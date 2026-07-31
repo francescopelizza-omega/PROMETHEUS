@@ -1,0 +1,86 @@
+# electron-builder.yml — per-OS packaging for Prometheus Studio (file 10 §2).
+#
+# RECONCILED to electron-vite's real output: the build emits apps/desktop/out/
+# {main,preload,renderer} (NOT dist/), so `files` packs out/**. The engine + the
+# relocatable CPython ride as extraResources (real files on disk, NOT in asar — a
+# child python must be able to exec them, §1), filled by scripts/stage-engine.mjs +
+# scripts/fetch-pyruntime.mjs into ../../staging/ before electron-builder runs.
+appId: ai.prometheus.studio
+productName: Prometheus Studio
+copyright: © 2026 Francesco Pelizza
+# App icon: the single source is build/icon.png (1024×1024). electron-builder reads
+# it from buildResources (build/) by convention and derives every per-OS format;
+# build/icon.icns is also shipped for macOS fidelity. To rebrand, replace those two
+# files (a 1024² PNG is enough — regenerate the .icns with `iconutil`). The dev run
+# loads the same PNG for its dock/window icon (see main/index.ts APP_ICON_PATH).
+directories:
+  output: release
+  buildResources: build
+files:
+  - out/**/*
+  - package.json
+asar: true
+# node-pty is N-API (ABI-stable across Electron versions) and ships a prebuilt binary — do
+# NOT let electron-builder auto-run @electron/rebuild on it (the plan's node-pty gotcha). The
+# rebuild also breaks on Python 3.12 (node-gyp 9.x → removed `distutils`); N-API needs none.
+npmRebuild: false
+asarUnpack:
+  # native .node addons (node-pty for the terminal, file 07) must be unpacked so a child
+  # process can exec them; the whole dir is unpacked, and the spawn-helper + *.node are
+  # called out explicitly (APP-068) so afterPack can re-chmod the exec bit electron-builder
+  # strips during asar packing (build/after-pack.cjs).
+  - "**/node_modules/node-pty/**"
+  - "**/node_modules/node-pty/build/Release/spawn-helper"
+  - "**/node_modules/node-pty/build/Release/*.node"
+# after every per-OS pack: restore the node-pty spawn-helper's 0755 exec bit inside
+# app.asar.unpacked (asar packing drops it → "No terminal backend" in the packaged app).
+afterPack: build/after-pack.cjs
+extraResources:
+  # §1 — engine + python runtime ride alongside, NOT in asar.
+  - from: ../../staging/engine
+    to: engine
+    filter: ["**/*"]
+  - from: ../../staging/pyruntime/${os}-${arch}
+    to: pyruntime
+    filter: ["**/*"]
+mac:
+  category: public.app-category.developer-tools
+  hardenedRuntime: true # required for notarization
+  gatekeeperAssess: false
+  entitlements: build/entitlements.mac.plist
+  entitlementsInherit: build/entitlements.mac.plist
+  notarize: false # notarized in CI via the afterSign hook (build/notarize.cjs, §4.1)
+  target:
+    - target: dmg
+      arch: [arm64, x64]
+    - target: zip # electron-updater consumes the zip on mac
+      arch: [arm64, x64]
+afterSign: build/notarize.cjs
+linux:
+  category: Development
+  maintainer: Francesco Pelizza <red-beard-phoenix@users.noreply.gitlab.com>
+  target:
+    - target: AppImage # primary, self-updating (zsync delta)
+      arch: [x64, arm64]
+    - target: deb
+      arch: [x64, arm64]
+  desktop:
+    StartupWMClass: prometheus-studio
+win:
+  target:
+    - target: nsis
+      # x64 only: the pinned CPython release (20240909) has no win-arm64 runtime (see
+      # pyruntime.lock.json) — re-add arm64 when a newer release publishes that triple.
+      arch: [x64]
+  signtoolOptions:
+    signingHashAlgorithms: [sha256]
+nsis:
+  oneClick: false
+  perMachine: false # per-user → no UAC, easier auto-update
+  allowToChangeInstallationDirectory: true
+  shortcutName: Prometheus Studio
+publish:
+  provider: github
+  owner: dev
+  repo: prometheus
+  channel: latest # beta/alpha channels gated by the prerelease tag (§5)

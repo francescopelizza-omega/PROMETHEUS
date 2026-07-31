@@ -1,0 +1,42 @@
+{
+  "name": "@prometheus/cli",
+  "version": "0.1.0",
+  "private": false,
+  "type": "module",
+  "description": "prom — Prometheus Studio terminal CLI / interactive TUI (Node). Full GUI feature parity over engine-bridge.",
+  "license": "MIT",
+  "bin": { "prometheus": "dist/bin.js", "prom": "dist/bin.js" },
+  "files": ["dist/bin.js", "README.md"],
+  "engines": { "node": ">=20" },
+  "publishConfig": { "access": "public" },
+  "//publish-note": "CLI-098 (M7): the published tarball ships ONE self-contained file — dist/bin.js — produced by `prepack` = `tsc -b` (build + typecheck the workspace deps) then esbuild bundles src/bin.ts with the @prometheus/* WORKSPACE deps INLINED. Those live in devDependencies (dev gets the pnpm symlink for tsc/tests; publish DROPS devDependencies), so the tarball has NO dangling `workspace:*` and NO registry dependency on the sibling packages. The Ink REPL externals (ink/react/yargs/chalk) are also devDependencies + `--external`: the one-shot CLI + the bundled REPL brain need none of them (bin.ts loads the Ink view via a guarded dynamic import and degrades to the one-shot help when absent), so `dependencies` is empty and `npm i -g` is truly zero-dependency. `files` is a strict whitelist ⇒ src/, *.test.*, *.map, .d.ts, dev-register.mjs, tsconfig NEVER reach the tarball (verify with `pnpm pack --dry-run`). The engine (prometheus.py/nemesis) is NOT bundled — set PROMETHEUS_PY / NEMESIS_BIN or put it on PATH (see README + doctor-bridge.ts).",
+  "scripts": {
+    "build": "tsc -b",
+    "dev": "tsc -b --watch",
+    "lint": "biome check src",
+    "typecheck": "tsc -b",
+    "bundle": "esbuild src/bin.ts --bundle --platform=node --format=esm --target=node20 --external:chalk --external:ink --external:ink-select-input --external:ink-spinner --external:react --external:yargs --outfile=dist/bin.js",
+    "prepack": "tsc -b && pnpm run bundle",
+    "build:sea": "node scripts/build-sea.mjs",
+    "sea:smoke": "node scripts/sea-smoke.mjs",
+    "start": "node --import ./dev-register.mjs src/bin.ts",
+    "test": "node --import ./dev-register.mjs --test src/cli.test.ts"
+  },
+  "dependencies": {},
+  "//deps-note": "The @prometheus/* workspace packages + the Ink-REPL externals (ink/react/yargs/chalk) are DEV-only: dev resolves them via the pnpm workspace symlink; the published package bundles the @prometheus/* code into dist/bin.js and loads the (optional) Ink view via a guarded dynamic import. Keeping `dependencies` empty preserves the zero-dependency install the README advertises.",
+  "devDependencies": {
+    "@prometheus/core": "workspace:*",
+    "@prometheus/engine-bridge": "workspace:*",
+    "@prometheus/ui": "workspace:*",
+    "@types/react": "^18.3.12",
+    "@types/yargs": "^17.0.33",
+    "chalk": "^5.3.0",
+    "esbuild": "^0.21.5",
+    "ink": "^5.0.1",
+    "ink-select-input": "^6.0.0",
+    "ink-spinner": "^5.0.0",
+    "postject": "^1.0.0-alpha.6",
+    "react": "^18.3.1",
+    "yargs": "^17.7.2"
+  }
+}

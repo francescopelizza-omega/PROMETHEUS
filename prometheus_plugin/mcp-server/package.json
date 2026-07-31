@@ -1,0 +1,47 @@
+{
+  "name": "@prometheus-plugin/mcp",
+  "version": "1.0.0",
+  "description": "MCP server bridging the Prometheus AI-agent plugin scanner/installer to any MCP-capable CLI",
+  "type": "module",
+  "bin": {
+    "prometheus-mcp": "dist/server.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "build": "tsc && node -e \"require('fs').chmodSync('dist/server.js', 0o755)\"",
+    "prepublishOnly": "npm run build",
+    "start": "node dist/server.js",
+    "dev": "tsx watch src/server.ts",
+    "inspect": "npx @modelcontextprotocol/inspector node dist/server.js",
+    "test": "tsx --test src/*.test.ts",
+    "docs": "tsx src/gen-docs.ts"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "prometheus",
+    "security",
+    "scanner",
+    "installer",
+    "ai-agents"
+  ],
+  "author": "Francesco Pelizza <red-beard-phoenix@users.noreply.gitlab.com>",
+  "license": "MIT",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  }
+}

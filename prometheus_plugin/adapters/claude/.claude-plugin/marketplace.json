@@ -1,0 +1,11 @@
+{
+  "name": "prometheus-marketplace",
+  "owner": { "name": "Francesco Pelizza", "email": "red-beard-phoenix@users.noreply.gitlab.com" },
+  "plugins": [
+    {
+      "name": "prometheus",
+      "source": "./",
+      "description": "Prometheus AI-agent plugin scanner/installer MCP tools (nemesis-gated)"
+    }
+  ]
+}

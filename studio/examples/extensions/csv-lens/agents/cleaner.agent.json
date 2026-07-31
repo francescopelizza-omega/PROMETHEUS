@@ -1,0 +1,16 @@
+{
+  "id": "acme.csv-cleaner",
+  "name": "CSV Cleaner",
+  "description": "Cleans + normalizes CSV files: trim whitespace, dedupe rows, normalize headers. Fires when the user asks to clean or tidy a CSV.",
+  "model": { "provider": "local", "modelId": "qwen3:8b" },
+  "system": "You clean CSV data on request: trim, dedupe, normalize headers. You read files within the workspace only and NEVER write without an explicit human confirmation.",
+  "tools": [{ "ref": "engine:info", "autoApprove": true }],
+  "sandbox": {
+    "fsRead": ["${workspace}/**"],
+    "fsWrite": [],
+    "network": "mcp-only",
+    "shell": false,
+    "timeoutSec": 600
+  },
+  "source": "extension"
+}

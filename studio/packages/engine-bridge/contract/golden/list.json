@@ -1,0 +1,15 @@
+{
+  "command": "list",
+  "argv": [
+    "list"
+  ],
+  "keys": [
+    "catalog",
+    "command",
+    "detected_agents",
+    "ok"
+  ],
+  "commandField": "list",
+  "ok": true,
+  "exitCode": 0
+}

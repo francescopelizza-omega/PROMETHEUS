@@ -1,0 +1,19 @@
+{
+  "id": "deep-research",
+  "title": "Local Deep-Research",
+  "description": "A local deep-research / RAG stack matching Odysseus's Memory layer (ChromaDB + fastembed) plus requests + BeautifulSoup for fetching and parsing sources.",
+  "pythonHint": ">=3.10,<3.13",
+  "packages": [
+    { "name": "chromadb", "source": "pypi", "requestedBy": "template" },
+    { "name": "fastembed", "source": "pypi", "requestedBy": "template" },
+    { "name": "requests", "source": "pypi", "requestedBy": "template" },
+    { "name": "beautifulsoup4", "source": "pypi", "requestedBy": "template" }
+  ],
+  "needs": [],
+  "postNotes": [
+    "Matches Odysseus's Memory stack — ChromaDB vector store with fastembed embeddings.",
+    "CPU-friendly; fastembed runs ONNX models without a GPU."
+  ],
+  "editable": true,
+  "builtin": true
+}

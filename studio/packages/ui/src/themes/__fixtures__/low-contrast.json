@@ -1,0 +1,19 @@
+{
+  "$schema": "prometheus-studio/theme@1",
+  "meta": {
+    "id": "low-contrast-trap",
+    "name": "Low Contrast Trap",
+    "base": "dark",
+    "version": "1.0.0",
+    "createdAt": "2026-06-19T00:00:00Z",
+    "baseScheme": "prometheus-dark"
+  },
+  "uiTokens": {
+    "bg-app": "#101214",
+    "bg-surface": "#16181b",
+    "danger": "#201a1b",
+    "ok": "#19211a",
+    "text-secondary": "#1f2226"
+  },
+  "syntaxTokens": {}
+}

@@ -1,0 +1,160 @@
+/**
+ * steering.test.ts — AGENTS.md/CLAUDE.md/PROMETHEUS.md discovery + assembly + the /memory
+ * controller (CLI-061). Injected read/write/editor/confirm seams — no real fs.
+ */
+import assert from "node:assert/strict";
+import { test } from "node:test";
+
+import {
+  type ReadSeam,
+  assembleSteering,
+  createSteeringController,
+  discoverSteering,
+  renderSteeringList,
+  resolveSteeringTarget,
+  steeringBadge,
+  steeringToRuleSources,
+} from "./steering.js";
+
+const HOME = "/home/.prometheus";
+const CWD = "/proj";
+
+/** An in-memory fs: path → content. */
+function fs(files: Record<string, string>): { read: ReadSeam; store: Record<string, string> } {
+  const store = { ...files };
+  return { read: (p) => (p in store ? store[p]! : null), store };
+}
+
+test("discoverSteering finds project + global candidates in precedence order (CLI-061)", () => {
+  const { read } = fs({
+    "/proj/AGENTS.md": "project agents rules",
+    "/proj/CLAUDE.md": "project claude rules",
+    "/home/.prometheus/AGENTS.md": "global agents rules",
+  });
+  const files = discoverSteering(CWD, HOME, read);
+  // project AGENTS, project CLAUDE, project PROMETHEUS, global AGENTS, global CLAUDE (5 candidates).
+  assert.deepEqual(
+    files.map((f) => `${f.scope}:${f.name}`),
+    [
+      "project:AGENTS.md",
+      "project:CLAUDE.md",
+      "project:PROMETHEUS.md",
+      "global:AGENTS.md",
+      "global:CLAUDE.md",
+    ],
+  );
+  const loaded = files.filter((f) => f.loaded).map((f) => f.path);
+  assert.ok(loaded.includes("/proj/AGENTS.md"));
+  assert.ok(loaded.includes("/home/.prometheus/AGENTS.md")); // BOTH scopes present
+  assert.equal(files.find((f) => f.name === "PROMETHEUS.md")?.loaded, false); // missing
+});
+
+test("a remote-instruction file is flagged + NEVER folded into the prompt (CLI-061)", () => {
+  const { read } = fs({ "/proj/AGENTS.md": "https://evil.example/inject.md" });
+  const files = discoverSteering(CWD, HOME, read);
+  const agents = files.find((f) => f.name === "AGENTS.md" && f.scope === "project");
+  assert.equal(agents?.remote, true);
+  assert.equal(steeringToRuleSources(files).length, 0); // excluded from the prompt
+  assert.match(renderSteeringList(files).join("\n"), /REMOTE/);
+});
+
+test("assembleSteering concatenates loaded files in precedence order (CLI-061)", () => {
+  const { read } = fs({
+    "/proj/AGENTS.md": "AAA project agents",
+    "/home/.prometheus/CLAUDE.md": "GGG global claude",
+  });
+  const files = discoverSteering(CWD, HOME, read);
+  const text = assembleSteering(files);
+  assert.match(text, /AAA project agents/);
+  assert.match(text, /GGG global claude/);
+  assert.ok(
+    text.indexOf("AAA") < text.indexOf("GGG"),
+    "project before global (DEFAULT_PRECEDENCE)",
+  );
+  assert.match(steeringBadge(files), /2 files \(global\+project\)/);
+});
+
+test("resolveSteeringTarget: 1-based index or name/path (CLI-061)", () => {
+  const { read } = fs({ "/proj/AGENTS.md": "x", "/proj/CLAUDE.md": "y" });
+  const files = discoverSteering(CWD, HOME, read);
+  assert.equal(resolveSteeringTarget(files, "1")?.name, "AGENTS.md");
+  assert.equal(resolveSteeringTarget(files, "CLAUDE.md")?.name, "CLAUDE.md");
+  assert.equal(resolveSteeringTarget(files, "/proj/AGENTS.md")?.name, "AGENTS.md");
+  assert.equal(resolveSteeringTarget(files, "nope"), undefined);
+});
+
+test("controller: edit → reload → block() re-reads the NEW content for the next turn (CLI-061)", async () => {
+  const backing = fs({ "/proj/AGENTS.md": "OLD rules" });
+  const opened: string[] = [];
+  const ctl = createSteeringController({
+    cwd: () => CWD,
+    home: HOME,
+    read: backing.read,
+    write: (p, content) => {
+      backing.store[p] = content;
+    },
+    // the "editor" mutates the file (as a real save would), then returns exit 0.
+    openEditor: (file) => {
+      opened.push(file);
+      backing.store[file] = "NEW rules after edit";
+      return 0;
+    },
+    confirm: async () => true,
+  });
+  assert.match(ctl.block() ?? "", /OLD rules/);
+  const status = await ctl.edit("1");
+  assert.deepEqual(opened, ["/proj/AGENTS.md"]);
+  assert.match(status, /edited AGENTS\.md/);
+  assert.match(ctl.block() ?? "", /NEW rules after edit/); // reload fed the next turn
+});
+
+test("controller: create scaffolds a project AGENTS.md behind confirm (CLI-061)", async () => {
+  const backing = fs({}); // nothing yet
+  let confirmed = false;
+  const ctl = createSteeringController({
+    cwd: () => CWD,
+    home: HOME,
+    read: backing.read,
+    write: (p, content) => {
+      backing.store[p] = content;
+    },
+    openEditor: () => 0,
+    confirm: async () => {
+      confirmed = true;
+      return true;
+    },
+  });
+  assert.equal(ctl.block(), null); // nothing loaded
+  const status = await ctl.create();
+  assert.ok(confirmed);
+  assert.match(status, /created \/proj\/AGENTS\.md/);
+  assert.match(backing.store["/proj/AGENTS.md"] ?? "", /Agent Rules/); // initRulesScaffold content
+  assert.match(ctl.block() ?? "", /Agent Rules/); // reloaded into the block
+
+  // declining create writes nothing.
+  const backing2 = fs({});
+  const ctl2 = createSteeringController({
+    cwd: () => CWD,
+    home: HOME,
+    read: backing2.read,
+    write: (p, content) => {
+      backing2.store[p] = content;
+    },
+    openEditor: () => 0,
+    confirm: async () => false,
+  });
+  assert.match(await ctl2.create(), /not created/);
+  assert.equal(backing2.store["/proj/AGENTS.md"], undefined);
+});
+
+test("controller: edit refuses an unknown target + an option-shaped path (CLI-061)", async () => {
+  const ctl = createSteeringController({
+    cwd: () => CWD,
+    home: HOME,
+    read: fs({}).read,
+    write: () => {},
+    openEditor: () => 0,
+    confirm: async () => true,
+  });
+  assert.match(await ctl.edit("99"), /no steering file matches/);
+});

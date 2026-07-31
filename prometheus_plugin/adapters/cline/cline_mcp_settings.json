@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "prometheus": {
+      "command": "npx",
+      "args": ["-y", "@prometheus-plugin/mcp"],
+      "env": { "PROMETHEUS_PY": "/ABS/PATH/TO/prometheus.py" },
+      "disabled": false,
+      "autoApprove": []
+    }
+  }
+}

@@ -1,0 +1,32 @@
+{
+  "schema": "extension@1",
+  "id": "acme.csv-lens",
+  "label": "CSV Lens",
+  "version": "0.3.1",
+  "publisher": "acme",
+  "description": "Reference Prometheus Studio extension: a CSV panel + a cleaner agent + a read-only engine grant. Used as the e2e fixture for extension install + nemesis gate tests (file 10).",
+  "engines": { "studio": ">=1.0.0" },
+  "main": "./dist/extension.js",
+  "repo": "acme/csv-lens",
+  "license": "MIT",
+  "ui": {
+    "panels": [
+      { "id": "csvLens", "title": "CSV Lens", "location": "secondary-sidebar", "entry": "./dist/panel.js" }
+    ]
+  },
+  "contributes": {
+    "commands": [{ "id": "csvLens.open", "title": "Open CSV Lens", "category": "Data" }],
+    "keybindings": [{ "command": "csvLens.open", "key": "mod+shift+c" }],
+    "agents": [{ "path": "./agents/cleaner.agent.json" }],
+    "configuration": {
+      "csvLens.maxRows": { "type": "number", "default": 5000, "description": "Max rows rendered in the panel." }
+    }
+  },
+  "permissions": {
+    "fs": { "read": ["${workspace}/**"], "write": [] },
+    "network": "none",
+    "engine": ["list", "info"],
+    "secrets": [],
+    "shell": false
+  }
+}

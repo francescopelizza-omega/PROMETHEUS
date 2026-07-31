@@ -1,0 +1,63 @@
+{
+  "name": "@prometheus/desktop",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Prometheus Studio — Electron 33 desktop IDE (hardened main process + sandboxed renderer + typed contextBridge IPC).",
+  "main": "out/main/index.js",
+  "scripts": {
+    "postinstall": "node scripts/fix-pty-helper.mjs",
+    "dev": "electron-vite dev",
+    "build": "electron-vite build",
+    "preview": "electron-vite preview",
+    "start": "electron-vite preview",
+    "package": "node scripts/fix-pty-helper.mjs && electron-vite build && electron-builder --publish never",
+    "lint": "biome check src",
+    "typecheck": "tsc --noEmit",
+    "e2e": "electron-vite build && playwright test",
+    "e2e:update": "electron-vite build && playwright test --update-snapshots"
+  },
+  "dependencies": {
+    "@fontsource/cascadia-code": "^5.2.3",
+    "@fontsource/fira-code": "^5.2.7",
+    "@fontsource/ibm-plex-mono": "^5.2.7",
+    "@fontsource/inconsolata": "^5.2.8",
+    "@fontsource/jetbrains-mono": "^5.2.8",
+    "@fontsource/montserrat": "^5.2.8",
+    "@fontsource/roboto-mono": "^5.2.9",
+    "@fontsource/source-code-pro": "^5.2.7",
+    "@fontsource/ubuntu-mono": "^5.2.8",
+    "@prometheus/core": "workspace:*",
+    "@prometheus/engine-bridge": "workspace:*",
+    "@prometheus/ui": "workspace:*",
+    "@tanstack/react-query": "^5.62.0",
+    "@xterm/addon-fit": "^0.10.0",
+    "@xterm/addon-ligatures": "^0.10.0",
+    "@xterm/xterm": "^5.5.0",
+    "monaco-editor": "^0.52.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "zod": "^3.24.0",
+    "zustand": "^5.0.0"
+  },
+  "//deps-note": "file 07 §1/§6/§12: node-pty is a NATIVE addon — externalized in the build (externalizeDepsPlugin auto-externalizes dependencies) + electron-rebuild'd per-target; it is ABSENT in this env so pty-host's PtyBackend is injected (a fake in tests, nodePtyBackend in prod). monaco-editor + @xterm/* back the renderer EditorPane/Terminal (built via electron-vite, not visually run here). chokidar is an OPTIONAL fs-watch backend (the default is node:fs.watch); declared in optionalDependencies. NONE installed this pass — the orchestrator installs + electron-rebuilds.",
+  "optionalDependencies": {
+    "@xterm/addon-clipboard": "^0.1.0",
+    "chokidar": "^4.0.0",
+    "node-pty": "^1.0.0",
+    "vite-plugin-monaco-editor": "^1.1.0"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.48.0",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "@vitejs/plugin-react": "^4.3.0",
+    "autoprefixer": "^10.4.0",
+    "electron": "^33.0.0",
+    "electron-builder": "^25.1.8",
+    "electron-vite": "^2.3.0",
+    "postcss": "^8.4.0",
+    "tailwindcss": "^3.4.0",
+    "vite": "^5.4.0"
+  }
+}

@@ -1,0 +1,93 @@
+/**
+ * commands/diagram-cmd.ts — `prom diagram <uml|deps> <path>` over the diagram.py
+ * sidecar (CLI-008). A read-only AST walk → a Mermaid (+ Graphviz DOT) diagram
+ * string; this renders it to stdout, a terse `--summary`, or a `--out <file>`
+ * artifact. `--json` emits the sidecar envelope unmodified. The CLI never spawns
+ * python directly — runSidecar is the sole gateway (C5/C7).
+ */
+import { existsSync, writeFileSync } from "node:fs";
+
+import type { CliContext, CommandOutcome } from "../context.js";
+import { c } from "../render.js";
+import { type SidecarDeps, defaultSidecarDeps, flagSet, flagStr } from "./sidecar-cmd.js";
+
+const VERBS = ["uml", "deps"] as const;
+const SUMMARY_LINES = 8;
+
+function badPath(verb: string, p: string): CommandOutcome {
+  return {
+    text: `prom diagram ${verb}: refusing option-shaped path: ${p}`,
+    json: { ok: false, error: "bad-path", path: p },
+    exitCode: 2,
+  };
+}
+
+export async function runDiagram(
+  ctx: CliContext,
+  deps: SidecarDeps = defaultSidecarDeps,
+): Promise<CommandOutcome> {
+  const verb = ctx.args.command[1];
+  if (verb !== "uml" && verb !== "deps") {
+    return {
+      text: `prom diagram: unknown verb ${verb ? `"${verb}"` : "(none)"} — valid: ${VERBS.join(", ")}`,
+      json: { ok: false, error: "unknown-verb", valid: VERBS },
+      exitCode: 2,
+    };
+  }
+  const path = ctx.args.positionals[0] ?? ".";
+  // option-injection guard BEFORE any spawn (so `--help` as a path can't reach python).
+  if (path.startsWith("-")) return badPath(verb, path);
+
+  const env = await deps.runSidecar("diagram.py", [verb, "--path", path]);
+  if (ctx.json) return { json: env, exitCode: env.ok === false ? 2 : 0 };
+  if (env.ok === false) {
+    return { text: c.red(`diagram ${verb} failed: ${env.error ?? "unknown error"}`), exitCode: 2 };
+  }
+
+  const mermaid = typeof env.mermaid === "string" ? env.mermaid : "";
+  const count =
+    verb === "uml"
+      ? `${env.classCount ?? 0} classes`
+      : `${env.moduleCount ?? 0} modules${
+          Array.isArray(env.cycles) && env.cycles.length > 0
+            ? ` · ${env.cycles.length} cycle(s)`
+            : ""
+        }`;
+
+  // --out <file>: write the artifact (mermaid), fenced only for a .md target.
+  const out = flagStr(ctx, "out");
+  if (out !== undefined) {
+    if (out.startsWith("-")) return badPath(verb, out);
+    if (existsSync(out) && !ctx.args.force) {
+      return {
+        text: `prom diagram: ${out} exists — re-run with ${c.bold("--force")} to overwrite`,
+        json: { ok: false, error: "exists", path: out },
+        exitCode: 2,
+      };
+    }
+    const body = out.endsWith(".md") ? `\`\`\`mermaid\n${mermaid}\n\`\`\`\n` : `${mermaid}\n`;
+    try {
+      writeFileSync(out, body);
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err);
+      return { text: c.red(`diagram: write failed: ${detail}`), exitCode: 2 };
+    }
+    return { text: `${c.green("✓")} wrote ${verb} diagram (${count}) → ${out}`, exitCode: 0 };
+  }
+
+  // --summary: terse pane view (counts + first lines) for the /diagram TUI slash.
+  if (flagSet(ctx, "summary")) {
+    const head = mermaid.split("\n").slice(0, SUMMARY_LINES).join("\n");
+    const more = mermaid.split("\n").length > SUMMARY_LINES ? c.dim("\n  …") : "";
+    return {
+      text: `${c.bold(`diagram ${verb}`)} ${c.dim(`(${count})`)}\n${head}${more}\n${c.dim(
+        "use --out <file> for the full diagram",
+      )}`,
+      exitCode: 0,
+    };
+  }
+
+  // default: the full mermaid to stdout (starts byte-one with the mermaid header),
+  // then a one-line summary.
+  return { text: `${mermaid}\n${c.dim(count)}`, exitCode: 0 };
+}

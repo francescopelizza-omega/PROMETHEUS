@@ -1,0 +1,22 @@
+{
+  "name": "@prometheus/engine-bridge",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Typed TS client over the prometheus.py --json contract + nemesis. The single gateway from JS to the Python engine — security logic is NEVER reimplemented here.",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -b",
+    "dev": "tsc -b --watch",
+    "lint": "biome check src",
+    "typecheck": "tsc -b",
+    "test": "node ../../scripts/run-tests.mjs packages/engine-bridge"
+  }
+}

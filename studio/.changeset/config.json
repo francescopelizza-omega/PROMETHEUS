@@ -1,0 +1,12 @@
+{
+  "$schema": "https://unpkg.com/@changesets/config@3.0.0/schema.json",
+  "//": "Changesets — semver + changelog for the genuinely-published packages (file 02 §1.4). The monorepo as a whole is private/unpublished; @prometheus/cli (prom) is the unit that ships via npx/brew ([[11]]). The desktop app version is decoupled (apps/desktop/package.json feeds electron-builder + auto-updater, [[10]]) and is therefore ignored here.",
+  "changelog": "@changesets/cli/changelog",
+  "commit": false,
+  "fixed": [],
+  "linked": [],
+  "access": "restricted",
+  "baseBranch": "master",
+  "updateInternalDependencies": "patch",
+  "ignore": ["@prometheus/desktop"]
+}

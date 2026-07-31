@@ -1,0 +1,263 @@
+{
+  "$schema": "prometheus-ai-providers/1",
+  "comment": "File 12 §1 billing-aware integration matrix. EVERY billing cell is verifyAtSetup (§0.1) — confirm against the provider's current ToS at configure time. This is config DATA, refreshable; the durable design is the 3-tier policy + the warn UX, not these rows. Prices are illustrative of the shape (from the bundled claude-api skill snapshot) — not frozen.",
+  "version": "1",
+  "providers": [
+    {
+      "id": "local",
+      "label": "Local (Model Hub)",
+      "kinds": ["local-serve"],
+      "billing": "free-local",
+      "includedInSubscription": false,
+      "tier": "A",
+      "costLight": "green",
+      "warnLevel": "none",
+      "verifyAtSetup": true,
+      "baseUrlEnv": "OPENAI_BASEURL",
+      "models": [
+        {
+          "id": "qwen3:8b",
+          "label": "Qwen3 8B (local)",
+          "modality": "text",
+          "openWeight": true,
+          "localOllamaTag": "qwen3:8b"
+        },
+        {
+          "id": "gpt-oss:20b",
+          "label": "gpt-oss 20B (local)",
+          "modality": "text",
+          "openWeight": true,
+          "localOllamaTag": "gpt-oss:20b"
+        },
+        {
+          "id": "gemma3",
+          "label": "Gemma 3 (local)",
+          "modality": "multimodal",
+          "openWeight": true,
+          "localOllamaTag": "gemma3"
+        }
+      ]
+    },
+    {
+      "id": "generic-openai-compatible",
+      "label": "Generic OpenAI-compatible",
+      "kinds": ["local-serve", "api-key"],
+      "billing": "free-local",
+      "includedInSubscription": false,
+      "tier": "A",
+      "costLight": "green",
+      "warnLevel": "none",
+      "verifyAtSetup": true,
+      "baseUrlEnv": "OPENAI_BASEURL",
+      "repointSuggest": true
+    },
+    {
+      "id": "open-weight-api-host",
+      "label": "Open-weight API host (OpenRouter / Groq / Together / Fireworks / DeepInfra / Hyperbolic / Novita / Nebius / Cerebras / SambaNova / Mistral / DeepSeek)",
+      "comment": "Authoritative own-key OpenAI-compatible registry for orchestration subagents lives in core/orchestration/api-providers.ts (kind:\"api\"). These rows mirror it for the billing/cost-light UI. EVERY row is verifyAtSetup.",
+      "kinds": ["api-key"],
+      "billing": "metered",
+      "includedInSubscription": false,
+      "tier": "C",
+      "costLight": "red",
+      "warnLevel": "loud",
+      "verifyAtSetup": true,
+      "repointSuggest": true,
+      "tosUrl": "https://openrouter.ai/terms",
+      "models": [
+        {
+          "id": "deepseek-chat",
+          "label": "DeepSeek Chat",
+          "modality": "text",
+          "openWeight": true,
+          "pricePerMTokIn": 0.27,
+          "pricePerMTokOut": 1.1,
+          "servedVia": ["openrouter", "deepinfra"],
+          "localOllamaTag": "deepseek-v3"
+        }
+      ]
+    },
+    {
+      "id": "nexos",
+      "label": "nexos.ai (enterprise AI gateway)",
+      "kinds": ["api-key"],
+      "billing": "metered",
+      "includedInSubscription": false,
+      "tier": "C",
+      "costLight": "red",
+      "warnLevel": "loud",
+      "verifyAtSetup": true,
+      "repointSuggest": true,
+      "baseUrlEnv": "OPENAI_BASEURL",
+      "tosUrl": "https://nexos.ai/terms",
+      "models": [
+        {
+          "id": "auto",
+          "label": "nexos routed model",
+          "modality": "text",
+          "openWeight": false
+        }
+      ]
+    },
+    {
+      "id": "abacus",
+      "label": "Abacus.AI (RouteLLM)",
+      "kinds": ["api-key"],
+      "billing": "metered",
+      "includedInSubscription": false,
+      "tier": "C",
+      "costLight": "red",
+      "warnLevel": "loud",
+      "verifyAtSetup": true,
+      "repointSuggest": true,
+      "baseUrlEnv": "OPENAI_BASEURL",
+      "tosUrl": "https://abacus.ai/app/termsAndConditions",
+      "models": [
+        {
+          "id": "route-llm",
+          "label": "RouteLLM (auto-routed)",
+          "modality": "text",
+          "openWeight": false
+        }
+      ]
+    },
+    {
+      "id": "claude",
+      "label": "Claude (Anthropic)",
+      "kinds": ["oauth-subscription-bridge", "cli-passthrough", "api-key"],
+      "billing": "flat-subscription",
+      "includedInSubscription": "per-plan",
+      "tier": "B",
+      "costLight": "blue",
+      "warnLevel": "gentle",
+      "verifyAtSetup": true,
+      "tosUrl": "https://www.anthropic.com/legal",
+      "oauth": {
+        "authUrl": "https://claude.ai/oauth/authorize",
+        "tokenUrl": "https://console.anthropic.com/v1/oauth/token",
+        "scopes": ["org:create_api_key", "user:inference"],
+        "betaHeader": "oauth-2025-04-20"
+      },
+      "models": [
+        {
+          "id": "claude-opus-4-8",
+          "label": "Claude Opus 4.8",
+          "modality": "text",
+          "openWeight": false,
+          "pricePerMTokIn": 5,
+          "pricePerMTokOut": 25
+        },
+        {
+          "id": "claude-sonnet-4-6",
+          "label": "Claude Sonnet 4.6",
+          "modality": "text",
+          "openWeight": false,
+          "pricePerMTokIn": 3,
+          "pricePerMTokOut": 15
+        },
+        {
+          "id": "claude-haiku-4-5",
+          "label": "Claude Haiku 4.5",
+          "modality": "text",
+          "openWeight": false,
+          "pricePerMTokIn": 1,
+          "pricePerMTokOut": 5
+        },
+        {
+          "id": "claude-fable-5",
+          "label": "Claude Fable 5",
+          "modality": "multimodal",
+          "openWeight": false,
+          "pricePerMTokIn": 10,
+          "pricePerMTokOut": 50
+        }
+      ]
+    },
+    {
+      "id": "chatgpt",
+      "label": "ChatGPT (OpenAI)",
+      "kinds": ["oauth-subscription-bridge", "api-key"],
+      "billing": "flat-subscription",
+      "includedInSubscription": "per-plan",
+      "tier": "B",
+      "costLight": "blue",
+      "warnLevel": "gentle",
+      "verifyAtSetup": true,
+      "tosUrl": "https://openai.com/policies",
+      "models": [
+        {
+          "id": "gpt-4o",
+          "label": "GPT-4o",
+          "modality": "multimodal",
+          "openWeight": false,
+          "pricePerMTokIn": 2.5,
+          "pricePerMTokOut": 10
+        }
+      ]
+    },
+    {
+      "id": "gemini",
+      "label": "Gemini (Google)",
+      "kinds": ["oauth-subscription-bridge", "api-key"],
+      "billing": "flat-subscription",
+      "includedInSubscription": "per-plan",
+      "tier": "B",
+      "costLight": "blue",
+      "warnLevel": "gentle",
+      "verifyAtSetup": true,
+      "tosUrl": "https://ai.google.dev/terms",
+      "models": [
+        {
+          "id": "gemini-2.5-pro",
+          "label": "Gemini 2.5 Pro",
+          "modality": "multimodal",
+          "openWeight": false,
+          "pricePerMTokIn": 1.25,
+          "pricePerMTokOut": 10
+        }
+      ]
+    },
+    {
+      "id": "copilot",
+      "label": "GitHub Copilot",
+      "kinds": ["oauth-subscription-bridge", "cli-passthrough"],
+      "billing": "flat-subscription",
+      "includedInSubscription": true,
+      "tier": "B",
+      "costLight": "blue",
+      "warnLevel": "gentle",
+      "verifyAtSetup": true,
+      "tosUrl": "https://github.com/features/copilot"
+    },
+    {
+      "id": "cursor",
+      "label": "Cursor",
+      "kinds": ["cli-passthrough"],
+      "billing": "flat-subscription",
+      "includedInSubscription": true,
+      "tier": "B",
+      "costLight": "blue",
+      "warnLevel": "gentle",
+      "verifyAtSetup": true,
+      "cliBin": "cursor",
+      "tosUrl": "https://cursor.com/terms"
+    }
+  ],
+  "pricingNote": "USD per 1M tokens; longest-prefix match, case-insensitive (CLI-058). Local models are $0 via endpoint locality, NOT this table. Approximate 2026 list prices — verify against the provider before relying on a figure.",
+  "pricing": {
+    "claude-opus-4": { "inputUsdPerMTok": 5, "outputUsdPerMTok": 25 },
+    "claude-sonnet-4": { "inputUsdPerMTok": 3, "outputUsdPerMTok": 15 },
+    "claude-haiku-4": { "inputUsdPerMTok": 1, "outputUsdPerMTok": 5 },
+    "claude-fable-5": { "inputUsdPerMTok": 10, "outputUsdPerMTok": 50 },
+    "claude-3-5-sonnet": { "inputUsdPerMTok": 3, "outputUsdPerMTok": 15 },
+    "claude-3-5-haiku": { "inputUsdPerMTok": 1, "outputUsdPerMTok": 5 },
+    "claude": { "inputUsdPerMTok": 3, "outputUsdPerMTok": 15 },
+    "gpt-4o-mini": { "inputUsdPerMTok": 0.15, "outputUsdPerMTok": 0.6 },
+    "gpt-4o": { "inputUsdPerMTok": 2.5, "outputUsdPerMTok": 10 },
+    "gpt-4.1": { "inputUsdPerMTok": 2, "outputUsdPerMTok": 8 },
+    "o3": { "inputUsdPerMTok": 2, "outputUsdPerMTok": 8 },
+    "gemini-2.5-pro": { "inputUsdPerMTok": 1.25, "outputUsdPerMTok": 10 },
+    "gemini-2.5-flash": { "inputUsdPerMTok": 0.3, "outputUsdPerMTok": 2.5 },
+    "deepseek": { "inputUsdPerMTok": 0.27, "outputUsdPerMTok": 1.1 }
+  }
+}

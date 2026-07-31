@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
+  "name": "prometheus",
+  "displayName": "Prometheus",
+  "version": "1.0.0",
+  "description": "Prometheus — scan the machine for AI-agent CLIs and install/audit plugins into each, with the nemesis security gate. Exposed as MCP tools.",
+  "author": { "name": "Francesco Pelizza", "email": "red-beard-phoenix@users.noreply.gitlab.com" },
+  "license": "MIT",
+  "keywords": ["security", "scanner", "installer", "mcp", "ai-agents"],
+  "mcpServers": {
+    "prometheus": {
+      "command": "npx",
+      "args": ["-y", "@prometheus-plugin/mcp"],
+      "env": { "PROMETHEUS_PY": "/ABS/PATH/TO/prometheus.py" }
+    }
+  }
+}

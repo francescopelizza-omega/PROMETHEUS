@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!--
+      APP-090 tear-out terminal window. Ships the SAME strict production CSP as
+      renderer/index.html (C5) — the `devCspRelax` Vite plugin rewrites this <meta> in DEV
+      (serve only) to allow Vite's inline @react-refresh preamble + HMR, exactly like the
+      main window; without that this float would boot BLACK. Build keeps the strict policy.
+    -->
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; worker-src 'self' blob:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'"
+    />
+    <title>Prometheus Terminal</title>
+    <style>
+      :root {
+        color-scheme: dark;
+      }
+      html,
+      body,
+      #root {
+        margin: 0;
+        height: 100%;
+        /* Pre-mount paint = the dark --bg-app token value, so no flash before tokens load. */
+        background: #0b0d10;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="./floating-terminal-main.tsx"></script>
+  </body>
+</html>

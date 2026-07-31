@@ -1,0 +1,30 @@
+# lefthook — git hooks for Prometheus Studio (file 02 §7.3).
+#
+# Single fast binary, no node startup tax. Installed via `lefthook install`
+# (lefthook is declared in root devDependencies). NOTE: lefthook is not present
+# in this environment yet; this file is source-only and activates once the
+# toolchain lands. The hooks below mirror the CI graph (§7.4) so a push that
+# would fail CI fails locally first.
+
+pre-commit:
+  parallel: true
+  commands:
+    # Lint + format-check only the staged files (fast, scoped). {staged_files}
+    # is expanded by lefthook to the staged paths; --no-errors-on-unmatched
+    # keeps a docs-only commit from failing when no JS/TS is staged.
+    biome:
+      glob: "*.{js,jsx,ts,tsx,json,jsonc}"
+      run: node_modules/.bin/biome check --no-errors-on-unmatched {staged_files}
+    # Type-check the whole composite graph incrementally. `tsc -b` is the right
+    # call (not per-file) because cross-package types only validate as a graph;
+    # the build cache makes the common case a near no-op.
+    typecheck:
+      run: node_modules/.bin/tsc -b tsconfig.json
+
+pre-push:
+  commands:
+    # Run the test suites before sharing. Wired to the working node:test runner
+    # (turbo run test -> each package's `test` script -> node --test via
+    # dev-register), NOT vitest, so the 176+ passing node:test cases gate pushes.
+    test:
+      run: pnpm run test

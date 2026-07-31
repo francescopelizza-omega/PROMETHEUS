@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!--
+      Content-Security-Policy: lock the sandboxed renderer down (C5).
+      - default-src 'self'        : only our own bundle.
+      - script-src 'self'         : no inline/remote scripts. THIS production-strict
+                                    value is rewritten in DEV by the `devCspRelax`
+                                    plugin (electron.vite.config.ts, serve-only) to
+                                    allow Vite's inline @react-refresh preamble + HMR;
+                                    without that the inline preamble is CSP-blocked and
+                                    React never mounts → a black window. Build keeps
+                                    this strict policy verbatim.
+      - connect-src 'self'        : the renderer makes NO direct network calls — all
+                                    engine/network work crosses the contextBridge to main.
+                                    NOTE (file 07 §7): the AI layer's model-endpoint
+                                    streaming is brokered through MAIN; the renderer never
+                                    fetches a remote model directly (so connect-src stays 'self').
+      - style-src 'self' 'unsafe-inline' : @prometheus/ui sets inline style props (token vars).
+      - img-src 'self' data:      : inline data icons only.
+      - worker-src 'self' blob:   : Monaco's TS/JSON/CSS/editor web workers (file 07 §12).
+      In dev, the devCspRelax Vite plugin rewrites this <meta> (and main/index.ts relaxes
+      the matching response-header CSP) so Vite's inline preamble + HMR work; production
+      ships this strict policy untouched.
+    -->
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; worker-src 'self' blob:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'"
+    />
+    <title>Prometheus Studio</title>
+    <style>
+      :root {
+        color-scheme: dark;
+      }
+      html,
+      body,
+      #root {
+        margin: 0;
+        height: 100%;
+        /* Pre-mount paint = the dark --bg-app token value (0b0d10), so there is no
+           flash of unthemed UI before styles/global.css + the tokens load (§6). */
+        background: #0b0d10;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="./main.tsx"></script>
+  </body>
+</html>

@@ -1,0 +1,15 @@
+{
+  "name": "prometheus",
+  "version": "1.0.0",
+  "description": "Prometheus MCP tools for Gemini CLI — scan/install/audit AI-agent plugins",
+  "contextFileName": "GEMINI.md",
+  "mcpServers": {
+    "prometheus": {
+      "command": "npx",
+      "args": ["-y", "@prometheus-plugin/mcp"],
+      "cwd": "${extensionPath}",
+      "env": { "PROMETHEUS_PY": "/ABS/PATH/TO/prometheus.py" },
+      "timeout": 600000
+    }
+  }
+}

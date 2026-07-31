@@ -1,0 +1,2118 @@
+/**
+ * main/ide-ipc.ts — the typed `ide:*` ipcMain handlers (file 07 §3.2/§4/§5/§6/§9).
+ *
+ * The trusted side of the contextBridge seam for the Code-Editor / IDE surface. It
+ * is RELAY-ONLY (mirrors security-ipc.ts / env-ipc.ts): every handler
+ *   1. zod-validates the renderer's arg at the seam (ide-validate.ts),
+ *   2. delegates to the MAIN-process host that owns the child process / fs
+ *      (LspHost / DapHost / PtyHost / GitHost / FsWatchHost) or the engine-bridge
+ *      RUN-GATE (gate.ts → the only nemesis spawner, C5), and
+ *   3. maps the result down to a renderer-safe plain-data shape, never letting a
+ *      live handle / ChildProcess cross back.
+ *
+ * GOLDEN RULE (C5): the renderer NEVER spawns a child; it drives the hosts over
+ * IPC. The RUN-GATE verdict is the ENGINE's — this file performs NO scoring, NO
+ * allowlist, NO heuristic, and never upgrades a verdict toward allow. The hosts'
+ * events (LSP diagnostics, DAP events, PTY output, fs changes) are multiplexed to
+ * the renderer over the single `ide:event` push (cosmetic/data only — no verdict).
+ *
+ * The hosts are INJECTED via wiring so this module is decoupled from the actual
+ * binaries (pyright/debugpy/node-pty absent here) — main/index.ts constructs them
+ * with the real node:child_process / node-pty spawn fns; node:test injects fakes.
+ *
+ * Node/Electron only at runtime (privileged main process). It imports the hosts +
+ * engine-bridge — which the renderer is forbidden from doing. The pure, testable
+ * arg-validation lives in ide-validate.ts (zod-double-tested, no electron).
+ */
+
+import { constants as fsConstants } from "node:fs";
+import { access } from "node:fs/promises";
+import { homedir } from "node:os";
+import { join, resolve, sep } from "node:path";
+
+import { ipcMain } from "electron";
+
+import {
+  type EngineConfig,
+  type SidecarEnvelope,
+  type SqlClient,
+  createSqlClient,
+  runSidecar as runSidecarScript,
+} from "@prometheus/engine-bridge";
+
+import {
+  IPC,
+  IPC_EVENTS,
+  type IdeAckResult,
+  type IdeCoverageReport,
+  type IdeCoverageResult,
+  type IdeDapDetectAdapterResult,
+  type IdeDapInstallAdapterResult,
+  type IdeDapLaunchResult,
+  type IdeDapRequestResult,
+  type IdeEvent,
+  type IdeExecResult,
+  type IdeFloatingTerminalResult,
+  type IdeFsReadResult,
+  type IdeFsWalkResult,
+  type IdeGateRequest,
+  type IdeGateResult,
+  type IdeGitBlameResult,
+  type IdeGitBranchesResult,
+  type IdeGitConflictVersionsResult,
+  type IdeGitDiffResult,
+  type IdeGitLogResult,
+  type IdeGitOpResult,
+  type IdeGitRebaseState,
+  type IdeGitRebaseTodoResult,
+  type IdeGitShowResult,
+  type IdeGitStashListResult,
+  type IdeGitStatus,
+  type IdeHistoryListResult,
+  type IdeHistoryReadResult,
+  type IdeKernelOkResult,
+  type IdeKernelStartResult,
+  type IdeKernelStreamEvent,
+  type IdeLintDetectResult,
+  type IdeLintFinding,
+  type IdeLintRunResult,
+  type IdeLspEnsureResult,
+  type IdeLspListResult,
+  type IdeLspRequestResult,
+  type IdeOkResult,
+  type IdePrDetailResult,
+  type IdePrListResult,
+  type IdePrOpResult,
+  type IdePrStatus,
+  type IdeProfileCompareResult,
+  type IdeProfileListResult,
+  type IdeProfileMode,
+  type IdeProfileResult,
+  type IdeProfileSample,
+  type IdeProfileSaveResult,
+  type IdeProfileSnapshotMeta,
+  type IdePtySpawnResult,
+  type IdeRefactorResult,
+  type IdeRepoMapFile,
+  type IdeRepoMapResult,
+  type IdeRunKillResult,
+  type IdeRunStartResult,
+  type IdeSearchResult,
+  type IdeSqlCell,
+  type IdeSqlConnectResult,
+  type IdeSqlQueryResult,
+  type IdeSqlSchemaResult,
+  type IdeStructMatch,
+  type IdeStructSearchResult,
+  type IdeTerminalMenuResult,
+  type IdeTerminalResolveResult,
+  type IdeTestDiscoverResult,
+  type IdeTestEvent,
+  type IdeTestNode,
+  type IdeTestRunResult,
+  type IdeTreeNode,
+  type IdeWorkspaceIndexResult,
+  type SystemTelemetry,
+} from "../shared/ipc-contract.js";
+import {
+  type FileSearchQuery,
+  type TaskRequest,
+  type TaskResponse,
+  runTask,
+} from "../worker/tasks.js";
+import {
+  validateCoverageImport,
+  validateCoverageRun,
+  validateDapDetectAdapter,
+  validateDapInstallAdapter,
+  validateDapLaunch,
+  validateDapRequest,
+  validateDapTerminate,
+  validateExec,
+  validateFloatingTerminalClose,
+  validateFloatingTerminalCreate,
+  validateFsPath,
+  validateFsRead,
+  validateFsRename,
+  validateFsTree,
+  validateFsWatch,
+  validateFsWrite,
+  validateGate,
+  validateGitApplyPatch,
+  validateGitBlame,
+  validateGitBranch,
+  validateGitCheckoutSide,
+  validateGitCommit,
+  validateGitCommitRef,
+  validateGitConflictVersions,
+  validateGitDiff,
+  validateGitFiles,
+  validateGitLog,
+  validateGitPrComment,
+  validateGitPrGet,
+  validateGitPrSetToken,
+  validateGitRebaseRun,
+  validateGitRebaseTodo,
+  validateGitReset,
+  validateGitRoot,
+  validateGitStash,
+  validateGitStashRef,
+  validateKernelDataframe,
+  validateKernelExecute,
+  validateKernelSession,
+  validateKernelStart,
+  validateLspCancel,
+  validateLspDoc,
+  validateLspEnsure,
+  validateLspRequest,
+  validateLspSetInterpreter,
+  validateProfileCompare,
+  validateProfileSnapshotSave,
+  validateProfileStart,
+  validatePtyKill,
+  validatePtyResize,
+  validatePtySpawn,
+  validatePtyWrite,
+  validateRefactor,
+  validateRepoMap,
+  validateRunKill,
+  validateRunStart,
+  validateSearch,
+  validateSearchCancel,
+  validateSqlConnect,
+  validateSqlQuery,
+  validateSqlSchema,
+  validateStructSearch,
+  validateTerminalMenu,
+  validateTerminalResolve,
+  validateTestRun,
+} from "./ide-validate.js";
+import type { DapHost, DapLaunchOptions, DapLaunchPlan } from "./ide/dap-host.js";
+import { type ExecRunner, defaultExecRunner } from "./ide/exec-host.js";
+import { screenCommand } from "./ide/exec-screen.js";
+import {
+  type FsWatchHost,
+  fsCreateFile,
+  fsDelete,
+  fsMkdir,
+  fsRead,
+  fsRename,
+  fsTree,
+  fsWalk,
+  fsWrite,
+  isLargeFile,
+} from "./ide/fs-watch.js";
+import { type RunGateResult, runGate } from "./ide/gate.js";
+import type { GitHost } from "./ide/git-host.js";
+import type { LocalHistoryManager } from "./ide/history-store.js";
+import { KernelHost, type KernelSpawner } from "./ide/kernel-host.js";
+import type { LspHost } from "./ide/lsp-host.js";
+import { assertNotSensitivePath, uriToFsPath } from "./ide/path-guard.js";
+import type { PtyHost } from "./ide/pty-host.js";
+import { type RefactorRunner, runRefactorVerb } from "./ide/refactor-host.js";
+import { type RunHost, startGatedRun } from "./ide/run-host.js";
+import { SqlHost } from "./ide/sql-host.js";
+import { buildTerminalMenuItems, resolveTerminalItem } from "./ide/terminal-menu.js";
+import { type TestRunSpawn, runTestVerb } from "./ide/test-run-host.js";
+import type { PrGateway } from "./pr-gateway.js";
+import { runSidecar } from "./sidecar.js";
+import { readTelemetry } from "./telemetry.js";
+
+/** Hard ceiling for one `ide:exec` command before SIGKILL (120s). */
+const EXEC_TIMEOUT_MS = 120_000;
+
+/** Coerce an unknown caught value to a short error string. */
+function errString(e: unknown): string {
+  if (e instanceof Error) return e.message;
+  return typeof e === "string" ? e : "unknown error";
+}
+
+/**
+ * APP-042: a sqlite conn "string" is a FILESYSTEM path — run it through the same
+ * sensitive-path guard as the fs IPC before it reaches the sidecar. Returns an error
+ * string when the path is refused, else null (pg/mysql network DSNs skip the guard).
+ */
+function guardSqliteConn(conn: string): string | null {
+  const m = /^sqlite:\/*(.*)$/i.exec(conn.trim());
+  if (!m) return null;
+  const p = (m[1] ?? "").trim();
+  if (!p || p === ":memory:") return null;
+  try {
+    assertNotSensitivePath(p.startsWith("/") ? p : `/${p}`);
+    return null;
+  } catch (e) {
+    return errString(e);
+  }
+}
+
+/**
+ * The minimal `{ send }` surface to push an IdeEvent back to a window. Extracted
+ * WITHOUT importing the electron event type (mirrors the sibling IPC modules).
+ */
+function senderOf(evt: unknown): { send(channel: string, payload: IdeEvent): void } | undefined {
+  if (!evt || typeof evt !== "object") return undefined;
+  const sender = (evt as { sender?: unknown }).sender;
+  if (sender && typeof (sender as { send?: unknown }).send === "function") {
+    return sender as { send(channel: string, payload: IdeEvent): void };
+  }
+  return undefined;
+}
+
+/** A run handle for a task dispatched to the offloaded worker (APP-066). */
+export interface WorkerTaskHandle {
+  /** the correlation id (used to `cancel`). */
+  id: string;
+  /** resolves with the worker's response — or the inline-fallback response on failure. */
+  result: Promise<TaskResponse>;
+  /** cooperatively cancel this task (no-op after it resolves). */
+  cancel(): void;
+}
+
+/**
+ * Dispatch a heavy task to the offloaded utilityProcess worker (APP-066). Injected from
+ * main/index.ts (backed by WorkerHost with an inline fallback); defaults to a pure inline
+ * runner so ide-ipc stays constructible/testable WITHOUT Electron or a live worker.
+ */
+export type RunWorkerTask = (
+  req: Omit<TaskRequest, "id">,
+  opts?: { onProgress?: (scanned: number) => void },
+) => WorkerTaskHandle;
+
+/** The hosts + config the IDE IPC relays to (injected so the binaries stay decoupled). */
+export interface IdeIpcWiring {
+  lsp: LspHost;
+  dap: DapHost;
+  pty: PtyHost;
+  git: GitHost;
+  fsWatch: FsWatchHost;
+  /** APP-063: the Local History manager (captures pre-write snapshots + persists). Absent →
+   *  history features fail-soft (a save still writes; the timeline is just empty). */
+  localHistory?: LocalHistoryManager;
+  /** engine config threaded into the RUN-GATE's engine-bridge gate (C2). */
+  engineConfig?: EngineConfig;
+  /** injectable command runner for `ide:exec` (default = the real shell capture runner). */
+  execRunner?: ExecRunner;
+  /**
+   * broadcast an IdeEvent to EVERY live renderer (the host feeds are global, like
+   * the model serve feed). Injected so this module stays window-agnostic; main/
+   * index.ts supplies a BrowserWindow fan-out. Defaults to a no-op (tests assert on
+   * the host listeners directly).
+   */
+  broadcast?: (event: IdeEvent) => void;
+  /**
+   * injectable spawner for the STREAMING testmgr `run`/`rerun-failed` verbs
+   * (APP-013). `runSidecar` is request/response, so live per-test events need a
+   * direct spawn seam — main/index.ts supplies node:child_process spawn with the
+   * safe child env; node:test injects a fake. Absent → `ide:test.run` fails soft.
+   */
+  testSpawn?: TestRunSpawn;
+  /** injectable SqlClient for the ide:sql.* console bridge (APP-042); default = the
+   *  real sqlrunner.py wrapper. node:test injects a fake returning canned envelopes. */
+  sqlClient?: SqlClient;
+  /**
+   * broadcast one live per-test event to EVERY live renderer over
+   * IPC_EVENTS.ideTestEvent (same BrowserWindow fan-out as `broadcast`).
+   * Defaults to a no-op (tests assert on the injected fn directly).
+   */
+  broadcastTest?: (event: IdeTestEvent) => void;
+  /**
+   * the named-run session host (APP-032). Absent → `ide:run.start` fails soft
+   * (tests that don't exercise runs need no fake).
+   */
+  runHost?: RunHost;
+  /**
+   * injectable telemetry reader for the 90% CPU/RAM launch guard (APP-032).
+   * Default = the REAL readTelemetry; a throw BLOCKS the launch (fail-closed,
+   * mirroring telemetry-ipc's errorTelemetry guard).
+   */
+  readTelemetry?: () => Promise<SystemTelemetry>;
+  /**
+   * injectable refactor.py runner for `ide:refactor` (APP-026). Default = the
+   * fail-closed engine-bridge `runSidecar` (NOT main/sidecar.ts's wrapper, which
+   * throws on `error`-carrying envelopes — refactor.py's legitimate refusals
+   * like `rope-missing`/`usages-remain` DO carry `error` and must surface as
+   * ok:false data, not a rejection). node:test injects a fake.
+   */
+  refactorRun?: RefactorRunner;
+  /**
+   * injectable kernel-session spawner for the notebook kernel bridge (APP-045).
+   * Default = the real engine-bridge `spawnKernelSidecar`; node:test injects a fake
+   * kernel (node stands in for python3) so the handlers run without ipykernel.
+   */
+  kernelSpawn?: KernelSpawner;
+  /**
+   * injectable profile.py runner (APP-046). Default = the fail-closed engine-bridge
+   * `runSidecar` (NOT main/sidecar.ts's wrapper — profile.py's legitimate refusals
+   * `load`/`option-injection`/`not-found` carry an `error` and must surface as ok:false
+   * DATA, not a rejection). node:test injects a fake returning canned fold envelopes.
+   */
+  profileRun?: ProfileRunner;
+  /**
+   * APP-089: absolute dir where profile snapshots persist (MAIN passes
+   * app.getPath("userData")/profile-snapshots — a MAIN-owned path, never renderer-supplied).
+   * Absent → a per-user tmp dir (tests + a headless run still work).
+   */
+  profileSnapshotDir?: string;
+  /**
+   * APP-066: dispatch workspace search + repo indexing to the offloaded utilityProcess
+   * worker (with a graceful inline fallback). Absent → the handlers run the SAME task
+   * INLINE in main (current behaviour) — tests need no worker.
+   */
+  runWorkerTask?: RunWorkerTask;
+  /**
+   * APP-085: the gated PR-review gateway (git remote → forge, token from keychain,
+   * every call via the L6 safeFetch proxy). Absent → the `ide:git.pr*` handlers report
+   * "PR review unavailable" (the panel hides its section); tests inject a fake.
+   */
+  prGateway?: PrGateway;
+  /**
+   * APP-090: the tear-out terminal window controller (MAIN owns BrowserWindow creation).
+   * Injected from index.ts where the hardened-webPreferences factory + RENDERER_DEV_URL
+   * live. Absent → the `ide:floatingTerminal.*` handlers report "unavailable" (the ⧉ action
+   * no-ops); tests inject a fake. NEVER kills the PTY — the session outlives its window.
+   */
+  floatingTerminal?: FloatingTerminalController;
+}
+
+/** MAIN-side controller the ide-ipc seam calls to open/close a tear-out terminal window. */
+export interface FloatingTerminalController {
+  /** open (or focus an existing) hardened float hosting `ptyId`. */
+  create(req: { ptyId: string; title: string; scheme?: string }): void;
+  /** close the float for `ptyId` (re-dock) — MAIN emits `floatingTerminal.returned`. */
+  close(ptyId: string): void;
+}
+
+/** Runs profile.py `run` and returns its raw envelope; `signal` aborts an in-flight run. */
+export type ProfileRunner = (argv: string[], signal?: AbortSignal) => Promise<SidecarEnvelope>;
+
+/** Hard ceiling for one profile run before SIGKILL (the sidecar also caps in-process). */
+const PROFILE_TIMEOUT_MS = 180_000;
+
+/** Map the gate.ts RunGateResult → the renderer-safe IdeGateResult. */
+function toGateResult(r: RunGateResult): IdeGateResult {
+  const out: IdeGateResult = {
+    ok: r.mayLaunch,
+    decision: r.decision,
+    mayLaunch: r.mayLaunch,
+    trusted: r.trusted,
+    workspaceRoot: r.workspaceRoot,
+    reason: r.reason,
+  };
+  if (r.verdict) {
+    out.verdict = r.verdict.verdict;
+    out.riskScore = r.verdict.risk_score;
+    out.findingsCount = r.verdict.findings.length;
+  }
+  return out;
+}
+
+/**
+ * Which of `bins` are executables on PATH — a lightweight `which`-style probe that
+ * scans the PATH directories with `fs.access(X_OK)` (NO child spawn, NO gate). Only
+ * bare command names are probed (a name containing a path separator is rejected → not
+ * a PATH lookup). Windows honours PATHEXT. Backs the terminal's CLI menu (installed vs
+ * needs-install) without running anything.
+ */
+async function detectBinsOnPath(bins: readonly string[]): Promise<Record<string, boolean>> {
+  const out: Record<string, boolean> = {};
+  const isWin = process.platform === "win32";
+  const pathVar = (isWin ? (process.env.Path ?? process.env.PATH) : process.env.PATH) ?? "";
+  const dirs = pathVar.split(isWin ? ";" : ":").filter(Boolean);
+  const exts = isWin ? (process.env.PATHEXT ?? ".EXE;.CMD;.BAT;.COM").split(";") : [""];
+  await Promise.all(
+    bins.map(async (bin) => {
+      if (!bin || /[\\/]/.test(bin)) {
+        out[bin] = false;
+        return;
+      }
+      for (const dir of dirs) {
+        for (const ext of exts) {
+          try {
+            await access(join(dir, bin + ext), fsConstants.X_OK);
+            out[bin] = true;
+            return;
+          } catch {
+            /* not in this dir — keep scanning */
+          }
+        }
+      }
+      out[bin] = false;
+    }),
+  );
+  return out;
+}
+
+/**
+ * Register the `ide:*` ipcMain handlers + wire the host event feeds to the
+ * renderer. Returns a disposer that removes the handlers AND detaches the host
+ * listeners (so a re-register in tests / a window reload never double-binds).
+ */
+export function registerIdeIpcHandlers(wiring: IdeIpcWiring): () => void {
+  const { lsp, dap, pty, git, fsWatch, prGateway } = wiring;
+  const history = wiring.localHistory; // APP-063: Local History (optional; fail-soft)
+  const config = wiring.engineConfig ?? {};
+  const broadcast = wiring.broadcast ?? (() => {});
+  const execRunner = wiring.execRunner ?? defaultExecRunner;
+  const testSpawn = wiring.testSpawn;
+  const broadcastTest = wiring.broadcastTest ?? (() => {});
+  // live testmgr children register a killer here; the disposer reaps them on
+  // window close so no orphaned pytest process outlives its renderer.
+  const testKills = new Set<() => void>();
+  const sqlHost = new SqlHost(wiring.sqlClient ?? createSqlClient());
+  const kernelHost = new KernelHost(wiring.kernelSpawn);
+
+  // APP-066: dispatch heavy walks to the offloaded worker. Default = a pure INLINE runner
+  // (runs the SAME `runTask` in main) so ide-ipc needs no Electron/worker under test.
+  let inlineSeq = 0;
+  const runWorkerTask: RunWorkerTask =
+    wiring.runWorkerTask ??
+    ((req, opts) => {
+      const id = `inline${++inlineSeq}`;
+      const hooks = opts?.onProgress ? { onProgress: opts.onProgress } : undefined;
+      return {
+        id,
+        result: Promise.resolve(runTask({ ...req, id } as TaskRequest, hooks)),
+        cancel: () => {},
+      };
+    });
+  // requestId → the in-flight search handle, so `ide:searchCancel` can reach it.
+  const activeSearches = new Map<string, WorkerTaskHandle>();
+
+  // ── multiplex the host feeds onto the single `ide:event` push ─────────────
+  const onLspDiag = (e: {
+    serverId: string;
+    params: { uri: string; diagnostics: unknown[]; version?: number };
+  }): void => {
+    const ev: IdeEvent = {
+      channel: "lsp.diagnostics",
+      serverId: e.serverId,
+      uri: e.params.uri,
+      diagnostics: e.params.diagnostics,
+      ...(e.params.version !== undefined ? { version: e.params.version } : {}),
+    };
+    broadcast(ev);
+  };
+  const onLspNotify = (e: { serverId: string; method: string; params: unknown }): void =>
+    broadcast({ channel: "lsp.notify", serverId: e.serverId, method: e.method, params: e.params });
+  const onLspState = (s: Record<string, unknown>): void =>
+    broadcast({ channel: "lsp.state", status: s });
+  const onLspStderr = (e: { serverId: string; line: string }): void =>
+    broadcast({ channel: "host.stderr", source: "lsp", id: e.serverId, line: e.line });
+  // APP-078: relay a server→client workspace/applyEdit to the renderer (which applies + acks).
+  const onLspApplyEdit = (e: {
+    serverId: string;
+    workspaceRoot: string;
+    requestId: number | string;
+    params: unknown;
+  }): void =>
+    broadcast({
+      channel: "lsp.applyEdit",
+      serverId: e.serverId,
+      workspaceRoot: e.workspaceRoot,
+      requestId: e.requestId,
+      params: e.params,
+    });
+
+  const onDapEvent = (e: { sessionId: string; event: string; body: unknown }): void =>
+    broadcast({ channel: "dap.event", sessionId: e.sessionId, event: e.event, body: e.body });
+  const onDapState = (s: Record<string, unknown>): void =>
+    broadcast({ channel: "dap.state", status: s });
+  const onDapStderr = (e: { sessionId: string; line: string }): void =>
+    broadcast({ channel: "host.stderr", source: "dap", id: e.sessionId, line: e.line });
+  // APP-079: a host-owned launch-time setBreakpoints response → the renderer store
+  // folds verified flags + adapter-adjusted lines (the host, not the renderer, sends it).
+  const onDapConfigApplied = (e: {
+    sessionId: string;
+    path: string;
+    sentLines: number[];
+    breakpoints: unknown[];
+  }): void =>
+    broadcast({
+      channel: "dap.setbreakpoints",
+      sessionId: e.sessionId,
+      path: e.path,
+      sentLines: e.sentLines,
+      breakpoints: e.breakpoints,
+    });
+
+  const onPtyData = (e: { ptyId: string; data: string }): void =>
+    broadcast({ channel: "pty.data", ptyId: e.ptyId, data: e.data });
+  const onPtyExit = (e: { ptyId: string; exitCode: number }): void =>
+    broadcast({ channel: "pty.exit", ptyId: e.ptyId, exitCode: e.exitCode });
+
+  const onFsChange = (e: { root: string; paths: string[] }): void =>
+    broadcast({ channel: "fs.change", root: e.root, paths: e.paths });
+
+  // APP-045: kernel NDJSON events → the shared push, tagged with their sessionId.
+  const onKernelEvent = (e: { sessionId: string; event: IdeKernelStreamEvent }): void =>
+    broadcast({ channel: "kernel", sessionId: e.sessionId, event: e.event });
+  kernelHost.on("event", onKernelEvent);
+
+  lsp.on("diagnostics", onLspDiag);
+  lsp.on("notify", onLspNotify);
+  lsp.on("state", onLspState as (s: unknown) => void);
+  lsp.on("stderr", onLspStderr);
+  lsp.on("applyEdit", onLspApplyEdit);
+  dap.on("event", onDapEvent);
+  dap.on("state", onDapState as (s: unknown) => void);
+  dap.on("stderr", onDapStderr);
+  dap.on("configApplied", onDapConfigApplied);
+  pty.on("data", onPtyData);
+  pty.on("exit", onPtyExit);
+  fsWatch.on("change", onFsChange);
+
+  /* ── fs ──────────────────────────────────────────────────────────────────*/
+  ipcMain.handle(IPC.ideFsRead, async (_e, arg: unknown): Promise<IdeFsReadResult> => {
+    const v = validateFsRead(arg);
+    if (!v.ok) return { ok: false, error: v.error.message };
+    try {
+      // assertNotSensitivePath returns the normalized fs path (a `file://` tab URI →
+      // real path). readFile can't take a `file://` STRING, so use the returned path —
+      // this also fixes editor opens reading ENOENT (empty) for `file://` uris.
+      const path = assertNotSensitivePath(v.value.uri);
+      const large = await isLargeFile(path);
+      const r = await fsRead(path);
+      return { ok: true, text: r.text, encoding: r.encoding, large };
+    } catch (e) {
+      return { ok: false, error: errString(e) };
+    }
+  });
+  ipcMain.handle(IPC.ideFsWrite, async (_e, arg: unknown): Promise<IdeOkResult> => {
+    const v = validateFsWrite(arg);
+    if (!v.ok) return { ok: false, error: v.error.message };
+    try {
+      const path = assertNotSensitivePath(v.value.uri); // normalize + deny sensitive targets
+      // APP-063: snapshot the PRE-write on-disk content BEFORE writing, so revert-by-one lands
+      // on the previous state (not the incoming buffer). A brand-new file (ENOENT) has nothing
+      // to snapshot → skip; capture never blocks or fails the save (fail-soft).
+      if (history) {
+        try {
+          const prev = await fsRead(path);
+          if (!(await isLargeFile(path))) history.capture(path, prev.text, "save");
+        } catch {
+          /* ENOENT (first save) / unreadable → nothing to snapshot */
+        }
+      }
+      await fsWrite(path, v.value.text);
+      return { ok: true };
+    } catch (e) {
+      return { ok: false, error: errString(e) };
+    }
+  });
+  ipcMain.handle(IPC.ideFsTree, async (_e, arg: unknown): Promise<IdeTreeNode[]> => {
+    const v = validateFsTree(arg);
+    if (!v.ok) return [];
+    return fsTree(uriToFsPath(v.value.dir));
+  });
+
+  // APP-065: walk the whole repo → a flat file list (ignore-pruned, no symlinks). Root is
+  // path-guarded exactly like fsTree so a symlinked/sensitive target can't escape.
+  ipcMain.handle(IPC.ideFsWalk, async (_e, arg: unknown): Promise<IdeFsWalkResult> => {
+    const a = (arg ?? {}) as { root?: unknown };
+    if (typeof a.root !== "string" || !a.root) return { ok: false, error: "root is required" };
+    try {
+      const root = assertNotSensitivePath(a.root);
+      return { ok: true, files: await fsWalk(root) };
+    } catch (e) {
+      return { ok: false, error: errString(e) };
+    }
+  });
+  ipcMain.handle(IPC.ideFsWatch, async (_e, arg: unknown): Promise<IdeOkResult> => {
+    const v = validateFsWatch(arg);
+    if (!v.ok) return { ok: false, error: v.error.message };
+    fsWatch.watch(v.value.root);
+    return { ok: true };
+  });
+  ipcMain.handle(IPC.ideFsUnwatch, async (_e, arg: unknown): Promise<IdeOkResult> => {
+    const v = validateFsWatch(arg);
+    if (!v.ok) return { ok: false, error: v.error.message };
+    fsWatch.unwatch(v.value.root);
+    return { ok: true };
+  });
+  // ── fs CRUD (leap #8): each path-guarded (assertNotSensitivePath) before any write ──
+  ipcMain.handle(IPC.ideFsCreateFile, async (_e, arg: unknown): Promise<IdeOkResult> => {
+    const v = validateFsPath(arg);
+    if (!v.ok) return { ok: false, error: v.error.message };
+    try {
+      await fsCreateFile(assertNotSensitivePath(v.value.path));
+      return { ok: true };
+    } catch (e) {
+      return { ok: false, error: errString(e) };
+    }
+  });
+  ipcMain.handle(IPC.ideFsMkdir, async (_e, arg: unknown): Promise<IdeOkResult> => {
+    const v = validateFsPath(arg);
+    if (!v.ok) return { ok: false, error: v.error.message };
+    try {
+      await fsMkdir(assertNotSensitivePath(v.value.path));
+      return { ok: true };
+    } catch (e) {
+      return { ok: false, error: errString(e) };
+    }
+  });
+  ipcMain.handle(IPC.ideFsRename, async (_e, arg: unknown): Promise<IdeOkResult> => {
+    const v = validateFsRename(arg);
+    if (!v.ok) return { ok: false, error: v.error.message };
+    try {
+      // guard BOTH endpoints — a rename can move a file INTO a sensitive location too.
+      await fsRename(assertNotSensitivePath(v.value.src), assertNotSensitivePath(v.value.dest));
+      return { ok: true };
+    } catch (e) {
+      return { ok: false, error: errString(e) };
+    }
+  });
+  ipcMain.handle(IPC.ideFsDelete, async (_e, arg: unknown): Promise<IdeOkResult> => {
+    const v = validateFsPath(arg);
+    if (!v.ok) return { ok: false, error: v.error.message };
+    try {
+      await fsDelete(assertNotSensitivePath(v.value.path));
+      return { ok: true };
+    } catch (e) {
+      return { ok: false, error: errString(e) };
+    }
+  });
+
+  /* ── LSP ─────────────────────────────────────────────────────────────────*/
+  ipcMain.handle(IPC.ideLspEnsure, async (_e, arg: unknown): Promise<IdeLspEnsureResult> => {
+    const v = validateLspEnsure(arg);
+    if (!v.ok) return { ok: false, error: v.error.message };
+    try {
+      const { serverId } = lsp.ensure(v.value.languageId, {
+        rootUri: v.value.workspaceRoot,
+        ...(v.value.interpreterPath ? { interpreterPath: v.value.interpreterPath } : {}),
+      });
+      return { ok: true, serverId };
+    } catch (e) {
+      return { ok: false, error: errString(e) };
+    }
+  });
+  // APP-077: the live LSP server list — read-only status snapshot (no spawn).
+  ipcMain.handle(IPC.ideLspList, async (): Promise<IdeLspListResult> => {
+    try {
+      const servers = lsp.list().map((s) => ({
+        serverId: s.serverId,
+        languageId: s.languageId,
+        workspaceRoot: s.workspaceRoot,
+        state: s.state,
+      }));
+      return { ok: true, servers };
+    } catch (e) {
+      return { ok: false, servers: [], error: errString(e) };
+    }
+  });
+  // APP-078: the renderer's ack for a relayed workspace/applyEdit → settle the server request.
+  ipcMain.handle(IPC.ideLspApplyEditResult, async (_e, arg: unknown): Promise<IdeOkResult> => {
+    const o = (arg ?? {}) as {
+      serverId?: unknown;
+      workspaceRoot?: unknown;
+      requestId?: unknown;
+      applied?: unknown;
+    };
+    if (
+      typeof o.serverId !== "string" ||
+      typeof o.workspaceRoot !== "string" ||
+      (typeof o.requestId !== "number" && typeof o.requestId !== "string")
+    ) {
+      return { ok: false, error: "invalid applyEdit ack" };
+    }
+    try {
+      lsp.respondApplyEdit(o.serverId, o.workspaceRoot, o.requestId, o.applied === true);
+      return { ok: true };
+    } catch (e) {
+      return { ok: false, error: errString(e) };
+    }
+  });
+  ipcMain.handle(IPC.ideLspRequest, async (_e, arg: unknown): Promise<IdeLspRequestResult> => {
+    const v = validateLspRequest(arg);
+    if (!v.ok) return { ok: false, requestId: -1, error: v.error.message };
+    const { id, result } = lsp.request(
+      v.value.serverId,
+      v.value.workspaceRoot,
+      v.value.method,
+      v.value.params,
+    );
+    try {
+      const res = await result;
+      return { ok: true, requestId: id, result: res };
+    } catch (e) {
+      return { ok: false, requestId: id, error: errString(e) };
+    }
+  });
+  ipcMain.on(IPC.ideLspCancel, (_e, arg: unknown) => {
+    const v = validateLspCancel(arg);
+    if (v.ok) lsp.cancel(v.value.serverId, v.value.workspaceRoot, v.value.requestId);
+  });
+  ipcMain.on(IPC.ideLspDidOpen, (_e, arg: unknown) => {
+    const v = validateLspDoc(arg);
+    if (v.ok && v.value.languageId !== undefined && v.value.text !== undefined) {
+      lsp.didOpen(
+        v.value.serverId,
+        v.value.workspaceRoot,
+        v.value.uri,
+        v.value.languageId,
+        v.value.text,
+        v.value.version,
+      );
+    }
+  });
+  ipcMain.on(IPC.ideLspDidChange, (_e, arg: unknown) => {
+    const v = validateLspDoc(arg);
+    if (v.ok && v.value.text !== undefined && v.value.version !== undefined) {
+      lsp.didChange(
+        v.value.serverId,
+        v.value.workspaceRoot,
+        v.value.uri,
+        v.value.text,
+        v.value.version,
+      );
+    }
+  });
+  ipcMain.on(IPC.ideLspDidClose, (_e, arg: unknown) => {
+    const v = validateLspDoc(arg);
+    if (v.ok) lsp.didClose(v.value.serverId, v.value.workspaceRoot, v.value.uri);
+  });
+  ipcMain.handle(IPC.ideLspSetInterpreter, async (_e, arg: unknown): Promise<IdeOkResult> => {
+    const v = validateLspSetInterpreter(arg);
+    if (!v.ok) return { ok: false, error: v.error.message };
+    try {
+      lsp.setInterpreter(v.value.serverId, v.value.workspaceRoot, v.value.interpreterPath);
+      return { ok: true };
+    } catch (e) {
+      return { ok: false, error: e instanceof Error ? e.message : String(e) };
+    }
+  });
+
+  /* ── DAP ─────────────────────────────────────────────────────────────────*/
+  ipcMain.handle(IPC.ideDapLaunch, async (_e, arg: unknown): Promise<IdeDapLaunchResult> => {
+    const v = validateDapLaunch(arg);
+    if (!v.ok) return { ok: false, error: v.error.message };
+    try {
+      // split the launch-time config plan (APP-079) + the non-DAP allowRemote flag
+      // (APP-080) out of the DAP launch args: `config` keeps `connect` (the adapter's
+      // attach argument) but never carries the plan or the confirm flag to the adapter.
+      const { breakpoints, exceptionFilters, allowRemote, ...config } = v.value;
+      const plan: DapLaunchPlan = {};
+      if (breakpoints !== undefined) plan.sources = breakpoints;
+      if (exceptionFilters !== undefined) plan.exceptionFilters = exceptionFilters;
+      const opts: DapLaunchOptions = {};
+      if (allowRemote !== undefined) opts.allowRemote = allowRemote;
+      const { sessionId, capabilities } = await dap.launch(config, plan, opts);
+      return { ok: true, sessionId, capabilities };
+    } catch (e) {
+      return { ok: false, error: errString(e) };
+    }
+  });
+  ipcMain.handle(IPC.ideDapRequest, async (_e, arg: unknown): Promise<IdeDapRequestResult> => {
+    const v = validateDapRequest(arg);
+    if (!v.ok) return { ok: false, error: v.error.message };
+    try {
+      const body = await dap.request(v.value.sessionId, v.value.command, v.value.args);
+      return { ok: true, body };
+    } catch (e) {
+      return { ok: false, error: errString(e) };
+    }
+  });
+  ipcMain.handle(IPC.ideDapTerminate, async (_e, arg: unknown): Promise<IdeOkResult> => {
+    const v = validateDapTerminate(arg);
+    if (!v.ok) return { ok: false, error: v.error.message };
+    try {
+      await dap.terminate(v.value.sessionId);
+      return { ok: true };
+    } catch (e) {
+      return { ok: false, error: e instanceof Error ? e.message : String(e) };
+    }
+  });
+  ipcMain.handle(
+    IPC.ideDapDetectAdapter,
+    async (_e, arg: unknown): Promise<IdeDapDetectAdapterResult> => {
+      const v = validateDapDetectAdapter(arg);
+      if (!v.ok) return { ok: false, type: "", available: false, detail: v.error.message };
+      try {
+        const r = await dap.detectAdapter(v.value.type, v.value.pythonPath);
+        return { ok: true, ...r };
+      } catch (e) {
+        return { ok: false, type: v.value.type, available: false, detail: errString(e) };
+      }
+    },
+  );
+  ipcMain.handle(
+    IPC.ideDapInstallAdapter,
+    async (_e, arg: unknown): Promise<IdeDapInstallAdapterResult> => {
+      const v = validateDapInstallAdapter(arg);
+      if (!v.ok) return { ok: false, output: "", error: v.error.message };
+      try {
+        const opts: { pythonPath?: string; confirm?: boolean } = {};
+        if (v.value.pythonPath !== undefined) opts.pythonPath = v.value.pythonPath;
+        if (v.value.confirm !== undefined) opts.confirm = v.value.confirm;
+        return await dap.installAdapter(v.value.type, opts);
+      } catch (e) {
+        return { ok: false, output: "", error: errString(e) };
+      }
+    },
+  );
+
+  /* ── refactor (refactor.py → WorkspaceEdit proposal, APP-026) ────────────*/
+  const refactorRun: RefactorRunner =
+    wiring.refactorRun ?? ((script, argv) => runSidecarScript(script, argv));
+  ipcMain.handle(IPC.ideRefactor, async (_e, arg: unknown): Promise<IdeRefactorResult> => {
+    const v = validateRefactor(arg);
+    if (!v.ok) return { ok: false, error: v.error.message };
+    return runRefactorVerb(v.value, refactorRun);
+  });
+
+  /* ── plain Run (APP-032): fail-closed gate → telemetry guard → spawn ─────*/
+  const runHost = wiring.runHost;
+  const readTele = wiring.readTelemetry ?? readTelemetry;
+  const onRunData = (e: { runId: string; data: string }): void =>
+    broadcast({ channel: "run.data", runId: e.runId, data: e.data });
+  const onRunExit = (e: {
+    runId: string;
+    exitCode: number;
+    signal?: number;
+    killed: boolean;
+  }): void =>
+    broadcast({
+      channel: "run.exit",
+      runId: e.runId,
+      exitCode: e.exitCode,
+      ...(e.signal !== undefined ? { signal: e.signal } : {}),
+      killed: e.killed,
+    });
+  runHost?.on("data", onRunData);
+  runHost?.on("exit", onRunExit);
+  ipcMain.handle(IPC.ideRunStart, async (_e, arg: unknown): Promise<IdeRunStartResult> => {
+    const v = validateRunStart(arg);
+    if (!v.ok) return { ok: false, error: v.error.message };
+    if (!runHost) return { ok: false, error: "run host unavailable" };
+    // the tested APP-032 spine: fail-closed gate → telemetry guard → spawn. A
+    // gate refusal additionally carries the FULL rendered verdict for the panel.
+    let lastGate: RunGateResult | undefined;
+    const outcome = await startGatedRun(
+      {
+        cmd: v.value.cmd,
+        args: v.value.args,
+        cwd: v.value.cwd,
+        ...(v.value.env ? { env: v.value.env } : {}),
+        ...(v.value.venv ? { venv: v.value.venv } : {}),
+        workspaceRoot: v.value.workspaceRoot,
+        ...(v.value.head ? { head: v.value.head } : {}),
+      },
+      {
+        gate: async (id) => {
+          lastGate = await runGate(id, { engineConfig: config });
+          return lastGate;
+        },
+        readTelemetry: readTele,
+        start: (req) => runHost.start(req),
+      },
+    );
+    const out: IdeRunStartResult = { ok: outcome.ok };
+    if (outcome.runId !== undefined) out.runId = outcome.runId;
+    if (outcome.refusedBy !== undefined) out.refusedBy = outcome.refusedBy;
+    if (outcome.error !== undefined) out.error = outcome.error;
+    if (outcome.refusedBy === "gate" && lastGate) out.gate = toGateResult(lastGate);
+    return out;
+  });
+  ipcMain.handle(IPC.ideRunKill, async (_e, arg: unknown): Promise<IdeRunKillResult> => {
+    const v = validateRunKill(arg);
+    if (!v.ok) return { ok: false, error: v.error.message };
+    if (!runHost) return { ok: false, error: "run host unavailable" };
+    return runHost.kill(v.value.runId) ? { ok: true } : { ok: false, error: "no such run" };
+  });
+
+  /* ── PTY ─────────────────────────────────────────────────────────────────*/
+  ipcMain.handle(IPC.idePtySpawn, async (_e, arg: unknown): Promise<IdePtySpawnResult> => {
+    const v = validatePtySpawn(arg);
+    if (!v.ok) return { ok: false, error: v.error.message };
+    try {
+      const { ptyId } = pty.spawn({
+        cwd: v.value.cwd,
+        ...(v.value.shell ? { shell: v.value.shell } : {}),
+        ...(v.value.cols !== undefined ? { cols: v.value.cols } : {}),
+        ...(v.value.rows !== undefined ? { rows: v.value.rows } : {}),
+        ...(v.value.venv ? { venv: v.value.venv } : {}),
+      });
+      return { ok: true, ptyId };
+    } catch (e) {
+      return { ok: false, error: errString(e) };
+    }
+  });
+  ipcMain.on(IPC.idePtyWrite, (_e, arg: unknown) => {
+    const v = validatePtyWrite(arg);
+    if (v.ok) pty.write(v.value.ptyId, v.value.data);
+  });
+  ipcMain.on(IPC.idePtyResize, (_e, arg: unknown) => {
+    const v = validatePtyResize(arg);
+    if (v.ok) pty.resize(v.value.ptyId, v.value.cols, v.value.rows);
+  });
+  ipcMain.on(IPC.idePtyKill, (_e, arg: unknown) => {
+    const v = validatePtyKill(arg);
+    if (v.ok) pty.kill(v.value.ptyId);
+  });
+  // APP-090: tear a terminal session out into a hardened secondary window / re-dock it.
+  // The window is created ONLY in MAIN (never window.open) by the injected controller;
+  // absent → the feature reports unavailable (the ⧉ action no-ops). NEVER kills the PTY.
+  ipcMain.handle(
+    IPC.ideFloatingTerminalCreate,
+    async (_e, arg: unknown): Promise<IdeFloatingTerminalResult> => {
+      const v = validateFloatingTerminalCreate(arg);
+      if (!v.ok) return { ok: false, error: v.error.message };
+      if (!wiring.floatingTerminal) return { ok: false, error: "floating terminal unavailable" };
+      try {
+        wiring.floatingTerminal.create(v.value);
+        return { ok: true };
+      } catch (e) {
+        return { ok: false, error: errString(e) };
+      }
+    },
+  );
+  ipcMain.handle(
+    IPC.ideFloatingTerminalClose,
+    async (_e, arg: unknown): Promise<IdeFloatingTerminalResult> => {
+      const v = validateFloatingTerminalClose(arg);
+      if (!v.ok) return { ok: false, error: v.error.message };
+      if (!wiring.floatingTerminal) return { ok: false, error: "floating terminal unavailable" };
+      try {
+        wiring.floatingTerminal.close(v.value.ptyId);
+        return { ok: true };
+      } catch (e) {
+        return { ok: false, error: errString(e) };
+      }
+    },
+  );
+  ipcMain.handle(IPC.ideDetectBins, async (_e, arg: unknown): Promise<Record<string, boolean>> => {
+    const raw = Array.isArray(arg) ? arg : (arg as { bins?: unknown })?.bins;
+    const bins = Array.isArray(raw) ? raw.filter((b): b is string => typeof b === "string") : [];
+    return detectBinsOnPath(bins);
+  });
+
+  /* ── git (RAW git, runs LIVE) ──────────────────────────────────────────────*/
+  ipcMain.handle(IPC.ideGitStatus, async (_e, arg: unknown): Promise<IdeGitStatus> => {
+    const v = validateGitRoot(arg);
+    if (!v.ok) {
+      return {
+        ok: false,
+        staged: [],
+        unstaged: [],
+        untracked: [],
+        conflicted: [],
+        error: v.error.message,
+      };
+    }
+    return git.status(v.value.root);
+  });
+  ipcMain.handle(IPC.ideGitDiff, async (_e, arg: unknown): Promise<IdeGitDiffResult> => {
+    const v = validateGitDiff(arg);
+    if (!v.ok) return { ok: false, diff: "", error: v.error.message };
+    const diff = await git.diff(v.value.root, v.value.file, v.value.staged);
+    return { ok: true, diff };
+  });
+  ipcMain.handle(IPC.ideGitStage, async (_e, arg: unknown): Promise<IdeGitOpResult> => {
+    const v = validateGitFiles(arg);
+    if (!v.ok) return { ok: false, error: v.error.message };
+    return git.stage(v.value.root, v.value.files);
+  });
+  ipcMain.handle(IPC.ideGitUnstage, async (_e, arg: unknown): Promise<IdeGitOpResult> => {
+    const v = validateGitFiles(arg);
+    if (!v.ok) return { ok: false, error: v.error.message };
+    return git.unstage(v.value.root, v.value.files);
+  });
+  ipcMain.handle(IPC.ideGitCommit, async (_e, arg: unknown): Promise<IdeGitOpResult> => {
+    const v = validateGitCommit(arg);
+    if (!v.ok) return { ok: false, error: v.error.message };
+    return git.commit(v.value.root, v.value.message, { amend: v.value.amend });
+  });
+  ipcMain.handle(IPC.ideGitBranch, async (_e, arg: unknown): Promise<IdeGitOpResult> => {
+    const v = validateGitBranch(arg);
+    if (!v.ok) return { ok: false, error: v.error.message };
+    return git.branch(v.value.root, v.value.name, { create: v.value.create });
+  });
+  ipcMain.handle(IPC.ideGitBranches, async (_e, arg: unknown): Promise<IdeGitBranchesResult> => {
+    const v = validateGitRoot(arg);
+    if (!v.ok) return { ok: false, branches: [], error: v.error.message };
+    const [branches, current] = await Promise.all([
+      git.listBranches(v.value.root),
+      git.currentBranch(v.value.root),
+    ]);
+    return { ok: true, branches, ...(current ? { current } : {}) };
+  });
+  ipcMain.handle(IPC.ideGitStash, async (_e, arg: unknown): Promise<IdeGitOpResult> => {
+    const v = validateGitStash(arg);
+    if (!v.ok) return { ok: false, error: v.error.message };
+    return git.stash(v.value.root, v.value.message);
+  });
+  ipcMain.handle(IPC.ideGitStashList, async (_e, arg: unknown): Promise<IdeGitStashListResult> => {
+    const v = validateGitRoot(arg);
+    if (!v.ok) return { ok: false, entries: [], error: v.error.message };
+    return { ok: true, entries: await git.stashList(v.value.root) };
+  });
+  ipcMain.handle(IPC.ideGitStashPop, async (_e, arg: unknown): Promise<IdeGitOpResult> => {
+    const v = validateGitStashRef(arg);
+    if (!v.ok) return { ok: false, error: v.error.message };
+    return git.stashPop(v.value.root, v.value.index);
+  });
+  ipcMain.handle(IPC.ideGitStashApply, async (_e, arg: unknown): Promise<IdeGitOpResult> => {
+    const v = validateGitStashRef(arg);
+    if (!v.ok) return { ok: false, error: v.error.message };
+    return git.stashApply(v.value.root, v.value.index);
+  });
+  ipcMain.handle(IPC.ideGitStashDrop, async (_e, arg: unknown): Promise<IdeGitOpResult> => {
+    const v = validateGitStashRef(arg);
+    if (!v.ok) return { ok: false, error: v.error.message };
+    return git.stashDrop(v.value.root, v.value.index);
+  });
+  ipcMain.handle(IPC.ideGitBlame, async (_e, arg: unknown): Promise<IdeGitBlameResult> => {
+    const v = validateGitBlame(arg);
+    if (!v.ok) return { ok: false, entries: [], error: v.error.message };
+    return { ok: true, entries: await git.blame(v.value.root, v.value.file) };
+  });
+  ipcMain.handle(IPC.ideGitMergeAbort, async (_e, arg: unknown): Promise<IdeGitOpResult> => {
+    const v = validateGitRoot(arg);
+    if (!v.ok) return { ok: false, error: v.error.message };
+    return git.abortMerge(v.value.root);
+  });
+  ipcMain.handle(IPC.ideGitCheckoutSide, async (_e, arg: unknown): Promise<IdeGitOpResult> => {
+    const v = validateGitCheckoutSide(arg);
+    if (!v.ok) return { ok: false, error: v.error.message };
+    return git.checkoutSide(v.value.root, v.value.file, v.value.side);
+  });
+  ipcMain.handle(IPC.ideGitCheckoutCommit, async (_e, arg: unknown): Promise<IdeGitOpResult> => {
+    const v = validateGitCommitRef(arg);
+    if (!v.ok) return { ok: false, error: v.error.message };
+    return git.checkoutCommit(v.value.root, v.value.hash);
+  });
+  ipcMain.handle(IPC.ideGitCherryPick, async (_e, arg: unknown): Promise<IdeGitOpResult> => {
+    const v = validateGitCommitRef(arg);
+    if (!v.ok) return { ok: false, error: v.error.message };
+    return git.cherryPick(v.value.root, v.value.hash);
+  });
+  ipcMain.handle(IPC.ideGitRevert, async (_e, arg: unknown): Promise<IdeGitOpResult> => {
+    const v = validateGitCommitRef(arg);
+    if (!v.ok) return { ok: false, error: v.error.message };
+    return git.revertCommit(v.value.root, v.value.hash);
+  });
+  ipcMain.handle(IPC.ideGitReset, async (_e, arg: unknown): Promise<IdeGitOpResult> => {
+    const v = validateGitReset(arg);
+    if (!v.ok) return { ok: false, error: v.error.message };
+    return git.reset(v.value.root, v.value.hash, v.value.mode);
+  });
+  ipcMain.handle(
+    IPC.ideGitConflictVersions,
+    async (_e, arg: unknown): Promise<IdeGitConflictVersionsResult> => {
+      const v = validateGitConflictVersions(arg);
+      if (!v.ok) {
+        return {
+          ok: false,
+          base: "",
+          ours: "",
+          theirs: "",
+          working: "",
+          binary: false,
+          error: v.error.message,
+        };
+      }
+      return git.conflictVersions(v.value.root, v.value.file);
+    },
+  );
+  ipcMain.handle(IPC.ideGitLog, async (_e, arg: unknown): Promise<IdeGitLogResult> => {
+    const v = validateGitLog(arg);
+    if (!v.ok) return { ok: false, entries: [], error: v.error.message };
+    const entries = await git.log(v.value.root, v.value.limit);
+    return { ok: true, entries };
+  });
+  ipcMain.handle(IPC.ideGitPush, async (_e, arg: unknown): Promise<IdeGitOpResult> => {
+    const v = validateGitRoot(arg);
+    if (!v.ok) return { ok: false, error: v.error.message };
+    return git.push(v.value.root);
+  });
+  ipcMain.handle(IPC.ideGitPull, async (_e, arg: unknown): Promise<IdeGitOpResult> => {
+    const v = validateGitRoot(arg);
+    if (!v.ok) return { ok: false, error: v.error.message };
+    return git.pull(v.value.root);
+  });
+  ipcMain.handle(IPC.ideGitFetch, async (_e, arg: unknown): Promise<IdeGitOpResult> => {
+    const v = validateGitRoot(arg);
+    if (!v.ok) return { ok: false, error: v.error.message };
+    return git.fetch(v.value.root);
+  });
+  // APP-082: interactive rebase — todo shas are strict lowercase hex, actions whitelisted,
+  // messages ride files (never argv); git rebase -i runs via scripted editors, no shell/UI.
+  ipcMain.handle(
+    IPC.ideGitRebaseTodo,
+    async (_e, arg: unknown): Promise<IdeGitRebaseTodoResult> => {
+      const v = validateGitRebaseTodo(arg);
+      if (!v.ok) return { ok: false, base: "", rows: [], error: v.error.message };
+      return git.rebaseTodo(v.value.root, v.value.base);
+    },
+  );
+  ipcMain.handle(IPC.ideGitRebaseRun, async (_e, arg: unknown): Promise<IdeGitOpResult> => {
+    const v = validateGitRebaseRun(arg);
+    if (!v.ok) return { ok: false, error: v.error.message };
+    return git.rebaseRun(v.value.root, v.value.base, v.value.todo);
+  });
+  ipcMain.handle(IPC.ideGitRebaseState, async (_e, arg: unknown): Promise<IdeGitRebaseState> => {
+    const v = validateGitRoot(arg);
+    if (!v.ok) return { inProgress: false, conflicted: [], error: v.error.message };
+    return git.rebaseState(v.value.root);
+  });
+  ipcMain.handle(IPC.ideGitRebaseContinue, async (_e, arg: unknown): Promise<IdeGitOpResult> => {
+    const v = validateGitRoot(arg);
+    if (!v.ok) return { ok: false, error: v.error.message };
+    return git.rebaseContinue(v.value.root);
+  });
+  ipcMain.handle(IPC.ideGitRebaseAbort, async (_e, arg: unknown): Promise<IdeGitOpResult> => {
+    const v = validateGitRoot(arg);
+    if (!v.ok) return { ok: false, error: v.error.message };
+    return git.rebaseAbort(v.value.root);
+  });
+  // APP-083: commit detail for the blame click-through — the sha is a validated commit-ish
+  // (validateGitCommitRef: no leading '-', no whitespace) and rides behind `--` in the host.
+  ipcMain.handle(IPC.ideGitShow, async (_e, arg: unknown): Promise<IdeGitShowResult> => {
+    const v = validateGitCommitRef(arg);
+    if (!v.ok) {
+      return {
+        ok: false,
+        sha: "",
+        author: "",
+        email: "",
+        date: "",
+        summary: "",
+        body: "",
+        error: v.error.message,
+      };
+    }
+    return git.show(v.value.root, v.value.hash);
+  });
+  // APP-084: per-hunk/per-line staging — the patch rides over STDIN in the host (never
+  // argv/shell); the root is path-guarded and the patch is size-capped + NUL-free.
+  ipcMain.handle(IPC.ideGitApplyPatch, async (_e, arg: unknown): Promise<IdeGitOpResult> => {
+    const v = validateGitApplyPatch(arg);
+    if (!v.ok) return { ok: false, error: v.error.message };
+    return git.applyPatch(v.value.root, v.value.patch, {
+      cached: v.value.cached,
+      reverse: v.value.reverse,
+    });
+  });
+
+  // APP-085: gated PR/MR review. Every network call runs inside prGateway → the
+  // engine-bridge provider client → the L6 safeFetch proxy (SSRF-guarded, fail-closed).
+  // The token lives in MAIN's keychain and reaches the sidecar via env — never the renderer.
+  ipcMain.handle(IPC.ideGitPrStatus, async (_e, arg: unknown): Promise<IdePrStatus> => {
+    const v = validateGitRoot(arg);
+    if (!v.ok || !prGateway) return { hasToken: false };
+    return prGateway.status(v.value.root);
+  });
+  ipcMain.handle(IPC.ideGitPrList, async (_e, arg: unknown): Promise<IdePrListResult> => {
+    const v = validateGitRoot(arg);
+    if (!v.ok) return { ok: false, prs: [], error: v.ok ? "" : v.error.message };
+    if (!prGateway) return { ok: false, prs: [], error: "PR review is unavailable" };
+    return prGateway.list(v.value.root);
+  });
+  ipcMain.handle(IPC.ideGitPrGet, async (_e, arg: unknown): Promise<IdePrDetailResult> => {
+    const v = validateGitPrGet(arg);
+    if (!v.ok) return { ok: false, error: v.error.message };
+    if (!prGateway) return { ok: false, error: "PR review is unavailable" };
+    return prGateway.get(v.value.root, v.value.number);
+  });
+  ipcMain.handle(IPC.ideGitPrComment, async (_e, arg: unknown): Promise<IdePrOpResult> => {
+    const v = validateGitPrComment(arg);
+    if (!v.ok) return { ok: false, error: v.error.message };
+    if (!prGateway) return { ok: false, error: "PR review is unavailable" };
+    return prGateway.comment(v.value.root, v.value.number, v.value.body);
+  });
+  ipcMain.handle(IPC.ideGitPrSetToken, async (_e, arg: unknown): Promise<IdePrOpResult> => {
+    const v = validateGitPrSetToken(arg);
+    if (!v.ok) return { ok: false, error: v.error.message };
+    if (!prGateway) return { ok: false, error: "PR review is unavailable" };
+    return prGateway.setToken(v.value.root, v.value.token);
+  });
+
+  /* ── the RUN-GATE (§5.2/§9) — REAL engine-bridge gate; fail-closed ─────────*/
+  ipcMain.handle(IPC.ideGate, async (evt: unknown, arg: unknown): Promise<IdeGateResult> => {
+    const v = validateGate(arg);
+    if (!v.ok) {
+      // a bad arg is fail-closed: never a silent allow.
+      const root =
+        arg && typeof arg === "object" && typeof (arg as IdeGateRequest).workspaceRoot === "string"
+          ? (arg as IdeGateRequest).workspaceRoot
+          : "";
+      return {
+        ok: false,
+        decision: "block",
+        mayLaunch: false,
+        trusted: false,
+        workspaceRoot: root,
+        reason: v.error.message,
+        error: v.error.message,
+      };
+    }
+    const sender = senderOf(evt);
+    try {
+      const result = await runGate(
+        { workspaceRoot: v.value.workspaceRoot, ...(v.value.head ? { head: v.value.head } : {}) },
+        {
+          engineConfig: config,
+          onStderr: (line) => {
+            // forward gate progress as a host.stderr line (cosmetic; no verdict, C5).
+            if (sender)
+              sender.send(IPC_EVENTS.ideEvent, {
+                channel: "host.stderr",
+                source: "dap",
+                id: "gate",
+                line,
+              });
+          },
+        },
+      );
+      return toGateResult(result);
+    } catch (e) {
+      // runGate is documented to fail closed; a hard crash still BLOCKS.
+      return {
+        ok: false,
+        decision: "block",
+        mayLaunch: false,
+        trusted: false,
+        workspaceRoot: v.value.workspaceRoot,
+        reason: `gate crashed: ${errString(e)}`,
+        error: errString(e),
+      };
+    }
+  });
+
+  /* ── gated command exec (§7.3) — user-approved + screened, fail-closed ─────*/
+  ipcMain.handle(IPC.ideExec, async (_e, arg: unknown): Promise<IdeExecResult> => {
+    const v = validateExec(arg);
+    if (!v.ok) {
+      return {
+        ok: false,
+        exitCode: 1,
+        stdout: "",
+        stderr: "",
+        blocked: true,
+        reason: v.error.message,
+        error: v.error.message,
+      };
+    }
+    // defense in depth: the destructive-command screen BLOCKS catastrophic commands
+    // outright, even though the user already approved this run (§7.3 task card).
+    const screen = screenCommand(v.value.command);
+    if (screen.blocked) {
+      return {
+        ok: false,
+        exitCode: 126,
+        stdout: "",
+        stderr: "",
+        blocked: true,
+        reason: screen.reason,
+      };
+    }
+    try {
+      // normalize + refuse a sensitive cwd (same guard as fs writes).
+      const cwd = assertNotSensitivePath(v.value.cwd);
+      return await execRunner(v.value.command, cwd, EXEC_TIMEOUT_MS);
+    } catch (e) {
+      return { ok: false, exitCode: 1, stdout: "", stderr: "", error: errString(e) };
+    }
+  });
+
+  /* ── workspace search (§6.3) — bounded gitignore-aware walk, OFFLOADED to the ──
+   * utilityProcess worker (APP-066) with a graceful inline fallback. A `requestId`
+   * opts into live progress (search.progress events) + `ide:searchCancel`. */
+  ipcMain.handle(IPC.ideSearch, async (_e, arg: unknown): Promise<IdeSearchResult> => {
+    const v = validateSearch(arg);
+    if (!v.ok) {
+      return { ok: false, matches: [], scanned: 0, truncated: false, error: v.error.message };
+    }
+    const requestId = v.value.requestId;
+    try {
+      const root = assertNotSensitivePath(v.value.root);
+      const q: FileSearchQuery = {
+        root,
+        ...(v.value.mode === "path" ? { contains: v.value.query } : { grep: v.value.query }),
+        ...(v.value.extensions ? { extensions: v.value.extensions } : {}),
+        ...(v.value.caseSensitive !== undefined ? { caseSensitive: v.value.caseSensitive } : {}),
+        ...(v.value.maxResults !== undefined ? { maxResults: v.value.maxResults } : {}),
+        ...(v.value.include ? { include: v.value.include } : {}),
+        ...(v.value.exclude ? { exclude: v.value.exclude } : {}),
+      };
+      const handle = runWorkerTask(
+        { kind: "file.search", payload: q },
+        requestId
+          ? {
+              onProgress: (scanned) =>
+                broadcast({ channel: "search.progress", requestId, scanned }),
+            }
+          : undefined,
+      );
+      if (requestId) activeSearches.set(requestId, handle);
+      let res: TaskResponse;
+      try {
+        res = await handle.result;
+      } finally {
+        if (requestId) activeSearches.delete(requestId);
+      }
+      if (!res.ok)
+        return { ok: false, matches: [], scanned: 0, truncated: false, error: res.error };
+      if (res.kind !== "file.search") {
+        return {
+          ok: false,
+          matches: [],
+          scanned: 0,
+          truncated: false,
+          error: "unexpected task kind",
+        };
+      }
+      const r = res.result;
+      return {
+        ok: true,
+        matches: r.matches.map((m) => ({
+          path: m.path,
+          rel: m.rel,
+          ext: m.ext,
+          ...(m.matchLine !== undefined ? { line: m.matchLine } : {}),
+        })),
+        scanned: r.scanned,
+        truncated: r.truncated,
+        ...(r.cancelled ? { cancelled: true } : {}),
+      };
+    } catch (e) {
+      if (requestId) activeSearches.delete(requestId);
+      return { ok: false, matches: [], scanned: 0, truncated: false, error: errString(e) };
+    }
+  });
+
+  /* ── APP-066: cancel an in-flight worker search by requestId (cooperative) ──*/
+  ipcMain.handle(IPC.ideSearchCancel, async (_e, arg: unknown): Promise<IdeAckResult> => {
+    const v = validateSearchCancel(arg);
+    if (!v.ok) return { ok: false, error: v.error.message };
+    activeSearches.get(v.value.requestId)?.cancel();
+    return { ok: true };
+  });
+
+  /* ── APP-076: structural (AST) search via the structsearch.py sidecar (read-only) ──*/
+  ipcMain.handle(IPC.ideStructSearch, async (_e, arg: unknown): Promise<IdeStructSearchResult> => {
+    const v = validateStructSearch(arg);
+    if (!v.ok) return { ok: false, matches: [], count: 0, error: v.error.message };
+    try {
+      const root = assertNotSensitivePath(v.value.root); // path-guarded, fail-closed
+      // argv as DISTINCT entries (option-injection safe) — a pattern starting with `-` stays a value.
+      const res = await runSidecar("structsearch", "match", [
+        "--path",
+        root,
+        "--pattern",
+        v.value.pattern,
+      ]);
+      const raw = (res.data as { matches?: unknown; count?: unknown }) ?? {};
+      const rows = Array.isArray(raw.matches) ? (raw.matches as Record<string, unknown>[]) : [];
+      const matches: IdeStructMatch[] = rows.map((m) => ({
+        file: String(m.file ?? ""),
+        line: typeof m.line === "number" ? m.line : 1,
+        col: typeof m.col === "number" ? m.col : 1,
+        endLine:
+          typeof m.end_line === "number" ? m.end_line : typeof m.line === "number" ? m.line : 1,
+        endCol: typeof m.end_col === "number" ? m.end_col : 0,
+        snippet: String(m.snippet ?? ""),
+        bindings:
+          m.bindings && typeof m.bindings === "object"
+            ? (m.bindings as Record<string, string>)
+            : {},
+      }));
+      return {
+        ok: true,
+        matches,
+        count: typeof raw.count === "number" ? raw.count : matches.length,
+      };
+    } catch (e) {
+      return { ok: false, matches: [], count: 0, error: errString(e) };
+    }
+  });
+
+  /* ── APP-066: repo file index — a filter-free walk OFFLOADED to the worker ──*/
+  ipcMain.handle(
+    IPC.ideWorkspaceIndex,
+    async (_e, arg: unknown): Promise<IdeWorkspaceIndexResult> => {
+      const v = validateGitRoot(arg);
+      if (!v.ok)
+        return { ok: false, files: [], scanned: 0, truncated: false, error: v.error.message };
+      try {
+        const root = assertNotSensitivePath(v.value.root);
+        const res = await runWorkerTask({ kind: "file.index", payload: { root } }).result;
+        if (!res.ok)
+          return { ok: false, files: [], scanned: 0, truncated: false, error: res.error };
+        if (res.kind !== "file.index") {
+          return {
+            ok: false,
+            files: [],
+            scanned: 0,
+            truncated: false,
+            error: "unexpected task kind",
+          };
+        }
+        const r = res.result;
+        return {
+          ok: true,
+          files: r.files,
+          scanned: r.scanned,
+          truncated: r.truncated,
+          ...(r.cancelled ? { cancelled: true } : {}),
+        };
+      } catch (e) {
+        return { ok: false, files: [], scanned: 0, truncated: false, error: errString(e) };
+      }
+    },
+  );
+
+  /* ── test discovery (§9) — testmgr.py AST scan; NEVER executes target code ──*/
+  ipcMain.handle(IPC.ideTestDiscover, async (_e, arg: unknown): Promise<IdeTestDiscoverResult> => {
+    const v = validateGitRoot(arg);
+    if (!v.ok) return { ok: false, roots: [], error: v.error.message };
+    try {
+      const res = await runSidecar("testmgr", "discover", ["--path", v.value.root]);
+      const data = res.data as { tree?: unknown; root?: unknown; caseCount?: unknown };
+      return {
+        ok: true,
+        roots: Array.isArray(data.tree) ? (data.tree as IdeTestNode[]) : [],
+        ...(typeof data.root === "string" ? { root: data.root } : {}),
+        ...(typeof data.caseCount === "number" ? { caseCount: data.caseCount } : {}),
+      };
+    } catch (e) {
+      return { ok: false, roots: [], error: errString(e) };
+    }
+  });
+
+  // APP-086: coverage RUN executes the target suite under coverage.py (user-initiated,
+  // like APP-013 run) → a CoverageReport; import reshapes an external coverage.py JSON.
+  const coerceReport = (data: unknown): IdeCoverageReport => {
+    const d = (data ?? {}) as { perFile?: unknown; totalPct?: unknown };
+    const perFile: IdeCoverageReport["perFile"] = {};
+    if (d.perFile && typeof d.perFile === "object" && !Array.isArray(d.perFile)) {
+      for (const [file, raw] of Object.entries(d.perFile as Record<string, unknown>)) {
+        const e = (raw ?? {}) as { lines?: unknown; missed?: unknown; branchPct?: unknown };
+        const entry: IdeCoverageReport["perFile"][string] = {
+          lines: Array.isArray(e.lines)
+            ? e.lines.filter((n): n is number => typeof n === "number")
+            : [],
+          missed: Array.isArray(e.missed)
+            ? e.missed.filter((n): n is number => typeof n === "number")
+            : [],
+        };
+        if (typeof e.branchPct === "number") entry.branchPct = e.branchPct;
+        perFile[file] = entry;
+      }
+    }
+    return { perFile, totalPct: typeof d.totalPct === "number" ? d.totalPct : 0 };
+  };
+  ipcMain.handle(IPC.ideCoverageRun, async (_e, arg: unknown): Promise<IdeCoverageResult> => {
+    const v = validateCoverageRun(arg);
+    if (!v.ok) return { ok: false, error: v.error.message };
+    try {
+      const idArgs = v.value.ids.flatMap((id) => ["--id", id]);
+      const res = await runSidecar("coverage", "run", [
+        "--path",
+        v.value.root,
+        "--framework",
+        v.value.framework,
+        ...idArgs,
+      ]);
+      return { ok: true, report: coerceReport(res.data) };
+    } catch (e) {
+      return { ok: false, error: errString(e) };
+    }
+  });
+  ipcMain.handle(IPC.ideCoverageImport, async (_e, arg: unknown): Promise<IdeCoverageResult> => {
+    const v = validateCoverageImport(arg);
+    if (!v.ok) return { ok: false, error: v.error.message };
+    try {
+      const res = await runSidecar("coverage", "import", ["--in", v.value.path]);
+      return { ok: true, report: coerceReport(res.data) };
+    } catch (e) {
+      return { ok: false, error: errString(e) };
+    }
+  });
+
+  /* ── test RUN (APP-013) — EXECUTES the given node ids via testmgr.py `run`/
+     `rerun-failed`; user-initiated only (the discover contract stays never-execute).
+     Per-test events stream over ide:test.event; the terminal summary rides back. ──*/
+  ipcMain.handle(IPC.ideTestRun, async (_e, arg: unknown): Promise<IdeTestRunResult> => {
+    const v = validateTestRun(arg);
+    if (!v.ok) return { ok: false, error: v.error.message };
+    if (!testSpawn) return { ok: false, error: "test runner unavailable (no spawn wired)" };
+    try {
+      const root = assertNotSensitivePath(v.value.root); // normalize + deny sensitive cwd
+      // APP-040: running target code EXECUTES project code — it must cross the SAME
+      // fail-closed run-gate + telemetry launch-guard as ide:run.start, not just the
+      // discovery never-execute path. Refusals name their stage.
+      const verdict = await runGate({ workspaceRoot: root }, { engineConfig: config });
+      if (!verdict.mayLaunch) return { ok: false, error: `run gate refused: ${verdict.reason}` };
+      try {
+        const tele = await readTele();
+        if (!tele.guard.allow) {
+          return {
+            ok: false,
+            error: `resource guard refused: ${tele.guard.reason ?? "over threshold"}`,
+          };
+        }
+      } catch (e) {
+        return {
+          ok: false,
+          error: `telemetry unavailable (${errString(e)}) — test run held (fail-closed)`,
+        };
+      }
+      return await runTestVerb(testSpawn, { ...v.value, root }, broadcastTest, {
+        kills: testKills,
+      });
+    } catch (e) {
+      return { ok: false, error: errString(e) };
+    }
+  });
+
+  // ── SQL console (APP-042): sqlrunner.py bridge — redacted + paged in SqlHost ──
+  ipcMain.handle(IPC.ideSqlConnect, async (_e, arg: unknown): Promise<IdeSqlConnectResult> => {
+    const v = validateSqlConnect(arg);
+    if (!v.ok) return { ok: false, error: v.error.message };
+    const guard = guardSqliteConn(v.value.conn);
+    if (guard) return { ok: false, error: guard };
+    return sqlHost.connect(v.value.conn);
+  });
+  ipcMain.handle(IPC.ideSqlQuery, async (_e, arg: unknown): Promise<IdeSqlQueryResult> => {
+    const v = validateSqlQuery(arg);
+    if (!v.ok) return { ok: false, error: v.error.message };
+    const guard = guardSqliteConn(v.value.conn);
+    if (guard) return { ok: false, error: guard };
+    return sqlHost.query({
+      conn: v.value.conn,
+      sql: v.value.sql,
+      ...(v.value.params ? { params: v.value.params as IdeSqlCell[] } : {}),
+      ...(v.value.page !== undefined ? { page: v.value.page } : {}),
+      ...(v.value.pageSize !== undefined ? { pageSize: v.value.pageSize } : {}),
+      ...(v.value.timeoutS !== undefined ? { timeoutS: v.value.timeoutS } : {}),
+    });
+  });
+  ipcMain.handle(IPC.ideSqlSchema, async (_e, arg: unknown): Promise<IdeSqlSchemaResult> => {
+    const v = validateSqlSchema(arg);
+    if (!v.ok) return { ok: false, error: v.error.message };
+    const guard = guardSqliteConn(v.value.conn);
+    if (guard) return { ok: false, error: guard };
+    return sqlHost.schema(v.value.conn, v.value.table);
+  });
+
+  /* ── live Jupyter kernel (APP-045): one supervised session per notebook ─────*/
+  ipcMain.handle(IPC.ideKernelStart, async (_e, arg: unknown): Promise<IdeKernelStartResult> => {
+    const v = validateKernelStart(arg);
+    if (!v.ok) return { ok: false, error: v.error.message };
+    // path-guard the working dir the same way the fs IPC guards reads (C5).
+    try {
+      assertNotSensitivePath(v.value.cwd);
+    } catch (e) {
+      return { ok: false, error: errString(e) };
+    }
+    try {
+      const sessionId = kernelHost.start(v.value.cwd, v.value.env);
+      return { ok: true, sessionId };
+    } catch (e) {
+      return { ok: false, error: errString(e) };
+    }
+  });
+  ipcMain.handle(IPC.ideKernelExecute, async (_e, arg: unknown): Promise<IdeKernelOkResult> => {
+    const v = validateKernelExecute(arg);
+    if (!v.ok) return { ok: false, error: v.error.message };
+    return kernelHost.execute(v.value.sessionId, v.value.cellId, v.value.code)
+      ? { ok: true }
+      : { ok: false, error: "no such kernel session" };
+  });
+  ipcMain.handle(IPC.ideKernelInterrupt, async (_e, arg: unknown): Promise<IdeKernelOkResult> => {
+    const v = validateKernelSession(arg);
+    if (!v.ok) return { ok: false, error: v.error.message };
+    return kernelHost.interrupt(v.value.sessionId)
+      ? { ok: true }
+      : { ok: false, error: "no such kernel session" };
+  });
+  ipcMain.handle(IPC.ideKernelRestart, async (_e, arg: unknown): Promise<IdeKernelOkResult> => {
+    const v = validateKernelSession(arg);
+    if (!v.ok) return { ok: false, error: v.error.message };
+    return kernelHost.restart(v.value.sessionId)
+      ? { ok: true }
+      : { ok: false, error: "no such kernel session" };
+  });
+  ipcMain.handle(IPC.ideKernelShutdown, async (_e, arg: unknown): Promise<IdeKernelOkResult> => {
+    const v = validateKernelSession(arg);
+    if (!v.ok) return { ok: false, error: v.error.message };
+    kernelHost.shutdown(v.value.sessionId); // idempotent — an unknown id is still ok
+    return { ok: true };
+  });
+  // APP-088: request a paged DataFrame view; the frame streams back as a `dataframe` event.
+  ipcMain.handle(IPC.ideKernelDataframe, async (_e, arg: unknown): Promise<IdeKernelOkResult> => {
+    const v = validateKernelDataframe(arg);
+    if (!v.ok) return { ok: false, error: v.error.message };
+    return kernelHost.dataframe(v.value.sessionId, v.value.name, v.value.offset, v.value.limit)
+      ? { ok: true }
+      : { ok: false, error: "no such kernel session" };
+  });
+
+  /* ── profiler (APP-046): GATED cProfile run → flame folds ───────────────────*/
+  const profileRun: ProfileRunner =
+    wiring.profileRun ??
+    ((argv, signal) =>
+      runSidecarScript("profile.py", argv, {
+        timeoutMs: PROFILE_TIMEOUT_MS,
+        ...(signal ? { signal } : {}),
+      }));
+  // at most one profile run in flight; `stop` aborts it fail-closed.
+  let profileAbort: AbortController | undefined;
+  ipcMain.handle(IPC.ideProfileStart, async (_e, arg: unknown): Promise<IdeProfileResult> => {
+    const v = validateProfileStart(arg);
+    if (!v.ok) return { ok: false, error: v.error.message, refusedBy: "path" };
+    // 1) the target MUST resolve under the workspace root (no profiling outside it).
+    const root = resolve(v.value.workspaceRoot);
+    const target = resolve(v.value.path);
+    if (target !== root && !target.startsWith(root + sep)) {
+      return { ok: false, error: "target script is outside the workspace root", refusedBy: "path" };
+    }
+    try {
+      assertNotSensitivePath(target);
+      if (v.value.cwd) assertNotSensitivePath(v.value.cwd);
+    } catch (e) {
+      return { ok: false, error: errString(e), refusedBy: "path" };
+    }
+    // 2) profiling EXECUTES the target — cross the SAME fail-closed run-gate as a run.
+    let gate: RunGateResult;
+    try {
+      gate = await runGate(
+        { workspaceRoot: v.value.workspaceRoot, ...(v.value.head ? { head: v.value.head } : {}) },
+        { engineConfig: config },
+      );
+    } catch (e) {
+      return { ok: false, error: `gate crashed: ${errString(e)}`, refusedBy: "gate" };
+    }
+    if (!gate.mayLaunch) {
+      return {
+        ok: false,
+        refusedBy: "gate",
+        gate: toGateResult(gate),
+        error: gate.reason ?? "profiling refused by the gate",
+      };
+    }
+    // 3) run it (abortable). argv: target args ride AFTER a literal `--`.
+    const argv = ["run", "--path", target];
+    if (v.value.mode) argv.push("--mode", v.value.mode);
+    if (v.value.cwd) argv.push("--cwd", v.value.cwd);
+    if (v.value.timeoutS !== undefined) argv.push("--timeout", String(v.value.timeoutS));
+    if (v.value.args?.length) argv.push("--", ...v.value.args);
+    profileAbort?.abort(); // supersede any previous in-flight run
+    const controller = new AbortController();
+    profileAbort = controller;
+    try {
+      const env = await profileRun(argv, controller.signal);
+      if (env.ok === false) {
+        return { ok: false, error: typeof env.error === "string" ? env.error : "profile failed" };
+      }
+      return {
+        ok: true,
+        samples: Array.isArray(env.samples) ? (env.samples as IdeProfileSample[]) : [],
+        totalUs: typeof env.totalUs === "number" ? env.totalUs : 0,
+        approx: env.approx === true,
+        timedOut: env.timedOut === true,
+        truncated: env.truncated === true,
+        mode: (typeof env.mode === "string" ? env.mode : "cpu") as IdeProfileMode,
+        unit: typeof env.unit === "string" ? env.unit : "us",
+        sawTasks: env.sawTasks === true,
+        ...(typeof env.note === "string" ? { note: env.note } : {}),
+      };
+    } catch (e) {
+      return { ok: false, error: errString(e) };
+    } finally {
+      if (profileAbort === controller) profileAbort = undefined;
+    }
+  });
+  ipcMain.handle(IPC.ideProfileStop, async (): Promise<IdeOkResult> => {
+    profileAbort?.abort();
+    profileAbort = undefined;
+    return { ok: true };
+  });
+
+  /* ── APP-089: profile snapshots (save/list) + compare, under a MAIN-owned dir ──*/
+  const snapDir =
+    wiring.profileSnapshotDir ?? join(homedir(), ".prometheus-studio", "profile-snapshots");
+  ipcMain.handle(
+    IPC.ideProfileSnapshotSave,
+    async (_e, arg: unknown): Promise<IdeProfileSaveResult> => {
+      const v = validateProfileSnapshotSave(arg);
+      if (!v.ok) return { ok: false, error: v.error.message };
+      const body = JSON.stringify({
+        name: v.value.name,
+        mode: v.value.mode,
+        unit: v.value.unit,
+        samples: v.value.samples,
+        totalValue: v.value.totalValue,
+      });
+      const env = await runSidecarScript(
+        "profile.py",
+        ["snapshot", "--op", "save", "--dir", snapDir, "--name", v.value.name],
+        { timeoutMs: 30_000, input: body },
+      );
+      if (env.ok === false) {
+        return {
+          ok: false,
+          error: typeof env.error === "string" ? env.error : "snapshot save failed",
+        };
+      }
+      return { ok: true, ...(typeof env.id === "string" ? { id: env.id } : {}) };
+    },
+  );
+  ipcMain.handle(IPC.ideProfileSnapshotList, async (): Promise<IdeProfileListResult> => {
+    const env = await runSidecarScript(
+      "profile.py",
+      ["snapshot", "--op", "list", "--dir", snapDir],
+      {
+        timeoutMs: 15_000,
+      },
+    );
+    if (env.ok === false) {
+      return {
+        ok: false,
+        error: typeof env.error === "string" ? env.error : "snapshot list failed",
+      };
+    }
+    return {
+      ok: true,
+      snapshots: Array.isArray(env.snapshots) ? (env.snapshots as IdeProfileSnapshotMeta[]) : [],
+    };
+  });
+  ipcMain.handle(
+    IPC.ideProfileCompare,
+    async (_e, arg: unknown): Promise<IdeProfileCompareResult> => {
+      const v = validateProfileCompare(arg);
+      if (!v.ok) return { ok: false, error: v.error.message };
+      const env = await runSidecarScript(
+        "profile.py",
+        ["compare", "--dir", snapDir, "--a", v.value.aId, "--b", v.value.bId],
+        { timeoutMs: 15_000 },
+      );
+      if (env.ok === false) {
+        return { ok: false, error: typeof env.error === "string" ? env.error : "compare failed" };
+      }
+      return {
+        ok: true,
+        samples: Array.isArray(env.samples) ? (env.samples as IdeProfileSample[]) : [],
+        unit: typeof env.unit === "string" ? env.unit : "us",
+        aMode: typeof env.aMode === "string" ? env.aMode : "cpu",
+        bMode: typeof env.bMode === "string" ? env.bMode : "cpu",
+        summary:
+          env.summary && typeof env.summary === "object"
+            ? (env.summary as IdeProfileCompareResult["summary"])
+            : { regressions: [], improvements: [] },
+      };
+    },
+  );
+
+  /* ── terminal launcher (APP-048): core profiles/AI presets/env → menu+resolve */
+  const termPlatform = process.platform === "win32" ? ("win32" as const) : ("posix" as const);
+  ipcMain.handle(IPC.ideTerminalMenu, async (_e, arg: unknown): Promise<IdeTerminalMenuResult> => {
+    const v = validateTerminalMenu(arg);
+    if (!v.ok) return { ok: false, items: [], error: v.error.message };
+    try {
+      return { ok: true, items: buildTerminalMenuItems(v.value.envs) };
+    } catch (e) {
+      return { ok: false, items: [], error: errString(e) };
+    }
+  });
+  ipcMain.handle(
+    IPC.ideTerminalResolve,
+    async (_e, arg: unknown): Promise<IdeTerminalResolveResult> => {
+      const v = validateTerminalResolve(arg);
+      if (!v.ok) return { ok: false, error: v.error.message };
+      try {
+        const resolved = resolveTerminalItem(v.value.id, {
+          workspaceRoot: v.value.workspaceRoot,
+          home: homedir(),
+          platform: termPlatform,
+          ...(v.value.envs ? { envs: v.value.envs } : {}),
+          ...(v.value.activeEnvPath ? { activeEnvPath: v.value.activeEnvPath } : {}),
+          ...(v.value.fileDir ? { fileDir: v.value.fileDir } : {}),
+        });
+        if (!resolved) return { ok: false, error: `unknown terminal profile '${v.value.id}'` };
+        return { ok: true, resolved };
+      } catch (e) {
+        return { ok: false, error: errString(e) };
+      }
+    },
+  );
+
+  /* ── repo-map (APP-053): repomap.py ranked symbol map for @codebase grounding */
+  ipcMain.handle(IPC.ideRepoMap, async (_e, arg: unknown): Promise<IdeRepoMapResult> => {
+    const v = validateRepoMap(arg);
+    if (!v.ok) return { ok: false, files: [], error: v.error.message };
+    let root: string;
+    try {
+      // resolve → an absolute path (never a leading-dash flag) + sensitive-path guard.
+      root = assertNotSensitivePath(v.value.root);
+    } catch (e) {
+      return { ok: false, files: [], error: errString(e) };
+    }
+    // argv is verbatim (shell:false): every user value rides behind its own flag, so no
+    // string can become a flag (files joined by comma — repomap splits on it).
+    const argv: string[] = v.value.files?.length ? ["refresh", root] : ["map", root];
+    if (v.value.files?.length) argv.push("--files", v.value.files.join(","));
+    if (v.value.budget !== undefined) argv.push("--budget", String(v.value.budget));
+    if (v.value.query) argv.push("--query", v.value.query);
+    // the scan can be slow on a big repo — a generous timeout, async (never blocks the UI).
+    const env = await runSidecarScript("repomap.py", argv, { timeoutMs: 120_000 });
+    if (env.ok === false) {
+      return {
+        ok: false,
+        files: [],
+        error: typeof env.error === "string" ? env.error : "repo-map failed",
+      };
+    }
+    return {
+      ok: true,
+      files: Array.isArray(env.files) ? (env.files as IdeRepoMapFile[]) : [],
+      ...(typeof env.generatedAt === "string" ? { generatedAt: env.generatedAt } : {}),
+      ...(typeof env.parser === "string" ? { parser: env.parser } : {}),
+      ...(typeof env.symbolCount === "number" ? { symbolCount: env.symbolCount } : {}),
+      ...(env.truncated === true ? { truncated: true } : {}),
+    };
+  });
+
+  // ── linter fan-in (APP-062): detect + run ruff/flake8/mypy/pylint over the sidecar ──
+  ipcMain.handle(IPC.ideLintDetect, async (_e, arg: unknown): Promise<IdeLintDetectResult> => {
+    const a = (arg ?? {}) as { python?: unknown };
+    const argv = ["detect"];
+    if (typeof a.python === "string" && a.python) argv.push("--python", a.python);
+    const env = await runSidecarScript("linters.py", argv, { timeoutMs: 30_000 });
+    if (env.ok === false) {
+      return { ok: false, error: typeof env.error === "string" ? env.error : "detect failed" };
+    }
+    const tools = env.tools && typeof env.tools === "object" ? Object.keys(env.tools) : [];
+    return {
+      ok: true,
+      tools,
+      ...(Array.isArray(env.missing) ? { missing: env.missing as string[] } : {}),
+    };
+  });
+
+  ipcMain.handle(IPC.ideLintRun, async (_e, arg: unknown): Promise<IdeLintRunResult> => {
+    const a = (arg ?? {}) as { paths?: unknown; python?: unknown; tools?: unknown };
+    const rawPaths = Array.isArray(a.paths)
+      ? a.paths.filter((p): p is string => typeof p === "string")
+      : [];
+    if (rawPaths.length === 0) return { ok: false, error: "no paths given" };
+    // path-guard EVERY user path → an absolute fs path (never a leading-dash flag, never a
+    // sensitive target); a bad path aborts the whole run fail-closed.
+    let paths: string[];
+    try {
+      paths = rawPaths.map((p) => assertNotSensitivePath(p));
+    } catch (e) {
+      return { ok: false, error: errString(e) };
+    }
+    // argv: flags FIRST, then `--`, then the guarded absolute paths (option-injection guard).
+    const argv = ["run"];
+    if (typeof a.python === "string" && a.python) argv.push("--python", a.python);
+    if (Array.isArray(a.tools) && a.tools.length) {
+      argv.push("--tools", a.tools.filter((t): t is string => typeof t === "string").join(","));
+    }
+    argv.push("--", ...paths);
+    const env = await runSidecarScript("linters.py", argv, { timeoutMs: 120_000 });
+    if (env.ok === false) {
+      return { ok: false, error: typeof env.error === "string" ? env.error : "lint run failed" };
+    }
+    return {
+      ok: true,
+      diagnostics: Array.isArray(env.diagnostics) ? (env.diagnostics as IdeLintFinding[]) : [],
+      ...(Array.isArray(env.ran) ? { ran: env.ran as string[] } : {}),
+      ...(Array.isArray(env.skipped)
+        ? { skipped: env.skipped as { tool: string; reason: string }[] }
+        : {}),
+    };
+  });
+
+  // ── Local History (APP-063): bind / list / read / revert ──────────────────
+  ipcMain.handle(IPC.ideHistoryBind, async (_e, arg: unknown): Promise<IdeOkResult> => {
+    if (!history) return { ok: false, error: "local history unavailable" };
+    const a = (arg ?? {}) as { root?: unknown };
+    if (typeof a.root !== "string" || !a.root) return { ok: false, error: "root is required" };
+    try {
+      await history.bind(a.root);
+      return { ok: true };
+    } catch (e) {
+      return { ok: false, error: errString(e) };
+    }
+  });
+
+  ipcMain.handle(IPC.ideHistoryList, async (_e, arg: unknown): Promise<IdeHistoryListResult> => {
+    if (!history) return { ok: true, entries: [] };
+    const a = (arg ?? {}) as { root?: unknown; uri?: unknown };
+    if (typeof a.root !== "string" || typeof a.uri !== "string") {
+      return { ok: false, error: "root + uri are required" };
+    }
+    try {
+      const path = assertNotSensitivePath(a.uri);
+      return { ok: true, entries: history.list(a.root, path) };
+    } catch (e) {
+      return { ok: false, error: errString(e) };
+    }
+  });
+
+  ipcMain.handle(IPC.ideHistoryRead, async (_e, arg: unknown): Promise<IdeHistoryReadResult> => {
+    if (!history) return { ok: false, error: "local history unavailable" };
+    const a = (arg ?? {}) as { root?: unknown; uri?: unknown; ts?: unknown };
+    if (typeof a.root !== "string" || typeof a.uri !== "string" || typeof a.ts !== "number") {
+      return { ok: false, error: "root + uri + ts are required" };
+    }
+    try {
+      const path = assertNotSensitivePath(a.uri);
+      const content = history.read(a.root, path, a.ts);
+      if (content === undefined) return { ok: false, error: "revision not found" };
+      return { ok: true, content };
+    } catch (e) {
+      return { ok: false, error: errString(e) };
+    }
+  });
+
+  ipcMain.handle(IPC.ideHistoryRevert, async (_e, arg: unknown): Promise<IdeOkResult> => {
+    if (!history) return { ok: false, error: "local history unavailable" };
+    const a = (arg ?? {}) as { root?: unknown; uri?: unknown; ts?: unknown };
+    if (typeof a.root !== "string" || typeof a.uri !== "string" || typeof a.ts !== "number") {
+      return { ok: false, error: "root + uri + ts are required" };
+    }
+    try {
+      const path = assertNotSensitivePath(a.uri);
+      const content = history.read(a.root, path, a.ts);
+      if (content === undefined) return { ok: false, error: "revision not found" };
+      // capture the CURRENT on-disk state first (so the revert is itself undoable), then write.
+      try {
+        const cur = await fsRead(path);
+        history.capture(path, cur.text, "before revert");
+      } catch {
+        /* the file may not exist (recover-deleted) — nothing to snapshot */
+      }
+      await fsWrite(path, content);
+      return { ok: true };
+    } catch (e) {
+      return { ok: false, error: errString(e) };
+    }
+  });
+
+  // ── disposer: remove handlers + detach host listeners ─────────────────────
+  return () => {
+    for (const channel of [
+      IPC.ideFsRead,
+      IPC.ideFsWrite,
+      IPC.ideFsTree,
+      IPC.ideFsWatch,
+      IPC.ideFsUnwatch,
+      IPC.ideFsCreateFile,
+      IPC.ideFsMkdir,
+      IPC.ideFsRename,
+      IPC.ideFsDelete,
+      IPC.ideLspEnsure,
+      IPC.ideLspList,
+      IPC.ideLspApplyEditResult,
+      IPC.ideLspRequest,
+      IPC.ideLspSetInterpreter,
+      IPC.ideDapLaunch,
+      IPC.ideDapRequest,
+      IPC.ideDapTerminate,
+      IPC.ideDapDetectAdapter,
+      IPC.ideDapInstallAdapter,
+      IPC.ideRefactor,
+      IPC.ideRunStart,
+      IPC.ideRunKill,
+      IPC.idePtySpawn,
+      IPC.ideFloatingTerminalCreate,
+      IPC.ideFloatingTerminalClose,
+      IPC.ideGitStatus,
+      IPC.ideGitDiff,
+      IPC.ideGitStage,
+      IPC.ideGitUnstage,
+      IPC.ideGitCommit,
+      IPC.ideGitBranch,
+      IPC.ideGitBranches,
+      IPC.ideGitStash,
+      IPC.ideGitStashList,
+      IPC.ideGitStashPop,
+      IPC.ideGitStashApply,
+      IPC.ideGitStashDrop,
+      IPC.ideGitBlame,
+      IPC.ideGitMergeAbort,
+      IPC.ideGitCheckoutSide,
+      IPC.ideGitCheckoutCommit,
+      IPC.ideGitCherryPick,
+      IPC.ideGitRevert,
+      IPC.ideGitReset,
+      IPC.ideGitConflictVersions,
+      IPC.ideGitLog,
+      IPC.ideGitPush,
+      IPC.ideGitPull,
+      IPC.ideGitFetch,
+      IPC.ideGate,
+      IPC.ideExec,
+      IPC.ideDetectBins,
+      IPC.ideSearch,
+      IPC.ideSearchCancel,
+      IPC.ideWorkspaceIndex,
+      IPC.ideStructSearch,
+      IPC.ideTestDiscover,
+      IPC.ideTestRun,
+      IPC.ideSqlConnect,
+      IPC.ideSqlQuery,
+      IPC.ideSqlSchema,
+      IPC.ideKernelStart,
+      IPC.ideKernelExecute,
+      IPC.ideKernelInterrupt,
+      IPC.ideKernelRestart,
+      IPC.ideKernelShutdown,
+      IPC.ideKernelDataframe,
+      IPC.ideProfileStart,
+      IPC.ideProfileStop,
+      IPC.ideProfileSnapshotSave,
+      IPC.ideProfileSnapshotList,
+      IPC.ideProfileCompare,
+      IPC.ideTerminalMenu,
+      IPC.ideTerminalResolve,
+      IPC.ideRepoMap,
+      IPC.ideLintDetect,
+      IPC.ideLintRun,
+      IPC.ideHistoryBind,
+      IPC.ideHistoryList,
+      IPC.ideHistoryRead,
+      IPC.ideHistoryRevert,
+      IPC.ideFsWalk,
+    ]) {
+      ipcMain.removeHandler(channel);
+    }
+    // abort any in-flight profile run so a window close never leaves one dangling.
+    profileAbort?.abort();
+    // reap any live test-run children (window close must not orphan pytest).
+    for (const kill of testKills) kill();
+    testKills.clear();
+    // reap every live kernel session (window close must not orphan an ipykernel).
+    kernelHost.off("event", onKernelEvent as (...a: unknown[]) => void);
+    kernelHost.disposeAll();
+    for (const channel of [
+      IPC.ideLspCancel,
+      IPC.ideLspDidOpen,
+      IPC.ideLspDidChange,
+      IPC.ideLspDidClose,
+      IPC.idePtyWrite,
+      IPC.idePtyResize,
+      IPC.idePtyKill,
+    ]) {
+      ipcMain.removeAllListeners(channel);
+    }
+    lsp.off("diagnostics", onLspDiag as (...a: unknown[]) => void);
+    lsp.off("notify", onLspNotify as (...a: unknown[]) => void);
+    lsp.off("state", onLspState as (...a: unknown[]) => void);
+    lsp.off("stderr", onLspStderr as (...a: unknown[]) => void);
+    lsp.off("applyEdit", onLspApplyEdit as (...a: unknown[]) => void);
+    dap.off("event", onDapEvent as (...a: unknown[]) => void);
+    dap.off("state", onDapState as (...a: unknown[]) => void);
+    dap.off("stderr", onDapStderr as (...a: unknown[]) => void);
+    dap.off("configApplied", onDapConfigApplied as (...a: unknown[]) => void);
+    pty.off("data", onPtyData as (...a: unknown[]) => void);
+    pty.off("exit", onPtyExit as (...a: unknown[]) => void);
+    runHost?.off("data", onRunData as (...a: unknown[]) => void);
+    runHost?.off("exit", onRunExit as (...a: unknown[]) => void);
+    fsWatch.off("change", onFsChange as (...a: unknown[]) => void);
+  };
+}

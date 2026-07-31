@@ -1,0 +1,22 @@
+{
+  "id": "data-science",
+  "title": "Data Science",
+  "description": "A CPU-friendly data-science stack: pandas/polars/numpy plus scikit-learn, JupyterLab and the seaborn/statsmodels plotting + stats pair. No GPU pins.",
+  "pythonHint": ">=3.10,<3.13",
+  "packages": [
+    { "name": "pandas", "source": "pypi", "requestedBy": "template" },
+    { "name": "numpy", "source": "pypi", "requestedBy": "template" },
+    { "name": "polars", "source": "pypi", "requestedBy": "template" },
+    { "name": "scikit-learn", "source": "pypi", "requestedBy": "template" },
+    { "name": "jupyterlab", "source": "pypi", "requestedBy": "template" },
+    { "name": "seaborn", "source": "pypi", "requestedBy": "template" },
+    { "name": "statsmodels", "source": "pypi", "requestedBy": "template" }
+  ],
+  "needs": [],
+  "postNotes": [
+    "Entirely CPU-friendly — no GPU pins; runs anywhere.",
+    "Launch with `jupyter lab` after binding this env as your interpreter."
+  ],
+  "editable": true,
+  "builtin": true
+}

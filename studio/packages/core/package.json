@@ -1,0 +1,69 @@
+{
+  "name": "@prometheus/core",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Shared domain types & logic for Prometheus Studio (consumed by both the desktop GUI and the prom CLI).",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./token-economy": {
+      "types": "./dist/token-economy/index.d.ts",
+      "import": "./dist/token-economy/index.js"
+    },
+    "./commands": {
+      "types": "./dist/commands.d.ts",
+      "import": "./dist/commands.js"
+    },
+    "./rules": {
+      "types": "./dist/rules/index.d.ts",
+      "import": "./dist/rules/index.js"
+    },
+    "./agent-checkpoint": {
+      "types": "./dist/agent/checkpoint.d.ts",
+      "import": "./dist/agent/checkpoint.js"
+    },
+    "./agent-session": {
+      "types": "./dist/agent/session-store.d.ts",
+      "import": "./dist/agent/session-store.js"
+    },
+    "./editor": {
+      "types": "./dist/editor/index.d.ts",
+      "import": "./dist/editor/index.js"
+    },
+    "./format": {
+      "types": "./dist/format/index.d.ts",
+      "import": "./dist/format/index.js"
+    },
+    "./templates": {
+      "types": "./dist/templates/live.d.ts",
+      "import": "./dist/templates/live.js"
+    },
+    "./keymap": {
+      "types": "./dist/settings/keymap.d.ts",
+      "import": "./dist/settings/keymap.js"
+    },
+    "./migrations": {
+      "types": "./dist/migrations/index.d.ts",
+      "import": "./dist/migrations/index.js"
+    },
+    "./mcp-node": {
+      "types": "./dist/mcp/host/node.d.ts",
+      "import": "./dist/mcp/host/node.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -b",
+    "dev": "tsc -b --watch",
+    "lint": "biome check src",
+    "typecheck": "tsc -b",
+    "test": "node ../../scripts/run-tests.mjs packages/core"
+  },
+  "dependencies": {
+    "@prometheus/engine-bridge": "workspace:*"
+  }
+}

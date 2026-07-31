@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json.schemastore.org/tsconfig",
+  "//": "SOLUTION file — `tsc -b` builds the whole composite graph incrementally.",
+  "//refs": "Order is irrelevant (tsc topo-sorts via each project's own references); listed in dep order for readers.",
+  "//desktop": "apps/desktop is NOT in this composite graph by design: it is noEmit + non-composite (built/bundled by electron-vite, not `tsc -b`). Its deps (@tanstack/react-query, zod, monaco, xterm, electron) ARE installed, so it IS type-checked — the root `typecheck` script runs `tsc -p apps/desktop/tsconfig.json` after this `-b` build, keeping the renderer/main honest without pulling them into the emit graph.",
+  "files": [],
+  "references": [
+    { "path": "packages/engine-bridge" },
+    { "path": "packages/core" },
+    { "path": "packages/ui" },
+    { "path": "apps/cli" }
+  ]
+}

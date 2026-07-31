@@ -1,0 +1,32 @@
+{
+  "$schema": "prometheus-pyruntime-lock/1",
+  "comment": "Pinned relocatable CPython (python-build-standalone, file 10 §3.1). sha256 is filled by `node scripts/fetch-pyruntime.mjs --write-lock` on a networked runner and committed; CI `--verify` fails on any empty sha256 (supply-chain gate, §3.1/§10).",
+  "source": "https://github.com/astral-sh/python-build-standalone",
+  "release": "20240909",
+  "python": "3.12.6",
+  "flavor": "install_only",
+  "comment_keys": "Target keys MATCH electron-builder's ${os}-${arch} file macro (mac/linux/windows) so electron-builder.yml extraResources `from: ../../staging/pyruntime/${os}-${arch}` resolves the runtime this script stages (APP-068 — both sides verified consistent).",
+  "targets": {
+    "mac-arm64": {
+      "triple": "aarch64-apple-darwin",
+      "sha256": "899f46eb592fcac4e834c064e4c901e8a4a6b5864e80b18efd2f0b7c3c050584"
+    },
+    "mac-x64": {
+      "triple": "x86_64-apple-darwin",
+      "sha256": "8c56da91436bee158b0d592aed3393c1fe3da3694ca35950ee1c52935ba8bfd5"
+    },
+    "linux-x64": {
+      "triple": "x86_64-unknown-linux-gnu",
+      "sha256": "68ff386c923c59a33a272bd984b8a33fe8117c56ad7f7552e0c2b21937ee3c0b"
+    },
+    "linux-arm64": {
+      "triple": "aarch64-unknown-linux-gnu",
+      "sha256": "caac1033f68f69d8978dc8c6b6964cfb9d8a111abc55c03403bd4ece63f331f3"
+    },
+    "windows-x64": {
+      "triple": "x86_64-pc-windows-msvc",
+      "sha256": "6280ce84c87ebaca2c4b42040bad48e7efbfd1b3f323579378ecf043e9fb023d"
+    }
+  },
+  "comment_windows_arm64": "Dropped: python-build-standalone release 20240909 has no aarch64-pc-windows-msvc install_only asset (404). Windows ARM64 packaging is x64-only for now (electron-builder.yml win target); re-add with a newer CPython release that publishes the win-arm64 triple (APP-068)."
+}

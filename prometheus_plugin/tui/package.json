@@ -1,0 +1,38 @@
+{
+  "name": "@prometheus-plugin/tui",
+  "version": "1.0.0",
+  "description": "Ink terminal GUI for Prometheus — browse/install/audit AI-agent plugins",
+  "type": "module",
+  "bin": {
+    "prometheus-tui": "dist/cli.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "build": "tsc && node -e \"require('fs').chmodSync('dist/cli.js', 0o755)\"",
+    "prepublishOnly": "npm run build",
+    "dev": "tsx src/cli.tsx",
+    "start": "node dist/cli.js"
+  },
+  "author": "Francesco Pelizza <red-beard-phoenix@users.noreply.gitlab.com>",
+  "license": "MIT",
+  "dependencies": {
+    "ink": "^5.0.1",
+    "ink-select-input": "^6.0.0",
+    "ink-spinner": "^5.0.0",
+    "react": "^18.3.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "@types/react": "^18.3.12",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  }
+}

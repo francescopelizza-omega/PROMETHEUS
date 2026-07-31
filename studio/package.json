@@ -1,0 +1,35 @@
+{
+  "name": "prometheus-studio-workspace",
+  "private": true,
+  "version": "0.0.0",
+  "description": "Prometheus Studio — security-first AI-everything IDE. Monorepo root (pnpm + turbo).",
+  "packageManager": "pnpm@10.34.3",
+  "engines": { "node": ">=20", "pnpm": ">=10.4" },
+  "scripts": {
+    "dev": "turbo run dev --filter=@prometheus/desktop",
+    "dev:logged": "node scripts/dev-logged.mjs",
+    "dev:cli": "turbo run dev --filter=@prometheus/cli",
+    "build": "tsc -b tsconfig.json",
+    "typecheck": "tsc -b tsconfig.json && tsc -p apps/desktop/tsconfig.json",
+    "lint": "biome check . && node scripts/check-no-raw-hex.mjs",
+    "lint:tokens": "node scripts/check-no-raw-hex.mjs",
+    "format": "biome format --write .",
+    "test": "node scripts/check-no-raw-hex.mjs && node scripts/run-tests.mjs",
+    "stage:engine": "node scripts/stage-engine.mjs",
+    "pyruntime": "node scripts/fetch-pyruntime.mjs",
+    "pyruntime:verify": "node scripts/fetch-pyruntime.mjs --verify",
+    "contract:capture": "node scripts/capture-contract.mjs",
+    "package": "tsc -b tsconfig.json && node scripts/stage-engine.mjs && node scripts/fetch-pyruntime.mjs && pnpm --filter @prometheus/desktop run package",
+    "changeset": "changeset",
+    "version": "changeset version && pnpm install --lockfile-only",
+    "clean": "turbo run clean && rm -rf node_modules"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^1.9.4",
+    "@changesets/cli": "^2.27.9",
+    "lefthook": "^1.8.0",
+    "turbo": "^2.3.0",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.0"
+  }
+}

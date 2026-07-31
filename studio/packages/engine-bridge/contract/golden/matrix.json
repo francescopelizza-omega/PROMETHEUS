@@ -1,0 +1,15 @@
+{
+  "command": "matrix",
+  "argv": [
+    "matrix"
+  ],
+  "keys": [
+    "agents",
+    "command",
+    "ok",
+    "reach"
+  ],
+  "commandField": "matrix",
+  "ok": true,
+  "exitCode": 0
+}

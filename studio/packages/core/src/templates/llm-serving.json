@@ -1,0 +1,38 @@
+{
+  "id": "llm-serving",
+  "title": "LLM-serving",
+  "description": "vLLM + transformers serving stack with an NVIDIA GPU. flash-attn is optional and gated on a CUDA build toolchain (nvcc), exactly as the engine's FlashAttention installer checks.",
+  "pythonHint": ">=3.10,<3.13",
+  "packages": [
+    { "name": "vllm", "source": "pypi", "requestedBy": "template" },
+    { "name": "transformers", "version": ">=4.40", "source": "pypi", "requestedBy": "template" },
+    { "name": "accelerate", "source": "pypi", "requestedBy": "template" },
+    {
+      "name": "torch",
+      "source": "pypi",
+      "requestedBy": "template",
+      "note": "wheel auto-matched to CUDA (cuXXX) when a GPU is detected"
+    },
+    {
+      "name": "flash-attn",
+      "source": "pypi",
+      "optional": true,
+      "requestedBy": "template",
+      "note": "optional · source build needs the NVIDIA toolchain (nvcc) matching torch's CUDA"
+    },
+    {
+      "name": "bitsandbytes",
+      "source": "pypi",
+      "optional": true,
+      "requestedBy": "template",
+      "note": "optional · 8-bit/4-bit quantization"
+    }
+  ],
+  "needs": ["nvidia"],
+  "postNotes": [
+    "flash-attn is unchecked by default — enabling it requires nvcc on PATH matching torch's CUDA version.",
+    "Serve with `python -m vllm.entrypoints.openai.api_server --model <repo>`."
+  ],
+  "editable": true,
+  "builtin": true
+}

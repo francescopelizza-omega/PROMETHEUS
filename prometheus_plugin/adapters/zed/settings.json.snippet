@@ -1,0 +1,10 @@
+{
+  "context_servers": {
+    "prometheus": {
+      "source": "custom",
+      "command": "npx",
+      "args": ["-y", "@prometheus-plugin/mcp"],
+      "env": { "PROMETHEUS_PY": "/ABS/PATH/TO/prometheus.py" }
+    }
+  }
+}

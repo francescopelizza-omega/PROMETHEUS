@@ -1,0 +1,195 @@
+/**
+ * tui/autocomplete.ts — the slash-command autocomplete (Claude-Code-style).
+ *
+ * Typing "/" opens a dropdown ABOVE the composer; ↑/↓ move the selection, Tab/Enter
+ * complete it, Esc closes. Ranking is prefix-first then fuzzy-subsequence so "/inst"
+ * surfaces `install` and "/scn" still finds `scan`. The selected row is painted with
+ * the high-contrast violet→cyan gradient bar (palette.selectionBar). PURE: state
+ * transitions + a render that takes the resolved color caps — fully unit-testable.
+ */
+import { type ColorCaps, painter, selectionBar } from "./palette.js";
+
+/** A completable command (mapped from the host's SlashCmd registry). */
+export interface AcItem {
+  name: string;
+  summary: string;
+  aliases?: readonly string[];
+  /** usage hint shown after the name (e.g. "<target>"). */
+  args?: string;
+  group?: string;
+}
+
+/** The live dropdown state. */
+export interface AcState {
+  /** the matched items, best-first. */
+  items: AcItem[];
+  /** the highlighted index (always valid when items is non-empty). */
+  index: number;
+  /** the query that produced `items` (the text after the leading "/"). */
+  query: string;
+}
+
+const EMPTY: AcState = { items: [], index: 0, query: "" };
+
+/* ── ranking ──────────────────────────────────────────────────────────────── */
+
+/** Is `q` a subsequence of `s` (chars in order, gaps allowed)? Returns the gap count or -1. */
+function subseqGaps(q: string, s: string): number {
+  let i = 0;
+  let gaps = 0;
+  let started = false;
+  for (let j = 0; j < s.length && i < q.length; j++) {
+    if (s[j] === q[i]) {
+      if (started && j > 0 && s[j - 1] !== q[i - 1]) gaps += 1;
+      started = true;
+      i += 1;
+    }
+  }
+  return i === q.length ? gaps : -1;
+}
+
+/** Score one item against a lowercased query. Higher = better; -1 = no match. */
+function scoreItem(item: AcItem, q: string): number {
+  if (q === "") return 1; // empty query → everything matches (listed)
+  const name = item.name.toLowerCase();
+  if (name === q) return 1000;
+  if (name.startsWith(q)) return 850 - name.length;
+  for (const a of item.aliases ?? []) {
+    const al = a.toLowerCase();
+    if (al === q) return 920;
+    if (al.startsWith(q)) return 720 - al.length;
+  }
+  const idx = name.indexOf(q);
+  if (idx >= 0) return 500 - idx;
+  const gaps = subseqGaps(q, name);
+  if (gaps >= 0) return 250 - gaps * 10;
+  return -1;
+}
+
+/**
+ * Rank the registry against the query (the chars AFTER the leading "/", up to the
+ * first space). Empty query → all commands, alphabetical. Ties break alphabetically.
+ */
+export function rankSlash(query: string, all: readonly AcItem[]): AcItem[] {
+  const q = query.toLowerCase();
+  return all
+    .map((item) => ({ item, score: scoreItem(item, q) }))
+    .filter((x) => x.score >= 0)
+    .sort((a, b) => b.score - a.score || a.item.name.localeCompare(b.item.name))
+    .map((x) => x.item);
+}
+
+/* ── the slash trigger ────────────────────────────────────────────────────── */
+
+/**
+ * Should the autocomplete be open for this input + cursor, and if so what's the
+ * query? Open only while the cursor is within the LEADING slash-word (no space yet) —
+ * "/inst|" yes, "/install foo|" no (args are typed freely). Returns null when closed.
+ */
+export function slashQuery(input: string, cursor: number): string | null {
+  if (!input.startsWith("/")) return null;
+  // slice on CODE POINTS — `cursor` is a code-point index (astral-safe composer).
+  const head = [...input].slice(0, cursor).join("");
+  // a space ends the command token → stop completing the name.
+  if (/\s/.test(head)) return null;
+  return head.slice(1);
+}
+
+/* ── state transitions ────────────────────────────────────────────────────── */
+
+/** (Re)compute the dropdown for an input line; closed → EMPTY. Keeps index in range. */
+export function syncAutocomplete(
+  input: string,
+  cursor: number,
+  all: readonly AcItem[],
+  prev: AcState = EMPTY,
+): AcState {
+  const query = slashQuery(input, cursor);
+  if (query === null) return EMPTY;
+  const items = rankSlash(query, all);
+  // clamp the numeric selection into the new range (spec: recompute clamps sel; a
+  // narrowing query keeps the best match at the top without surprising index jumps).
+  const index = items.length === 0 ? 0 : Math.min(Math.max(prev.index, 0), items.length - 1);
+  return { items, index, query };
+}
+
+export function isOpen(state: AcState): boolean {
+  return state.items.length > 0;
+}
+
+/** Move the highlight by ±1 (wraps). */
+export function moveAc(state: AcState, delta: number): AcState {
+  if (state.items.length === 0) return state;
+  const n = state.items.length;
+  return { ...state, index: (((state.index + delta) % n) + n) % n };
+}
+
+/** The full input line after accepting the highlighted item ("/name "). null = none. */
+export function acceptAc(state: AcState): string | null {
+  const sel = state.items[state.index];
+  return sel ? `/${sel.name} ` : null;
+}
+
+/* ── render ───────────────────────────────────────────────────────────────── */
+
+export interface DropdownOpts {
+  /** max visible rows (default 8); the list scrolls a window around the selection. */
+  maxRows?: number;
+}
+
+/** Truncate to `w` visible code points, adding "…" when cut. */
+function clip(s: string, w: number): string {
+  const cps = [...s];
+  if (cps.length <= w) return s;
+  return `${cps.slice(0, Math.max(0, w - 1)).join("")}…`;
+}
+
+/**
+ * Render the dropdown rows (shown ABOVE the composer). The selected row gets the
+ * gradient selection bar; the rest show `name` (accent) + `summary` (muted). A long
+ * list scrolls a window around the selection with a "+N more" footer.
+ */
+export function renderDropdown(
+  state: AcState,
+  width: number,
+  caps: ColorCaps,
+  opts: DropdownOpts = {},
+): string[] {
+  if (state.items.length === 0) return [];
+  const p = painter(caps);
+  const maxRows = Math.max(1, opts.maxRows ?? 8);
+  const n = state.items.length;
+  const w = Math.max(12, width);
+
+  // scroll window around the selection
+  let top = 0;
+  if (n > maxRows) top = Math.min(Math.max(0, state.index - (maxRows >> 1)), n - maxRows);
+  const view = state.items.slice(top, top + maxRows);
+
+  const nameW = Math.min(18, Math.max(...view.map((i) => i.name.length + 1)) + 1);
+  const rows: string[] = [];
+  view.forEach((item, idx) => {
+    const real = top + idx;
+    const nm = `/${item.name}`;
+    const hint = item.args ? ` ${item.args}` : "";
+    const label = `${nm}${hint}`.padEnd(nameW + 1);
+    const line = clip(`${label} ${item.summary}`, w - 3);
+    if (real === state.index) {
+      // `▌` left edge marker (fg accent) survives NO_COLOR + colorblind; the rest is
+      // the high-contrast gradient bar.
+      rows.push(`${p.accent("▌")}${selectionBar(` ${line}`, w - 1, caps)}`);
+    } else {
+      const cut = clip(`${label}`, nameW + 1);
+      const summary = clip(item.summary, w - nameW - 4);
+      rows.push(`  ${p.accent(cut)} ${p.muted(summary)}`);
+    }
+  });
+  if (n > maxRows) {
+    const more = n - (top + view.length);
+    const above = top;
+    const tag =
+      `${above > 0 ? `↑${above} ` : ""}${more > 0 ? `↓${more} more` : ""}`.trim() || "↑↓ to scroll";
+    rows.push(`  ${p.muted(tag)}`);
+  }
+  return rows;
+}

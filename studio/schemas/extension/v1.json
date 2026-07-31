@@ -1,0 +1,192 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://prometheus.studio/schemas/extension/v1.json",
+  "title": "Prometheus Studio Extension Manifest",
+  "description": "extension@1 — the manifest for a Studio extension (file 09 §5.1). Declares identity, what it contributes (panels/commands/keybindings/themes/agents/mcpServers/configuration), and the DECLARED, enforced permissions surfaced at install. A superset of VS Code's contributes model plus our agents + permissions additions. contributes.themes[] point at theme@1 documents (schemas/theme/v1.json); contributes.agents[] point at AgentDef JSON (file 09 §4).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "id", "label", "version"],
+  "properties": {
+    "schema": {
+      "description": "Schema discriminator. Must be 'extension@1'.",
+      "const": "extension@1"
+    },
+    "id": {
+      "type": "string",
+      "pattern": "^[a-z0-9]+(?:[-.][a-z0-9]+)*$",
+      "description": "Stable extension id, <publisher>.<name> (kebab/dotted lowercase)."
+    },
+    "label": { "type": "string", "minLength": 1, "description": "Human-readable display name." },
+    "version": {
+      "type": "string",
+      "pattern": "^\\d+\\.\\d+\\.\\d+$",
+      "description": "Semantic version."
+    },
+    "publisher": { "type": "string", "description": "Publisher / author id." },
+    "description": { "type": "string" },
+    "main": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Activation entrypoint (runs in the extension host, not the renderer)."
+    },
+    "repo": {
+      "type": "string",
+      "description": "Source repo — the marketplace nemesis gate target (file 09 §5.3)."
+    },
+    "license": { "type": "string" },
+    "engines": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "studio": {
+          "type": "string",
+          "description": "Compatible Studio version range (e.g. '>=1.0.0', '^1.0.0')."
+        }
+      }
+    },
+    "ui": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "panels": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["id", "title", "entry"],
+            "properties": {
+              "id": { "type": "string", "minLength": 1 },
+              "title": { "type": "string", "minLength": 1 },
+              "location": { "enum": ["primary-sidebar", "secondary-sidebar", "panel"] },
+              "entry": {
+                "type": "string",
+                "minLength": 1,
+                "description": "Sandboxed webview entry (postMessage RPC)."
+              }
+            }
+          }
+        }
+      }
+    },
+    "contributes": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "What this extension adds to Studio.",
+      "properties": {
+        "commands": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["id", "title"],
+            "properties": {
+              "id": { "type": "string", "minLength": 1 },
+              "title": { "type": "string", "minLength": 1 },
+              "category": { "type": "string" }
+            }
+          }
+        },
+        "keybindings": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["command", "key"],
+            "properties": {
+              "command": { "type": "string", "minLength": 1 },
+              "key": { "type": "string", "minLength": 1 }
+            }
+          }
+        },
+        "themes": {
+          "type": "array",
+          "description": "Themes shipped by this extension. Each points at a theme@1 file (schemas/theme/v1.json).",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["id", "label", "base", "path"],
+            "properties": {
+              "id": { "type": "string", "pattern": "^[a-z0-9]+(?:[-.][a-z0-9]+)*$" },
+              "label": { "type": "string", "minLength": 1 },
+              "base": { "enum": ["dark", "light", "high-contrast"] },
+              "path": { "type": "string", "minLength": 1 }
+            }
+          }
+        },
+        "agents": {
+          "type": "array",
+          "description": "Drop-in AgentDef files (file 09 §4).",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["path"],
+            "properties": { "path": { "type": "string", "minLength": 1 } }
+          }
+        },
+        "mcpServers": {
+          "type": "array",
+          "description": "MCP servers contributed by the extension; gated like any host server (file 09 §2.2).",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["id", "transport"],
+            "properties": {
+              "id": { "type": "string", "minLength": 1 },
+              "transport": {
+                "type": "object",
+                "description": "stdio { command, args, env?, cwd? } or http { url, headers? }."
+              }
+            }
+          }
+        },
+        "configuration": {
+          "type": "object",
+          "description": "Extension-contributed settings keys (merged into the settings schema).",
+          "additionalProperties": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["type"],
+            "properties": {
+              "type": { "enum": ["number", "string", "boolean"] },
+              "default": {},
+              "description": { "type": "string" }
+            }
+          }
+        }
+      }
+    },
+    "permissions": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Declared, enforced, surfaced at install (file 09 §5.2). Default-deny.",
+      "properties": {
+        "fs": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "read": { "type": "array", "items": { "type": "string" } },
+            "write": { "type": "array", "items": { "type": "string" } }
+          }
+        },
+        "network": {
+          "description": "none | mcp-only | a host allowlist.",
+          "oneOf": [
+            { "enum": ["none", "mcp-only"] },
+            { "type": "array", "items": { "type": "string" } }
+          ]
+        },
+        "engine": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Prometheus subcommands the extension may invoke (read-only by default)."
+        },
+        "secrets": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Keychain entries it may request."
+        },
+        "shell": { "type": "boolean" }
+      }
+    }
+  }
+}

@@ -1,0 +1,26 @@
+{
+  "id": "ml-starter",
+  "title": "ML Starter",
+  "description": "PyTorch + scikit-learn baseline for general machine-learning work. The torch wheel is auto-matched to the detected CUDA runtime (cuXXX when an NVIDIA GPU is present, CPU/MPS otherwise).",
+  "pythonHint": ">=3.10,<3.13",
+  "packages": [
+    {
+      "name": "torch",
+      "source": "pypi",
+      "requestedBy": "template",
+      "note": "wheel auto-matched to CUDA (cuXXX) when a GPU is detected"
+    },
+    { "name": "scikit-learn", "source": "pypi", "requestedBy": "template" },
+    { "name": "pandas", "source": "pypi", "requestedBy": "template" },
+    { "name": "numpy", "source": "pypi", "requestedBy": "template" },
+    { "name": "matplotlib", "source": "pypi", "requestedBy": "template" },
+    { "name": "jupyter", "source": "pypi", "requestedBy": "template" }
+  ],
+  "needs": ["nvidia"],
+  "postNotes": [
+    "torch was resolved to the CUDA-matched wheel when an NVIDIA GPU was detected, else the CPU/MPS build.",
+    "Open a notebook with `jupyter lab` once the env is bound as your interpreter."
+  ],
+  "editable": true,
+  "builtin": true
+}

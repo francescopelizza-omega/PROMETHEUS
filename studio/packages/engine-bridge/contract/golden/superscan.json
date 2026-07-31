@@ -1,0 +1,17 @@
+{
+  "command": "superscan",
+  "argv": [
+    "superscan"
+  ],
+  "keys": [
+    "agents",
+    "command",
+    "ok",
+    "os",
+    "prereqs",
+    "summary"
+  ],
+  "commandField": "superscan",
+  "ok": true,
+  "exitCode": 0
+}

@@ -1,0 +1,12 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": "src",
+    "outDir": "dist",
+    "lib": ["ES2023"],
+    "types": ["node"]
+  },
+  "references": [{ "path": "../engine-bridge" }],
+  "include": ["src/**/*", "src/**/*.json"],
+  "exclude": ["dist", "node_modules", "src/**/*.test.ts"]
+}

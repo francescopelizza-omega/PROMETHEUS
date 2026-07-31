@@ -1,0 +1,777 @@
+/**
+ * modelhub/client.ts — the typed Model-Hub client (file 05 §1/§2/§3).
+ *
+ * A thin marshaller over the existing `runSidecar("modelhub.py", argv)` (engine-bridge
+ * is the ONLY JS spawner of python3 — C5). It validates the sidecar's one-JSON-object
+ * stdout at the boundary (the zod-shaped schemas in ./types.ts) and projects snake_case
+ * → the typed camelCase shapes the rest of the app renders.
+ *
+ * THE GOLDEN RULE (C5): JS NEVER decides "safe". The download GATE decision is the REAL
+ * `nemesis` run inside the sidecar (stage → nemesis → admit | quarantine). A nemesis
+ * BLOCK rides through as a RETURNED `DownloadResult` (`ok:false, blocked:true, gate:…`)
+ * — it is a renderable value, NOT a thrown error and NEVER upgraded toward "allow".
+ *
+ * Long ops (download) stream JSON-lines progress on stderr ({"event":"progress",…});
+ * `download({onProgress})` consumes those via the sidecar runner's stderr — see note
+ * on the runner below. The runner-serving + multi-GB HF fetch cannot execute in this
+ * sandbox; those code paths are correct + design-complete and the GATE / fit / argv
+ * LOGIC is what is exercised deterministically.
+ */
+import { normalizeVerdict } from "../security/verdict.js";
+import { type SidecarEnvelope, type SidecarOptions, runSidecar } from "../sidecar-runner.js";
+import {
+  type FitResult,
+  FitResultSchema,
+  type HardwareProfile,
+  HardwareProfileSchema,
+  type Model,
+  type ModelResource,
+  type ScoredQuant,
+  type ServeProfile,
+} from "./types.js";
+
+export type { GateBadge } from "../security/verdict.js";
+
+export interface ModelHubClientOptions extends SidecarOptions {}
+
+// ── progress (the JSON-lines stderr stream, C2/C6) ────────────────────────────
+
+/** One `{"event":"progress",...}` JSON-line the sidecar streams on stderr. */
+export interface DownloadProgress {
+  event: "progress" | "log" | string;
+  /** 0..100 when present. */
+  pct?: number;
+  message?: string;
+  bytes?: number;
+  totalBytes?: number;
+  /** the raw stderr line (escape hatch). */
+  raw: string;
+}
+
+/** Parse one stderr line into a DownloadProgress, or undefined if it is not one. */
+export function parseDownloadProgressLine(line: string): DownloadProgress | undefined {
+  const trimmed = line.trim();
+  if (!trimmed.startsWith("{")) return undefined;
+  try {
+    const o = JSON.parse(trimmed) as Record<string, unknown>;
+    if (!o || typeof o !== "object" || typeof o.event !== "string") return undefined;
+    return {
+      event: o.event,
+      pct: typeof o.pct === "number" ? o.pct : undefined,
+      message: typeof o.message === "string" ? o.message : undefined,
+      bytes: typeof o.bytes === "number" ? o.bytes : undefined,
+      totalBytes: typeof o.total_bytes === "number" ? o.total_bytes : undefined,
+      raw: trimmed,
+    };
+  } catch {
+    return undefined;
+  }
+}
+
+// ── gate summary (the camelCased verdict the GUI renders) ─────────────────────
+
+/** The camelCased gate summary (mirrors `nemesis_gate.verdict_summary`). */
+export interface GateSummary {
+  verdict: "allow" | "warn" | "block" | "error";
+  score: number;
+  reasons: string[];
+  signed: boolean;
+  recommendation?: string;
+  scannedAt?: string;
+}
+
+function toGate(raw: unknown): GateSummary | undefined {
+  if (!raw || typeof raw !== "object") return undefined;
+  const g = raw as Record<string, unknown>;
+  return {
+    // normalizeVerdict fails CLOSED on any unknown/typo/crafted token → "error" (C3).
+    // A raw cast here let a bogus token (e.g. "ok"/"safe") ride through as non-block.
+    verdict: normalizeVerdict(g.verdict),
+    score: typeof g.score === "number" ? g.score : 100,
+    reasons: Array.isArray(g.reasons) ? g.reasons.map(String) : [],
+    signed: Boolean(g.signed),
+    recommendation: typeof g.recommendation === "string" ? g.recommendation : undefined,
+    scannedAt: typeof g.scanned_at === "string" ? g.scanned_at : undefined,
+  };
+}
+
+/** The forced-override flag (rides through when a block/error was force-admitted). */
+export interface ForcedDangerInfo {
+  label: string;
+  verdict: string;
+  riskScore?: number;
+  blockingReasons: string[];
+}
+
+function toForcedDanger(raw: unknown): ForcedDangerInfo | undefined {
+  if (!raw || typeof raw !== "object") return undefined;
+  const f = raw as Record<string, unknown>;
+  return {
+    label: String(f.label ?? ""),
+    verdict: String(f.verdict ?? ""),
+    riskScore: typeof f.risk_score === "number" ? f.risk_score : undefined,
+    blockingReasons: Array.isArray(f.blocking_reasons) ? f.blocking_reasons.map(String) : [],
+  };
+}
+
+// ── result shapes ─────────────────────────────────────────────────────────────
+
+/** Pickle (*.bin/*.pt/*.ckpt) vs safetensors/gguf supply-chain risk (§5.3). */
+export interface FormatRisk {
+  highRiskFiles: string[];
+  safeFiles: string[];
+  risk: "high" | "low";
+}
+
+function toFormatRisk(raw: unknown): FormatRisk | undefined {
+  if (!raw || typeof raw !== "object") return undefined;
+  const r = raw as Record<string, unknown>;
+  return {
+    highRiskFiles: Array.isArray(r.high_risk_files) ? r.high_risk_files.map(String) : [],
+    safeFiles: Array.isArray(r.safe_files) ? r.safe_files.map(String) : [],
+    risk: r.risk === "high" ? "high" : "low",
+  };
+}
+
+/**
+ * The unified download / gate result (file 05 §5). EVERY outcome is a RETURNED value:
+ *   - `admitted:true`            → the stage was moved to the live library.
+ *   - `blocked:true, ok:false`   → nemesis BLOCK/error (or sha256 mismatch); QUARANTINED.
+ *   - `needsConfirm:true`        → nemesis WARN, no force — the GUI confirms + re-runs.
+ *   - `planned:true`             → the resumable download plan (no `--staged`; no bytes).
+ * The gate verdict rides through in `gate`; JS never decides safe (C5).
+ */
+export interface DownloadResult {
+  ok: boolean;
+  command: string;
+  id?: string;
+  /** the live library path once admitted. */
+  localPath?: string;
+  manifest?: string;
+  admitted?: boolean;
+  blocked?: boolean;
+  needsConfirm?: boolean;
+  planned?: boolean;
+  plan?: unknown;
+  verdict?: string;
+  gate?: GateSummary;
+  formatRisk?: FormatRisk;
+  /** the kept-for-inspection stage dir on a refusal (never auto-deleted). */
+  quarantined?: string;
+  forcedDanger?: ForcedDangerInfo;
+  stageDir?: string;
+  message?: string;
+  error?: string;
+  /** the raw sidecar envelope (escape hatch). */
+  raw: SidecarEnvelope;
+}
+
+function toDownloadResult(env: SidecarEnvelope): DownloadResult {
+  return {
+    ok: env.ok !== false,
+    command: env.command,
+    id: typeof env.id === "string" ? env.id : undefined,
+    localPath: typeof env.local_path === "string" ? env.local_path : undefined,
+    manifest: typeof env.manifest === "string" ? env.manifest : undefined,
+    admitted: typeof env.admitted === "boolean" ? env.admitted : undefined,
+    blocked: typeof env.blocked === "boolean" ? env.blocked : undefined,
+    needsConfirm: typeof env.needs_confirm === "boolean" ? env.needs_confirm : undefined,
+    planned: typeof env.planned === "boolean" ? env.planned : undefined,
+    plan: env.plan,
+    verdict: typeof env.verdict === "string" ? env.verdict : undefined,
+    gate: toGate(env.gate),
+    formatRisk: toFormatRisk(env.format_risk),
+    quarantined: typeof env.quarantined === "string" ? env.quarantined : undefined,
+    forcedDanger: toForcedDanger(env.forced_danger),
+    stageDir: typeof env.stage_dir === "string" ? env.stage_dir : undefined,
+    message: typeof env.message === "string" ? env.message : undefined,
+    error: typeof env.error === "string" ? env.error : undefined,
+    raw: env,
+  };
+}
+
+/** A plain executed/planned mutation result (remove / unserve — no gate). */
+export interface MutationResult {
+  ok: boolean;
+  command: string;
+  message?: string;
+  error?: string;
+  raw: SidecarEnvelope;
+  [k: string]: unknown;
+}
+
+function toMutationResult(env: SidecarEnvelope): MutationResult {
+  return {
+    ...env,
+    ok: env.ok !== false,
+    command: env.command,
+    message: typeof env.message === "string" ? env.message : undefined,
+    error: typeof env.error === "string" ? env.error : undefined,
+    raw: env,
+  };
+}
+
+/** The REAL local-model install result (ollama `pull`, file 05 §5). `installable:true`
+ *  means the ollama runner itself is missing → the UI shows an "Install ollama" hint. */
+export interface PullResult {
+  ok: boolean;
+  command: string;
+  installed: boolean;
+  id: string;
+  tag?: string;
+  runner: string;
+  /** the OpenAI-compatible endpoint the model is served at on success. */
+  endpoint?: string;
+  /** true when the failure is "runner not installed" (actionable, not a real error). */
+  installable?: boolean;
+  install?: string;
+  error?: string;
+  raw: SidecarEnvelope;
+}
+
+function toPullResult(env: SidecarEnvelope): PullResult {
+  return {
+    ...env,
+    ok: env.ok !== false,
+    command: env.command,
+    installed: env.installed === true,
+    id: typeof env.id === "string" ? env.id : "",
+    tag: typeof env.tag === "string" ? env.tag : undefined,
+    runner: typeof env.runner === "string" ? env.runner : "ollama",
+    endpoint: typeof env.endpoint === "string" ? env.endpoint : undefined,
+    installable: env.installable === true ? true : undefined,
+    install: typeof env.install === "string" ? env.install : undefined,
+    error: typeof env.error === "string" ? env.error : undefined,
+    raw: env,
+  };
+}
+
+/** Result of auto-installing the local RUNNER (ollama) on the user's behalf, OS-aware.
+ *  `manual:true` means the host needs a step we won't automate (no Homebrew / Windows). */
+export interface InstallRunnerResult {
+  ok: boolean;
+  command?: string;
+  runner: string;
+  /** the OS family the command was chosen for ("macos" | "linux" | …). */
+  os?: string;
+  installed: boolean;
+  manual?: boolean;
+  install?: string;
+  url?: string;
+  error?: string;
+  raw: SidecarEnvelope;
+}
+
+function toInstallRunnerResult(env: SidecarEnvelope): InstallRunnerResult {
+  return {
+    ...env,
+    ok: env.ok !== false,
+    // the sidecar emits the ACTUAL shell command it ran as `cmdline` (`command` is
+    // reserved for the verb name); surface it as the result's `command`.
+    command: typeof env.cmdline === "string" ? env.cmdline : undefined,
+    runner: typeof env.runner === "string" ? env.runner : "ollama",
+    os: typeof env.os === "string" ? env.os : undefined,
+    installed: env.installed === true,
+    manual: env.manual === true ? true : undefined,
+    install: typeof env.install === "string" ? env.install : undefined,
+    url: typeof env.url === "string" ? env.url : undefined,
+    error: typeof env.error === "string" ? env.error : undefined,
+    raw: env,
+  };
+}
+
+/** A served local endpoint (LIVE `localai endpoints` passthrough). */
+export interface Endpoint {
+  name: string;
+  baseUrl: string;
+}
+
+export interface EndpointsResult {
+  ok: boolean;
+  /** FREE local servers (llama.cpp / vLLM / Ollama at localhost). */
+  local: Endpoint[];
+  /** big open-weight APIs (OpenRouter / Groq / Together / …). */
+  openApi: Endpoint[];
+  engine?: string;
+  error?: string;
+  raw: SidecarEnvelope;
+}
+
+/** The non-secret repoint env diff (LIVE `localai show <tool>` passthrough, §6). */
+export interface RepointResult {
+  ok: boolean;
+  tool?: string;
+  baseUrl?: string;
+  patchable?: boolean;
+  recipe?: string;
+  /** the NON-SECRET env to write: base-URL + dummy KEY=ollama (never a real key). */
+  proposedEnv?: Record<string, string>;
+  referencedEnvVars?: string[];
+  secretPolicy?: string;
+  engine?: string;
+  error?: string;
+  raw: SidecarEnvelope;
+}
+
+// ── option bags ───────────────────────────────────────────────────────────────
+
+export interface SearchOptions {
+  q?: string;
+  modality?: string;
+  source?: "hf" | "ollama";
+  freeOnly?: boolean;
+  limit?: number;
+}
+
+export interface FitOptions {
+  id?: string;
+  params?: string;
+  family?: string;
+  ctx?: number;
+  /** an hw.scan envelope OR the fit hardware shape, as JSON. */
+  hw?: unknown;
+}
+
+export interface DownloadOptions {
+  id: string;
+  quant?: string;
+  source?: "hf" | "ollama" | "url";
+  license?: string;
+  /** a dir already holding the (fetched/planted) bytes → drives the gate. */
+  staged?: string;
+  /** {rfilename: sha256} — verified before the scan (mismatch ⇒ BLOCK). */
+  sha256?: Record<string, string>;
+  force?: boolean;
+  onProgress?: (p: DownloadProgress) => void;
+}
+
+export interface ServeOptions {
+  id: string;
+  quant?: string;
+  runner?: "llamacpp" | "vllm" | "ollama";
+  gguf?: string;
+  ctx?: number;
+  port?: number;
+  hw?: unknown;
+  autostart?: boolean;
+}
+
+export interface RepointOptions {
+  tool: string;
+  baseUrl: string;
+}
+
+// ── catalog Model projection (model.search rows → typed Model) ────────────────
+
+/** Project the catalog snake_case `resource` block → the camelCase ModelResource. */
+function toResource(raw: unknown): ModelResource | undefined {
+  if (!raw || typeof raw !== "object") return undefined;
+  const r = raw as Record<string, unknown>;
+  const num = (v: unknown): number | undefined => (typeof v === "number" ? v : undefined);
+  return {
+    q4Gb: num(r.q4_gb),
+    kv8kGb: num(r.kv_8k_gb),
+    kvNativeGb: num(r.kv_native_gb),
+    minRamGb: num(r.min_ram_gb),
+    recRamGb: num(r.rec_ram_gb),
+    gpuMinVramGb: num(r.gpu_min_vram_gb),
+    cpuOk: typeof r.cpu_ok === "boolean" ? r.cpu_ok : undefined,
+    tier: typeof r.tier === "string" ? r.tier : undefined,
+    needsOffload: typeof r.needs_offload === "boolean" ? r.needs_offload : undefined,
+    label: typeof r.label === "string" ? r.label : undefined,
+  };
+}
+
+function toModel(row: Record<string, unknown>): Model {
+  const kind = String(row.kind ?? "llm").toLowerCase();
+  const subtype = String(row.subtype ?? "").toLowerCase();
+  const license = String(row.license ?? "");
+  const lic = license.toLowerCase();
+  // "open-weight" = the weights are downloadable (NOT a commercial-use claim — the
+  // freeOnly filter below additionally requires a PERMISSIVE license). This broad
+  // allowlist makes NVIDIA Nemotron + the other open catalogs surface as open-weight.
+  const open =
+    lic.includes("apache") ||
+    lic === "mit" ||
+    lic.startsWith("bsd") ||
+    lic.includes("gemma") ||
+    lic.includes("llama") ||
+    lic.includes("deepseek") ||
+    lic.includes("nvidia") ||
+    lic.includes("open-model-license") ||
+    lic.includes("research-license") ||
+    lic.includes("cc-by") ||
+    lic.includes("openrail") ||
+    lic.includes("falcon") ||
+    lic.includes("qwen") ||
+    lic.includes("mistral") ||
+    lic.includes("exaone") ||
+    lic.includes("tencent") ||
+    lic.includes("hunyuan") ||
+    lic.includes("minimax") ||
+    lic.includes("bigcode") ||
+    lic.includes("stabilityai") ||
+    kind === "non-llm";
+  const modality: Model["modality"] =
+    subtype === "embedding"
+      ? "embedding"
+      : subtype === "asr"
+        ? "asr"
+        : subtype === "text-to-image"
+          ? "diffusion"
+          : kind === "non-llm"
+            ? "embedding"
+            : "text";
+  const paramsB = typeof row.params_b === "number" ? row.params_b : undefined;
+  return {
+    id: String(row.id ?? ""),
+    ...(typeof row.name === "string" ? { name: row.name } : {}),
+    ...(typeof row.ollama === "string" ? { ollama: row.ollama } : {}),
+    source: "huggingface",
+    modality,
+    family: typeof row.family === "string" ? row.family : undefined,
+    description: typeof row.description === "string" ? row.description : undefined,
+    resource: toResource(row.resource),
+    params: paramsB != null ? `${paramsB}B` : undefined,
+    license,
+    openWeight: open,
+    gated: false,
+    quants: [],
+    contextLen: typeof row.context === "number" ? row.context : undefined,
+    // APP-092: carry the catalog capability tags through so the AI picker can badge them.
+    ...(Array.isArray(row.tags)
+      ? { tags: (row.tags as unknown[]).filter((t): t is string => typeof t === "string") }
+      : {}),
+    cardUrl: typeof row.repo === "string" ? `https://huggingface.co/${row.repo}` : undefined,
+    installed: false,
+  };
+}
+
+const PERMISSIVE = ["apache", "mit", "bsd"];
+
+// ── the client ────────────────────────────────────────────────────────────────
+
+export class ModelHubClient {
+  private readonly opts: ModelHubClientOptions;
+
+  constructor(opts: ModelHubClientOptions = {}) {
+    this.opts = opts;
+  }
+
+  private run<T extends SidecarEnvelope = SidecarEnvelope>(
+    argv: string[],
+    extra?: Partial<SidecarOptions>,
+  ): Promise<T> {
+    return runSidecar<T>("modelhub.py", argv, { ...this.opts, ...extra });
+  }
+
+  /**
+   * REAL hardware detection (`hw.scan`) → a typed HardwareProfile. `rescan` is honored
+   * by the client surface (the sidecar scan is always live; there is no stale cache on
+   * the python side yet, so a rescan is just a re-run). Validated at the boundary.
+   */
+  async hardware(opts: { rescan?: boolean } = {}): Promise<HardwareProfile> {
+    const argv = ["hw.scan"];
+    if (opts.rescan) argv.push("--rescan");
+    const env = await this.run(argv);
+    return HardwareProfileSchema.parse(env);
+  }
+
+  /** Catalog search (bundled open-models.json + best-effort HF). Returns typed Models. */
+  async search(opts: SearchOptions = {}): Promise<Model[]> {
+    const argv = ["model.search"];
+    if (opts.q) argv.push(opts.q);
+    if (opts.modality) argv.push("--family", opts.modality);
+    if (opts.source) argv.push("--source", opts.source);
+    const env = await this.run(argv);
+    const rows = Array.isArray(env.results) ? (env.results as Record<string, unknown>[]) : [];
+    let models = rows.map(toModel);
+    if (opts.freeOnly) {
+      models = models.filter(
+        (m) => m.openWeight && PERMISSIVE.some((p) => m.license.toLowerCase().includes(p)),
+      );
+    }
+    if (typeof opts.limit === "number" && opts.limit >= 0) {
+      models = models.slice(0, opts.limit);
+    }
+    return models;
+  }
+
+  /** Model detail (quants populated from the HF tree where available). */
+  async info(id: string): Promise<Model | undefined> {
+    const env = await this.run(["model.search", id]);
+    const rows = Array.isArray(env.results) ? (env.results as Record<string, unknown>[]) : [];
+    const match = rows.find((r) => String(r.id ?? "") === id) ?? rows[0];
+    return match ? toModel(match) : undefined;
+  }
+
+  /**
+   * The Cookbook fit-score (file 05 §4): recommended quant + ranked + reasons. Validated
+   * at the boundary into a typed FitResult. `hw` (an hw.scan envelope OR the fit shape)
+   * is threaded as JSON so callers can score against a saved/overridden profile.
+   */
+  async fit(id?: string, opts: Omit<FitOptions, "id"> = {}): Promise<FitResult> {
+    const argv = ["fit"];
+    if (id) argv.push("--id", id);
+    if (opts.params) argv.push("--params", opts.params);
+    if (opts.family) argv.push("--family", opts.family);
+    if (typeof opts.ctx === "number") argv.push("--ctx", String(opts.ctx));
+    if (opts.hw !== undefined) argv.push("--hw", JSON.stringify(opts.hw));
+    const env = await this.run(argv);
+    return FitResultSchema.parse(env);
+  }
+
+  /**
+   * Download → stage → REAL nemesis gate → admit | quarantine (the SECURITY SPINE §5).
+   *
+   * Without `staged`, the sidecar returns the resumable download PLAN (no bytes moved).
+   * With `staged` (a dir already holding the bytes), the GATE runs over them: a BLOCK is
+   * a RETURNED `DownloadResult` (`ok:false, blocked:true`), NEVER a throw — JS does not
+   * decide safety (C5). `onProgress` consumes the JSON-lines stderr stream.
+   *
+   * ENV LIMIT: the multi-GB HF fetch + the runner serving cannot run in this sandbox; the
+   * gate decision over staged bytes is the security-load-bearing part and IS exercised.
+   */
+  async download(opts: DownloadOptions): Promise<DownloadResult> {
+    const argv = ["download", "--id", opts.id];
+    if (opts.quant) argv.push("--quant", opts.quant);
+    if (opts.source) argv.push("--source", opts.source);
+    if (opts.license) argv.push("--license", opts.license);
+    if (opts.staged) argv.push("--staged", opts.staged);
+    if (opts.sha256) argv.push("--sha256", JSON.stringify(opts.sha256));
+    if (opts.force) argv.push("--force");
+    // The sidecar streams `{"event":"progress",...}` JSON-lines on stderr during a real
+    // multi-GB fetch. `runSidecar` buffers stderr (no per-line hook today); `onProgress`
+    // is honored when the runner surfaces the stderr blob on the envelope (`_stderr`),
+    // and the line parser is exported + tested so wiring an onStderr hook is a one-liner.
+    // ENV LIMIT: no real fetch runs in this sandbox, so no progress lines are produced;
+    // the gate DECISION over `--staged` bytes is what is exercised.
+    const env = await this.run(argv);
+    if (opts.onProgress && typeof env._stderr === "string") {
+      for (const line of env._stderr.split("\n")) {
+        const p = parseDownloadProgressLine(line);
+        if (p) opts.onProgress(p);
+      }
+    }
+    return toDownloadResult(env);
+  }
+
+  /**
+   * REAL local-model install via the ollama runner (`ollama pull`). Unlike `download`
+   * (the HF/GGUF gate spine), this actually fetches AND serves the weights on the user's
+   * machine — ollama's signed registry is the trust boundary. `onProgress` consumes the
+   * JSON-lines stderr stream. Returns an actionable `PullResult` (`installable:true` when
+   * the ollama runner itself is missing); it NEVER throws for the "not installed" case.
+   */
+  async pull(opts: {
+    id: string;
+    tag?: string;
+    onProgress?: (p: DownloadProgress) => void;
+  }): Promise<PullResult> {
+    const argv = ["pull", "--id", opts.id];
+    if (opts.tag) argv.push("--tag", opts.tag);
+    const env = await this.run(argv);
+    if (opts.onProgress && typeof env._stderr === "string") {
+      for (const line of env._stderr.split("\n")) {
+        const p = parseDownloadProgressLine(line);
+        if (p) opts.onProgress(p);
+      }
+    }
+    return toPullResult(env);
+  }
+
+  /**
+   * Auto-install the local RUNNER (ollama) ON THE USER'S BEHALF. The sidecar
+   * discriminates macOS (`brew install ollama`) vs Linux (`curl … install.sh | sh`)
+   * and runs the command itself, streaming its output as JSON-lines on stderr.
+   * Returns `manual:true` when the host needs a step we won't automate.
+   */
+  async installRunner(opts?: {
+    runner?: "ollama";
+    onProgress?: (p: DownloadProgress) => void;
+  }): Promise<InstallRunnerResult> {
+    const argv = ["install-runner", "--runner", opts?.runner ?? "ollama"];
+    const env = await this.run(argv);
+    if (opts?.onProgress && typeof env._stderr === "string") {
+      for (const line of env._stderr.split("\n")) {
+        const p = parseDownloadProgressLine(line);
+        if (p) opts.onProgress(p);
+      }
+    }
+    return toInstallRunnerResult(env);
+  }
+
+  /** Installed models in the local library (+ Ollama index). */
+  async library(modality?: string): Promise<Model[]> {
+    const argv = ["model.list"];
+    void modality; // model.list takes a dir, not a modality filter, on the sidecar today
+    const env = await this.run(argv);
+    const rows = Array.isArray(env.models) ? (env.models as Record<string, unknown>[]) : [];
+    return rows.map((r) => ({
+      id: String(r.name ?? ""),
+      source: "huggingface",
+      modality: "text",
+      license: "",
+      openWeight: true,
+      gated: false,
+      quants: [],
+      installed: true,
+      localPath: typeof r.path === "string" ? r.path : undefined,
+      params: typeof r.quant === "string" ? r.quant : undefined,
+    }));
+  }
+
+  /** Remove model files (refuses if a ServeProfile references it, unless force). */
+  remove(id: string, opts: { quant?: string; force?: boolean } = {}): Promise<MutationResult> {
+    const argv = ["remove", "--id", id];
+    if (opts.quant) argv.push("--quant", opts.quant);
+    if (opts.force) argv.push("--force");
+    return this.run(argv).then(toMutationResult);
+  }
+
+  /**
+   * Build a ServeProfile + fit-derived runner argv (file 05 §8). PURE on the sidecar —
+   * it does NOT spawn: the long-lived runner is supervised by the desktop MAIN process
+   * (C8 ServerSupervisor). The returned profile's `status` is "starting"; the supervisor
+   * flips it to "ready" once `/v1/models` answers. ENV LIMIT: the runner binaries
+   * (llama.cpp / vLLM / ollama) are not installed here, so only the argv CONSTRUCTION is
+   * exercised — which is the testable, load-bearing part.
+   */
+  async serve(opts: ServeOptions): Promise<ServeProfile> {
+    const argv = ["serve", "--id", opts.id];
+    if (opts.quant) argv.push("--quant", opts.quant);
+    if (opts.runner) argv.push("--runner", opts.runner);
+    if (opts.gguf) argv.push("--gguf", opts.gguf);
+    if (typeof opts.ctx === "number") argv.push("--ctx", String(opts.ctx));
+    if (typeof opts.port === "number") argv.push("--port", String(opts.port));
+    if (opts.hw !== undefined) argv.push("--hw", JSON.stringify(opts.hw));
+    if (opts.autostart) argv.push("--autostart");
+    const env = await this.run(argv);
+    return toServeProfile(env.profile);
+  }
+
+  /** Stop a served runner (SIGTERM the pid via the supervisor). */
+  unserve(profileId: string): Promise<MutationResult> {
+    return this.run(["unserve", "--profile", profileId]).then(toMutationResult);
+  }
+
+  /** LIVE local + open-weight endpoints (`prometheus.py localai endpoints` passthrough). */
+  async endpoints(): Promise<EndpointsResult> {
+    const env = await this.run(["endpoints"]);
+    const local = Array.isArray(env.local) ? (env.local as Record<string, unknown>[]) : [];
+    const openApi = Array.isArray(env.open_api) ? (env.open_api as Record<string, unknown>[]) : [];
+    const map = (r: Record<string, unknown>): Endpoint => ({
+      name: String(r.name ?? ""),
+      baseUrl: String(r.base_url ?? ""),
+    });
+    return {
+      ok: env.ok !== false,
+      local: local.map(map),
+      openApi: openApi.map(map),
+      engine: typeof env.engine === "string" ? env.engine : undefined,
+      error: typeof env.error === "string" ? env.error : undefined,
+      raw: env,
+    };
+  }
+
+  /** LIVE repoint env diff (`localai show <tool>` passthrough, §6). Non-secret only. */
+  async repoint(opts: RepointOptions): Promise<RepointResult> {
+    const env = await this.run(["repoint", "--tool", opts.tool, "--base-url", opts.baseUrl]);
+    const proposed =
+      env.proposed_env && typeof env.proposed_env === "object"
+        ? (env.proposed_env as Record<string, string>)
+        : undefined;
+    return {
+      ok: env.ok !== false,
+      tool: typeof env.tool === "string" ? env.tool : undefined,
+      baseUrl: typeof env.base_url === "string" ? env.base_url : undefined,
+      patchable: typeof env.patchable === "boolean" ? env.patchable : undefined,
+      recipe: typeof env.recipe === "string" ? env.recipe : undefined,
+      proposedEnv: proposed,
+      referencedEnvVars: Array.isArray(env.referenced_env_vars)
+        ? env.referenced_env_vars.map(String)
+        : undefined,
+      secretPolicy: typeof env.secret_policy === "string" ? env.secret_policy : undefined,
+      engine: typeof env.engine === "string" ? env.engine : undefined,
+      error: typeof env.error === "string" ? env.error : undefined,
+      raw: env,
+    };
+  }
+}
+
+// ── ServeProfile projection (serve `profile` envelope → typed ServeProfile) ────
+
+function toServeProfile(raw: unknown): ServeProfile {
+  const p = (raw && typeof raw === "object" ? raw : {}) as Record<string, unknown>;
+  const ep = (p.endpoint && typeof p.endpoint === "object" ? p.endpoint : {}) as Record<
+    string,
+    unknown
+  >;
+  const a = (p.args && typeof p.args === "object" ? p.args : {}) as Record<string, unknown>;
+  const runner = String(p.runner ?? "llamacpp") as ServeProfile["runner"];
+  return {
+    id: String(p.id ?? ""),
+    modelId: String(p.model_id ?? ""),
+    quant: String(p.quant ?? ""),
+    runner,
+    endpoint: {
+      host: String(ep.host ?? "127.0.0.1"),
+      port: typeof ep.port === "number" ? ep.port : 8080,
+      baseUrl: String(ep.base_url ?? ""),
+    },
+    apiKey: String(p.api_key ?? "local"),
+    args: {
+      ctxLen: typeof a.ctx_len === "number" ? a.ctx_len : 8192,
+      gpuLayers: typeof a.gpu_layers === "number" ? a.gpu_layers : undefined,
+      tensorParallel: typeof a.tensor_parallel === "number" ? a.tensor_parallel : undefined,
+      kvCacheDtype:
+        a.kv_cache_dtype === "fp8" ? "fp8" : a.kv_cache_dtype === "auto" ? "auto" : undefined,
+      maxModelLen: typeof a.max_model_len === "number" ? a.max_model_len : undefined,
+      servedModelName: String(a.served_model_name ?? p.model_id ?? ""),
+    },
+    argv: Array.isArray(p.argv) ? p.argv.map(String) : [],
+    autostart: Boolean(p.autostart),
+    // the sidecar builds a profile (status "stopped"); the client surfaces "starting"
+    // because the very next step is the MAIN-process supervisor spawning it (C8).
+    status: "starting",
+  };
+}
+
+// re-export the ScoredQuant type used in serve fit responses for convenience.
+export type { ScoredQuant };
+
+// ── module-level convenience (mirrors env.ts / the security module) ───────────
+
+const defaultClient = new ModelHubClient();
+
+export const createModelHubClient = (opts?: ModelHubClientOptions): ModelHubClient =>
+  new ModelHubClient(opts);
+
+export const hardware = (opts?: { rescan?: boolean }): Promise<HardwareProfile> =>
+  defaultClient.hardware(opts);
+export const search = (opts?: SearchOptions): Promise<Model[]> => defaultClient.search(opts);
+export const info = (id: string): Promise<Model | undefined> => defaultClient.info(id);
+export const fit = (id?: string, opts?: Omit<FitOptions, "id">): Promise<FitResult> =>
+  defaultClient.fit(id, opts);
+export const download = (opts: DownloadOptions): Promise<DownloadResult> =>
+  defaultClient.download(opts);
+export const pull = (opts: {
+  id: string;
+  tag?: string;
+  onProgress?: (p: DownloadProgress) => void;
+}): Promise<PullResult> => defaultClient.pull(opts);
+export const installRunner = (opts?: {
+  runner?: "ollama";
+  onProgress?: (p: DownloadProgress) => void;
+}): Promise<InstallRunnerResult> => defaultClient.installRunner(opts);
+export const library = (modality?: string): Promise<Model[]> => defaultClient.library(modality);
+export const remove = (
+  id: string,
+  opts?: { quant?: string; force?: boolean },
+): Promise<MutationResult> => defaultClient.remove(id, opts);
+export const serve = (opts: ServeOptions): Promise<ServeProfile> => defaultClient.serve(opts);
+export const unserve = (profileId: string): Promise<MutationResult> =>
+  defaultClient.unserve(profileId);
+export const endpoints = (): Promise<EndpointsResult> => defaultClient.endpoints();
+export const repoint = (opts: RepointOptions): Promise<RepointResult> =>
+  defaultClient.repoint(opts);

@@ -1,0 +1,22 @@
+{
+  "id": "airllm",
+  "title": "Big-model-on-small-GPU",
+  "description": "AirLLM layered inference for running large models on a small GPU, mirroring the engine's AirLLM tool (pip_extras: bitsandbytes). For the versioned, rollback-managed tree use `models install airllm`.",
+  "pythonHint": ">=3.10,<3.13",
+  "packages": [
+    { "name": "airllm", "source": "pypi", "requestedBy": "template" },
+    {
+      "name": "bitsandbytes",
+      "source": "pypi",
+      "requestedBy": "template",
+      "note": "mirrors the engine's AirLLM pip_extras=('bitsandbytes',)"
+    }
+  ],
+  "needs": [],
+  "postNotes": [
+    "For the versioned, rollback-managed install prefer `models install airllm` (Model Hub).",
+    "AirLLM streams layers from disk — expect slower-but-feasible inference of big models."
+  ],
+  "editable": true,
+  "builtin": true
+}

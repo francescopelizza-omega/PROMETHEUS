@@ -1,0 +1,15 @@
+{
+  "command": "scan",
+  "argv": [
+    "scan"
+  ],
+  "keys": [
+    "agents",
+    "command",
+    "ok",
+    "os"
+  ],
+  "commandField": "scan",
+  "ok": true,
+  "exitCode": 0
+}

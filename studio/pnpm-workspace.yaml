@@ -1,0 +1,55 @@
+packages:
+  - "apps/*"
+  - "packages/*"
+
+# Dependency overrides (moved here from package.json "pnpm.overrides" — pnpm >=10.x
+# reads overrides ONLY from this file and IGNORES the package.json field with a warning).
+# global-agent@3 (via electron → @electron/get) pulls `boolean`; pin it to a single
+# resolved version to dedupe the tree. DO NOT redirect this to "@socketregistry/boolean"
+# — that drop-in is NOT published on the public npmjs registry (404) and needs a scoped
+# Socket registry in .npmrc, which this repo deliberately has none of. The real
+# `boolean@3.2.0` resolves cleanly and is what the lockfile pins.
+overrides:
+  boolean: "3.2.0"
+
+# Approved dependency build scripts. pnpm >=10 BLOCKS every dependency lifecycle
+# script (install/postinstall) by default for supply-chain safety, and silently
+# (no error). That left electron with NO binary downloaded — `require("electron")`
+# returned undefined and the app could not boot. These are the trusted packages
+# whose postinstall MUST run: electron + esbuild + biome fetch their platform
+# binary; node-pty compiles the terminal's native pty. (lefthook is intentionally
+# NOT approved — its postinstall self-installs git hooks at the MONOREPO root, not
+# the studio dir, which is surprising and unwanted.)
+#
+# NOTE: electron's own install.js extracts via `extract-zip`, which produces an
+# INCOMPLETE app under Node 26 (missing Electron Framework.framework). Use the
+# pinned Node 20 (.nvmrc) for a clean `pnpm install`; under newer Node the binary
+# may need a manual `unzip` of the release zip into electron/dist + a path.txt.
+onlyBuiltDependencies:
+  - "@biomejs/biome"
+  - electron
+  - esbuild
+  - node-pty
+
+# ── install settings (moved here from .npmrc, file 02 §1) ──────────────────────
+# Modern pnpm reads ONLY auth/registry from .npmrc; every other setting lives here
+# (https://pnpm.io/settings). Keeping them in .npmrc made `npm`/`npx` emit
+# "Unknown project config" warnings (npm does not know pnpm's keys) and that path is
+# being removed in a future npm major. There is no `.npmrc` anymore — nothing for npm
+# to misread. Requires pnpm >= 10.4 (settings-in-workspace-yaml); see packageManager.
+
+# nodeLinker: isolated -> a strict, NON-FLAT node_modules: a package may import only
+#   what it DECLARES in its own package.json. This is what physically enforces the
+#   dependency graph (file 02 §1.1): the renderer cannot reach engine-bridge unless it
+#   depends on it; core cannot reach node-only packages it never declared. The security
+#   boundary is a linker property, not a hope.
+nodeLinker: isolated
+
+# shamefullyHoist: false -> never flatten phantom deps into the root. With the isolated
+#   linker this keeps every package's import surface honest.
+shamefullyHoist: false
+
+# engineStrict: true -> refuse to install under a Node/pnpm that violates "engines"
+#   (node >=20, pnpm >=10.4). The Electron native ABI is pinned to Node 20 (.nvmrc);
+#   installing under the wrong runtime is a hard error, not a warning.
+engineStrict: true

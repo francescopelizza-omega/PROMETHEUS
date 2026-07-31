@@ -1,0 +1,104 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://prometheus.studio/schemas/theme/v1.json",
+  "title": "Prometheus Studio Theme",
+  "description": "theme@1 — a Studio color theme: meta + uiTokens (chrome) + syntaxTokens (editor) on a declared base. Referenced by extension manifests (schemas/extension/v1.json) via contributes.themes[].",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "meta", "base", "uiTokens", "syntaxTokens"],
+  "properties": {
+    "schema": {
+      "description": "Schema discriminator. Must be 'theme@1'.",
+      "const": "theme@1"
+    },
+    "meta": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "label"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[a-z0-9]+(?:[-.][a-z0-9]+)*$",
+          "description": "Stable theme id (kebab/dotted lowercase)."
+        },
+        "label": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Human-readable name shown in the picker."
+        },
+        "author": { "type": "string" },
+        "version": {
+          "type": "string",
+          "pattern": "^\\d+\\.\\d+\\.\\d+$",
+          "description": "Semantic version of THIS theme document."
+        },
+        "description": { "type": "string" }
+      }
+    },
+    "base": {
+      "description": "Which built-in base this theme derives from / declares itself as.",
+      "enum": ["dark", "light", "high-contrast"]
+    },
+    "uiTokens": {
+      "description": "Application-chrome colors (non-editor). Keys are token names; values are colors.",
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": { "$ref": "#/$defs/color" },
+      "properties": {
+        "background": { "$ref": "#/$defs/color" },
+        "foreground": { "$ref": "#/$defs/color" },
+        "accent": { "$ref": "#/$defs/color" },
+        "border": { "$ref": "#/$defs/color" },
+        "muted": { "$ref": "#/$defs/color" },
+        "error": { "$ref": "#/$defs/color" },
+        "warning": { "$ref": "#/$defs/color" },
+        "success": { "$ref": "#/$defs/color" },
+        "info": { "$ref": "#/$defs/color" },
+        "selection": { "$ref": "#/$defs/color" }
+      }
+    },
+    "syntaxTokens": {
+      "description": "Editor syntax-highlighting tokens. Keys are TextMate-style scopes or token names.",
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": { "$ref": "#/$defs/syntaxStyle" },
+      "properties": {
+        "comment": { "$ref": "#/$defs/syntaxStyle" },
+        "keyword": { "$ref": "#/$defs/syntaxStyle" },
+        "string": { "$ref": "#/$defs/syntaxStyle" },
+        "number": { "$ref": "#/$defs/syntaxStyle" },
+        "function": { "$ref": "#/$defs/syntaxStyle" },
+        "variable": { "$ref": "#/$defs/syntaxStyle" },
+        "type": { "$ref": "#/$defs/syntaxStyle" },
+        "constant": { "$ref": "#/$defs/syntaxStyle" },
+        "operator": { "$ref": "#/$defs/syntaxStyle" },
+        "punctuation": { "$ref": "#/$defs/syntaxStyle" }
+      }
+    }
+  },
+  "$defs": {
+    "color": {
+      "description": "A color: #RGB, #RGBA, #RRGGBB, #RRGGBBAA, or a CSS rgb()/rgba()/hsl()/hsla() string.",
+      "type": "string",
+      "pattern": "^(#([0-9a-fA-F]{3,4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})|(rgb|rgba|hsl|hsla)\\([^)]*\\))$"
+    },
+    "syntaxStyle": {
+      "description": "A syntax token style: either a bare color string, or an object with color + font styling.",
+      "oneOf": [
+        { "$ref": "#/$defs/color" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["color"],
+          "properties": {
+            "color": { "$ref": "#/$defs/color" },
+            "background": { "$ref": "#/$defs/color" },
+            "bold": { "type": "boolean" },
+            "italic": { "type": "boolean" },
+            "underline": { "type": "boolean" }
+          }
+        }
+      ]
+    }
+  }
+}

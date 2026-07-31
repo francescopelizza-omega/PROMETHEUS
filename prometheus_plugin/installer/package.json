@@ -1,0 +1,34 @@
+{
+  "name": "@prometheus-plugin/installer",
+  "version": "1.0.0",
+  "description": "Detect installed AI agent CLIs and register the Prometheus MCP server into each",
+  "type": "module",
+  "bin": {
+    "prometheus-install": "dist/cli.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "build": "tsc && node -e \"require('fs').chmodSync('dist/cli.js', 0o755)\"",
+    "prepublishOnly": "npm run build",
+    "start": "node dist/cli.js",
+    "test": "npm run build && node --test dist/"
+  },
+  "author": "Francesco Pelizza <red-beard-phoenix@users.noreply.gitlab.com>",
+  "license": "MIT",
+  "dependencies": {
+    "@iarna/toml": "^2.2.5",
+    "yaml": "^2.6.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "typescript": "^5.7.2"
+  }
+}

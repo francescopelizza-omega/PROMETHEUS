@@ -1,0 +1,17 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": "src",
+    "outDir": "dist",
+    "lib": ["ES2023"],
+    "types": ["node"]
+  },
+  "references": [
+    { "path": "../../packages/engine-bridge" },
+    { "path": "../../packages/core" },
+    { "path": "../../packages/ui" }
+  ],
+  "include": ["src/**/*"],
+  "//repl": "src/repl/** is the Ink TUI view (file 11 §3/§9). ink/react are packaging-time deps NOT installed in this build, so the .tsx view is EXCLUDED from tsc; its semantic brain lives in @prometheus/core/repl (pure, built + tested). bin.ts loads it via a non-literal dynamic import and falls back to one-shot help when absent.",
+  "exclude": ["dist", "node_modules", "src/**/*.test.ts", "src/repl/**"]
+}

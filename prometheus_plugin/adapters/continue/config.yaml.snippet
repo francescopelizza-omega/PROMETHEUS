@@ -1,0 +1,11 @@
+# Merge into ~/.continue/config.yaml — `mcpServers` is a LIST of objects.
+# Continue uses MCP tools only in Agent mode.
+mcpServers:
+  - name: prometheus
+    type: stdio
+    command: npx
+    args:
+      - "-y"
+      - "@prometheus-plugin/mcp"
+    env:
+      PROMETHEUS_PY: "/ABS/PATH/TO/prometheus.py"

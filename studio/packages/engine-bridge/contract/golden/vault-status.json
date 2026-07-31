@@ -1,0 +1,19 @@
+{
+  "command": "vault-status",
+  "argv": [
+    "vault",
+    "status"
+  ],
+  "keys": [
+    "action",
+    "command",
+    "initialized",
+    "ok",
+    "repos",
+    "root",
+    "summary"
+  ],
+  "commandField": "vault",
+  "ok": true,
+  "exitCode": 0
+}

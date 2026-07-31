@@ -1,0 +1,17 @@
+{
+  "id": "notebook-min",
+  "title": "Minimal Notebook",
+  "description": "The smallest useful Jupyter kernel: ipykernel + jupyterlab. A clean base to register an interpreter and start a notebook with nothing extra.",
+  "pythonHint": ">=3.10,<3.13",
+  "packages": [
+    { "name": "ipykernel", "source": "pypi", "requestedBy": "template" },
+    { "name": "jupyterlab", "source": "pypi", "requestedBy": "template" }
+  ],
+  "needs": [],
+  "postNotes": [
+    "Register the kernel with `python -m ipykernel install --user --name <env>`.",
+    "Smallest useful notebook base — add packages as you go."
+  ],
+  "editable": true,
+  "builtin": true
+}

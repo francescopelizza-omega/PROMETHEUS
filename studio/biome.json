@@ -1,0 +1,170 @@
+{
+  "$schema": "https://biomejs.dev/schemas/1.9.4/schema.json",
+  "vcs": {
+    "enabled": true,
+    "clientKind": "git",
+    "useIgnoreFile": true
+  },
+  "files": {
+    "ignoreUnknown": true,
+    "ignore": [
+      "**/dist/**",
+      "**/out/**",
+      "**/release/**",
+      "**/node_modules/**",
+      "**/*.tsbuildinfo",
+      "pnpm-lock.yaml",
+      "examples/**",
+      "**/contract/golden/**",
+      "apps/cli/src/repl/**"
+    ]
+  },
+  "formatter": {
+    "enabled": true,
+    "indentStyle": "space",
+    "indentWidth": 2,
+    "lineWidth": 100,
+    "lineEnding": "lf"
+  },
+  "javascript": {
+    "formatter": {
+      "quoteStyle": "double",
+      "trailingCommas": "all",
+      "semicolons": "always"
+    }
+  },
+  "organizeImports": { "enabled": true },
+  "linter": {
+    "enabled": true,
+    "rules": {
+      "recommended": true,
+      "suspicious": {
+        "noExplicitAny": "warn",
+        "noControlCharactersInRegex": "off",
+        "noAssignInExpressions": "warn",
+        "noImplicitAnyLet": "warn"
+      },
+      "style": {
+        "noNonNullAssertion": "off",
+        "noCommaOperator": "warn"
+      },
+      "a11y": {
+        "useSemanticElements": "warn"
+      },
+      "correctness": {
+        "useExhaustiveDependencies": "warn"
+      }
+    }
+  },
+  "overrides": [
+    {
+      "include": [
+        "apps/desktop/src/renderer/**",
+        "apps/desktop/src/routes/**",
+        "packages/ui/src/**"
+      ],
+      "linter": {
+        "rules": {
+          "nursery": {
+            "noRestrictedImports": {
+              "level": "error",
+              "options": {
+                "paths": {
+                  "electron": "Renderer/ui is sandboxed (C5): no electron. Reach the engine only via window.prometheus.* (the contextBridge seam).",
+                  "@prometheus/engine-bridge": "Renderer/ui must NEVER import the engine bridge (C5). Use window.prometheus.*.",
+                  "node:child_process": "Renderer/ui may not import any node:* builtin (C5 sandbox).",
+                  "node:fs": "Renderer/ui may not import any node:* builtin (C5 sandbox).",
+                  "node:fs/promises": "Renderer/ui may not import any node:* builtin (C5 sandbox).",
+                  "node:path": "Renderer/ui may not import any node:* builtin (C5 sandbox).",
+                  "node:os": "Renderer/ui may not import any node:* builtin (C5 sandbox).",
+                  "node:process": "Renderer/ui may not import any node:* builtin (C5 sandbox).",
+                  "node:url": "Renderer/ui may not import any node:* builtin (C5 sandbox).",
+                  "node:events": "Renderer/ui may not import any node:* builtin (C5 sandbox).",
+                  "node:module": "Renderer/ui may not import any node:* builtin (C5 sandbox)."
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "include": ["packages/core/src/**"],
+      "linter": {
+        "rules": {
+          "nursery": {
+            "noRestrictedImports": {
+              "level": "error",
+              "options": {
+                "paths": {
+                  "react": "@prometheus/core is isomorphic/framework-free: no react. UI primitives live in @prometheus/ui.",
+                  "react-dom": "@prometheus/core is framework-free: no react-dom."
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "include": [
+        "packages/core/src/**",
+        "packages/ui/src/**",
+        "apps/cli/src/**",
+        "apps/desktop/src/**"
+      ],
+      "linter": {
+        "rules": {
+          "nursery": {
+            "noRestrictedImports": {
+              "level": "error",
+              "options": {
+                "paths": {
+                  "node:child_process": "child_process may be imported ONLY in @prometheus/engine-bridge (C5) — the single gateway that spawns python3/nemesis. Shell out through engine-bridge instead.",
+                  "child_process": "child_process may be imported ONLY in @prometheus/engine-bridge (C5)."
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "include": [
+        "packages/core/src/supervisor/**",
+        "apps/desktop/src/main/sidecar-supervisor.ts",
+        "apps/desktop/src/main/index.ts",
+        "apps/desktop/src/main/ide/git-host.ts",
+        "apps/desktop/src/main/ide/exec-host.ts",
+        "apps/desktop/src/main/ide/dap-adapter-install.ts",
+        "apps/desktop/src/main/mcp/transport.ts",
+        "**/*.test.ts",
+        "**/*.test.tsx",
+        "**/__test-doubles__/**"
+      ],
+      "linter": {
+        "rules": {
+          "nursery": {
+            "noRestrictedImports": { "level": "off" }
+          }
+        }
+      }
+    },
+    {
+      "include": ["packages/engine-bridge/src/types/**"],
+      "linter": {
+        "rules": {
+          "suspicious": { "noExplicitAny": "off" }
+        }
+      }
+    },
+    {
+      "include": ["**/*.test.ts", "**/*.test.tsx", "**/__test-doubles__/**", "**/__fixtures__/**"],
+      "linter": {
+        "rules": {
+          "suspicious": { "noExplicitAny": "off" }
+        }
+      }
+    }
+  ]
+}
