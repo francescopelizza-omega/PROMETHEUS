@@ -88,7 +88,11 @@ export function HomeRoute({ onNavigate, onOpenTokens }: HomeRouteProps): ReactEl
   });
 
   const shield = deriveShield(lastVerdict?.verdict ?? null);
-  const servingCount = serving.data?.ok ? (serving.data.servers?.length ?? 0) : 0;
+  // count only RUNNING servers — the snapshot includes stopped/errored, so the old
+  // `.length` reported "3 serving" for 3 stopped servers (a status lie on the launcher).
+  const servingCount = serving.data?.ok
+    ? (serving.data.servers ?? []).filter((s) => s?.state === "running").length
+    : 0;
   const serverRows = serverRowViews(serving.data);
 
   // ── server start/stop (APP-008) — the C8 supervisor over the existing IPC ──
@@ -160,6 +164,8 @@ export function HomeRoute({ onNavigate, onOpenTokens }: HomeRouteProps): ReactEl
         flexDirection: "column",
         gap: "var(--space-12, 24px)",
         maxWidth: 1180,
+        width: "100%",
+        margin: "0 auto",
       }}
     >
       {/* ── hero ── */}
@@ -296,7 +302,7 @@ export function HomeRoute({ onNavigate, onOpenTokens }: HomeRouteProps): ReactEl
           onClick={() => onNavigate("catalog")}
         />
         <LaunchCard
-          icon="Sparkles"
+          icon="Settings"
           title="Run setup wizard"
           subtitle="Interpreter · model · theme · tokens"
           onClick={() => window.dispatchEvent(new CustomEvent("prometheus:run-onboarding"))}
@@ -315,7 +321,7 @@ export function HomeRoute({ onNavigate, onOpenTokens }: HomeRouteProps): ReactEl
         <section style={{ flex: "2 1 360px", minWidth: 0 }}>
           <SectionTitle>Recent projects</SectionTitle>
           <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
-            {repos.isPending ? (
+            {repos.isLoading ? (
               <Hint>Loading…</Hint>
             ) : recent.length === 0 ? (
               <Hint>No recent projects. Open a folder or clone a repo to get started.</Hint>
@@ -357,17 +363,17 @@ export function HomeRoute({ onNavigate, onOpenTokens }: HomeRouteProps): ReactEl
             <GlanceRow
               label="Models"
               onClick={() => onNavigate("models")}
-              value={<Mono>{serving.isPending ? "…" : `${servingCount} serving`}</Mono>}
+              value={<Mono>{serving.isLoading ? "…" : `${servingCount} serving`}</Mono>}
             />
             <GlanceRow
               label="Environments"
               onClick={() => onNavigate("environments")}
-              value={<Mono>{envs.isPending ? "…" : `${envCount}`}</Mono>}
+              value={<Mono>{envs.isLoading ? "…" : `${envCount}`}</Mono>}
             />
             <GlanceRow
               label="Catalog"
               onClick={() => onNavigate("catalog")}
-              value={<Mono>{catalog.isPending ? "…" : `${catalogRows.length}`}</Mono>}
+              value={<Mono>{catalog.isLoading ? "…" : `${catalogRows.length}`}</Mono>}
             />
             {onOpenTokens && (
               <GlanceRow
@@ -721,39 +727,59 @@ function wordmark(): CSSProperties {
  * re-tints with the scheme.
  */
 function PrometheusMark({ height = 58 }: { height?: number }): ReactElement {
+  // The muscular Titan holding a thunderbolt (Ϟ) — ported VERBATIM from the `prom` CLI
+  // startup banner (apps/cli/src/session/host.ts → ZEUS_ROWS) so desktop and terminal
+  // share ONE identity. Rendered as block glyphs in a monospace <pre>, colored per
+  // muscle zone: silver hair · yellow bolt · cyan arms/pecs · brand abs · blue quads.
+  const HAIR = "var(--text-secondary)";
+  const BOLT = "var(--warn)";
+  const ARM = "var(--accent)";
+  const AB = "var(--brand)";
+  const QUAD = "var(--info)";
+  const rows: ReadonlyArray<ReadonlyArray<readonly [string, string]>> = [
+    [
+      ["        ", HAIR],
+      ["Ϟ", BOLT],
+    ], // thunderbolt (raised hand)
+    [
+      ["  ▟▀▀▙  ", HAIR],
+      ["▟", ARM],
+    ], // head + raised forearm
+    [
+      [" ██▀▀██", BOLT],
+      ["▟▘", ARM],
+    ], // face (eyes) + raised arm
+    [["▟████████▙", ARM]], // shoulders / traps
+    [["███▟█▙▟█▙███", ARM]], // arms + PECTORALS
+    [[" █ █▀█▀█ █", AB]], // ABS (six-pack grid)
+    [["  ▐██▌██▌", QUAD]], // QUADS (thighs)
+  ];
   return (
-    <svg
-      width={(height * 30) / 38}
-      height={height}
-      viewBox="0 0 30 38"
-      fill="none"
+    <pre
       aria-hidden="true"
-      role="img"
-      style={{ flexShrink: 0, display: "block" }}
+      style={{
+        margin: 0,
+        flexShrink: 0,
+        fontFamily: "var(--font-mono)",
+        fontSize: `${height / rows.length}px`,
+        lineHeight: 1,
+        whiteSpace: "pre",
+        userSelect: "none",
+      }}
     >
-      {/* raised lightning bolt (the Ϟ). NB: token colors go in `style` (fill), NOT in a
-          `fill=` attribute — var() in SVG presentation attributes is unreliable in
-          Electron's Chromium and would fall back to BLACK → invisible on the dark bg. */}
-      <path
-        d="M23.5 1 L17.5 10 L21 10 L18.5 17 L27 8 L23.2 8 L26 1 Z"
-        style={{ fill: "var(--warn)" }}
-      />
-      {/* head (silver) */}
-      <circle cx="11" cy="5.6" r="3.4" style={{ fill: "var(--text-secondary)" }} />
-      {/* cyan body group: torso, raised arm to the bolt, lowered arm */}
-      <g style={{ fill: "var(--accent)" }}>
-        <path d="M4.6 12 Q4.6 10.4 6.2 10.4 L15.8 10.4 Q17.4 10.4 17.4 12 L16 21.5 L6 21.5 Z" />
-        <path d="M14.8 11.2 L21.4 6.4 L23.4 9 L16.8 13.8 Z" />
-        <path d="M5.6 11.8 L2.2 17.4 L4.4 18.6 L7.6 13.6 Z" />
-      </g>
-      {/* brand ab band */}
-      <path d="M6.6 16.4 L15.4 16.4 L14.7 20.6 L7.3 20.6 Z" style={{ fill: "var(--brand)" }} />
-      {/* blue quads (two thighs) */}
-      <g style={{ fill: "var(--info)" }}>
-        <path d="M6.6 21.5 L10.1 21.5 L9.4 34 L6.4 34 Z" />
-        <path d="M11.4 21.5 L15 21.5 L15 34 L12 34 Z" />
-      </g>
-    </svg>
+      {rows.map((row) => {
+        const rowKey = row.map(([g]) => g).join("|");
+        return (
+          <div key={rowKey}>
+            {row.map(([glyphs, color]) => (
+              <span key={`${rowKey}:${color}`} style={{ color }}>
+                {glyphs}
+              </span>
+            ))}
+          </div>
+        );
+      })}
+    </pre>
   );
 }
 

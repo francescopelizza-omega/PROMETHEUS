@@ -14,13 +14,21 @@ import type { Frame } from "./frame.js";
 const ESC = "\x1b";
 
 /**
- * Emitted once on enter: bracketed paste on · autowrap off (our region) · cursor hidden · SGR mouse
- * tracking on (CLI-069: `?1000h` button events THEN `?1006h` SGR extended coords — order matters;
- * `?1003h` any-motion is deliberately NOT enabled, it floods stdin). Best-effort — an emulator
- * without SGR mouse (macOS Terminal.app) silently ignores it, no garbage. Hold Shift for native
- * OS text-selection (the emulator bypasses tracking then — emulator behavior, not ours).
+ * Emitted once on enter: bracketed paste on · autowrap off (our region) · cursor hidden.
+ *
+ * SGR mouse tracking (`?1000h`/`?1006h`) is DELIBERATELY NOT enabled: it makes the emulator
+ * capture the mouse for the app, which BLOCKS native click-drag text selection / copy of
+ * Prometheus output — the one thing users need most in a terminal. The mouse only powered
+ * click-to-position-caret + wheel dropdown scroll, both of which the keyboard already covers.
+ * Native selection now works everywhere with no Shift/Option-drag workaround.
  */
-export const ENTER_TUI = `${ESC}[?2004h${ESC}[?7l${ESC}[?25l${ESC}[?1000h${ESC}[?1006h`;
+export const ENTER_TUI = `${ESC}[?2004h${ESC}[?7l${ESC}[?25l`;
+
+/** OSC 11 — force the terminal background to pure black (#000000) while prom runs, so the
+ *  vivid Pelly output stays at maximum contrast. Restored to the terminal default on exit
+ *  (`BG_RESET`, OSC 111). Emitted ONLY when color is on (NO_COLOR / piped leaves it alone). */
+export const BG_BLACK = `${ESC}]11;#000000\x07`;
+export const BG_RESET = `${ESC}]111\x07`;
 /** The idempotent restore (wired to every exit/signal/crash path) — mouse OFF in reverse order so
  *  a killed TUI never leaves the parent shell emitting click garbage. */
 export const RESTORE_TUI = `${ESC}[?1006l${ESC}[?1000l${ESC}[?2004l${ESC}[?7h${ESC}[?25h${ESC}[0m`;

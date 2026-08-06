@@ -31,6 +31,7 @@ import {
   type SecThreatDbStatus,
   type SecTrustedSource,
   type SecVerdict,
+  type SecVerifyResult,
   ThreatDbPanel,
   TrustedSourcesView,
   VerdictBadge,
@@ -286,6 +287,20 @@ export function SecurityRoute(): ReactElement {
     },
     [loadTrustDb],
   );
+
+  // Verify a gate-audit row's HMAC (§8) — was a DEAD button (route never passed onVerify).
+  const [verifyResults, setVerifyResults] = useState<Record<string, SecVerifyResult>>({});
+  const verifyAuditRow = useCallback(async (row: SecAuditLogEntry) => {
+    try {
+      const r = await window.prometheus.security.trust({ op: "verify", file: row.target });
+      setVerifyResults((m) => ({ ...m, [row.at]: { valid: !!r.valid, reason: r.message } }));
+    } catch (e) {
+      setVerifyResults((m) => ({
+        ...m,
+        [row.at]: { valid: false, reason: e instanceof Error ? e.message : String(e) },
+      }));
+    }
+  }, []);
 
   // ── Remediation & quarantine (§9): disinfect → cleaned copy; vault list /
   // restore (reversible) / purge (irreversible). All work is the ENGINE's; the
@@ -1110,7 +1125,11 @@ export function SecurityRoute(): ReactElement {
       {/* Gate-audit log (newest-first) — prebuilt view, previously unmounted. */}
       {auditLog.length > 0 && (
         <Panel title="Gate audit log" elevation="e1">
-          <AuditLogView rows={auditLog} />
+          <AuditLogView
+            rows={auditLog}
+            onVerify={(row) => void verifyAuditRow(row)}
+            verifyResults={verifyResults}
+          />
         </Panel>
       )}
 

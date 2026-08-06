@@ -552,6 +552,27 @@ def emit_json(obj: dict) -> int:
     return int(obj.get("_exit", 0 if obj.get("ok", True) else 2))
 
 
+def emit_table_json(command: str, render, **extra) -> int:
+    """Bridge-safe emit for HUMAN-TABLE commands (models/apps/inventory list). Under --json
+    the bridge contract requires ONE JSON object on stdout — but these render human tables via
+    print(). So under JSON_OUT we CAPTURE the render's stdout into `lines` and emit it as JSON
+    (stdout never carries raw text → no `error (bad_json)`); non-JSON just renders the table.
+    The engine-bridge catalog client reads these WITHOUT --json, so its text path is untouched."""
+    if not JSON_OUT:
+        render()
+        return 0
+    import io
+
+    buf = io.StringIO()
+    old = sys.stdout
+    sys.stdout = buf
+    try:
+        render()
+    finally:
+        sys.stdout = old
+    return emit_json({"command": command, "ok": True, "lines": buf.getvalue().splitlines(), **extra})
+
+
 # Default wall-clock cap so a stuck OR foreground-blocking command can never hang
 # Prometheus: the child is killed on expiry and the shell terminates. Generous so big
 # clones / pip downloads / docker pulls finish. A long-running SERVICE that must KEEP
@@ -2128,12 +2149,21 @@ RULES: list[Rule] = [
     #  A bare `rm -rf <relative|$VAR>` (installer cleaning its own dir) = HIGH
     #  (confirm). Only `rm -rf` of a system/home LITERAL or --no-preserve-root is
     #  critical (block). Split so a benign self-clean doesn't hard-block.
+    # Critical ONLY for a WHOLE root/home/system-dir wipe: `rm -rf /`, `/*`, `~`, `$HOME`, or a
+    # top-level system dir wiped entirely (`/var`, `/var/*`, `/etc `). A deep sub-path delete
+    # like `rm -rf /var/lib/apt/lists/*` (routine apt-cache cleanup) is NOT this — it falls to
+    # the generic low R1.rmrf. The system-dir alternative therefore requires the dir to be the
+    # TERMINAL target (followed by `*`, `/*`, whitespace, or end), never `/dir/subpath`.
     Rule("R1.rmrf_sys", "critical",
          _rx(r"\brm\s+-[a-z]*[rf][a-z]*\s+(--no-preserve-root\s+)?"
-             r"(/(\s|\*|$)|~(/|\s|$)|\$HOME|\$\{HOME\}|/(etc|usr|var|bin|lib|opt|boot|sys|System|Library|Applications)\b)"),
+             r"(/(\s|\*|$)|~(/|\s|$)|\$HOME|\$\{HOME\}|"
+             r"/(etc|usr|var|bin|lib|opt|boot|sys|System|Library|Applications)(/?\*|/?\s|/?$))"),
          "recursive delete of a system/home path", "never auto-run — can wipe the machine"),
-    Rule("R1.rmrf", "high", _rx(r"\brm\s+-[a-z]*r[a-z]*f|\brm\s+-[a-z]*f[a-z]*r"),
-         "recursive force delete", "verify the target path before running"),
+    # Down-weighted to LOW: a generic `rm -rf` (e.g. `rm -rf ./dist`, `rm -rf node_modules`,
+    # a cache clean) is routine in build/setup scripts. The CATASTROPHIC form — `rm -rf /`,
+    # `$HOME`, a system dir, or --no-preserve-root — is a SEPARATE critical rule (R1.rmrf_sys).
+    Rule("R1.rmrf", "low", _rx(r"\brm\s+-[a-z]*r[a-z]*f|\brm\s+-[a-z]*f[a-z]*r"),
+         "recursive force delete (verify the target)", "verify the target path before running"),
     Rule("R1.devwrite", "critical", _rx(r"\bdd\b[^\n]*\bof=/dev/|\bmkfs\b|>\s*/dev/sd|\bshred\b"),
          "raw device write / disk format", "destroys disks — never auto-run"),
     # R2 remote-exec / pipe to shell
@@ -2142,8 +2172,12 @@ RULES: list[Rule] = [
     Rule("R2.procsub", "critical", _rx(r"(ba|z)?sh\s+<\(|source\s+<\(|eval\s+\$\((curl|wget)"),
          "exec of process-substituted/remote content", "run nothing you can't read"),
     # R3 privilege
-    Rule("R3.sudo", "high", _rx(r"\bsudo\b|\bsu\s+-\b|\bdoas\b"),
-         "privilege escalation", "an installer needing root is a red flag"),
+    # Down-weighted to LOW: `sudo`/`su`/`doas` are routine in Dockerfiles, devcontainers, and
+    # setup scripts (`sudo apt-get`, `sudo chown`). It is a signal to review, NOT a block on its
+    # own — the truly dangerous privilege patterns (setuid, chmod 777, sshkeys) stay higher, and
+    # the deep nemesis scan judges intent in context.
+    Rule("R3.sudo", "low", _rx(r"\bsudo\b|\bsu\s+-\b|\bdoas\b"),
+         "uses elevated privileges (sudo/su/doas)", "normal in setup scripts; confirm it's expected"),
     Rule("R3.chmod777", "high", _rx(r"\bchmod\s+(-[a-z]+\s+)?(0?777|a\+rwx)\b|\bchown\s+root\b"),
          "world-writable / root ownership", "tightens nothing, opens attack surface"),
     Rule("R3.setuid", "high", _rx(r"\bchmod\s+[ug]\+s\b|\b[0-7]?[4267][0-7]{3}\b\s*\$?\w*setuid"),
@@ -2160,8 +2194,11 @@ RULES: list[Rule] = [
     # R5 exfil / reverse shell
     Rule("R5.revshell", "critical", _rx(r"\bnc\b[^\n]*-e\b|/dev/tcp/|/dev/udp/|bash\s+-i\s+>&|mkfifo[^\n]*\|\s*nc"),
          "reverse shell / netcat exec", "remote control of your machine"),
-    Rule("R5.rawip", "medium", _rx(r"(curl|wget|nc|fetch)\b[^\n]*\b\d{1,3}(\.\d{1,3}){3}\b"),
-         "network call to a raw IP", "hardcoded IP often = C2 / exfil"),
+    # Down-weighted to LOW: a raw-IP fetch is often a localhost/health-check/mirror call
+    # (127.0.0.1, 10.x, 192.168.x). Still worth a glance, but not a medium finding on its own —
+    # actual exfil/C2 combines it with upload flags (R5.upload) or a reverse shell (R5.revshell).
+    Rule("R5.rawip", "low", _rx(r"(curl|wget|nc|fetch)\b[^\n]*\b\d{1,3}(\.\d{1,3}){3}\b"),
+         "network call to a raw IP", "check the address; often a local/health-check endpoint"),
     Rule("R5.upload", "high", _rx(r"(curl|wget)\b[^\n]*(-F|--data|-d|--upload-file|-T)\b[^\n]*(base64|/etc/|\.ssh|\.env)"),
          "uploads local/secret data", "possible exfiltration"),
     # R6 obfuscation
@@ -3136,6 +3173,21 @@ def security_gate(report: ScanReport, host_name: str, auto_trust: bool = False) 
         return True
 
     sev = report.verdict
+    # AUTHORITATIVE-DEEP-SCAN (solution 2): the deep nemesis gate (enforce_gate) runs next in
+    # the install flow and is the real, context-aware verdict. When it is live, this regex
+    # pre-scan is ADVISORY for NON-catastrophic findings — its context-blind heuristics must not
+    # BLOCK or nag on their own (that is what turned a benign `sudo apt-get` / `rm -rf ./dist`
+    # into a scary "CRITICAL"). We STILL hard-block the pre-scan's own CATASTROPHIC criticals
+    # (rm -rf /, reverse shell, disk-wipe, curl|sh) as cheap belt-and-suspenders. `--strict`
+    # restores the old, block-on-anything bar for the paranoid.
+    deep_gate_live = GATE_MODE != "off" and not _GATE_DISABLED and os.path.exists(NEMESIS_BIN)
+    if deep_gate_live and not STRICT and sev != "critical":
+        Log.step(
+            f"heuristic pre-scan: {sev} — ADVISORY only (findings above); the deep nemesis "
+            f"scan is authoritative and runs next"
+        )
+        return True
+
     block_critical = sev == "critical"
     block_strict = STRICT and SEVERITY_ORDER[sev] >= SEVERITY_ORDER["medium"]
 
@@ -6607,8 +6659,8 @@ def _apps_run_action(t: RepoTool, osi: OSInfo, action: str, path: Optional[str],
 
 def cmd_apps(args, osi: OSInfo) -> int:
     action = getattr(args, "action", None) or "list"
-    if action == "list":
-        _print_repo_tools(); return 0   # human-table READ (engine-bridge catalog.ts parses text)
+    if action == "list":  # human-table READ; --json → bridge-safe envelope (was bad_json)
+        return emit_table_json("apps", _print_repo_tools, action="list")
     if action == "wizard":
         return _apps_wizard(osi)
     if action == "installed":
@@ -9772,16 +9824,31 @@ def cmd_info(args, osi: OSInfo) -> int:
 
 
 def cmd_doctor(args, osi: OSInfo) -> int:
-    # NOTE: doctor is intentionally HUMAN-TEXT only (engine-bridge types/doctor.ts captures
-    # the text for the health pill and explicitly does NOT treat it as a --json command).
+    # doctor's HUMAN text is captured by engine-bridge types/doctor.ts (the health pill) when
+    # called WITHOUT --json. But the bridge contract is UNIVERSAL: under --json we MUST emit one
+    # JSON object on stdout. Raw print() here previously wrote the human table to stdout even
+    # under --json → the bridge saw non-JSON → `error (bad_json)`. Honor --json.
+    detected = detect_hosts()
+    ok = osi.family != "unsupported" and bool(detected)
+    if JSON_OUT:
+        emit_json(
+            {
+                "command": "doctor",
+                "ok": ok,
+                "os": {"raw": osi.raw, "family": osi.family},
+                "pkg_manager": osi.pkg_manager or None,
+                "python": platform.python_version(),
+                "git": shutil.which("git"),
+                "ai_agents": [h.name for h in detected],
+            }
+        )
+        return 0 if ok else 2
     Log.head("Environment check")
     print(f"  OS            : {osi.raw} -> {osi.family}")
     print(f"  pkg manager   : {osi.pkg_manager or 'none found'}")
     print(f"  python        : {platform.python_version()}")
     print(f"  git           : {shutil.which('git') or 'NOT FOUND'}")
-    detected = detect_hosts()
     print(f"  AI agents     : {', '.join(h.name for h in detected) or 'none detected'}")
-    ok = osi.family != "unsupported" and bool(detected)
     (Log.ok if ok else Log.warn)("ready" if ok else "no usable OS or no AI agents found")
     return 0 if ok else 2
 
@@ -11862,56 +11929,63 @@ def cmd_inventory(args, osi: OSInfo) -> int:
     (registry-managed AND foreign), with state. Live — re-run to refresh."""
     detected = _filter_hosts(detect_hosts(), getattr(args, "host", None))
     if not detected:
+        if JSON_OUT:
+            return emit_json(
+                {"command": "inventory", "ok": False, "error": "no target AI agents detected", "lines": []}
+            )
         Log.err("no target AI agents detected")
         return 2
-    # human-table READ consumed by engine-bridge catalog.ts as text — no JSON envelope.
-    reg_ids = registry_plugin_ids()
-    reg_names = registry_repo_names()
-    totals = {"plugins": 0, "skills": 0, "mcp": 0, "extensions": 0}
-    for host in detected:
-        Log.head(f"Inventory: {host.label} ({host.name})")
-        inv = inventory_host(host)
-        if not any(inv.get(k) for k in ("plugins", "skills", "mcp", "extensions",
-                                        "marketplaces", "rules", "commands")):
-            Log.step("nothing found (or no known plugin/skill store for this agent)")
-            continue
-        if inv["marketplaces"]:
-            print(f"  marketplaces: {', '.join(inv['marketplaces'])}")
-        if inv["plugins"]:
-            print("  plugins:")
-            for pl in inv["plugins"]:
-                tag = "registry" if pl["id"] in reg_ids else "foreign"
-                tcol = "cyan" if tag == "registry" else "yellow"
-                st = "enabled" if pl["enabled"] else "disabled"
-                scol = "green" if pl["enabled"] else "yellow"
-                print(f"    - {pl['id']:<42} {Log._c(st, scol):<8} {Log._c('[' + tag + ']', tcol)}")
-            totals["plugins"] += len(inv["plugins"])
-        if inv["extensions"]:
-            print("  extensions: " + ", ".join(inv["extensions"]))
-            totals["extensions"] += len(inv["extensions"])
-        if inv["skills"]:
-            print("  skills:")
-            for sk in inv["skills"]:
-                tag = "registry" if sk["name"].lower() in reg_names else "foreign"
-                col = {"enabled": "green", "muted": "cyan", "disabled": "yellow"}.get(sk["state"], "magenta")
-                print(f"    - {sk['name']:<42} {Log._c(sk['state'], col):<8} [{tag}]")
-            totals["skills"] += len(inv["skills"])
-        if inv["mcp"]:
-            print("  MCP servers:")
-            for m in inv["mcp"]:
-                print(f"    - {m['name']:<42} ({m['config']})")
-            totals["mcp"] += len(inv["mcp"])
-        for key, label in (("rules", "rules (Cursor .mdc)"), ("commands", "commands")):
-            if inv.get(key):
-                print(f"  {label}:")
-                for r in inv[key]:
-                    col = {"enabled": "green", "muted": "cyan", "disabled": "yellow"}.get(r["state"], "magenta")
-                    print(f"    - {r['name']:<42} {Log._c(r['state'], col)}")
-    Log.info(f"totals across agents: {totals['plugins']} plugins, {totals['skills']} skills, "
-             f"{totals['mcp']} MCP, {totals['extensions']} extensions")
-    Log.step("manage: `disable <id>` / `enable <id>` / `uninstall <id>` (plugins by id), "
-             "`skills disable <name>` (skills)")
-    return 0
+
+    # human-table READ; under --json emit a bridge-safe envelope (was raw text → bad_json).
+    def _render() -> None:
+        reg_ids = registry_plugin_ids()
+        reg_names = registry_repo_names()
+        totals = {"plugins": 0, "skills": 0, "mcp": 0, "extensions": 0}
+        for host in detected:
+            Log.head(f"Inventory: {host.label} ({host.name})")
+            inv = inventory_host(host)
+            if not any(inv.get(k) for k in ("plugins", "skills", "mcp", "extensions",
+                                            "marketplaces", "rules", "commands")):
+                Log.step("nothing found (or no known plugin/skill store for this agent)")
+                continue
+            if inv["marketplaces"]:
+                print(f"  marketplaces: {', '.join(inv['marketplaces'])}")
+            if inv["plugins"]:
+                print("  plugins:")
+                for pl in inv["plugins"]:
+                    tag = "registry" if pl["id"] in reg_ids else "foreign"
+                    tcol = "cyan" if tag == "registry" else "yellow"
+                    st = "enabled" if pl["enabled"] else "disabled"
+                    scol = "green" if pl["enabled"] else "yellow"
+                    print(f"    - {pl['id']:<42} {Log._c(st, scol):<8} {Log._c('[' + tag + ']', tcol)}")
+                totals["plugins"] += len(inv["plugins"])
+            if inv["extensions"]:
+                print("  extensions: " + ", ".join(inv["extensions"]))
+                totals["extensions"] += len(inv["extensions"])
+            if inv["skills"]:
+                print("  skills:")
+                for sk in inv["skills"]:
+                    tag = "registry" if sk["name"].lower() in reg_names else "foreign"
+                    col = {"enabled": "green", "muted": "cyan", "disabled": "yellow"}.get(sk["state"], "magenta")
+                    print(f"    - {sk['name']:<42} {Log._c(sk['state'], col):<8} [{tag}]")
+                totals["skills"] += len(inv["skills"])
+            if inv["mcp"]:
+                print("  MCP servers:")
+                for m in inv["mcp"]:
+                    print(f"    - {m['name']:<42} ({m['config']})")
+                totals["mcp"] += len(inv["mcp"])
+            for key, label in (("rules", "rules (Cursor .mdc)"), ("commands", "commands")):
+                if inv.get(key):
+                    print(f"  {label}:")
+                    for r in inv[key]:
+                        col = {"enabled": "green", "muted": "cyan", "disabled": "yellow"}.get(r["state"], "magenta")
+                        print(f"    - {r['name']:<42} {Log._c(r['state'], col)}")
+        Log.info(f"totals across agents: {totals['plugins']} plugins, {totals['skills']} skills, "
+                 f"{totals['mcp']} MCP, {totals['extensions']} extensions")
+        Log.step("manage: `disable <id>` / `enable <id>` / `uninstall <id>` (plugins by id), "
+                 "`skills disable <name>` (skills)")
+
+    return emit_table_json("inventory", _render, action="scan")
 
 
 def cmd_sync(args, osi: OSInfo) -> int:
@@ -12282,9 +12356,8 @@ def cmd_models(args, osi: OSInfo) -> int:
     if action in ("pull", "run"):
         return _models_pull_run(action, getattr(args, "tool", None))
     if action == "list":
-        # human-table READ consumed by engine-bridge catalog.ts as text — no JSON envelope.
-        _print_model_tools()
-        return 0
+        # human-table READ; under --json emit a bridge-safe envelope (raw text → bad_json).
+        return emit_table_json("models", _print_model_tools, action="list")
     valid = ("install", "uninstall", "update", "enable", "disable", "status", "versions", "rollback")
     if action not in valid:
         Log.err(f"usage: models [list | {' | '.join(valid)}] <id> [--path DIR] [--version N]"); return 2

@@ -17,6 +17,8 @@ import { safeInspectorJson } from "./rightrail-view.js";
 
 const RAIL_DEFAULT = 320;
 const RAIL_MIN = 260;
+/** Collapsed → a thin vertical tray docked on the right edge (≈ the 56px ActivityBar). */
+const RAIL_TRAY_WIDTH = 44;
 
 export type RightRailMode = "agent" | "inspector";
 
@@ -46,6 +48,24 @@ function tabStyle(activeTab: boolean): CSSProperties {
   };
 }
 
+/** Icon-button style for the collapsed tray (mirrors the ActivityBar brand-mix). */
+function trayButtonStyle(activeItem: boolean): CSSProperties {
+  return {
+    width: 32,
+    height: 32,
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    background: activeItem ? "color-mix(in srgb, var(--brand) 16%, transparent)" : "transparent",
+    border: "none",
+    borderRadius: "var(--radius-md, 6px)",
+    color: activeItem ? "var(--brand)" : "var(--text-secondary)",
+    cursor: "pointer",
+    fontSize: "0.95rem",
+    lineHeight: 1,
+  };
+}
+
 export function RightRail({
   collapsed,
   mode,
@@ -59,10 +79,75 @@ export function RightRail({
     axis: "x",
     initial: RAIL_DEFAULT,
     min: RAIL_MIN,
-    max: () => Math.max(RAIL_MIN, Math.round(window.innerWidth * 0.6)),
+    // 0.45 so rail_max + sidebar_max (0.35) + the 56px activity bar can never exceed
+    // the viewport. storageKey persists the chosen width across reloads (like Sidebar).
+    max: () => Math.max(RAIL_MIN, Math.round(window.innerWidth * 0.45)),
     invert: true,
+    storageKey: "prometheus.layout.rightRailWidth",
   });
-  if (collapsed) return null;
+  if (collapsed) {
+    // Minimized: a thin vertical tray docked on the right edge (mirrors BottomPanel's
+    // stay-mounted, click-to-restore collapse — never a hard unmount). The chevron
+    // re-expands; each mode glyph re-expands straight into that mode. Kept AFTER the
+    // useResizable call so hook order stays stable.
+    return (
+      <aside
+        aria-label="AI and inspector (minimized)"
+        data-shell-region="rail"
+        tabIndex={-1}
+        style={{
+          width: RAIL_TRAY_WIDTH,
+          flexShrink: 0,
+          display: "flex",
+          flexDirection: "column",
+          alignItems: "center",
+          gap: "var(--space-4, 8px)",
+          paddingBlock: "var(--space-4, 8px)",
+          background: "var(--bg-surface)",
+          borderLeft: "1px solid var(--border-subtle)",
+        }}
+      >
+        <button
+          type="button"
+          aria-label="Expand right rail"
+          aria-expanded={false}
+          title="Expand AI panel (⌥⌘B)"
+          onClick={onToggle}
+          style={trayButtonStyle(false)}
+        >
+          ⟨
+        </button>
+        <div
+          style={{ width: 20, height: 1, background: "var(--border-subtle)" }}
+          aria-hidden="true"
+        />
+        <button
+          type="button"
+          aria-label="Open AI"
+          title="AI"
+          onClick={() => {
+            onModeChange("agent");
+            onToggle();
+          }}
+          style={trayButtonStyle(mode === "agent")}
+        >
+          ✦
+        </button>
+        <button
+          type="button"
+          aria-label="Open Inspector"
+          title="Inspector"
+          onClick={() => {
+            onModeChange("inspector");
+            onToggle();
+          }}
+          style={trayButtonStyle(mode === "inspector")}
+        >
+          {"{}"}
+        </button>
+      </aside>
+    );
+  }
   return (
     <aside
       aria-label="AI and inspector"
@@ -107,8 +192,8 @@ export function RightRail({
         <div style={{ flex: 1 }} />
         <button
           type="button"
-          aria-label="Collapse right rail"
-          title="Collapse (⌥⌘B)"
+          aria-label="Minimize right rail to tray"
+          title="Minimize to tray (⌥⌘B)"
           onClick={onToggle}
           style={{
             background: "transparent",

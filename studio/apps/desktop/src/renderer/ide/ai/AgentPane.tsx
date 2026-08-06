@@ -1431,7 +1431,9 @@ export function AgentPane({
               position: "relative",
               alignSelf: t.role === "user" ? "flex-end" : "flex-start",
               maxWidth: "90%",
-              padding: "6px 22px 6px 8px",
+              // role-aware right gutter: a user turn stacks copy/revert/fork (out to right:34
+              // + glyph) → needs 48px; assistant has only copy → tight 24px. 22px overlapped text.
+              padding: t.role === "user" ? "6px 48px 6px 8px" : "6px 24px 6px 8px",
               borderRadius: 6,
               fontSize: "0.8rem",
               whiteSpace: "pre-wrap",

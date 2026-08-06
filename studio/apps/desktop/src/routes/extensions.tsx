@@ -300,7 +300,16 @@ function McpManager(): ReactElement {
                     padding: "var(--space-1, 2px) 0",
                   }}
                 >
-                  <span style={{ flex: 1, fontFamily: "var(--font-mono)" }}>
+                  <span
+                    style={{
+                      flex: 1,
+                      minWidth: 0,
+                      overflow: "hidden",
+                      textOverflow: "ellipsis",
+                      whiteSpace: "nowrap",
+                      fontFamily: "var(--font-mono)",
+                    }}
+                  >
                     {s.id} · {s.transportKind === "stdio" ? s.command : s.url} · {s.toolCount} tool
                     {s.toolCount === 1 ? "" : "s"}
                   </span>
@@ -747,6 +756,12 @@ export function ExtensionsRoute(): ReactElement {
         <MarketplaceView
           tab={tab}
           onTabChange={setTab}
+          // only show the WIRED tabs — Plugins/Skills have no data source here, so
+          // advertising them meant two permanently-empty tabs ("absurdly empty").
+          tabs={[
+            { id: "extensions", label: "Extensions" },
+            { id: "mcp", label: "MCP Servers" },
+          ]}
           query={query}
           onQueryChange={setQuery}
           sort={sort}

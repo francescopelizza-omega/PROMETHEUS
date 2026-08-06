@@ -368,7 +368,16 @@ export function AppearancePage({ windowId, workspaceRoot }: AppearancePageProps)
         </div>
 
         <div style={{ display: "flex", gap: "var(--space-3, 6px)", justifyContent: "flex-end" }}>
-          <Button variant="primary" onClick={() => active && apply(active)}>
+          <Button
+            variant="primary"
+            onClick={() => {
+              // "Set as default" must set the GLOBAL default regardless of the per-window
+              // toggle — via apply() it silently only re-painted the window when per-window was on.
+              if (!active) return;
+              setRegistry((r) => themes.setActive(r, active.id, undefined));
+              setScheme(active.id);
+            }}
+          >
             Set as default
           </Button>
         </div>

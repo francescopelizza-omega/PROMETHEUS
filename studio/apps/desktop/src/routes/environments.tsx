@@ -330,6 +330,7 @@ export function EnvironmentsRoute(): ReactElement {
         .create({
           name: payload.name,
           kind: payload.kind,
+          python: payload.base, // the chosen interpreter — was dropped (env made from default)
           location: payload.location,
           templateId: payload.templateId,
           confirm: true,
@@ -337,7 +338,8 @@ export function EnvironmentsRoute(): ReactElement {
         .then(() => {
           closeWizard();
           refetchAll();
-        });
+        })
+        .catch(() => closeWizard()); // a rejected create must still close the wizard
     },
     [closeWizard, refetchAll],
   );
@@ -373,14 +375,34 @@ export function EnvironmentsRoute(): ReactElement {
           onClone={(id) =>
             void envApi()
               .clone({ from: id, to: `${id}-clone`, confirm: true })
-              .then(refetchAll)
-              .catch(() => {})
+              .then((res) => {
+                // a gated clone (warn/block) used to be silently swallowed → "Clone…" looked
+                // dead. Route the verdict to the shared sheet like the other gated verbs.
+                if (res.installed) refetchAll();
+                else if (res.gate)
+                  setPendingGate({
+                    gate: res.gate,
+                    request: { envId: id, spec: "" },
+                    target: `clone of ${id}`,
+                  });
+              })
+              .catch(() => clearPendingGate())
           }
           onExport={(id) =>
             void envApi()
               .export(id)
-              .catch(() => {})
+              .then((r) =>
+                setImportMsg(
+                  r.ok ? `Exported requirements for "${id}".` : (r.error ?? "export failed"),
+                ),
+              )
+              .catch(() => setImportMsg("export failed"))
           }
+          onReveal={(id) => {
+            // was a dead/greyed button (prop never passed) — reveal the env folder in the OS.
+            const e = envRows.find((x) => x.id === id);
+            if (e) void window.prometheus.openPath(e.path).catch(() => {});
+          }}
           onDelete={(id) => {
             // destructive: removes the env + all its packages/isolation — confirm first.
             if (
@@ -440,7 +462,12 @@ export function EnvironmentsRoute(): ReactElement {
                   else if (res.gate)
                     setPendingGate({
                       gate: res.gate,
-                      request: { envId: selectedEnvId, spec: [] },
+                      // spec:[] meant the re-run installed NOTHING (silent no-op); carry the
+                      // actual outdated set so Proceed actually upgrades them.
+                      request: {
+                        envId: selectedEnvId,
+                        spec: pkgRows.filter((p) => p.state === "outdated").map((p) => p.name),
+                      },
                       target: "outdated packages",
                     });
                 })
@@ -476,6 +503,12 @@ export function EnvironmentsRoute(): ReactElement {
                       })
                       .catch(() => clearPendingGate())
                 : undefined
+            }
+            onInstallToolkit={() =>
+              void envApi()
+                .cudaInstall()
+                .then(refetchAll)
+                .catch(() => {})
             }
           />
         </Panel>

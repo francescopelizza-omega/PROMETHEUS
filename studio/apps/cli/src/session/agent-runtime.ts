@@ -46,6 +46,7 @@ import {
   closeSync,
   fsyncSync,
   lstatSync,
+  mkdirSync,
   openSync,
   readFileSync,
   renameSync,
@@ -76,6 +77,9 @@ import {
   safeFetch,
 } from "@prometheus/engine-bridge";
 import { hasMeteredConsent } from "../metered-consent.js";
+// syntax highlighting for code inside the reasoning stream (Pelly scheme). Pure, self-contained.
+import { CODE_STATE, detectLanguage, highlightLine, isHighlightable } from "../tui/highlight.js";
+import { type ColorCaps, type Role, paint } from "../tui/palette.js";
 // pure display-width helper (ANSI + wide-char aware); no TUI/presentation deps.
 import { wrapLine } from "../tui/width.js";
 import { type AccountingRecord, appendAccounting, readAccounting } from "./history-store.js";
@@ -287,6 +291,8 @@ export interface SessionCtx {
   write: (text: string) => void;
   /** terminal columns for streamed word-wrap (CLI-003); undefined ⇒ pass-through. */
   width?: number;
+  /** terminal color depth — enables Pelly syntax highlighting of code inside reasoning. */
+  caps?: ColorCaps;
   /** resolved read-scope roots = [cwd, ...added dirs] (CLI-004). A path-scoped tool
    * touching anything outside is denied fail-closed. undefined ⇒ no path guard. */
   workingSet?: string[];
@@ -682,6 +688,246 @@ function threadToMessages(thread: Thread): Msg[] {
   return thread.messages.map((m: ThreadMessage): Msg => ({ role: m.role, content: m.content }));
 }
 
+/** Map the agent's `ToolDef`s → OpenAI function-tool schemas so a tool-capable local model
+ *  (ollama/lmstudio) can emit NATIVE tool_calls. `ToolSchema` is Record<field, FieldSpec>. */
+function toOpenAiTools(tools: ToolDef[]): unknown[] {
+  return tools.map((t) => {
+    const properties: Record<string, unknown> = {};
+    const required: string[] = [];
+    for (const [field, spec] of Object.entries(t.schema)) {
+      const s = spec as { type?: string; required?: boolean; description?: string };
+      properties[field] = {
+        type: s.type ?? "string",
+        ...(s.description ? { description: s.description } : {}),
+      };
+      if (s.required) required.push(field);
+    }
+    return {
+      type: "function",
+      function: {
+        name: t.name,
+        description: t.description,
+        parameters: { type: "object", properties, required },
+      },
+    };
+  });
+}
+
+/**
+ * Fire-and-forget: pre-load a LOCAL model into memory at session start so the FIRST real
+ * prompt is warm (no multi-second cold RELOAD). Sends a 1-token request with `keep_alive`
+ * to pin the model resident. Never throws, never blocks the session — a down/absent runner
+ * just means the first prompt loads cold, exactly as before. Local endpoints only (never a
+ * cloud request, never a non-standard field to a non-Ollama endpoint).
+ */
+export function warmupLocalModel(endpoint: AiEndpoint | undefined): void {
+  if (!endpoint || endpoint.locality !== "local") return;
+  const base = endpoint.baseUrl.replace(/\/+$/, "");
+  const url = /\/v1$/.test(base) ? `${base}/chat/completions` : `${base}/v1/chat/completions`;
+  void fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: "Bearer local" },
+    body: JSON.stringify({
+      model: endpoint.model ?? endpoint.id,
+      messages: [{ role: "user", content: "ping" }],
+      max_tokens: 1,
+      stream: false,
+      keep_alive: "30m",
+    }),
+  }).catch(() => {
+    /* best-effort: a down/absent runner just means the first prompt loads cold */
+  });
+}
+
+/** One tool call being reassembled from OpenAI streaming deltas (name once, args in fragments). */
+interface ToolCallAccum {
+  name: string;
+  args: string;
+}
+
+/** The tool-call-capable transport (CLI-*): send the agent's tools and STREAM the
+ *  OpenAI-compatible SSE so text tokens surface immediately (no wait for the whole
+ *  completion) while native `tool_calls` are reassembled from their delta fragments.
+ *  Yields text deltas live, then one `{kind:"tool_call"}` per completed call, then final.
+ *  The agent loop routes each call through the §4.3 broker (permission prompt / gate) and
+ *  applies it — so `propose_edit`/`write_file` land on disk ONLY after the human approves. */
+async function* toolTurn(
+  endpoint: AiEndpoint,
+  messages: Msg[],
+  tools: ToolDef[],
+  policy: WorkspacePolicy,
+  signal?: AbortSignal,
+): AsyncIterable<LlmTurn> {
+  if (policy.neverSendToCloud && endpoint.locality === "cloud") {
+    yield { kind: "text", text: "cloud endpoint refused (workspace never-send-to-cloud is on)" };
+    yield { kind: "final" };
+    return;
+  }
+  const base = endpoint.baseUrl.replace(/\/+$/, "");
+  const url = /\/v1$/.test(base) ? `${base}/chat/completions` : `${base}/v1/chat/completions`;
+  const model = endpoint.model ?? endpoint.id;
+  // accumulate tool-call fragments by their stream index (args arrive in pieces).
+  const calls = new Map<number, ToolCallAccum>();
+  // progress watchdog: a large local model can take 30–90s to START (cold prefill/reload).
+  // Without a heartbeat the user can't tell a slow MODEL from a hung WRAPPER — so we emit a
+  // status every FIRST_TOKEN_TICK until the first byte, and hard-abort after HARD_TIMEOUT.
+  const FIRST_TOKEN_TICK_MS = 8_000;
+  const STREAM_IDLE_TICK_MS = 15_000;
+  const HARD_TIMEOUT_MS = 180_000;
+  // our own controller so a HARD TIMEOUT (or the user's Ctrl-C) cancels the fetch + reader.
+  const ac = new AbortController();
+  const onUserAbort = (): void => ac.abort();
+  if (signal) {
+    if (signal.aborted) ac.abort();
+    else signal.addEventListener("abort", onUserAbort, { once: true });
+  }
+  const startMs = Date.now();
+  const hardTimer = setTimeout(() => ac.abort(), HARD_TIMEOUT_MS);
+  try {
+    yield { kind: "status", text: `→ ${model}: sending request…` };
+    const res = await fetch(url, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: "Bearer local",
+        Accept: "text/event-stream",
+      },
+      body: JSON.stringify({
+        model,
+        // Our tool results are already human-readable (`[tool_result …]`) and carry no
+        // OpenAI `tool_call_id` linkage; send them as plain `user` context so a strict
+        // endpoint never rejects an unpaired `role:"tool"` message on the follow-up round.
+        messages: messages.map((m) => ({
+          role: m.role === "tool" ? "user" : m.role,
+          content: m.content,
+        })),
+        tools: toOpenAiTools(tools),
+        tool_choice: "auto",
+        stream: true,
+        // Ollama extension (ignored by other endpoints): keep the model resident 30m so a
+        // second prompt doesn't pay the multi-second cold RELOAD. Only for LOCAL runners —
+        // never send a non-standard field to a cloud endpoint.
+        ...(endpoint.locality === "local" ? { keep_alive: "30m" } : {}),
+      }),
+      signal: ac.signal,
+    });
+    if (!res.ok || !res.body) {
+      yield { kind: "text", text: `model error: HTTP ${res.status} ${res.statusText}` };
+      yield { kind: "final" };
+      return;
+    }
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = "";
+    let done = false;
+    let firstByte = false;
+    // hold ONE in-flight read across watchdog ticks (calling read() twice concurrently throws).
+    let pendingRead = reader.read();
+    while (!done) {
+      if (signal?.aborted || ac.signal.aborted) break;
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const tick = new Promise<"TICK">((r) => {
+        timer = setTimeout(() => r("TICK"), firstByte ? STREAM_IDLE_TICK_MS : FIRST_TOKEN_TICK_MS);
+      });
+      const raced = await Promise.race([pendingRead, tick]);
+      if (timer) clearTimeout(timer);
+      if (raced === "TICK") {
+        // no byte within the tick window — tell the user it's the MODEL we're waiting on.
+        const s = Math.round((Date.now() - startMs) / 1000);
+        yield {
+          kind: "status",
+          text: firstByte
+            ? `▼ ${model} still generating… (${s}s)`
+            : `⏳ waiting for ${model} — no output yet (${s}s). A large local model can take 30–90s to start.`,
+        };
+        continue; // pendingRead is still pending — re-race it next iteration
+      }
+      const { value, done: streamDone } = raced;
+      if (streamDone) break;
+      if (!firstByte) {
+        firstByte = true;
+        yield { kind: "status", text: `▼ ${model}: responding…` };
+      }
+      buf += decoder.decode(value, { stream: true });
+      // SSE frames are newline-delimited `data: <json>` lines; process whole lines only.
+      let nl = buf.indexOf("\n");
+      while (nl !== -1) {
+        const line = buf.slice(0, nl).trim();
+        buf = buf.slice(nl + 1);
+        nl = buf.indexOf("\n");
+        if (!line.startsWith("data:")) continue;
+        const payload = line.slice(5).trim();
+        if (payload === "[DONE]") {
+          done = true;
+          break;
+        }
+        let chunk: {
+          choices?: Array<{
+            delta?: {
+              content?: string | null;
+              // reasoning models stream thinking here (content stays empty meanwhile);
+              // Ollama uses `reasoning`, some servers `reasoning_content`.
+              reasoning?: string | null;
+              reasoning_content?: string | null;
+              tool_calls?: Array<{
+                index?: number;
+                function?: { name?: string; arguments?: string };
+              }>;
+            };
+          }>;
+        };
+        try {
+          chunk = JSON.parse(payload);
+        } catch {
+          continue; // a partial/keepalive frame — skip
+        }
+        const delta = chunk.choices?.[0]?.delta;
+        if (!delta) continue;
+        const reasoning = delta.reasoning ?? delta.reasoning_content;
+        if (reasoning) yield { kind: "reasoning", text: reasoning };
+        if (delta.content) yield { kind: "text", text: delta.content };
+        for (const tc of delta.tool_calls ?? []) {
+          const idx = tc.index ?? 0;
+          const acc = calls.get(idx) ?? { name: "", args: "" };
+          if (tc.function?.name) acc.name = tc.function.name;
+          if (tc.function?.arguments) acc.args += tc.function.arguments;
+          calls.set(idx, acc);
+        }
+      }
+      pendingRead = reader.read(); // queue the next chunk
+    }
+    // emit each fully-reassembled tool call (ordered by stream index).
+    for (const [, acc] of [...calls.entries()].sort((a, b) => a[0] - b[0])) {
+      if (!acc.name) continue;
+      let args: Record<string, unknown> = {};
+      try {
+        args = JSON.parse(acc.args || "{}") as Record<string, unknown>;
+      } catch {
+        args = {};
+      }
+      yield { kind: "tool_call", call: { name: acc.name as agent.ToolCall["name"], args } };
+    }
+  } catch (err) {
+    // our HARD TIMEOUT aborted the fetch (ac aborted but NOT via the user's Ctrl-C).
+    if (ac.signal.aborted && !signal?.aborted) {
+      const s = Math.round((Date.now() - startMs) / 1000);
+      yield {
+        kind: "status",
+        text: `✗ ${model} timed out after ${s}s with no complete response — aborting this turn. Try a smaller model via /setup, or check the local runner.`,
+      };
+    } else if (!(isAbortError(err) || signal?.aborted)) {
+      yield {
+        kind: "text",
+        text: `model error: ${err instanceof Error ? err.message : String(err)}`,
+      };
+    }
+  } finally {
+    clearTimeout(hardTimer);
+    if (signal) signal.removeEventListener("abort", onUserAbort);
+  }
+  yield { kind: "final" };
+}
+
 /**
  * Build the agent loop's `LLMClient` from a Model-Hub endpoint.
  *
@@ -703,8 +949,16 @@ export function makeLlmClient(endpoint: AiEndpoint, deps: LlmClientDeps = {}): L
   const client: AiClient = createAiClient(endpoint, policy, aiDeps);
 
   return {
-    async *turn(thread: Thread, _tuning: AgentTuning, _tools: ToolDef[]): AsyncIterable<LlmTurn> {
+    async *turn(thread: Thread, _tuning: AgentTuning, tools: ToolDef[]): AsyncIterable<LlmTurn> {
       const messages = threadToMessages(thread);
+      // Tool-capable transport: when the agent offers tools AND the model supports them, use a
+      // non-streaming request so a capable local model returns native tool_calls (which the
+      // text-only SSE below never carries). This is what lets Prometheus ACT — create/edit
+      // files, run gated verbs — instead of only describing.
+      if (tools.length > 0 && endpoint.supportsTools) {
+        yield* toolTurn(endpoint, messages, tools, policy, signal);
+        return;
+      }
       let any = false;
       let usage: SseTokenUsage | undefined;
       let received = "";
@@ -959,6 +1213,64 @@ function applyLocalEdit(
   };
 }
 
+/**
+ * Apply a `write_file` call to a LOCAL file: CREATE a new file or OVERWRITE an existing one
+ * with exact content. Path-guarded (resolve within the working set), parent dirs created,
+ * atomic write, pre-image kept for revert (empty string when the file is newly created).
+ * Mirrors applyLocalEdit's guards; this is the "author a brand-new file" path. Never throws.
+ */
+function applyWriteFile(
+  args: Record<string, unknown>,
+  roots: string[] | undefined,
+  cwd: string,
+): { outcome: ToolOutcome; record?: EditRecord } {
+  const rawPath = typeof args.path === "string" ? args.path : "";
+  if (!rawPath || rawPath.startsWith("-")) {
+    return { outcome: { ok: false, summary: `write_file: refusing invalid path: ${rawPath}` } };
+  }
+  if (typeof args.content !== "string") {
+    return { outcome: { ok: false, summary: "write_file: content must be a string" } };
+  }
+  const content = args.content;
+  const abs = isAbsolute(rawPath) ? rawPath : resolve(cwd, rawPath);
+  // NOTE: no working-set rejection here. `write_file` is destructiveHint ⇒ the broker ALWAYS
+  // routes it to a human confirm that shows the EXACT absolute path; that approval IS the
+  // authorization (and in acceptEdits/bypass/yolo the user opted into auto-approval globally).
+  // A redundant working-set guard here only broke legitimate writes the user explicitly asked
+  // for (e.g. `~/hello.py` while cwd is the repo) and — worse — made the model RETRY the blocked
+  // write every round, burning the whole turn. The confirm prompt is the real gate. `roots` is
+  // intentionally unused now (kept in the signature for call-site symmetry with propose_edit).
+  void roots;
+  // capture the pre-image (for revert): existing content, or "" when the file is new.
+  let preImage = "";
+  let existed = false;
+  try {
+    preImage = readFileSync(abs, "utf8");
+    existed = true;
+  } catch {
+    preImage = "";
+  }
+  // a new file may name directories that don't exist yet — create the parent chain.
+  try {
+    mkdirSync(dirname(abs), { recursive: true });
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err);
+    return { outcome: { ok: false, summary: `write_file: cannot create directory: ${detail}` } };
+  }
+  try {
+    atomicWrite(abs, content);
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err);
+    return { outcome: { ok: false, summary: `write_file: write failed: ${detail}` } };
+  }
+  const verb = existed ? "overwrote" : "created";
+  const lines = content.length === 0 ? 0 : content.split("\n").length;
+  return {
+    outcome: { ok: true, summary: `${verb} ${rawPath} (${lines} line${lines === 1 ? "" : "s"})` },
+    record: { path: abs, preImage },
+  };
+}
+
 /** Restore a kept pre-image (revertLastEdit). Returns true on success. */
 export function revertEdit(record: EditRecord): boolean {
   try {
@@ -1164,6 +1476,16 @@ export function makeToolRunner(
       }
       return outcome;
     }
+    // write_file: CREATE a new file or OVERWRITE an existing one (path-guarded, atomic,
+    // pre-image kept). Reaches here only AFTER human confirm (destructiveHint ⇒ always confirm).
+    if (tool.name === "write_file") {
+      const { outcome, record } = applyWriteFile(args, roots, opts.cwd ?? process.cwd?.() ?? ".");
+      if (record) {
+        if (opts.editHistory) opts.editHistory.push(record);
+        if (opts.checkpoint) captureIntoCheckpoint(opts.checkpoint, record.path, record.preImage);
+      }
+      return outcome;
+    }
     // fail-closed read scope (CLI-004): when a working set is configured, any path
     // argument outside [cwd, ...added dirs] is denied BEFORE it reaches the engine.
     // (Only PATH SCOPE widens — nemesis gating for exec-flavored tools is untouched;
@@ -1250,6 +1572,10 @@ const DEFAULT_ID = (kind: "session" | "turn"): string =>
  */
 function eventLine(ev: AgentEvent): string | null {
   switch (ev.kind) {
+    // reasoning + status are rendered live+dimmed in emit() before here; null = no reprint.
+    case "reasoning":
+    case "status":
+      return null;
     case "text":
       return ev.text;
     // Claude-Code framing: `●` bullet for an action, `⎿` connector for its result.
@@ -1374,17 +1700,128 @@ export async function runMessageTurn(
     writeLogical(partial);
   };
 
+  // --- live "thinking" channel (CLI): reasoning models stream thinking BEFORE any
+  // answer; without this the screen sits blank for the whole reasoning phase ("taking
+  // ages, no output"). We stream it DIMMED, wrapped, and NEVER persist it (not in
+  // `events`, not in `reply`). ANSI dim wraps each PHYSICAL line so wrapLine never
+  // measures the escape bytes. ---------------------------------------------------- //
+  const DIM = "\x1b[2m";
+  const DIM_OFF = "\x1b[22m";
+  const caps: ColorCaps = ctx.caps ?? "none";
+  // paint each PHYSICAL line by `role` (wrap raw first so SGR bytes aren't width-measured).
+  const paintWrapped = (logical: string, role: Role): void => {
+    const physical = wrapWidth > 0 ? wrapLine(logical, wrapWidth) : [logical];
+    safeWrite(physical.map((p) => paint(p, role, caps)).join("\n"));
+  };
+  const dimWrapped = (logical: string): void => {
+    const physical = wrapWidth > 0 ? wrapLine(logical, wrapWidth) : [logical];
+    safeWrite(physical.map((p) => `${DIM}${p}${DIM_OFF}`).join("\n"));
+  };
+  // status lines carry a leading glyph → colour by phase (→ send · ▼ resp · ⏳ wait · round · ✗ err).
+  const statusRole = (t: string): Role => {
+    const s = t.trimStart();
+    if (s.startsWith("→")) return "stSend";
+    if (s.startsWith("▼")) return "stResp";
+    if (s.startsWith("⏳")) return "stWait";
+    if (s.startsWith("✗")) return "stErr";
+    if (s.startsWith("continuing")) return "stRound";
+    return "muted";
+  };
+  let reasoningPending = "";
+  let thinkingStarted = false;
+  // reasoning often contains ```fenced code``` the model is drafting — light it up with the
+  // Pelly scheme; prose is soft violet ("reasoning"), the ``` markers stay dim.
+  const FENCE_RX = /^\s*```(\w+)?\s*$/;
+  let fenceLang: string | null = null;
+  let fenceState = CODE_STATE;
+  const writeReasoningLine = (logical: string): void => {
+    const fm = FENCE_RX.exec(logical);
+    if (fm) {
+      // the ``` marker line itself stays dim; toggle the fence for the lines between.
+      if (fenceLang === null) {
+        fenceLang = detectLanguage(fm[1]);
+        fenceState = CODE_STATE;
+      } else {
+        fenceLang = null;
+      }
+      dimWrapped(logical);
+      return;
+    }
+    if (fenceLang && caps !== "none" && isHighlightable(fenceLang)) {
+      // code inside a fence → highlighted (NOT re-wrapped: highlightLine is line-based and
+      // wrapping mid-token would split an escape); lexer state threads across lines.
+      const { text, state } = highlightLine(logical, fenceLang, fenceState, caps);
+      fenceState = state;
+      safeWrite(text);
+      return;
+    }
+    paintWrapped(logical, "reasoning"); // thinking prose → soft violet, no longer flat grey
+  };
+  const pushReasoning = (text: string): void => {
+    if (!thinkingStarted) {
+      thinkingStarted = true;
+      safeWrite(paint("✻ thinking…", "thinkMark", caps));
+    }
+    reasoningPending += text.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+    let nl = reasoningPending.indexOf("\n");
+    while (nl !== -1) {
+      writeReasoningLine(reasoningPending.slice(0, nl));
+      reasoningPending = reasoningPending.slice(nl + 1);
+      nl = reasoningPending.indexOf("\n");
+    }
+  };
+  const flushReasoning = (): void => {
+    if (reasoningPending.length === 0) return;
+    const partial = reasoningPending;
+    reasoningPending = "";
+    writeReasoningLine(partial);
+  };
+
   const emit = (ev: AgentEvent): void => {
+    // reasoning is LIVE-ONLY progress: render it, but do not persist or count it.
+    if (ev.kind === "reasoning") {
+      pushReasoning(ev.text);
+      return;
+    }
+    // status is LIVE-ONLY wrapper progress (contacting/waiting/round/timeout): colour by phase,
+    // close any thinking block first, never persist.
+    if (ev.kind === "status") {
+      flushReasoning();
+      paintWrapped(ev.text, statusRole(ev.text));
+      return;
+    }
     events.push(ev);
     if (ev.kind === "text") {
+      flushReasoning(); // close any trailing thinking line before the real answer
       reply += ev.text; // RAW accumulation — persistence/tests depend on it
       pushDelta(ev.text); // display buffering ONLY
       return;
     }
-    // a non-text event flushes the pending partial FIRST so tool/status ordering holds.
+    // a non-text event flushes any pending thinking + partial FIRST so ordering holds.
+    flushReasoning();
     flushPending();
     const line = eventLine(ev);
-    if (line !== null) writeLogical(line);
+    if (line !== null) {
+      // colour the tool lines (● action · ⎿ result/verdict/blocked) by outcome.
+      const role: Role | null =
+        ev.kind === "tool_use"
+          ? "toolAction"
+          : ev.kind === "tool_result"
+            ? ev.ok
+              ? "stResp"
+              : "stErr"
+            : ev.kind === "verdict"
+              ? ev.verdict === "block" || ev.verdict === "error"
+                ? "stErr"
+                : "stWait"
+              : ev.kind === "blocked"
+                ? "stErr"
+                : ev.kind === "capped"
+                  ? "stWait"
+                  : null;
+      if (role) paintWrapped(line, role);
+      else writeLogical(line);
+    }
   };
 
   // --- offline / no-endpoint path: engine local chat, no tool loop ---------- //

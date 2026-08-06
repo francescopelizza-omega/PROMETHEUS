@@ -182,6 +182,9 @@ export function DatabasePanel(): ReactElement {
     });
   }, []);
 
+  // the SQL that produced the CURRENT result — the pager must page against THIS, not the
+  // live editor buffer (which the user may have edited after running).
+  const [ranSql, setRanSql] = useState("");
   const runPage = useCallback(
     async (sqlText: string, page: number): Promise<void> => {
       const a = sqlApi();
@@ -195,6 +198,7 @@ export function DatabasePanel(): ReactElement {
         return;
       }
       if (!sqlText.trim()) return;
+      setRanSql(sqlText);
       setExecuting(true);
       setError(undefined);
       const r = await a
@@ -258,7 +262,7 @@ export function DatabasePanel(): ReactElement {
           pageSize={PAGE_SIZE}
           serverPage={pageInfo.page}
           serverMaxPage={pageInfo.maxPage}
-          onPageChange={(p) => void runPage(query, p)}
+          onPageChange={(p) => void runPage(ranSql, p)}
           onQueryChange={setQuery}
           onRun={(q) => void runPage(q, 0)}
           onExport={(fmt) => void exportResult(fmt)}

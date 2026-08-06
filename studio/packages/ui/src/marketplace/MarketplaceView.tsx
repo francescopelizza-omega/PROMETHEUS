@@ -30,6 +30,9 @@ const TABS: { id: MarketplaceTab; label: string }[] = [
 export interface MarketplaceViewProps {
   tab: MarketplaceTab;
   onTabChange(tab: MarketplaceTab): void;
+  /** which tabs to show (default: all four). The container passes only the WIRED tabs so it
+   *  never advertises a Plugins/Skills tab it has no data source for (→ permanently empty). */
+  tabs?: { id: MarketplaceTab; label: string }[];
   query: string;
   onQueryChange(query: string): void;
   sort: SortBy;
@@ -72,7 +75,7 @@ export function MarketplaceView(props: MarketplaceViewProps): ReactElement {
         }}
       >
         <nav style={{ display: "flex", gap: "var(--space-2, 4px)" }}>
-          {TABS.map((t) => (
+          {(props.tabs ?? TABS).map((t) => (
             <button
               key={t.id}
               type="button"
@@ -183,7 +186,26 @@ export function MarketplaceView(props: MarketplaceViewProps): ReactElement {
                   )}
                 </button>
                 <VerdictChip verdict={row.worstVerdict} />
-                {row.installable === false ? (
+                {row.installed ? (
+                  // installed rows are 'installable:false' but ARE manageable — show Manage,
+                  // not the confusing "not installable" text, as the primary affordance.
+                  <button
+                    type="button"
+                    onClick={() => props.onInstall(row)}
+                    style={{
+                      background: "var(--bg-surface-2)",
+                      color: "var(--text-primary)",
+                      border: "1px solid var(--border-strong)",
+                      borderRadius: "var(--radius-md, 6px)",
+                      padding: "var(--space-2, 4px) var(--space-6, 12px)",
+                      cursor: "pointer",
+                      fontSize: "var(--text-small-size, 0.8125rem)",
+                      fontWeight: 600,
+                    }}
+                  >
+                    Manage
+                  </button>
+                ) : row.installable === false ? (
                   <span
                     style={{
                       color: "var(--text-secondary)",
@@ -207,7 +229,7 @@ export function MarketplaceView(props: MarketplaceViewProps): ReactElement {
                       fontWeight: 600,
                     }}
                   >
-                    {row.installed ? "Manage" : "Install"}
+                    Install
                   </button>
                 )}
               </li>
@@ -220,7 +242,11 @@ export function MarketplaceView(props: MarketplaceViewProps): ReactElement {
                   textAlign: "center",
                 }}
               >
-                No matches in “{inert(query)}”.
+                {query.trim() ? (
+                  <>No matches for “{inert(query)}”.</>
+                ) : (
+                  <>Nothing here yet — install one to get started.</>
+                )}
               </li>
             )}
           </ul>

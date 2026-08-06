@@ -223,11 +223,33 @@ export function CatalogRoute(): ReactElement {
         install.mutate({ name: vars.name, dryRun: false, force: false });
         return;
       }
-      // a non-allow/non-forced FAILURE (e.g. a plain engine/network error envelope) used
-      // to fall straight to refetch with no feedback — surface it so the button isn't
-      // just silently returning to idle.
+      // a non-allow/non-forced FAILURE. Surface the REAL reason: the engine reports a
+      // nemesis BLOCK via structured install_events (no top-level error/verdict) — e.g.
+      // frontend-design flagged dangerous (21 HIGH findings). Without this the banner
+      // showed a meaningless "install failed" for what is actually a security block.
       if (!res.ok) {
-        setInstallError({ name: vars.name, error: res.error ?? "install failed" });
+        const events = Array.isArray(res.installEvents) ? res.installEvents : [];
+        const bad = events.filter((e) => {
+          const r = (e as { result?: unknown }).result;
+          return r === "blocked" || r === "error" || r === "failed";
+        });
+        let msg = res.error ?? res.message;
+        if (!msg && bad.length > 0) {
+          const names = bad
+            .map((e) => String((e as { plugin?: unknown }).plugin ?? vars.name))
+            .join(", ");
+          msg = bad.some((e) => (e as { result?: unknown }).result === "blocked")
+            ? `Blocked by the security gate — nemesis flagged ${names} as dangerous; not installed. Use Force install to override at your own risk.`
+            : `Install did not complete for ${names} — see the log pane below.`;
+        }
+        if (!msg) {
+          const summary = res.summary as Record<string, unknown> | undefined;
+          if (summary && Object.keys(summary).length > 0)
+            msg = `Install did not complete: ${Object.entries(summary)
+              .map(([k, v]) => `${String(v)} ${k}`)
+              .join(", ")}.`;
+        }
+        setInstallError({ name: vars.name, error: msg ?? "install failed" });
       }
       refetchAll();
     },
@@ -428,7 +450,14 @@ export function CatalogRoute(): ReactElement {
         </div>
       )}
 
-      <nav style={{ display: "flex", gap: "var(--space-3, 6px)" }}>
+      <nav
+        style={{
+          display: "flex",
+          flexWrap: "wrap",
+          alignItems: "center",
+          gap: "var(--space-3, 6px)",
+        }}
+      >
         {TABS.map((t) => (
           <button
             key={t.id}
@@ -756,20 +785,43 @@ export function CatalogRoute(): ReactElement {
 
       {/* the install/audit gate decision is the ENGINE's — rendered in the shared sheet. */}
       {pendingGate && (
-        <VerdictSheet
-          verdict={gateToVerdict(pendingGate.gate, pendingGate.target)}
-          onProceed={() => {
-            // proceed = commit the install (the engine still gates; warn ⇒ allowed).
-            install.mutate({ name: pendingGate.name, dryRun: false, force: false });
-            setPendingGate(null);
+        // Fixed-overlay modal (mirrors the sibling dialogs). WITHOUT this the sheet was an
+        // in-flow child appended below the catalog grid, inside <main overflow:auto> —
+        // below the fold, so a block verdict + the force-override escape hatch were invisible
+        // and Install/Audit looked like it did nothing.
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-label={`Security verdict: ${pendingGate.name}`}
+          style={{
+            position: "fixed",
+            inset: 0,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            background: "color-mix(in srgb, var(--bg-app) 65%, transparent)",
+            padding: "var(--space-8, 16px)",
+            overflow: "auto",
+            zIndex: 70,
           }}
-          onCancel={() => setPendingGate(null)}
-          onRequestForce={() => {
-            // the deep-red override re-runs the install with force + confirm (§8).
-            install.mutate({ name: pendingGate.name, dryRun: false, force: true });
-            setPendingGate(null);
-          }}
-        />
+        >
+          <div style={{ width: "min(680px, 100%)", maxHeight: "90vh", overflow: "auto" }}>
+            <VerdictSheet
+              verdict={gateToVerdict(pendingGate.gate, pendingGate.target)}
+              onProceed={() => {
+                // proceed = commit the install (the engine still gates; warn ⇒ allowed via --yes).
+                install.mutate({ name: pendingGate.name, dryRun: false, force: false });
+                setPendingGate(null);
+              }}
+              onCancel={() => setPendingGate(null)}
+              onRequestForce={() => {
+                // the deep-red override re-runs the install with force + confirm (§8).
+                install.mutate({ name: pendingGate.name, dryRun: false, force: true });
+                setPendingGate(null);
+              }}
+            />
+          </div>
+        </div>
       )}
 
       {/* "Learn more" — the deep tutorial (dossier) for the selected item. */}
@@ -1015,7 +1067,7 @@ function ItemCard(props: {
           </div>
         </div>
       ) : (
-        <div style={{ display: "flex", gap: 8, marginTop: 4 }}>
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginTop: 4 }}>
           <Button variant="ghost" onClick={onLearn}>
             Learn more
           </Button>
@@ -1093,7 +1145,8 @@ function ReachMatrix(props: { items: CatalogItem[]; loading: boolean }): ReactEl
   return (
     <Panel title="Reach Matrix" elevation="e1">
       <p style={{ marginTop: 0, color: "var(--text-secondary, #9a9aa3)", fontSize: "0.82rem" }}>
-        ✓ native · ↔ via sync · – unavailable. Click a ↔ cell to install on Claude, then sync.
+        ✓ native · ↔ via sync · – unavailable. Install from the catalog list; cross-agent sync then
+        propagates it to ↔ agents.
       </p>
       {loading ? (
         <p style={{ color: "var(--text-secondary, #9a9aa3)" }}>loading matrix…</p>

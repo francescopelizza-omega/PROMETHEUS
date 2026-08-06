@@ -16,6 +16,7 @@ import { stringWidth } from "./width.js";
 
 const BASE: StatusModel = {
   permMode: "default",
+  authLevel: 1,
   model: "qwen2.5",
   modelSource: "local",
   tools: true,
@@ -55,9 +56,12 @@ test("justify drops right segments tail-first when they don't fit", () => {
 });
 
 test("default mode: bar + hint only (no indicator line)", () => {
-  const lines = statusLines(BASE, 60, "none");
+  // width 80: room for the load-bearing auth chip + model + profile (the auth chip sits
+  // immediately left of the model and is always kept — it drops last on a narrow terminal).
+  const lines = statusLines(BASE, 80, "none");
   assert.equal(lines.length, 2); // bar + hint
   assert.match(lines[0] ?? "", /\[PROM:DEFAULT\]/);
+  assert.match(lines[0] ?? "", /auth:1·readonly/); // authorisation chip, left of the model
   assert.match(lines[0] ?? "", /\/default/); // profile chip
   assert.match(lines[1] ?? "", /commands/); // hint
 });

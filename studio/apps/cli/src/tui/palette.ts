@@ -13,6 +13,8 @@ import {
   ACCENT_RGB,
   ANSI_SGR,
   type AnsiColorName,
+  PELLY_SPAN_BG,
+  PELLY_SYNTAX,
   type Ramp,
   type RampName,
   ramps,
@@ -44,18 +46,50 @@ export type Role =
   | "accent"
   | "muted"
   | "heading"
-  // syntax-highlight token roles (WRAPPER Subsystem 2) — sourced from the SAME ramps, no new hex.
+  // syntax-highlight token roles (WRAPPER Subsystem 2). The exact hues come from the Pelly
+  // scheme (tokens/pelly-syntax) on truecolor/256; the ramp/ANSI-16 maps below are the fallback.
   | "synKeyword"
   | "synString"
+  | "synDoc"
   | "synNumber"
   | "synComment"
   | "synFunc"
+  | "synClass"
   | "synType"
   | "synBuiltin"
+  | "synSelf"
   | "synOperator"
+  | "synParen"
+  | "synBracket"
+  | "synBrace"
+  | "synComma"
+  | "synDot"
+  | "synDecorator"
+  | "synConstant"
+  | "synKwarg"
   | "synPunct"
   | "synProperty"
-  | "synRegex";
+  | "synRegex"
+  // non-code OUTPUT roles (Pelly-aligned): reasoning prose, status phases, markdown, tool lines.
+  | "reasoning"
+  | "thinkMark"
+  | "mdHeading"
+  | "mdBold"
+  | "mdBullet"
+  | "mdNumber"
+  | "mdCode"
+  | "mdQuote"
+  | "toolAction"
+  | "stSend"
+  | "stResp"
+  | "stWait"
+  | "stRound"
+  | "stErr"
+  // surgical edit card (diff)
+  | "diffAdd"
+  | "diffDel"
+  | "diffGutter"
+  | "diffLoc";
 
 /** role → (ramp, shade): the truecolor source. High shades = bright = high contrast on dark. */
 const ROLE_RAMP: Record<Role, [RampName, keyof Ramp]> = {
@@ -75,15 +109,44 @@ const ROLE_RAMP: Record<Role, [RampName, keyof Ramp]> = {
   heading: ["violet", 200],
   synKeyword: ["violet", 400],
   synString: ["green", 400],
+  synDoc: ["green", 300],
   synNumber: ["amber", 400],
   synComment: ["neutral", 500],
   synFunc: ["cyan", 400],
+  synClass: ["violet", 400],
   synType: ["cyan", 300],
   synBuiltin: ["violet", 300],
+  synSelf: ["violet", 300],
   synOperator: ["slate", 300],
+  synParen: ["amber", 400],
+  synBracket: ["green", 400],
+  synBrace: ["cyan", 300],
+  synComma: ["amber", 400],
+  synDot: ["amber", 300],
+  synDecorator: ["amber", 300],
+  synConstant: ["violet", 300],
+  synKwarg: ["amber", 300],
   synPunct: ["neutral", 400],
   synProperty: ["green", 300],
   synRegex: ["amber", 300],
+  reasoning: ["violet", 300],
+  thinkMark: ["violet", 400],
+  mdHeading: ["violet", 400],
+  mdBold: ["amber", 400],
+  mdBullet: ["green", 400],
+  mdNumber: ["cyan", 300],
+  mdCode: ["cyan", 400],
+  mdQuote: ["cyan", 400],
+  toolAction: ["violet", 400],
+  stSend: ["cyan", 400],
+  stResp: ["green", 400],
+  stWait: ["amber", 400],
+  stRound: ["violet", 300],
+  stErr: ["red", 400],
+  diffAdd: ["green", 400],
+  diffDel: ["red", 400],
+  diffGutter: ["neutral", 500],
+  diffLoc: ["cyan", 300],
 };
 
 /** role → ANSI-16 fallback name (used when the terminal can't do 256/truecolor). */
@@ -102,17 +165,46 @@ const ROLE_ANSI16: Record<Role, AnsiColorName> = {
   accent: "cyan",
   muted: "brightBlack",
   heading: "brightMagenta",
-  synKeyword: "brightMagenta",
-  synString: "green",
-  synNumber: "yellow",
-  synComment: "brightBlack",
-  synFunc: "brightCyan",
-  synType: "cyan",
-  synBuiltin: "magenta",
-  synOperator: "white",
-  synPunct: "white",
-  synProperty: "brightGreen",
+  synKeyword: "brightYellow",
+  synString: "brightBlue",
+  synDoc: "brightGreen",
+  synNumber: "brightGreen",
+  synComment: "blue",
+  synFunc: "brightMagenta",
+  synClass: "brightMagenta",
+  synType: "green",
+  synBuiltin: "brightRed",
+  synSelf: "magenta",
+  synOperator: "green",
+  synParen: "brightYellow",
+  synBracket: "brightGreen",
+  synBrace: "brightBlue",
+  synComma: "brightYellow",
+  synDot: "yellow",
+  synDecorator: "yellow",
+  synConstant: "brightMagenta",
+  synKwarg: "red",
+  synPunct: "brightYellow",
+  synProperty: "brightBlue",
   synRegex: "yellow",
+  reasoning: "brightMagenta",
+  thinkMark: "brightMagenta",
+  mdHeading: "brightMagenta",
+  mdBold: "brightYellow",
+  mdBullet: "brightGreen",
+  mdNumber: "brightCyan",
+  mdCode: "brightBlue",
+  mdQuote: "blue",
+  toolAction: "brightMagenta",
+  stSend: "brightCyan",
+  stResp: "brightGreen",
+  stWait: "yellow",
+  stRound: "brightMagenta",
+  stErr: "brightRed",
+  diffAdd: "brightGreen",
+  diffDel: "brightRed",
+  diffGutter: "brightBlack",
+  diffLoc: "brightCyan",
 };
 
 const ESC = "\x1b";
@@ -205,13 +297,37 @@ export function paint(
 ): string {
   if (caps === "none") return text;
   const isAccent = ACCENT_ROLES.has(role);
-  // accent (light-blue) output is always bold; other roles bold only when asked.
-  const bold = opts.bold || isAccent ? "1;" : "";
+  // truecolor/256 syntax roles take their EXACT hue + bold/italic from the Pelly scheme;
+  // ansi16 has no hex path, so it keeps the ROLE_ANSI16 nearest-name fallback below.
+  const syn = caps !== "ansi16" ? PELLY_SYNTAX[role] : undefined;
+  // accent (light-blue) output is always bold; other roles bold when asked or per the Pelly style.
+  const bold = opts.bold || isAccent || syn?.bold ? "1;" : "";
+  const italic = syn?.italic ? "3;" : "";
   if (caps === "ansi16") {
     return sgr(text, String(ANSI_SGR[ROLE_ANSI16[role]]), bold);
   }
-  const rgb = isAccent ? { ...ACCENT_RGB } : rampRgb(...ROLE_RAMP[role]);
-  return sgr(text, fgCode(rgb, caps), bold);
+  const rgb = syn ? hexToRgb(syn.fg) : isAccent ? { ...ACCENT_RGB } : rampRgb(...ROLE_RAMP[role]);
+  return sgr(text, fgCode(rgb, caps), bold + italic);
+}
+
+/**
+ * Paint a WORD-LEVEL changed span on a diff line: the role's fg colour PLUS a subtle add/del
+ * background tint, so the exact tokens that changed stand out from the rest of the red/green line.
+ * ansi16 has no truecolor bg → falls back to the fg colour only.
+ */
+export function spanHighlight(
+  text: string,
+  role: Role,
+  which: "add" | "del",
+  caps: ColorCaps,
+): string {
+  if (caps === "none") return text;
+  const syn = caps !== "ansi16" ? PELLY_SYNTAX[role] : undefined;
+  const bold = syn?.bold ? "1;" : "";
+  if (caps === "ansi16") return sgr(text, String(ANSI_SGR[ROLE_ANSI16[role]]), bold);
+  const fg = syn ? hexToRgb(syn.fg) : rampRgb(...ROLE_RAMP[role]);
+  const bg = hexToRgb(PELLY_SPAN_BG[which]);
+  return `${ESC}[${bold}${fgCode(fg, caps)};${bgCode(bg, caps)}m${text}${ESC}[0m`;
 }
 
 /** Bind a caps value into a terse `p.role(text)` painter set (for the renderers). */

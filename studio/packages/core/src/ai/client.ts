@@ -329,7 +329,13 @@ export function createAiClient(
     // C5/privacy: refuse a cloud endpoint up-front; nothing has left the machine.
     enforcePolicy();
     const headers = await buildHeaders();
-    const url = joinUrl(endpoint.baseUrl, "/v1/chat/completions");
+    // Tolerate a baseUrl that ALREADY ends in /v1 (the engine's `localai endpoints` returns
+    // e.g. "http://localhost:11434/v1") — plain joinUrl would emit ".../v1/v1/chat/completions"
+    // → the runner answers "404 page not found" and chat is dead. Dedupe the /v1 segment.
+    const cleanBase = endpoint.baseUrl.replace(/\/+$/, "");
+    const url = /\/v1$/.test(cleanBase)
+      ? `${cleanBase}/chat/completions`
+      : joinUrl(cleanBase, "/v1/chat/completions");
     const body = JSON.stringify({
       model: endpoint.model ?? endpoint.id,
       messages,

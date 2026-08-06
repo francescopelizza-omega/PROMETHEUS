@@ -11,6 +11,7 @@ export { exposedTools, exposedToolNames, isForceArg, stripForce } from "./tools.
 export type { EditHunk, ApplyEditResult, DiffLine } from "./edit.js";
 export {
   PROPOSE_EDIT_TOOL,
+  WRITE_FILE_TOOL,
   applyProposedEdit,
   diffHunk,
   parseHunks,
@@ -108,6 +109,26 @@ export {
   permissionModePolicy,
   planModeRefusal,
 } from "./permission-modes.js";
+// --- the --authorisation(s) autonomy scale (0–7) ------------------------------------ //
+export type { AuthCategory, AuthLevelMeta, AuthToolEffect } from "./authorization.js";
+export {
+  AUTH_LEVELS,
+  DEFAULT_AUTH_LEVEL,
+  authDecision,
+  authLevelLegend,
+  authLevelMeta,
+  authLevelName,
+  authLevelToMode,
+  authRunToDone,
+  classifyAuth,
+  modeToAuthLevel,
+  parseAuthLevel,
+} from "./authorization.js";
+// --- human-readable elapsed-duration formatter (turn/subtask timing) ---------------- //
+export { formatDuration } from "./duration.js";
+// --- structured, line-numbered, word-level diff for the surgical edit card ----------- //
+export type { WordSpan, DiffRow, DiffHunkView, EditView } from "./diff-view.js";
+export { buildEditView } from "./diff-view.js";
 
 // --- file 14 §3.10: named/searchable/resumable session store (shared GUI+CLI) ------- //
 export type { Session, SessionTurn, SessionQuery } from "./session-store.js";

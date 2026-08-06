@@ -253,13 +253,18 @@ export function OnboardingWizard({
           </>
         )}
 
-        {/* footer: back / skip / next|finish */}
+        {/* footer: back / skip / next|finish — pinned so the primary CTA stays visible while
+            a tall step (e.g. the 40+ theme grid) scrolls above it at the min window height. */}
         <div
           style={{
             display: "flex",
             alignItems: "center",
             gap: "var(--space-3, 6px)",
             marginTop: "var(--space-4, 8px)",
+            position: "sticky",
+            bottom: 0,
+            background: "var(--bg-surface)",
+            paddingTop: "var(--space-3, 6px)",
           }}
         >
           <button

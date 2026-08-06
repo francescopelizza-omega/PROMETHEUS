@@ -60,18 +60,22 @@ export function useResizable({
 }: UseResizableOptions): Resizable {
   // rehydrate the persisted size (#13) — fall back to `initial` for a missing/bad value.
   const [size, setSizeState] = useState(() => {
+    // Clamp on rehydrate/init too (not only during drag): a size persisted from a
+    // LARGER window must not restore off-screen. `max` may be a viewport-aware thunk.
+    const hi = typeof max === "function" ? max() : (max ?? Number.POSITIVE_INFINITY);
+    const clampInit = (v: number): number => Math.min(Math.max(v, min), Math.max(min, hi));
     if (storageKey) {
       try {
         const raw = window.localStorage.getItem(storageKey);
         if (raw != null) {
           const n = Number(raw);
-          if (Number.isFinite(n) && n >= min) return n;
+          if (Number.isFinite(n)) return clampInit(n);
         }
       } catch {
         /* private mode / quota — fall through to the default. */
       }
     }
-    return initial;
+    return clampInit(initial);
   });
   const [dragging, setDragging] = useState(false);
   const drag = useRef<{ start: number; base: number } | null>(null);
@@ -93,6 +97,15 @@ export function useResizable({
     },
     [min, max],
   );
+
+  // Re-clamp to the viewport-relative max when the window shrinks, so a size persisted
+  // from (or dragged in) a larger window can never push the panel — and the content
+  // beside it — off the right/bottom edge. Mirrors BottomPanel's height re-cap.
+  useEffect(() => {
+    const onResize = (): void => setSizeState((s) => clamp(s));
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, [clamp]);
 
   const setSize = useCallback((n: number): void => setSizeState(clamp(n)), [clamp]);
   const reset = useCallback((): void => setSizeState(clamp(initial)), [clamp, initial]);

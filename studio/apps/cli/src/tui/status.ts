@@ -16,7 +16,7 @@ import { type ColorCaps, type Role, painter } from "./palette.js";
 import { clipToWidth, stringWidth } from "./width.js";
 
 type PermissionModeId = agent.PermissionModeId;
-const { permissionModeMeta } = agent;
+const { permissionModeMeta, authLevelMeta } = agent;
 
 /** A justified segment: text + the palette role to tint it. */
 export interface Segment {
@@ -27,6 +27,8 @@ export interface Segment {
 /** The live state the status bar reflects (the host maps tuning → this). */
 export interface StatusModel {
   permMode: PermissionModeId;
+  /** the 0–7 --authorisation autonomy level; shown as a chip to the LEFT of the model. */
+  authLevel: number;
   model: string;
   /** where the model runs — drives the open(green)/paid(amber)/none color. */
   modelSource: "local" | "cloud" | "none";
@@ -138,6 +140,14 @@ function gateRole(gate: string): Role {
   return gate === "off" ? "danger" : gate === "warn" ? "warn" : "info";
 }
 
+/** The authorisation chip's role: higher autonomy = louder (0–1 muted → 6–7 danger). */
+function authRole(level: number): Role {
+  if (level >= 6) return "danger";
+  if (level >= 4) return "warn";
+  if (level >= 2) return "accent";
+  return "muted";
+}
+
 /** The permission-mode chip role, from its tone. */
 function modeRole(mode: PermissionModeId): Role {
   const tone = permissionModeMeta(mode).tone;
@@ -172,7 +182,12 @@ export function statusLines(m: StatusModel, width: number, caps: ColorCaps): str
 
   const modelRole: Role =
     m.modelSource === "local" ? "modelOpen" : m.modelSource === "cloud" ? "modelPaid" : "muted";
+  // the authorisation chip sits immediately LEFT of the model (first right segment → leftmost of
+  // the right run) and, being at the head, is the LAST right chip justify() drops on a narrow
+  // terminal — so the active autonomy level stays visible next to the model.
+  const auth = authLevelMeta(m.authLevel);
   const right: Segment[] = [
+    { text: `auth:${auth.level}·${auth.name}`, role: authRole(auth.level) },
     { text: m.model || "no model", role: modelRole },
     { text: `/${m.profile}`, role: "modelOpen" }, // profile in green (the "/rc"-style chip)
   ];

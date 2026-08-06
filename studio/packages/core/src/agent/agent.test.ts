@@ -39,12 +39,13 @@ async function collect(it: AsyncIterable<AgentEvent>): Promise<AgentEvent[]> {
   return out;
 }
 
-test("exposedTools: the 14 prometheus tools + propose_edit + web_fetch (CLI-010/011)", () => {
+test("exposedTools: the 14 prometheus tools + propose_edit + write_file + web_fetch (CLI-010/011)", () => {
   assert.equal(exposedToolNames({ enabled: false, allow: [], deny: [] }).size, 0);
-  // the 14 prometheus.py tools PLUS the CLI-local propose_edit + web_fetch = 16
+  // the 14 prometheus.py tools PLUS the CLI-local propose_edit + write_file + web_fetch = 17
   const all = exposedToolNames({ enabled: true, allow: [], deny: [] });
-  assert.equal(all.size, 16);
+  assert.equal(all.size, 17);
   assert.ok(all.has("propose_edit"), "propose_edit is exposed to the agent");
+  assert.ok(all.has("write_file"), "write_file is exposed to the agent");
   assert.ok(all.has("web_fetch"), "web_fetch is exposed to the agent");
   assert.deepEqual(
     [...exposedToolNames({ enabled: true, allow: ["prometheus_list"], deny: [] })],

@@ -87,7 +87,10 @@ export function ProviderPicker({
                   <span
                     style={{
                       minWidth: 0,
-                      flex: "0 0 12rem",
+                      flex: "1 1 8rem",
+                      overflow: "hidden",
+                      textOverflow: "ellipsis",
+                      whiteSpace: "nowrap",
                       color: v("text-primary"),
                       fontWeight: active ? 600 : 400,
                     }}
@@ -96,7 +99,11 @@ export function ProviderPicker({
                   </span>
                   <code
                     style={{
-                      flex: "0 0 13rem",
+                      minWidth: 0,
+                      flex: "1 1 6rem",
+                      overflow: "hidden",
+                      textOverflow: "ellipsis",
+                      whiteSpace: "nowrap",
                       color: v("text-secondary"),
                       fontFamily: v("font-mono"),
                       fontSize: fs("small"),
@@ -104,7 +111,14 @@ export function ProviderPicker({
                   >
                     {row.kind}
                   </code>
-                  <span style={{ flex: 1, color: v("text-secondary"), fontSize: fs("small") }}>
+                  <span
+                    style={{
+                      flex: 1,
+                      minWidth: 0,
+                      color: v("text-secondary"),
+                      fontSize: fs("small"),
+                    }}
+                  >
                     {row.caption}
                     {row.tier === "A" && row.id === activeId ? "  Recommended (free, local)" : ""}
                   </span>

@@ -875,6 +875,9 @@ export function EditorRoute({
           padding: "8px 4px",
           borderRight: "1px solid var(--border-subtle)",
           background: "var(--bg-surface)",
+          // scroll instead of clipping the lower activities off a short window
+          overflowY: "auto",
+          minHeight: 0,
         }}
       >
         {ACTIVITY.map((a) => (

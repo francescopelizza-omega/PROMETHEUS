@@ -251,7 +251,9 @@ function resourceTitle(res: NonNullable<ModelData["resource"]>): string {
   return parts.join(" · ");
 }
 
-const TABS: HubTab[] = ["library", "discover", "serving", "compare"];
+// "compare" dropped — the route never passes a comparePanel, so it was a dead tab that
+// switched to a static placeholder with no models/controls. Re-add once wired.
+const TABS: HubTab[] = ["library", "discover", "serving"];
 
 export function ModelHub({
   hardware,
@@ -467,8 +469,14 @@ export function ModelHub({
             )}
 
             {/* the result list / library list */}
-            {tab === "library" && libraryList ? (
-              libraryList
+            {tab === "library" ? (
+              // don't leak DISCOVER search results into "My Models" when no library is wired —
+              // render an explicit empty state instead.
+              (libraryList ?? (
+                <p style={{ color: "var(--text-secondary)", fontSize: "0.85rem", margin: 0 }}>
+                  No models installed yet. Download one from Discover to see it here.
+                </p>
+              ))
             ) : loading ? (
               <p style={{ color: "var(--text-secondary)", fontSize: "0.85rem", margin: 0 }}>
                 Searching…

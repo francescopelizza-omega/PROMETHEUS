@@ -309,7 +309,7 @@ export function VerdictSheet({
 
       {/* ── actions ───────────────────────────────────────────────────────── */}
       <footer style={{ display: "flex", gap: "var(--space-4, 8px)", flexWrap: "wrap" }}>
-        {!refuse && (
+        {!refuse && onProceed && (
           <Button
             variant={verdict.verdict === "allow" ? "primary" : "danger"}
             disabled={requiresApproval && !acknowledged}
@@ -324,7 +324,7 @@ export function VerdictSheet({
             {t("verdict.disinfectInstall")}
           </Button>
         )}
-        {refuse && (
+        {refuse && onCancel && (
           <Button variant="primary" onClick={onCancel}>
             {t("verdict.cancel")}
           </Button>
@@ -335,7 +335,7 @@ export function VerdictSheet({
             {t("verdict.quarantine")}
           </Button>
         )}
-        {!refuse && (
+        {!refuse && onCancel && (
           <Button variant="ghost" onClick={onCancel}>
             {t("verdict.cancel")}
           </Button>
@@ -348,7 +348,7 @@ export function VerdictSheet({
         )}
 
         {/* refuse tiers: Force hides under a collapsed Advanced disclosure (§5.3) */}
-        {refuse && (
+        {refuse && onRequestForce && (
           <div style={{ width: "100%", marginTop: "var(--space-4, 8px)" }}>
             <button
               type="button"

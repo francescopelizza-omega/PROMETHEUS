@@ -619,3 +619,30 @@ test("history recall does NOT splice a fresh paste into a recalled placeholder (
   const down = reduce(up2, k("down"), CTX).state;
   assert.equal(down.pastes.length, 1); // draft paste restored
 });
+
+test("⌘←/→ (line-home/line-end) jump to the start/end of the CURRENT line in a multi-line draft", () => {
+  // build a two-line draft: "foo\nbarbaz", caret parked mid-second-line.
+  const base = run(initialTuiState(), [...typed("foo"), k("newline"), ...typed("barbaz")]).state;
+  assert.equal(base.input, "foo\nbarbaz");
+  const home = run(base, [k("line-home")]).state;
+  assert.equal(home.cursor, 4); // start of "barbaz" (after the \n at index 3)
+  const end = run(home, [k("line-end")]).state;
+  assert.equal(end.cursor, base.input.length); // end of the second line
+});
+
+test("⌘↑/⌘↓ (history-entry-prev/next) jump whole prompts regardless of the cursor line", () => {
+  const ctx: ReduceCtx = { items: ITEMS, running: false };
+  const withHist: TuiState = { ...initialTuiState(), history: ["first prompt", "second prompt"] };
+  // start a NEW multi-line draft, caret NOT on the first line
+  const draft = run(withHist, [...typed("draft"), k("newline"), ...typed("line2")], ctx).state;
+  // ⌘↑ recalls the newest history entry directly (does NOT line-move up through "line2")
+  const up1 = run(draft, [k("history-entry-prev")], ctx).state;
+  assert.equal(up1.input, "second prompt");
+  const up2 = run(up1, [k("history-entry-prev")], ctx).state;
+  assert.equal(up2.input, "first prompt");
+  // ⌘↓ walks back toward newer, then restores the stashed live draft (empty-draft recovery)
+  const down1 = run(up2, [k("history-entry-next")], ctx).state;
+  assert.equal(down1.input, "second prompt");
+  const down2 = run(down1, [k("history-entry-next")], ctx).state;
+  assert.equal(down2.input, "draft\nline2"); // back to the parked draft
+});

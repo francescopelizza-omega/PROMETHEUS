@@ -65,11 +65,19 @@ export function DataSourcePanel({
         const st = statuses[s.id];
         return (
           <div key={s.id} style={{ display: "flex", alignItems: "center", gap: 4 }}>
-            <button
-              type="button"
+            <div
+              role="button"
+              tabIndex={0}
               onClick={() => onSelect(s.id)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" || e.key === " ") {
+                  e.preventDefault();
+                  onSelect(s.id);
+                }
+              }}
               style={{
                 flex: 1,
+                minWidth: 0,
                 textAlign: "left",
                 background: s.id === selectedId ? "var(--bg-inset)" : "transparent",
                 border: "none",
@@ -102,7 +110,7 @@ export function DataSourcePanel({
                 {s.redactedConn}
               </div>
               {st?.error && <div style={{ color: "var(--danger)" }}>{st.error}</div>}
-            </button>
+            </div>
             <button
               type="button"
               aria-label="remove data source"

@@ -93,6 +93,12 @@ export function InlineEdit(props: InlineEditProps): ReactElement {
     <div
       role="dialog"
       aria-label="inline edit"
+      tabIndex={-1}
+      // Escape on the CONTAINER (not the input, which is disabled with no endpoint → never
+      // gets the key) so the overlay is always dismissable, incl. the no-model degrade state.
+      onKeyDown={(e) => {
+        if (e.key === "Escape") onClose();
+      }}
       style={{
         border: "1px solid var(--accent, #6d5ef0)",
         borderRadius: "var(--radius-md, 6px)",
@@ -135,6 +141,17 @@ export function InlineEdit(props: InlineEditProps): ReactElement {
           disabled={!endpoint || busy || !instruction.trim()}
         >
           {busy ? "…" : "Cmd-K"}
+        </Button>
+        {/* always-visible close — the reject button only renders while streaming, so without
+            this the no-endpoint / pre-first-token overlay had NO dismiss control. */}
+        <Button
+          type="button"
+          size="sm"
+          variant="ghost"
+          aria-label="close inline edit"
+          onClick={onClose}
+        >
+          ✕
         </Button>
       </form>
 

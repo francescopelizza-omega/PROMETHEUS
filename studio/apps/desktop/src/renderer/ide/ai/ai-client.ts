@@ -125,6 +125,14 @@ export function joinUrl(base: string, path: string): string {
   return `${b}${p}`;
 }
 
+/** Chat-completions URL that tolerates a baseUrl already ending in /v1 (the engine's
+ *  `localai endpoints` returns ".../v1") — plain joinUrl would double it to ".../v1/v1/..."
+ *  and the runner answers "404 page not found". */
+export function chatCompletionsUrl(baseUrl: string): string {
+  const b = baseUrl.replace(/\/+$/, "");
+  return /\/v1$/.test(b) ? `${b}/chat/completions` : joinUrl(b, "/v1/chat/completions");
+}
+
 /**
  * Stream a chat completion from `endpoint`. Yields text deltas. Enforces the cloud
  * policy BEFORE the request leaves (§7.5). Aborts on `signal`. The actual model is
@@ -139,7 +147,7 @@ export async function* streamChat(
     throw new CloudPolicyError(endpoint.id);
   }
   const doFetch = opts.doFetch ?? fetch;
-  const res = await doFetch(joinUrl(endpoint.baseUrl, "/v1/chat/completions"), {
+  const res = await doFetch(chatCompletionsUrl(endpoint.baseUrl), {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ model: endpoint.model ?? endpoint.id, messages, stream: true }),
@@ -303,7 +311,7 @@ export async function runChatTurn(
     body.tools = opts.tools;
     body.tool_choice = "auto";
   }
-  const res = await doFetch(joinUrl(endpoint.baseUrl, "/v1/chat/completions"), {
+  const res = await doFetch(chatCompletionsUrl(endpoint.baseUrl), {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(body),

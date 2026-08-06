@@ -607,18 +607,33 @@ export class ModelHubClient {
     void modality; // model.list takes a dir, not a modality filter, on the sidecar today
     const env = await this.run(argv);
     const rows = Array.isArray(env.models) ? (env.models as Record<string, unknown>[]) : [];
-    return rows.map((r) => ({
-      id: String(r.name ?? ""),
-      source: "huggingface",
-      modality: "text",
-      license: "",
-      openWeight: true,
-      gated: false,
-      quants: [],
-      installed: true,
-      localPath: typeof r.path === "string" ? r.path : undefined,
-      params: typeof r.quant === "string" ? r.quant : undefined,
-    }));
+    return rows.map((r) => {
+      // Honor the sidecar's real fields so Ollama-indexed models (spec §9) carry their
+      // true source/modality/params instead of being flattened to a HF text model.
+      const source: Model["source"] =
+        r.source === "ollama" || r.source === "url" ? r.source : "huggingface";
+      const modality = (
+        typeof r.modality === "string" ? r.modality : "text"
+      ) as Model["modality"];
+      const params =
+        typeof r.params === "string"
+          ? r.params
+          : typeof r.quant === "string"
+            ? r.quant
+            : undefined;
+      return {
+        id: String(r.id ?? r.name ?? ""),
+        source,
+        modality,
+        license: typeof r.license === "string" ? r.license : "",
+        openWeight: r.openWeight !== false,
+        gated: r.gated === true,
+        quants: [],
+        installed: r.installed !== false,
+        localPath: typeof r.path === "string" && r.path ? r.path : undefined,
+        params,
+      };
+    });
   }
 
   /** Remove model files (refuses if a ServeProfile references it, unless force). */

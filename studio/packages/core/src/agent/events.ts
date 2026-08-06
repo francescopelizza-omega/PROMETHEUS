@@ -12,6 +12,12 @@ import type { ToolCall } from "./loop.js";
 export type GateVerdictTier = "allow" | "warn" | "block" | "error";
 
 export type AgentEvent =
+  // wrapper progress note (contacting model / waiting Ns / round N / timeout). Rendered
+  // dimmed as live feedback so a slow model never looks like a hang; NOT persisted.
+  | { kind: "status"; text: string }
+  // model "thinking" tokens (reasoning models stream these BEFORE any answer). Rendered
+  // dimmed as live progress; NOT persisted to the thread and NOT part of the reply text.
+  | { kind: "reasoning"; text: string }
   | { kind: "text"; text: string }
   | { kind: "tool_use"; call: ToolCall }
   | { kind: "verdict"; tool: string; verdict: GateVerdictTier; riskScore?: number }

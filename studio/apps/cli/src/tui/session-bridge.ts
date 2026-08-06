@@ -21,7 +21,7 @@ import {
 import { type EngineClient, createEngineClient } from "@prometheus/engine-bridge";
 
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { isAbsolute, join, resolve } from "node:path";
 
 import { PROM_VERSION } from "../commands/help.js";
 import {
@@ -54,7 +54,9 @@ import {
   runMessageTurn,
   sessionUsage,
   shouldAutoCompact,
+  warmupLocalModel,
 } from "../session/agent-runtime.js";
+import { readSavedAuthLevel, saveAuthLevel } from "../session/authorisation-store.js";
 import { type SessionCtx as VerbCtx, execVerb } from "../session/command-exec.js";
 import { realGitSpawn } from "../session/git-helpers.js";
 import {
@@ -79,6 +81,7 @@ import {
 } from "../session/onboarding.js";
 import { DEFAULT_SUBAGENTS, orchestratorNote } from "../session/orchestrator.js";
 import { applyRepoMapVerb, makeRepoMapState, repoMapStats } from "../session/repo-map-state.js";
+import { maybeStopServicesOnExit } from "../session/service-shutdown.js";
 import {
   type SessionCtx as LegacySlashCtx,
   type SlashResult,
@@ -90,9 +93,10 @@ import { createWorkingSet } from "../session/working-set.js";
 import { insideTmux } from "../tmux/tmux.js";
 import { runUpdates } from "../updates/updates-cmd.js";
 import { copyReplyStatus, lastAssistantReply } from "./clipboard.js";
+import { CODE_STATE, detectLanguage, highlightLine, isHighlightable } from "./highlight.js";
 import type { InvokeItem } from "./invoke-overlay.js";
 import { type KeymapResolution, resolveKeymap } from "./keys.js";
-import type { ColorCaps } from "./palette.js";
+import { type ColorCaps, type Role, paint, spanHighlight } from "./palette.js";
 import type { StatusModel } from "./status.js";
 
 type PermissionModeId = agent.PermissionModeId;
@@ -142,6 +146,114 @@ function loadKeymap(home: string): KeymapResolution {
   }
 }
 
+/**
+ * Render up to N code lines with Pelly syntax highlighting inferred from the file extension.
+ * Falls back to dim grey when the language isn't highlightable or color is off — so a plain
+ * text/config file still reads calmly, but a `.py`/`.ts`/… card lights up (the whole point).
+ */
+function highlightPreview(
+  lines: string[],
+  path: string,
+  caps: ColorCaps,
+  indent = "    ",
+): string[] {
+  const ext = path.includes(".") ? (path.split(".").pop() ?? "") : "";
+  const lang = detectLanguage(ext);
+  const colored = isHighlightable(lang) && caps !== "none";
+  let state = CODE_STATE;
+  return lines.map((l) => {
+    if (!colored) return c.dim(`${indent}${l}`);
+    const { text, state: next } = highlightLine(l, lang, state, caps);
+    state = next;
+    return `${indent}${text}`;
+  });
+}
+
+/**
+ * Paint the SURGICAL EDIT card: a line-numbered diff of `oldText`→`newText` with context lines
+ * syntax-highlighted, removed lines red / added green, and WORD-LEVEL span tints for the exact
+ * tokens that changed. Pure — the caller supplies the resolved old/new content + caps. Shared by
+ * propose_edit and by write_file when it OVERWRITES an existing file.
+ */
+function renderDiffCard(
+  header: string,
+  oldText: string,
+  newText: string,
+  path: string,
+  caps: ColorCaps,
+  note: string,
+): string[] {
+  const ext = path.includes(".") ? (path.split(".").pop() ?? "") : "";
+  const lang = detectLanguage(ext);
+  const view = agent.buildEditView(oldText, newText, { context: 2 });
+  const maxNo = Math.max(
+    1,
+    ...view.hunks.flatMap((h) => h.rows.map((r) => Math.max(r.oldNo ?? 0, r.newNo ?? 0))),
+  );
+  const w = String(maxNo).length;
+  const gut = (o: number | null, n: number | null): string =>
+    paint(
+      `${(o?.toString() ?? "·").padStart(w)} ${(n?.toString() ?? "·").padStart(w)}`,
+      "diffGutter",
+      caps,
+    );
+  const spans = (
+    sp: agent.WordSpan[] | undefined,
+    text: string,
+    role: Role,
+    which: "add" | "del",
+  ): string =>
+    sp
+      ? sp
+          .map((s) =>
+            s.changed ? spanHighlight(s.text, role, which, caps) : paint(s.text, role, caps),
+          )
+          .join("")
+      : paint(text, role, caps);
+
+  const out: string[] = [
+    `${paint(header, "toolAction", caps)}  ${c.dim(
+      `+${view.added} −${view.removed} · ${view.hunks.length} hunk${
+        view.hunks.length === 1 ? "" : "s"
+      }${note ? ` · ${note}` : ""}`,
+    )}`,
+  ];
+  if (view.hunks.length === 0) {
+    out.push(c.dim("  (no changes)"));
+    return out;
+  }
+  const MAX_ROWS = 80;
+  let shown = 0;
+  for (const h of view.hunks) {
+    if (shown >= MAX_ROWS) break;
+    out.push(
+      paint(`@@ −${h.oldStart},${h.oldCount} +${h.newStart},${h.newCount} @@`, "diffLoc", caps),
+    );
+    for (const r of h.rows) {
+      if (shown++ >= MAX_ROWS) {
+        out.push(c.dim("  … (diff truncated)"));
+        break;
+      }
+      if (r.kind === "context") {
+        const code =
+          isHighlightable(lang) && caps !== "none"
+            ? highlightLine(r.text, lang, CODE_STATE, caps).text
+            : r.text;
+        out.push(`${gut(r.oldNo, r.newNo)}   ${code}`);
+      } else if (r.kind === "del") {
+        out.push(
+          `${gut(r.oldNo, r.newNo)} ${paint("−", "diffDel", caps)} ${spans(r.spans, r.text, "diffDel", "del")}`,
+        );
+      } else {
+        out.push(
+          `${gut(r.oldNo, r.newNo)} ${paint("+", "diffAdd", caps)} ${spans(r.spans, r.text, "diffAdd", "add")}`,
+        );
+      }
+    }
+  }
+  return out;
+}
+
 /** Shorten an absolute path under $HOME to a leading `~`. */
 function shortCwd(dir: string): string {
   const home = process.env.HOME ?? process.env.USERPROFILE ?? "";
@@ -188,6 +300,10 @@ export interface SessionBridge {
   /** the active permission mode (the app keeps the reducer + this in sync). */
   getPermMode: () => PermissionModeId;
   setPermMode: (mode: PermissionModeId) => void;
+  /** the active 0–7 authorisation level (fine autonomy scale). */
+  getAuthLevel: () => number;
+  /** set the 0–7 authorisation level; also syncs the coarse permMode/indicator. */
+  setAuthLevel: (level: number) => void;
   /** the startup banner + onboarding hint block. */
   banner: () => string;
   /** undo the last applied propose_edit; returns the reverted path (or undefined). CLI-010. */
@@ -213,6 +329,9 @@ export async function createSessionBridge(deps: BridgeDeps): Promise<SessionBrid
   // capture the profile's system prompt BEFORE any /system override → /system reset (CLI-017).
   const systemPromptDefault = state.tuning.systemPrompt;
   let permMode: PermissionModeId = "default";
+  // the fine-grained 0–7 autonomy scale (--authorisation). The SOURCE OF TRUTH for allow/ask;
+  // permMode is kept synced as the coarse Shift-Tab/indicator companion. Default 1 = ask-for-changes.
+  let authLevel: number = agent.DEFAULT_AUTH_LEVEL;
   let history: agent.ThreadMessage[] = [];
   let session: agent.Session | undefined;
   // CLI-072: resume state for `/continue` — a capped turn's full non-system thread (tool results
@@ -234,6 +353,8 @@ export async function createSessionBridge(deps: BridgeDeps): Promise<SessionBrid
         model: { provider: backends.localRunner?.name ?? "ollama", modelId: endpoint.model ?? "" },
       },
     });
+    // pre-load the local model NOW (fire-and-forget) so the user's first prompt is warm.
+    warmupLocalModel(endpoint);
   }
 
   const orchestrating = insideTmux();
@@ -273,6 +394,18 @@ export async function createSessionBridge(deps: BridgeDeps): Promise<SessionBrid
 
   const write = deps.write;
 
+  // Quit hook (CLI-SVC): before tearing down, offer to free local-AI memory (unload the
+  // resident Ollama model). Fire-and-forget is safe — `deps.quit()` is what actually exits,
+  // so the process stays alive until the prompt resolves; a failure never blocks the exit.
+  const doQuit = async (): Promise<void> => {
+    try {
+      await maybeStopServicesOnExit({ confirm: deps.confirm, write });
+    } catch {
+      /* never let a shutdown-prompt error trap the user in the session */
+    }
+    deps.quit();
+  };
+
   // ── per-handler context projectors ──────────────────────────────────────── //
 
   const verbCtx: VerbCtx = {
@@ -283,26 +416,49 @@ export async function createSessionBridge(deps: BridgeDeps): Promise<SessionBrid
     write,
   };
 
-  // render a token-sourced unified-diff card for a pending propose_edit (CLI-010).
+  // render the surgical edit card for a pending propose_edit: read the file, apply the hunks
+  // in-memory, and show the line-numbered old→new diff (word-level) at its real position.
   const renderEditCard = (path: string, hunks: agent.EditHunk[]): string => {
-    const body: string[] = [];
-    let added = 0;
-    let removed = 0;
-    for (const h of hunks) {
-      for (const dl of agent.diffHunk(h.old, h.new)) {
-        if (dl.tag === "+") {
-          body.push(c.green(`  + ${dl.text}`));
-          added++;
-        } else if (dl.tag === "-") {
-          body.push(c.red(`  - ${dl.text}`));
-          removed++;
-        } else {
-          body.push(c.dim(`    ${dl.text}`));
+    const caps = deps.caps ?? "none";
+    const abs = isAbsolute(path) ? path : resolve(state.cwd, path);
+    let oldText: string | null = null;
+    try {
+      oldText = readFileSync(abs, "utf8");
+    } catch {
+      oldText = null;
+    }
+    if (oldText === null) {
+      // no file to diff against (new / unreadable) → per-hunk text-diff fallback.
+      const body: string[] = [];
+      for (const h of hunks) {
+        for (const dl of agent.diffHunk(h.old, h.new)) {
+          body.push(
+            dl.tag === "+"
+              ? paint(`  + ${dl.text}`, "diffAdd", caps)
+              : dl.tag === "-"
+                ? paint(`  − ${dl.text}`, "diffDel", caps)
+                : c.dim(`    ${dl.text}`),
+          );
         }
       }
+      return [paint(`✎ edit ${path}`, "toolAction", caps), ...body].join("\n");
     }
-    const header = `${c.bold(`✎ propose_edit ${path}`)} ${c.dim(`(+${added} -${removed})`)}`;
-    return [header, ...body].join("\n");
+    // preview: apply the exact/fuzzy match now so the card shows precisely what will land (and,
+    // if the old text can't be uniquely located, that the edit will be REJECTED — never guessed).
+    const res = agent.applyProposedEdit(oldText, hunks, { fallback: true });
+    if (!res.ok) {
+      return [
+        paint(`✎ edit ${path}`, "toolAction", caps),
+        paint(
+          `  ⎿ can't locate this edit — it will be REJECTED on apply: ${res.message}`,
+          "stErr",
+          caps,
+        ),
+      ].join("\n");
+    }
+    const rungs = [...new Set(res.rungs.filter((r) => r !== "exact"))];
+    const note = rungs.length > 0 ? `recovered via ${rungs.join(", ")}` : "matched exact";
+    return renderDiffCard(`✎ edit ${path}`, oldText, res.next, path, caps, note).join("\n");
   };
 
   // audit ONE line per no-prompt auto-approval (CLI-033): bypassPermissions AND yolo log; no other mode.
@@ -312,17 +468,21 @@ export async function createSessionBridge(deps: BridgeDeps): Promise<SessionBrid
     }
   };
 
-  // propose_edit gating (CLI-010): show the diff card, then decide by permission MODE.
+  // a file-write annotation (propose_edit/write_file both classify as the "write" category).
+  const WRITE_ANN = { destructiveHint: true } as const;
+
+  // propose_edit gating (CLI-010): show the diff card, then decide by the 0–7 authorisation level
+  // (auto ≥ level 2 "edits"; plan mode still refuses read-only; else prompt the human).
   const confirmEdit = async (call: ToolCall): Promise<agent.ConfirmResult> => {
     const path = typeof call.args.path === "string" ? call.args.path : "?";
     write(renderEditCard(path, agent.parseHunks(call.args.hunks)));
-    if (permMode === "acceptEdits" || permMode === "bypassPermissions" || permMode === "yolo") {
-      auditBypass(call);
-      return true;
-    }
     if (permMode === "plan") {
       // read-only refusal fed back to the model so it re-plans (CLI-033 + CLI-032 channel).
       return { approved: false, reason: JSON.stringify(agent.planModeRefusal(call.name)) };
+    }
+    if (agent.authDecision(authLevel, "propose_edit", WRITE_ANN) === "allow") {
+      auditBypass(call);
+      return true;
     }
     const ok = await deps.confirm(`apply edit to ${path}?`);
     if (ok) return true;
@@ -330,19 +490,75 @@ export async function createSessionBridge(deps: BridgeDeps): Promise<SessionBrid
     return { approved: false, reason: reason || "rejected" };
   };
 
-  // permission-mode aware tool confirm: allow → run, deny → structured plan refusal, ask → modal.
-  const turnConfirm = async (call: ToolCall): Promise<agent.ConfirmResult> => {
-    if (call.name === "propose_edit") return confirmEdit(call);
-    const tool = PROMETHEUS_TOOLS.find((t) => t.name === call.name);
-    const decision = agent.decideToolForMode(permMode, tool?.annotations);
-    if (decision === "allow") {
+  // write_file gating: show a create/overwrite card + a short content preview, then decide by the
+  // 0–7 authorisation level (mirrors confirmEdit — auto ≥ level 2, plan refuses, else prompt).
+  const confirmWrite = async (call: ToolCall): Promise<agent.ConfirmResult> => {
+    const path = typeof call.args.path === "string" ? call.args.path : "?";
+    const content = typeof call.args.content === "string" ? call.args.content : "";
+    const caps = deps.caps ?? "none";
+    const abs = isAbsolute(path) ? path : resolve(state.cwd, path);
+    let existing: string | null = null;
+    try {
+      existing = readFileSync(abs, "utf8");
+    } catch {
+      existing = null;
+    }
+    if (existing !== null && existing !== content) {
+      // OVERWRITE of an existing file → show the actual old→new diff, not just the new blob,
+      // and nudge toward the surgical path.
+      for (const ln of renderDiffCard(
+        `✎ overwrite ${path}`,
+        existing,
+        content,
+        path,
+        caps,
+        "existing file",
+      )) {
+        write(ln);
+      }
+      write(
+        paint(
+          "  ↳ overwrites an existing file — propose_edit would touch only the changed lines",
+          "stWait",
+          caps,
+        ),
+      );
+    } else {
+      // NEW file (or byte-identical) → a create preview of the first lines.
+      const allLines = content.length === 0 ? [] : content.split("\n");
+      write(
+        `${paint(`✎ write_file ${path}`, "toolAction", caps)} ${c.dim(`(${allLines.length} line${allLines.length === 1 ? "" : "s"}, ${content.length} bytes)`)}`,
+      );
+      for (const styled of highlightPreview(allLines.slice(0, 12), path, caps)) write(styled);
+      if (allLines.length > 12) write(c.dim(`    … (${allLines.length - 12} more)`));
+    }
+    if (permMode === "plan") {
+      return { approved: false, reason: JSON.stringify(agent.planModeRefusal(call.name)) };
+    }
+    if (agent.authDecision(authLevel, "write_file", WRITE_ANN) === "allow") {
       auditBypass(call);
       return true;
     }
-    if (decision === "deny") {
-      write(`  ⎿ ${call.name}: blocked by ${permMode} mode`);
-      // a plan-mode deny re-enters the thread as a structured refusal (model re-plans).
+    const ok = await deps.confirm(`write file ${path}?`);
+    if (ok) return true;
+    const reason = (await deps.ask("reject reason (optional):").catch(() => "")).trim();
+    return { approved: false, reason: reason || "rejected" };
+  };
+
+  // authorisation-aware tool confirm: allow → run, plan-mode mutation → refusal, else → modal.
+  const turnConfirm = async (call: ToolCall): Promise<agent.ConfirmResult> => {
+    if (call.name === "propose_edit") return confirmEdit(call);
+    if (call.name === "write_file") return confirmWrite(call);
+    const tool = PROMETHEUS_TOOLS.find((t) => t.name === call.name);
+    // plan mode is a read-only DENY override, orthogonal to the autonomy scale.
+    if (permMode === "plan") {
+      if (agent.decideToolForMode("plan", tool?.annotations) === "allow") return true;
+      write(`  ⎿ ${call.name}: blocked by plan mode`);
       return { approved: false, reason: JSON.stringify(agent.planModeRefusal(call.name)) };
+    }
+    if (agent.authDecision(authLevel, call.name, tool?.annotations) === "allow") {
+      auditBypass(call);
+      return true;
     }
     return deps.confirm(`run tool ${call.name}?`);
   };
@@ -357,6 +573,8 @@ export async function createSessionBridge(deps: BridgeDeps): Promise<SessionBrid
       confirm: turnConfirm,
       write,
       ...(cols && cols > 0 ? { width: cols } : {}),
+      // terminal color depth → Pelly syntax highlighting of code inside the reasoning stream.
+      ...(deps.caps ? { caps: deps.caps } : {}),
       // read scope = cwd (implicit root) + every /add-dir dir, resolved fail-closed.
       workingSet: [state.cwd, ...ws.list()],
       // propose_edit resolves paths against cwd + logs pre-images for /revert (CLI-010).
@@ -558,6 +776,8 @@ export async function createSessionBridge(deps: BridgeDeps): Promise<SessionBrid
         type: "tune",
         patch: { model: { provider: "ollama", modelId: r.endpoint.model ?? "" } },
       });
+      // pre-load the just-chosen model so the next prompt is warm.
+      warmupLocalModel(endpoint);
     }
   };
   const runHostPaths = async (): Promise<void> => {
@@ -598,8 +818,14 @@ export async function createSessionBridge(deps: BridgeDeps): Promise<SessionBrid
     tune: (patch) => {
       state = repl.reduce(state, { type: "tune", patch });
     },
+    getAuthLevel: () => authLevel,
+    setAuthLevel: (level) => {
+      authLevel = agent.authLevelMeta(level).level; // clamp 0–7
+      permMode = agent.authLevelToMode(authLevel); // sync the coarse mode/indicator
+      saveAuthLevel(authLevel, home); // last-set becomes the next-session default
+    },
     control: (signal) => {
-      if (signal === "quit") deps.quit();
+      if (signal === "quit") void doQuit();
       else {
         state = repl.reduce(state, { type: "clear" });
         history = [];
@@ -869,7 +1095,7 @@ export async function createSessionBridge(deps: BridgeDeps): Promise<SessionBrid
         break;
       case "control":
         if (res.text) write(res.text);
-        if (res.control === "quit") deps.quit();
+        if (res.control === "quit") void doQuit();
         else if (res.control === "clear") state = repl.reduce(state, { type: "clear" });
         else if (res.control === "cwd" && res.rest.trim())
           state = repl.reduce(state, { type: "cwd", dir: res.rest.trim() });
@@ -937,6 +1163,7 @@ export async function createSessionBridge(deps: BridgeDeps): Promise<SessionBrid
       u.estTokens > 0 && u.cost !== null ? { estTokens: u.estTokens, estUsd: u.cost } : undefined;
     return {
       permMode,
+      authLevel,
       model,
       modelSource: source,
       tools: state.tuning.tools.enabled,
@@ -979,6 +1206,16 @@ export async function createSessionBridge(deps: BridgeDeps): Promise<SessionBrid
     getPermMode: () => permMode,
     setPermMode: (mode) => {
       permMode = mode;
+      // keep the fine autonomy level in sync when the user Shift-Tabs the coarse mode,
+      // and PERSIST it so the last posture is the default for the next session.
+      authLevel = agent.modeToAuthLevel(mode);
+      saveAuthLevel(authLevel, home);
+    },
+    getAuthLevel: () => authLevel,
+    setAuthLevel: (level) => {
+      authLevel = agent.authLevelMeta(level).level; // clamp 0–7
+      permMode = agent.authLevelToMode(authLevel); // sync the coarse mode/indicator
+      saveAuthLevel(authLevel, home); // last-set becomes the next-session default
     },
     banner,
     revertLastEdit,

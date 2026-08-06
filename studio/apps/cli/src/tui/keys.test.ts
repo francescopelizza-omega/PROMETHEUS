@@ -206,3 +206,18 @@ test("renderKeymap: one line per action with source; reserved footer; refused le
   assert.match(refused, /REFUSED/);
   assert.match(refused, /clear-line/);
 });
+
+test("modifier arrows: ⌥/Ctrl → word, ⌘ → line home/end, ⌘↑↓ → whole-history jump", () => {
+  const nm = (seq: string): string[] => decodeKeys(seq, "").events.map((e) => e.name);
+  assert.deepEqual(nm("\x1b[1;3D"), ["word-left"]); // Option+Left
+  assert.deepEqual(nm("\x1b[1;3C"), ["word-right"]); // Option+Right
+  assert.deepEqual(nm("\x1b[1;5D"), ["word-left"]); // Ctrl+Left
+  assert.deepEqual(nm("\x1b[1;9D"), ["line-home"]); // Cmd+Left
+  assert.deepEqual(nm("\x1b[1;9C"), ["line-end"]); // Cmd+Right
+  assert.deepEqual(nm("\x1b[1;9A"), ["history-entry-prev"]); // Cmd+Up
+  assert.deepEqual(nm("\x1b[1;9B"), ["history-entry-next"]); // Cmd+Down
+  assert.deepEqual(nm("\x1b[D"), ["left"]); // plain Left unchanged
+  assert.deepEqual(nm("\x1b[A"), ["up"]); // plain Up unchanged
+  assert.deepEqual(nm("\x1bb"), ["word-left"]); // Option-as-Meta M-b
+  assert.deepEqual(nm("\x1bf"), ["word-right"]); // Option-as-Meta M-f
+});

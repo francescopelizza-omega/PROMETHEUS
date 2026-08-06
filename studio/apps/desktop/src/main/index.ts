@@ -72,6 +72,7 @@ import { registerMcpIpcHandlers } from "./mcp-ipc.js";
 import { registerMetadataIpcHandlers } from "./metadata-ipc.js";
 import { registerModelIpcHandlers } from "./model-ipc.js";
 import { registerRepoIpcHandlers } from "./repo-ipc.js";
+import { repairPath } from "./resolve-path.js";
 import { registerSecurityIpcHandlers } from "./security-ipc.js";
 import { ServeSupervisor } from "./serve-supervisor.js";
 import { registerSettingsIpcHandlers } from "./settings-ipc.js";
@@ -84,6 +85,13 @@ import { type WorkerHandle, WorkerHost } from "./worker-host.js";
 import { makeWorkerTaskSeam } from "./worker-task-seam.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
+
+// APP-PATH: repair PATH for GUI (Finder/Dock) launches BEFORE any engine/sidecar/
+// detection spawn. A launchd-inherited PATH omits /opt/homebrew/bin, ~/.local/bin,
+// etc., so the engine can't find git/claude/ollama/hf/brew → installs fail and host
+// detection reports false-negatives. safeChildEnv forwards process.env.PATH to every
+// child, so fixing it here fixes installs AND detection app-wide. Runs once, sync.
+repairPath();
 
 /** The Local History manager (APP-063), lazily created after `app` is ready (getPath). */
 let localHistoryManager: LocalHistoryManager | null = null;

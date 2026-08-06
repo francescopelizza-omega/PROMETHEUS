@@ -99,8 +99,9 @@ export function buildLocalEndpoint(runner: LocalRunner): AiEndpoint {
     baseUrl: runner.baseUrl,
     locality: "local",
     contextWindow: 8192,
-    // text-only stream (no tool-call transport on the OpenAI SSE) → keep tools off.
-    supportsTools: false,
+    // capable local runners (ollama/lmstudio) return native OpenAI tool_calls — the agent
+    // runtime now has a tool-call transport (makeLlmClient.toolTurn), so offer tools.
+    supportsTools: true,
     model,
   };
 }

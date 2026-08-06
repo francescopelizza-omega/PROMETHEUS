@@ -8,15 +8,21 @@
  * §4 — only a human may type the confirmation). PURE.
  */
 import { PROMETHEUS_TOOLS, type ToolDef } from "../mcp/server/index.js";
-import { PROPOSE_EDIT_TOOL } from "./edit.js";
+import { PROPOSE_EDIT_TOOL, WRITE_FILE_TOOL } from "./edit.js";
 import { WEB_FETCH_TOOL } from "./web.js";
 
 export type ToolName = string;
 
 /** The agent's full tool surface: the MCP prometheus.py catalog PLUS the CLI-local
- * tools the runtime dispatches (not the engine): `propose_edit` (CLI-010) and
- * `web_fetch` via the safeFetch L6 proxy (CLI-011). */
-const AGENT_TOOLS: readonly ToolDef[] = [...PROMETHEUS_TOOLS, PROPOSE_EDIT_TOOL, WEB_FETCH_TOOL];
+ * tools the runtime dispatches (not the engine): `propose_edit` (CLI-010, edit existing),
+ * `write_file` (create/overwrite a file), and `web_fetch` via the safeFetch L6 proxy
+ * (CLI-011). */
+const AGENT_TOOLS: readonly ToolDef[] = [
+  ...PROMETHEUS_TOOLS,
+  PROPOSE_EDIT_TOOL,
+  WRITE_FILE_TOOL,
+  WEB_FETCH_TOOL,
+];
 
 export interface AgentToolPolicy {
   enabled: boolean;

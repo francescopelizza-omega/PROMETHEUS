@@ -4623,6 +4623,44 @@ def _ruleset_sha() -> str:
     return h.hexdigest()[:12]
 
 
+# --------------------------------------------------------------------------- #
+# Non-executable DOC suppression (verdict only — findings are still SHOWN).
+# A shell-exec HEURISTIC (curl|bash dropper, an exfil command shape, a reverse-shell
+# string) that lives in a NON-EXECUTABLE DOC — README / CHANGELOG / LICENSE / *.md /
+# *.rst / *.txt — is documentation (install instructions or an example), NOT an
+# executed action, so it must not BLOCK an install. It stays in the report as a LOW/
+# advisory note. Agent-targeting classes (ioc / indirect prompt-injection) and
+# high-confidence signature (known-malware hash) are DELIBERATELY excluded from this
+# suppression: those are dangerous — or authoritative — even inside a doc.
+_DOC_SUPPRESS_CATEGORIES = frozenset({"dropper", "exfiltration", "reverse_shell"})
+_DOC_EXTS = frozenset({".md", ".markdown", ".mdx", ".rst", ".txt", ".adoc", ".rdoc"})
+# EXTENSIONLESS canonical doc filenames only (README, LICENSE, CHANGELOG…). ANCHORED with NO
+# optional suffix on purpose: an earlier version allowed `<name>[.-_]<anything>`, which matched
+# `security.py` / `readme.sh` / `license.py` — an allowlist BYPASS that let a dropper named
+# `readme.sh` masquerade as a doc and skip the block. A file with ANY extension must go through
+# the _DOC_EXTS check below; the regex now only whitelists truly extensionless doc files.
+_DOC_NAME_RX = re.compile(
+    r"^(readme|changelog|changes|history|news|license|licence|copying|notice|"
+    r"contributing|code_of_conduct|authors|maintainers)$", re.I)
+
+
+def _is_nonexec_doc(path: str) -> bool:
+    """True ONLY for real documentation files that are never executed on install:
+    a recognised doc EXTENSION (.md/.rst/.txt/…), or an EXTENSIONLESS canonical doc name
+    (README/LICENSE/CHANGELOG). Anything carrying a code/script extension (.py/.sh/.js/…) —
+    including `security.py`, `readme.sh` — is NOT a doc and its findings still block."""
+    base = (path or "").replace("\\", "/").lower().rsplit("/", 1)[-1]
+    ext = os.path.splitext(base)[1]
+    if ext in _DOC_EXTS:
+        return True
+    return ext == "" and bool(_DOC_NAME_RX.search(base))
+
+
+def _doc_suppressed(f: Finding) -> bool:
+    """A shell-exec heuristic sitting in a non-executable doc → advisory, not blocking."""
+    return f.rule.category in _DOC_SUPPRESS_CATEGORIES and _is_nonexec_doc(f.path)
+
+
 def build_verdict(findings: list[Finding], scanner: Scanner, target: str,
                   target_kind: str, policy: dict, elapsed: float) -> dict:
     counts = {s: sum(1 for f in findings if f.rule.severity == s) for s in SEVERITIES}
@@ -4639,6 +4677,10 @@ def build_verdict(findings: list[Finding], scanner: Scanner, target: str,
     block_classes = set(policy.get("block_classes", ["malware", "secret"]))
 
     def _blocks(f: Finding) -> bool:
+        # a shell-exec heuristic in a non-executable doc (README/CHANGELOG/*.md) is prose,
+        # not an executed action — advisory only, never a block (ioc/signature still block).
+        if _doc_suppressed(f):
+            return False
         k = f.rule.klass
         if k == "vuln":
             return bool(policy.get("vuln_block", False)) and f.rule.severity in ("CRITICAL", "HIGH")
@@ -4656,17 +4698,21 @@ def build_verdict(findings: list[Finding], scanner: Scanner, target: str,
     blocking = [f for f in findings if _blocks(f)]
     reasons: list[str] = [f"{f.rule.rid} @ {f.path}" for f in blocking]
     # accumulation rule: MANY high-severity findings in block classes block even
-    # when no single one does (previously counted only already-blocking finds)
+    # when no single one does (previously counted only already-blocking finds).
+    # Doc-suppressed heuristics (curl|bash in a README) do NOT accumulate.
     high_n = sum(1 for f in findings
-                 if f.rule.severity == "HIGH" and f.rule.klass in block_classes)
+                 if f.rule.severity == "HIGH" and f.rule.klass in block_classes
+                 and not _doc_suppressed(f))
     if high_n >= policy.get("high_block_count", 3):
         reasons.append(f"{high_n} HIGH findings in blockable classes")
     # risk-score accumulation: only CRITICAL/HIGH findings in block classes feed
     # it — MEDIUM/LOW (e.g. an example JWT, a generic-credential hit) belong to
-    # the warn tier and must not single-handedly force a block.
+    # the warn tier and must not single-handedly force a block. Doc-suppressed
+    # shell-exec heuristics are excluded (documentation is not executed).
     block_score_sum = min(100, sum(_SEV_WEIGHT[f.rule.severity] for f in findings
                                    if f.rule.klass in block_classes
-                                   and f.rule.severity in ("CRITICAL", "HIGH")))
+                                   and f.rule.severity in ("CRITICAL", "HIGH")
+                                   and not _doc_suppressed(f)))
     if block_score_sum >= policy.get("block_score", 70):
         reasons.append(f"risk score {block_score_sum} ≥ {policy.get('block_score', 70)}")
     if unscannable_hard and not policy.get("allow_unscannable", False):

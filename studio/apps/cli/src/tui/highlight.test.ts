@@ -110,3 +110,41 @@ test("unknown lang is not highlightable and highlightLine is identity", () => {
   const { text } = highlightLine("whatever { }", "plain", CODE_STATE, "truecolor");
   assert.equal(text, "whatever { }");
 });
+
+/* ── Pelly scheme: fine Python roles (self / class / func / brackets / dot / const / docstring) ── */
+
+test("python: self, class name, func name, brackets, dot, constant, decorator, docstring roles", () => {
+  const roleOf = (line: string, needle: string): string | undefined =>
+    tokenizeLine(line, "python").tokens.find((t) => t.text === needle)?.role;
+
+  assert.equal(roleOf("def fibonacci(self, n):", "self"), "synSelf");
+  assert.equal(roleOf("def fibonacci(self, n):", "fibonacci"), "synFunc");
+  assert.equal(roleOf("def fibonacci(self, n):", "def"), "synKeyword");
+  assert.equal(roleOf("class MathSolver:", "MathSolver"), "synClass");
+  assert.equal(roleOf("seq[-1]", "["), "synBracket");
+  assert.equal(roleOf("seq[-1]", "]"), "synBracket");
+  assert.equal(roleOf("f(a, b)", "("), "synParen");
+  assert.equal(roleOf("f(a, b)", ","), "synComma");
+  assert.equal(roleOf("d = {1: 2}", "{"), "synBrace");
+  assert.equal(roleOf("obj.attr", "."), "synDot");
+  assert.equal(roleOf("MAX_SIZE = 100", "MAX_SIZE"), "synConstant");
+  assert.equal(roleOf("print(x)", "print"), "synBuiltin");
+  assert.equal(tokenizeLine("@staticmethod", "python").tokens[0]?.role, "synDecorator");
+});
+
+test("python: a triple-quote at statement start is a docstring (synDoc), mid-line is a string", () => {
+  assert.equal(tokenizeLine('    """doc."""', "python").tokens.find((t) => t.text.includes("doc"))?.role, "synDoc");
+  // carried across lines
+  const open = tokenizeLine('    """multi', "python");
+  assert.equal(open.state.role, "synDoc");
+  const mid = tokenizeLine("still doc", "python", open.state);
+  assert.equal(mid.tokens[0]?.role, "synDoc");
+  // an assignment triple is a normal string, not a docstring
+  assert.equal(tokenizeLine('x = """v"""', "python").tokens.find((t) => t.text.includes("v"))?.role, "synString");
+});
+
+test("byte-invariant holds for a dense Pelly line (join === line)", () => {
+  const line = '        return sequence[-1] + self.calc(n, base=2)  # note';
+  const { tokens } = tokenizeLine(line, "python");
+  assert.equal(tokens.map((t) => t.text).join(""), line);
+});

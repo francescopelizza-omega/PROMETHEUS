@@ -1353,12 +1353,12 @@ export function GitPanel({ root }: { root: string }): ReactElement {
             marginBottom: 8,
             padding: "6px 8px",
             background: "var(--bg-surface-2)",
-            border: "1px solid var(--warning)",
+            border: "1px solid var(--warn)",
             borderRadius: "var(--radius-sm, 3px)",
             fontSize: "0.74rem",
           }}
         >
-          <div style={{ color: "var(--warning)", fontWeight: 600 }}>
+          <div style={{ color: "var(--warn)", fontWeight: 600 }}>
             ⚠ Rebase in progress
             {rebaseState.step && rebaseState.total
               ? ` — step ${rebaseState.step}/${rebaseState.total}`
@@ -1770,8 +1770,10 @@ export function GitPanel({ root }: { root: string }): ReactElement {
           <div
             style={{
               position: "fixed",
-              top: commitMenu.y,
-              left: commitMenu.x,
+              // clamp into the viewport so a right-click low/right doesn't push the menu (and
+              // its destructive "Reset (hard)" item) off-window.
+              top: Math.min(commitMenu.y, window.innerHeight - 240),
+              left: Math.min(commitMenu.x, window.innerWidth - 190),
               zIndex: 1001,
               minWidth: 180,
               padding: 4,
@@ -2115,7 +2117,7 @@ export function GitPanel({ root }: { root: string }): ReactElement {
               ) : null,
             )}
             {rebaseTreeDirty && (
-              <p style={{ margin: "6px 0 0", color: "var(--warning)", fontSize: "0.72rem" }}>
+              <p style={{ margin: "6px 0 0", color: "var(--warn)", fontSize: "0.72rem" }}>
                 Commit, stash, or discard your changes first — a rebase needs a clean working tree.
               </p>
             )}

@@ -38,7 +38,9 @@ export function Sidebar({
     axis: "x",
     initial: SIDEBAR_DEFAULT,
     min: SIDEBAR_MIN,
-    max: () => Math.max(SIDEBAR_MIN, Math.round(window.innerWidth * 0.5)),
+    // 0.35 so sidebar_max + rail_max (0.45) + the 56px activity bar can never exceed
+    // the viewport and push the workbench/rail off-screen (paired with RightRail 0.45).
+    max: () => Math.max(SIDEBAR_MIN, Math.round(window.innerWidth * 0.35)),
     storageKey: "prometheus.layout.sidebarWidth",
   });
   if (collapsed) return null;

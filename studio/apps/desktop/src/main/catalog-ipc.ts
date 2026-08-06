@@ -134,6 +134,30 @@ function toInstall(env: EngineEnvelope): CatalogInstallResult {
   }
   if (typeof env.message === "string") out.message = env.message;
   if (typeof env.error === "string") out.error = env.error;
+  // When the engine reports a per-target failure via STRUCTURED fields (install_events
+  // + summary + _exit) but sets NO top-level error/message string, synthesize a real
+  // reason here so the renderer never falls back to a bare "install failed". Benefits
+  // every caller (install + bundle). The full stderr reason still streams over
+  // catalog:progress for the log pane.
+  if (out.ok === false && !out.error && !out.message) {
+    const events = out.installEvents ?? [];
+    const bad = events.filter((e) => {
+      const r = (e as { result?: unknown }).result;
+      return r === "failed" || r === "blocked" || r === "error";
+    });
+    if (bad.length > 0) {
+      out.message = bad
+        .map((e) => {
+          const d = e as { plugin?: unknown; agent?: unknown; result?: unknown };
+          return `${String(d.plugin ?? "?")}@${String(d.agent ?? "?")}: ${String(d.result)}`;
+        })
+        .join("; ");
+    } else if (out.summary && Object.keys(out.summary).length > 0) {
+      out.message = `install did not complete: ${Object.entries(out.summary)
+        .map(([k, v]) => `${String(v)} ${k}`)
+        .join(", ")}`;
+    }
+  }
   return out;
 }
 

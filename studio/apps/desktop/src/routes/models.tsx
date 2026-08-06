@@ -187,13 +187,13 @@ export function ModelsRoute(): ReactElement {
    * blocked ⇒ apply the verdict (quarantine). JS never decides "safe" (C5).
    */
   const runDownload = useCallback(
-    async (id: string, quant: string, modalityHint: string, force: boolean): Promise<void> => {
+    async (id: string, quant: string, modalityHint: string, force: boolean): Promise<boolean> => {
       const rowId = `${id}:${quant}`;
       // Guard against a double-download: the warn flow surfaces BOTH the per-row queue
       // confirm AND the shared VerdictSheet, so two confirms could fire runDownload for
       // the same row. If the row is already actively in-flight, ignore the re-trigger.
       const inflight = useModelsStore.getState().downloads[rowId];
-      if (inflight && (inflight.state === "staging" || inflight.state === "scanning")) return;
+      if (inflight && (inflight.state === "staging" || inflight.state === "scanning")) return false;
       enqueueDownload({ id: rowId, modelId: id, quant, modality: modalityHint });
       advanceDownload(rowId, "start", { stagePath: `~/.prometheus/models/.stage/${id}` });
       advanceDownload(rowId, "staged");
@@ -203,17 +203,19 @@ export function ModelsRoute(): ReactElement {
         if (res.admitted) {
           applyDownloadVerdict(rowId, { verdict: "allow", ...(gate ?? {}) });
           setPendingGate(null);
-          return;
+          return true; // admitted — the ONLY outcome a caller may serve on (§5 gate)
         }
         if (gate) {
           applyDownloadVerdict(rowId, gate, res.quarantined);
           // a warn (or a block the user may force) opens the shared verdict sheet.
           setPendingGate({ gate, request: { id, quant, force: true }, target: rowId });
         }
+        return false; // warned/blocked/quarantined — NOT admitted
       } catch {
         // IPC/engine failure — unstick the row into an error state (fail-closed),
         // never leave it spinning at "staged" or raise an unhandled rejection.
         advanceDownload(rowId, "scanError");
+        return false;
       }
     },
     [enqueueDownload, advanceDownload, applyDownloadVerdict, setPendingGate],
@@ -230,8 +232,10 @@ export function ModelsRoute(): ReactElement {
   const onDownloadServe = useCallback(
     (quant: string): void => {
       if (!selectedId) return;
-      void runDownload(selectedId, quant, modality, false).then(() => {
-        void modelsApi().serve({ id: selectedId, quant }).then(refetchServing);
+      void runDownload(selectedId, quant, modality, false).then((admitted) => {
+        // only serve a model the §5 gate ADMITTED — never spin a profile for a warned/
+        // blocked/quarantined download (the sheet is still open for the user to decide).
+        if (admitted) void modelsApi().serve({ id: selectedId, quant }).then(refetchServing);
       });
     },
     [selectedId, modality, runDownload, refetchServing],
@@ -268,7 +272,9 @@ export function ModelsRoute(): ReactElement {
       advanceDownload(rowId, "confirmAdmit");
       // NEVER reconstruct the id from rowId.split(':') — ollama ids contain colons
       // (qwen2.5:7b), so a split would re-download the WRONG model. row.modelId is the truth.
-      if (row.modelId) void runDownload(row.modelId, row.quant, row.modality ?? modality, false);
+      // FORCE=true: a warned download re-run WITHOUT force returns the same warn → the sheet
+      // re-opens forever. force is the only lever the download IPC exposes to admit a warn.
+      if (row.modelId) void runDownload(row.modelId, row.quant, row.modality ?? modality, true);
       setPendingGate(null);
     },
     [downloads, advanceDownload, runDownload, modality, setPendingGate],
@@ -300,9 +306,14 @@ export function ModelsRoute(): ReactElement {
   );
   const onRetry = useCallback(
     (rowId: string): void => {
+      const row = useModelsStore.getState().downloads[rowId];
+      if (!row?.modelId) return;
+      // advancing to "queued" alone did NOTHING (no consumer re-runs a queued row) — the
+      // button looked dead. Advance AND actually re-invoke the download.
       advanceDownload(rowId, "retry");
+      void runDownload(row.modelId, row.quant, row.modality ?? modality, false);
     },
-    [advanceDownload],
+    [advanceDownload, runDownload, modality],
   );
 
   // ── real local install via the ollama runner (the actual weight download) ──
@@ -437,7 +448,11 @@ export function ModelsRoute(): ReactElement {
             onStop={onStop}
             onRetry={onStart}
             onUseInIde={onUseInIde}
-            onEndpoint={onUseInIde}
+            onEndpoint={(profile) => {
+              // "Endpoint" ≠ "Use in IDE": copy the served URL instead of repointing the IDE.
+              const baseUrl = profile.endpoint?.baseUrl;
+              if (baseUrl) void navigator.clipboard?.writeText(baseUrl);
+            }}
           />
         }
       />
@@ -501,8 +516,11 @@ export function ModelsRoute(): ReactElement {
           onProceed={() => {
             // proceed = confirm a warn (re-run admit; the engine still gates). Read the
             // id/quant from the carried request — NEVER split the colon-bearing target.
+            // Advance the row off `confirm` first (else applyDownloadVerdict's transition is
+            // illegal and the row parks forever), and force=true (the only lever to admit).
+            advanceDownload(pendingGate.target, "confirmAdmit");
             const { id, quant } = pendingGate.request;
-            if (id && quant) void runDownload(id, quant, modality, false);
+            if (id && quant) void runDownload(id, quant, modality, true);
             setPendingGate(null);
           }}
           onCancel={() => setPendingGate(null)}

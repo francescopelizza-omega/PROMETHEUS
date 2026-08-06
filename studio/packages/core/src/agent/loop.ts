@@ -74,8 +74,11 @@ export interface Thread {
   messages: ThreadMessage[];
 }
 
-/** A turn the model emits — a text delta, a tool call, or the final answer. */
+/** A turn the model emits — a wrapper STATUS note (progress/waiting/timeout, NOT persisted),
+ *  a reasoning delta (thinking, NOT persisted), a text delta, a tool call, or the final answer. */
 export type LlmTurn =
+  | { kind: "status"; text: string }
+  | { kind: "reasoning"; text: string }
   | { kind: "text"; text: string }
   | { kind: "tool_call"; call: ToolCall }
   | { kind: "final"; text?: string };
@@ -167,7 +170,24 @@ export async function* runAgentTurn(
     let sawFinal = false;
     const toolMessages: string[] = [];
 
+    // multi-round visibility (CLI): after the first round, tell the user we're continuing
+    // (the model asked for another tool step) so a long agentic turn never looks like a hang.
+    if (round > 0) {
+      yield { kind: "status", text: `continuing — round ${round + 1}/${maxRounds}` };
+    }
+
     for await (const turn of deps.llm.turn(thread, tuning, tools)) {
+      if (turn.kind === "status") {
+        // wrapper progress note (waiting/timeout/etc.): surface live, never persist.
+        yield { kind: "status", text: turn.text };
+        continue;
+      }
+      if (turn.kind === "reasoning") {
+        // thinking tokens: surface as live feedback but NEVER fold into assistantText /
+        // the persisted thread (reasoning is ephemeral, not part of the answer).
+        yield { kind: "reasoning", text: turn.text };
+        continue;
+      }
       if (turn.kind === "text") {
         assistantText += turn.text;
         yield { kind: "text", text: turn.text };
@@ -303,7 +323,16 @@ export async function* runAgentTurn(
 export function defaultTuning(model: ModelRef): AgentTuning {
   return {
     model,
-    systemPrompt: "You are Prometheus. Always scan before installing. Prefer free/local tools.",
+    systemPrompt:
+      "You are Prometheus, an agentic coding assistant running on the user's own machine with REAL tools. " +
+      "To DO anything to the system you MUST call the matching tool — `write_file` to create a NEW file (pass the full content), " +
+      "`propose_edit` to change an EXISTING file, and the prometheus verbs to run/scan/install. " +
+      "To MODIFY an existing file, ALWAYS use `propose_edit` with the SMALLEST exact hunks (each hunk's `old` must be a unique, verbatim span of the current file — include a little surrounding context so it matches ONE place); " +
+      "do NOT rewrite a whole existing file with `write_file` — that is for brand-new files only, and overwriting loses precision. " +
+      "NEVER satisfy a 'create/write/edit this file' request by only printing the code in your reply: printing does nothing on disk. " +
+      "Call the tool with the exact content instead, then confirm what you did. " +
+      "Every action is permission-gated — the user is asked to approve before it runs — so act directly and let the gate handle safety. " +
+      "Always scan before installing; prefer free/local tools; never use --force.",
     tools: { enabled: true, allow: [], deny: [] },
     gateMode: "enforce",
     dryRun: false,

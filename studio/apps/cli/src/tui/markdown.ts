@@ -55,7 +55,7 @@ function inline(text: string, p: ReturnType<typeof painter>): string {
     if (text[i] === "`") {
       const end = text.indexOf("`", i + 1);
       if (end !== -1) {
-        out += p.command(text.slice(i, end + 1)); // keep the backticks, tint the span
+        out += p.mdCode(text.slice(i, end + 1)); // Pelly blue inline code (backticks kept)
         i = end + 1;
         continue;
       }
@@ -63,8 +63,17 @@ function inline(text: string, p: ReturnType<typeof painter>): string {
     if (text[i] === "*" && text[i + 1] === "*") {
       const end = text.indexOf("**", i + 2);
       if (end !== -1) {
-        out += p.bold(text.slice(i + 2, end), "plain");
+        out += p.mdBold(text.slice(i + 2, end)); // Pelly yellow bold
         i = end + 2;
+        continue;
+      }
+    }
+    // markdown link [text](url) → Pelly blue (whole span tinted).
+    if (text[i] === "[") {
+      const m = /^\[[^\]]*\]\([^)]*\)/.exec(text.slice(i));
+      if (m) {
+        out += p.mdCode(m[0]);
+        i += m[0].length;
         continue;
       }
     }
@@ -116,17 +125,26 @@ export function createMarkdownRenderer(caps: ColorCaps, width: number): Markdown
 
     const h = HEADING.exec(line);
     if (h) {
-      return [p.bold((h[2] as string).trim(), "heading")];
+      return [p.mdHeading((h[2] as string).trim())]; // Pelly magenta heading
     }
 
     const li = LIST.exec(line);
     if (li) {
       const indent = Math.floor((li[1] as string).length / 2); // 2-space steps
-      const marker = /^\d+\./.test(li[2] as string) ? (li[2] as string) : "•"; // keep author's number
-      return [`${"  ".repeat(indent)}${p.accent(marker)} ${inline(li[3] as string, p)}`];
+      const numbered = /^\d+\./.test(li[2] as string);
+      const marker = numbered ? (li[2] as string) : "•"; // keep author's number
+      // numbered markers → Pelly cyan · bullets → Pelly green.
+      const mk = numbered ? p.mdNumber(marker) : p.mdBullet(marker);
+      return [`${"  ".repeat(indent)}${mk} ${inline(li[3] as string, p)}`];
     }
 
-    // ordinary prose (tables / blockquotes / links / unknown all pass through inline).
+    // blockquote `> …` → Pelly blue italic (the whole line, inline styling preserved).
+    const bq = /^(\s*>+\s?)(.*)$/.exec(line);
+    if (bq) {
+      return [p.mdQuote(`${bq[1]}${bq[2]}`)];
+    }
+
+    // ordinary prose (tables / links / unknown all pass through inline).
     return [inline(line, p)];
   };
 

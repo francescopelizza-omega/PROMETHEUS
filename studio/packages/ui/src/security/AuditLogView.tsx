@@ -126,7 +126,15 @@ export function AuditLogView({
         // Compact one-line rows (NOT an 8-column table that collapses in a narrow
         // column): time · verdict · label · target read left→right and TRUNCATE with a
         // hover title — never wrap one char per line. Minimal vertical space per entry.
-        <div role="list" style={{ display: "flex", flexDirection: "column" }}>
+        <div
+          role="list"
+          style={{
+            display: "flex",
+            flexDirection: "column",
+            maxHeight: "clamp(240px, 42vh, 520px)",
+            overflowY: "auto",
+          }}
+        >
           {visible.map((row) => {
             const result = verifyResults[row.at];
             return (

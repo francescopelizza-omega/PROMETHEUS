@@ -189,3 +189,28 @@ export const PROPOSE_EDIT_TOOL: ToolDef = {
     throw new Error("propose_edit is applied locally by the CLI runtime, not via the engine");
   },
 };
+
+/**
+ * The `write_file` ToolDef — CREATE a new file or OVERWRITE an existing one with exact
+ * content. Applied LOCALLY by the CLI runtime (never the engine), path-guarded within the
+ * working set, atomic, with a kept pre-image for revert. Unlike `propose_edit` (exact-match
+ * hunks into an existing file) this is how the agent brings a NEW file into being — the
+ * "write me hello.py" path. DESTRUCTIVE ⇒ always human-confirmed, never auto-approved.
+ */
+export const WRITE_FILE_TOOL: ToolDef = {
+  name: "write_file",
+  title: "Write file",
+  description:
+    "Create a new file or OVERWRITE an existing one with exact content: {path, content}. " +
+    "Use this to author a brand-new file (propose_edit only edits existing files). " +
+    "Requires human approval; never auto-applies.",
+  schema: {
+    path: { type: "string", required: true, description: "file path within the working set" },
+    content: { type: "string", required: true, description: "the full file content to write" },
+  },
+  // DESTRUCTIVE ⇒ the broker always routes to confirm (never auto, even under tuning.yes).
+  annotations: { destructiveHint: true },
+  toArgv: () => {
+    throw new Error("write_file is applied locally by the CLI runtime, not via the engine");
+  },
+};

@@ -29,6 +29,11 @@ export type KeyName =
   | "pagedown"
   | "word-left"
   | "word-right"
+  // Cmd/Meta motions: ⌘←/→ jump to line start/end; ⌘↑/↓ jump WHOLE history entries.
+  | "line-home"
+  | "line-end"
+  | "history-entry-prev"
+  | "history-entry-next"
   | "ctrl-c"
   | "ctrl-d"
   | "ctrl-l"
@@ -211,12 +216,25 @@ export function decodeKeys(buf: string): { events: KeyEvent[]; rest: string } {
     const ss3 = /^\x1bO([A-Za-z])/.exec(tail);
     if (csi) {
       const [, params, final] = csi as unknown as [string, string, string];
-      const name = final === "~" ? CSI_TILDE[params.split(";")[0] ?? ""] : CSI_FINAL[final];
-      // Ctrl/Alt-arrow word motion: ESC[1;5C / ESC[1;3D etc. → word-left/right.
-      if ((final === "C" || final === "D") && /;[0-9]/.test(params)) {
-        events.push({ name: final === "C" ? "word-right" : "word-left" });
-      } else if (name) {
-        events.push({ name });
+      // Modifier param (xterm/CSI-u): `ESC[1;<m><final>`. m = 1 + bitmask(Shift1 Alt2 Ctrl4 Meta8).
+      const mod = Math.max(0, (Number.parseInt(params.split(";")[1] ?? "1", 10) || 1) - 1);
+      const meta = (mod & 8) !== 0; // ⌘ / Meta
+      const altOrCtrl = (mod & (2 | 4)) !== 0; // ⌥ Option or Ctrl
+      if (final === "C" || final === "D") {
+        // ←/→ : ⌘ → line home/end · ⌥/Ctrl → word · none → char step.
+        if (meta) events.push({ name: final === "C" ? "line-end" : "line-home" });
+        else if (altOrCtrl) events.push({ name: final === "C" ? "word-right" : "word-left" });
+        else events.push({ name: final === "C" ? "right" : "left" });
+      } else if (final === "A" || final === "B") {
+        // ↑/↓ : ⌘ → jump WHOLE history entries (ignore the multi-line cursor); else vertical move.
+        if (meta) {
+          events.push({ name: final === "A" ? "history-entry-prev" : "history-entry-next" });
+        } else {
+          events.push({ name: final === "A" ? "up" : "down" });
+        }
+      } else {
+        const name = final === "~" ? CSI_TILDE[params.split(";")[0] ?? ""] : CSI_FINAL[final];
+        if (name) events.push({ name });
       }
       i += (csi[0] as string).length;
       continue;
@@ -225,6 +243,14 @@ export function decodeKeys(buf: string): { events: KeyEvent[]; rest: string } {
       const name = CSI_FINAL[ss3[1] as string];
       if (name) events.push({ name });
       i += (ss3[0] as string).length;
+      continue;
+    }
+    // Option-as-Meta (Terminal.app "Use Option as Meta key"): ESC-b / ESC-f = word motion,
+    // the readline M-b / M-f convention — so ⌥←/→ still jumps words in that terminal mode.
+    const metaWord = /^\x1b([bf])/.exec(tail);
+    if (metaWord) {
+      events.push({ name: metaWord[1] === "f" ? "word-right" : "word-left" });
+      i += 2;
       continue;
     }
 

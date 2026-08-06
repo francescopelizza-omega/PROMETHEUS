@@ -26,6 +26,8 @@ export interface HlState {
   mode: "code" | "block" | "template" | "triple";
   /** the closing delimiter to scan for when a multiline mode is open. */
   delim: string;
+  /** the role a multiline string carries (so a triple-quoted DOCSTRING stays synDoc across lines). */
+  role?: Role;
 }
 
 export const CODE_STATE: HlState = Object.freeze({ mode: "code", delim: "" });
@@ -46,6 +48,16 @@ interface LangSpec {
   types?: Set<string>;
   /** language keys precede this char (json `:` / toml `=`) → paint the preceding string/ident as a property. */
   keyTerminator?: string;
+  /** exact identifiers that get a fixed role regardless of position (Python `self` → synSelf). */
+  specialIdents?: Record<string, Role>;
+  /** a decorator/annotation sigil (`@` in Python/TS) — `@name` paints as synDecorator. */
+  decoratorSigil?: string;
+  /** ALL_CAPS identifiers are constants (synConstant) — the near-universal convention. */
+  constantsUpper?: boolean;
+  /** keywords after which the next identifier NAMES a class (Python/JS `class`). */
+  classAfter?: Set<string>;
+  /** keywords after which the next identifier NAMES a function (Python `def`, JS `function`). */
+  funcAfter?: Set<string>;
 }
 
 const set = (s: string): Set<string> => new Set(s.split(/\s+/).filter(Boolean));
@@ -74,8 +86,13 @@ const PY: LangSpec = {
     "def class return if elif else for while break continue pass import from as with try except finally raise yield lambda global nonlocal assert del in is not and or async await match case",
   ),
   builtins: set(
-    "print len range int str float list dict set tuple bool type object super isinstance issubclass enumerate zip map filter open input sum min max abs sorted reversed None True False self __init__",
+    "print len range int str float list dict set tuple bool type object super isinstance issubclass enumerate zip map filter open input sum min max abs round pow divmod sorted reversed None True False __init__ ValueError TypeError KeyError IndexError Exception",
   ),
+  specialIdents: { self: "synSelf", cls: "synSelf" },
+  decoratorSigil: "@",
+  constantsUpper: true,
+  classAfter: set("class"),
+  funcAfter: set("def"),
 };
 
 const BASH: LangSpec = {
@@ -184,10 +201,23 @@ export function isHighlightable(langId: string): boolean {
 const IDENT = /^[A-Za-z_$][\w$]*/;
 const NUMBER = /^(0[xX][0-9a-fA-F]+|0[bB][01]+|0[oO][0-7]+|\d[\d_]*\.?\d*([eE][+-]?\d+)?|\.\d+)/;
 const WS = /^[ \t]+/;
-const OPERATOR = /^[-+*/%=<>!&|^~?.:]+/;
-const PUNCT = /^[()[\]{},;]/;
+// `.` is pulled OUT of the operator run so attribute dots paint as synDot (Pelly #ff8e00).
+const OPERATOR = /^[-+*/%=<>!&|^~?:]+/;
+const DOT = /^\.+/;
+const CONST_RX = /^[A-Z][A-Z0-9_]*$/;
+/** each bracket family + comma get their own Pelly hue; `;` and the rest stay generic synPunct. */
+const PUNCT_ROLE: Record<string, Role> = {
+  "(": "synParen",
+  ")": "synParen",
+  "[": "synBracket",
+  "]": "synBracket",
+  "{": "synBrace",
+  "}": "synBrace",
+  ",": "synComma",
+  ";": "synPunct",
+};
 
-const modeRole = (mode: HlState["mode"]): Role => (mode === "block" ? "synComment" : "synString");
+const modeRole = (s: HlState): Role => s.role ?? (s.mode === "block" ? "synComment" : "synString");
 
 /** Peek: the next non-space char at or after `i` (or "" at EOL). */
 function peekNonSpace(line: string, i: number): string {
@@ -225,16 +255,19 @@ export function tokenizeLine(
   const tokens: Token[] = [];
   let i = 0;
   let cur = state;
+  // the last keyword/identifier seen (skipping whitespace/punct) — lets `class X`/`def f`
+  // name the following identifier as a class / function (Pelly magenta hues).
+  let prevWord = "";
 
   // resume an open multiline construct
   if (cur.mode !== "code") {
     const idx = line.indexOf(cur.delim);
     if (idx === -1) {
-      if (line.length > 0) tokens.push({ role: modeRole(cur.mode), text: line });
+      if (line.length > 0) tokens.push({ role: modeRole(cur), text: line });
       return { tokens, state: cur };
     }
     const end = idx + cur.delim.length;
-    tokens.push({ role: modeRole(cur.mode), text: line.slice(0, end) });
+    tokens.push({ role: modeRole(cur), text: line.slice(0, end) });
     i = end;
     cur = CODE_STATE;
   }
@@ -268,15 +301,18 @@ export function tokenizeLine(
       push("synComment", close + spec.block[1].length);
       continue;
     }
-    // python triple-quote (multiline)
+    // python triple-quote (multiline). A triple that OPENS the statement (only whitespace before
+    // it on the line) is a DOCSTRING → synDoc (Pelly green italic); otherwise a normal string.
     const triple = spec.triples?.find((t) => rest.startsWith(t));
     if (triple) {
+      const atStmtStart = tokens.every((t) => t.text.trim() === "");
+      const tRole: Role = atStmtStart ? "synDoc" : "synString";
       const close = rest.indexOf(triple, triple.length);
       if (close === -1) {
-        tokens.push({ role: "synString", text: rest });
-        return { tokens, state: { mode: "triple", delim: triple } };
+        tokens.push({ role: tRole, text: rest });
+        return { tokens, state: { mode: "triple", delim: triple, role: tRole } };
       }
-      push("synString", close + triple.length);
+      push(tRole, close + triple.length);
       continue;
     }
     // js template (multiline)
@@ -308,37 +344,63 @@ export function tokenizeLine(
         continue;
       }
     }
+    // decorator / annotation: `@name` (Python/TS) → synDecorator (Pelly olive).
+    if (spec.decoratorSigil && rest[0] === spec.decoratorSigil) {
+      const dm = /^@[\w.]*/.exec(rest);
+      if (dm && dm[0].length > 1) {
+        push("synDecorator", dm[0].length);
+        prevWord = "";
+        continue;
+      }
+    }
     // number
     const num = NUMBER.exec(rest);
     if (num && num[0].length > 0) {
       push("synNumber", num[0].length);
+      prevWord = "";
       continue;
     }
-    // identifier / keyword / builtin / type / function-call / key
+    // identifier / keyword / builtin / type / self / constant / class · function name / key
     const id = IDENT.exec(rest);
     if (id) {
       const w = id[0];
       let role: Role = "plain";
       if (spec.keywords.has(w)) role = "synKeyword";
+      else if (spec.specialIdents?.[w]) role = spec.specialIdents[w] as Role;
       else if (spec.builtins.has(w)) role = "synBuiltin";
       else if (spec.types?.has(w)) role = "synType";
+      else if (spec.classAfter?.has(prevWord))
+        role = "synClass"; // `class Foo`
+      else if (spec.funcAfter?.has(prevWord))
+        role = "synFunc"; // `def foo`
+      else if (spec.constantsUpper && w.length > 1 && CONST_RX.test(w)) role = "synConstant";
       else {
         const nxt = peekNonSpace(line, i + w.length);
         if (nxt === "(") role = "synFunc";
         else if (spec.keyTerminator && nxt === spec.keyTerminator) role = "synProperty";
       }
       push(role, w.length);
+      prevWord = w;
       continue;
     }
-    // operators / punctuation
+    // attribute dot(s) `.` → synDot (Pelly orange); floats like `.5` were taken by NUMBER above.
+    const dot = DOT.exec(rest);
+    if (dot) {
+      push("synDot", dot[0].length);
+      continue;
+    }
+    // operators
     const op = OPERATOR.exec(rest);
     if (op) {
       push("synOperator", op[0].length);
+      prevWord = "";
       continue;
     }
-    const pu = PUNCT.exec(rest);
-    if (pu) {
-      push("synPunct", pu[0].length);
+    // brackets / comma / semicolon — each family its own Pelly hue.
+    const punctRole = PUNCT_ROLE[rest[0] as string];
+    if (punctRole) {
+      push(punctRole, 1);
+      prevWord = "";
       continue;
     }
     // fallback: one char, uncolored (guarantees join === line, never throws)

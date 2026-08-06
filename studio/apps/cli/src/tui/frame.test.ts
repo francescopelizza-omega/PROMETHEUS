@@ -13,6 +13,7 @@ import type { StatusModel } from "./status.js";
 
 const STATUS: StatusModel = {
   permMode: "default",
+  authLevel: 1,
   model: "qwen",
   modelSource: "local",
   tools: true,

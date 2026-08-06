@@ -68,6 +68,10 @@ export interface SlashCtx {
   continueTurn: () => Promise<void>;
   /** apply a tuning patch + redraw the footer. */
   tune: (patch: Partial<AgentTuning>) => void;
+  /** the active 0–7 --authorisation level. */
+  getAuthLevel: () => number;
+  /** set the 0–7 --authorisation level (persists as the next-session default). */
+  setAuthLevel: (level: number) => void;
   /** session controls owned by the host. */
   control: (signal: "clear" | "new" | "quit") => void;
   /** change the working directory. */
@@ -896,6 +900,33 @@ export const SLASH_REGISTRY: readonly SlashCmd[] = Object.freeze([
         ctx.tune({ gateMode: m });
         ctx.write(c.dim(`gate → ${m}`));
       } else ctx.write(c.dim(`gate: ${ctx.tuning().gateMode} (use enforce|warn|off)`));
+    },
+  },
+  {
+    name: "authorisation",
+    aliases: ["authorisations", "authorization", "authorizations", "auth"],
+    group: "model",
+    summary: "Set autonomy 0–7 (0 paranoid … 7 runall): higher = fewer permission prompts.",
+    args: "[0-7 | name]",
+    run: (rest, ctx) => {
+      const arg = rest.trim();
+      if (!arg) {
+        const cur = agent.authLevelMeta(ctx.getAuthLevel());
+        ctx.write(c.dim(`authorisation: ${cur.level} ${cur.name} — ${cur.description}`));
+        ctx.write(c.dim(`levels: ${agent.authLevelLegend()}`));
+        return;
+      }
+      const lvl = agent.parseAuthLevel(arg);
+      if (lvl === null) {
+        ctx.write(c.dim(`unknown authorisation "${arg}" — use a level 0–7 or a name`));
+        ctx.write(c.dim(`levels: ${agent.authLevelLegend()}`));
+        return;
+      }
+      ctx.setAuthLevel(lvl);
+      const m = agent.authLevelMeta(lvl);
+      ctx.write(
+        c.dim(`authorisation → ${m.level} ${m.name} — ${m.description} (saved as default)`),
+      );
     },
   },
   toggle("dry-run", "dryRun", "Toggle dry-run (preview mutations)."),

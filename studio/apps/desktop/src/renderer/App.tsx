@@ -71,7 +71,7 @@ import {
 } from "./settings/keymap-overrides.js";
 import { ErrorBoundary } from "./shell/ErrorBoundary.js";
 import { UpdateBanner } from "./shell/UpdateBanner.js";
-import { nextRegion } from "./shell/a11y.js";
+import { nextRegion, useFocusTrap } from "./shell/a11y.js";
 import {
   ActivityBar,
   BottomPanel,
@@ -235,6 +235,14 @@ function SettingsOverlay({
   workspaceRoot?: string;
 }): ReactElement {
   const { preference, setPreference } = useTheme();
+  // focus trap + initial focus + focus-restore on close (parity with CommandPalette) so Tab
+  // stays inside the modal instead of walking the workbench controls behind it.
+  const dialogRef = useRef<HTMLElement | null>(null);
+  useFocusTrap(dialogRef, true);
+  useEffect(() => {
+    const id = requestAnimationFrame(() => dialogRef.current?.focus());
+    return () => cancelAnimationFrame(id);
+  }, []);
   // Esc closes the overlay — keyboard parity with the backdrop click + the ✕ button.
   useEffect(() => {
     const onKey = (e: KeyboardEvent): void => {
@@ -264,6 +272,10 @@ function SettingsOverlay({
       }}
     >
       <section
+        ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
+        tabIndex={-1}
         aria-label="Settings"
         style={{
           width: "min(900px, 94vw)",
@@ -649,7 +661,7 @@ function App(): ReactElement {
         fontFamily: "var(--font-ui)",
       }}
     >
-      <div style={{ flex: 1, display: "flex", minHeight: 0, minWidth: 0 }}>
+      <div style={{ flex: 1, display: "flex", minHeight: 0, minWidth: 0, overflow: "hidden" }}>
         <ActivityBar
           active={activity}
           sidebarOpen={!sidebarCollapsedForRoute}

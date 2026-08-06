@@ -194,8 +194,18 @@ export function FlameView({
             role="tooltip"
             style={{
               position: "fixed",
-              left: hover.x + 12,
-              top: hover.y + 12,
+              // clamp into the viewport so an edge-of-window hover isn't painted off-screen
+              left: Math.min(
+                hover.x + 12,
+                (typeof window !== "undefined" ? window.innerWidth : 9999) - 300,
+              ),
+              top: Math.min(
+                hover.y + 12,
+                (typeof window !== "undefined" ? window.innerHeight : 9999) - 64,
+              ),
+              maxWidth: "min(300px, 90vw)",
+              overflow: "hidden",
+              textOverflow: "ellipsis",
               zIndex: 50,
               pointerEvents: "none",
               padding: "var(--space-2, 4px) var(--space-3, 6px)",

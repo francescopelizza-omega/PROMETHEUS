@@ -15,11 +15,13 @@
 import { createInterface } from "node:readline";
 import { StringDecoder } from "node:string_decoder";
 
+import { agent } from "@prometheus/core";
 import type { EngineClient } from "@prometheus/engine-bridge";
 import { engineHandshake } from "../doctor-bridge.js";
 import { prometheusHome } from "../home.js";
 import type { ParsedArgs } from "../parse.js";
 import { defaultColorEnabled } from "../render.js";
+import { readSavedAuthLevel } from "../session/authorisation-store.js";
 import type { Backends } from "../session/onboarding.js";
 import { createPathCycler } from "../session/path-completer.js";
 import { SLASH_REGISTRY } from "../session/slash-registry.js";
@@ -38,7 +40,7 @@ import { type KeyEvent, decodeKeys } from "./keys.js";
 import { createMarkdownRenderer } from "./markdown.js";
 import { type ColorCaps, detectColorCaps, paint } from "./palette.js";
 import { workingLine } from "./quantum-verbs.js";
-import { ENTER_TUI, RESTORE_TUI, Renderer } from "./redraw.js";
+import { BG_BLACK, BG_RESET, ENTER_TUI, RESTORE_TUI, Renderer } from "./redraw.js";
 import {
   type ReduceCtx,
   type TuiEffect,
@@ -236,7 +238,41 @@ export async function launchTui(parsed: ParsedArgs, deps: TuiDeps = {}): Promise
   }).catch(() => null);
   if (!bridge) return TUI_NOT_TTY;
   const session = bridge; // non-null alias so the closures below don't see `| null`
-  session.setPermMode(startMode);
+
+  // --authorisation(s) / --authorization(s): the 0–7 autonomy scale (a digit OR a name,
+  // e.g. `--authorisation 7` or `--authorisation runall`). Sets the starting mode AND the
+  // fine-grained per-tool auth level. A declined-sudo bypass lock caps it below trusted.
+  const authFlag =
+    parsed.flags.authorisations ??
+    parsed.flags.authorisation ??
+    parsed.flags.authorizations ??
+    parsed.flags.authorization;
+  // default = the LAST-SET level persisted from any prior session (so the user's chosen posture
+  // carries across sessions); falls back to the sudo-derived mode when never set. A flag overrides.
+  let startAuthLevel = readSavedAuthLevel(home) ?? agent.modeToAuthLevel(startMode);
+  if (authFlag !== undefined) {
+    const parsedLevel = typeof authFlag === "string" ? agent.parseAuthLevel(authFlag) : null;
+    if (parsedLevel === null) {
+      stdout.write(
+        `${paint(
+          `unknown --authorisation "${authFlag === true ? "" : authFlag}" — use a level 0–7 or a name: ${agent.authLevelLegend()}`,
+          "warn",
+          caps,
+        )}\n`,
+      );
+    } else {
+      startAuthLevel = parsedLevel;
+    }
+  }
+  // a declined-sudo lock forbids the full-autonomy tiers (trusted/runall) — clamp to 5.
+  if (bypassLocked && startAuthLevel > 5) startAuthLevel = 5;
+  session.setAuthLevel(startAuthLevel); // sets the level AND syncs the coarse permMode/indicator
+  if (authFlag !== undefined) {
+    const m = agent.authLevelMeta(startAuthLevel);
+    stdout.write(
+      `${paint(`authorisation: ${m.level} ${m.name} — ${m.description}`, "info", caps)}\n`,
+    );
+  }
 
   // ── raw mode setup + restore ─────────────────────────────────────────────── //
   function restore(): void {
@@ -247,6 +283,7 @@ export async function launchTui(parsed: ParsedArgs, deps: TuiDeps = {}): Promise
         clearTimeout(escTimer);
         escTimer = null;
       }
+      if (caps !== "none") stdout.write(BG_RESET); // restore the terminal's own background
       stdout.write(RESTORE_TUI);
       if (typeof stdin.setRawMode === "function") stdin.setRawMode(false);
       stdin.pause();
@@ -484,6 +521,11 @@ export async function launchTui(parsed: ParsedArgs, deps: TuiDeps = {}): Promise
       caps === "none"
         ? null
         : setInterval(() => {
+            // CRITICAL (CLI-064): a confirm/ask modal opened mid-turn (e.g. the write_file
+            // permission prompt) paints ONCE; if the spinner keeps drawing it OVERWRITES the
+            // prompt every 120ms so the user never sees it and the turn appears to hang while
+            // silently waiting for input. Skip the spinner frame whenever a modal is open.
+            if (modal) return;
             renderer.transient(workingLine(spinTick++, Date.now() - spinStart, caps, spinSeed));
           }, 120);
     try {
@@ -498,6 +540,8 @@ export async function launchTui(parsed: ParsedArgs, deps: TuiDeps = {}): Promise
     // close an unterminated fence at turn end so the box always finishes.
     const tail = md.flush();
     if (tail.length > 0) renderer.printAbove(tail.join("\n"));
+    // elapsed-time resume (dark grey): only the non-zero counters, e.g. "40s" / "1m 30s".
+    renderer.printAbove(paint(`⏱ ${agent.formatDuration(Date.now() - spinStart)}`, "muted", caps));
     turnAbort = null;
     running = false;
     render();
@@ -633,6 +677,8 @@ export async function launchTui(parsed: ParsedArgs, deps: TuiDeps = {}): Promise
     entered = true;
     stdin.resume();
     stdout.write(ENTER_TUI);
+    // force a pure-black background for best Pelly-color contrast (skipped under NO_COLOR).
+    if (caps !== "none") stdout.write(BG_BLACK);
     stdin.on("data", onData);
     stdout.on("resize", onResize);
     // restore the terminal on EVERY exit path — normal, signal, or crash. (bin.ts's

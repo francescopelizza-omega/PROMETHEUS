@@ -43,11 +43,12 @@ body,
 }
 
 /* GLOBAL READABILITY — every text size in the app is authored in `rem`, so raising the
- * root font-size scales the WHOLE UI up at once (no per-component edits). 16→18.5px
- * (~116%) makes the small/secondary text legible. Paired with a slightly heavier base
- * weight + grayscale smoothing so text reads less thin/skinny on the dark surfaces. */
+ * root font-size scales the WHOLE UI up at once (no per-component edits). 16→18px
+ * (112.5%) lifts small/secondary text to a legible size WITHOUT the cramped/oversized
+ * feel of the old 125% (20px), which scaled text past the fixed-px chrome. Paired with a
+ * slightly heavier base weight + grayscale smoothing so text reads less thin on dark. */
 html {
-  font-size: 125%;
+  font-size: 112.5%;
 }
 
 body {

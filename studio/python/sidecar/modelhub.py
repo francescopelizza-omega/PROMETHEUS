@@ -253,6 +253,48 @@ def _default_models_dir() -> Path:
     return Path.home() / ".cache" / "prometheus" / "models"
 
 
+def _ollama_installed_models() -> List[Dict[str, Any]]:
+    """Index models already pulled into the Ollama store (spec 05 §9: the Hub does NOT own
+    Ollama's bytes — it INDEXES Ollama's own library via its HTTP API). Returns [] if the
+    daemon is unreachable. Never raises — a down daemon just means no ollama rows."""
+    if not _ollama_reachable():
+        return []
+    import json as _json
+    import urllib.request
+
+    try:
+        with urllib.request.urlopen(  # noqa: S310 — localhost daemon only
+            f"{_ollama_root()}/api/tags", timeout=2.0
+        ) as resp:
+            data = _json.loads(resp.read().decode("utf-8"))
+    except Exception:  # noqa: BLE001 — any failure ⇒ no ollama rows
+        return []
+    out: List[Dict[str, Any]] = []
+    for m in data.get("models", []) or []:
+        name = m.get("name") or m.get("model") or ""
+        if not name:
+            continue
+        det = m.get("details") or {}
+        size = int(m.get("size") or 0)
+        out.append({
+            "name": name,
+            "id": f"ollama:{name}",
+            "source": "ollama",
+            "modality": "text",
+            "path": "",  # Ollama owns the bytes; nothing in our library tree
+            "format": det.get("format") or "gguf",
+            "size_bytes": size,
+            "size_gb": round(size / 1024**3, 2) if size else 0,
+            "quant": det.get("quantization_level"),
+            "params": det.get("parameter_size"),
+            "family": det.get("family"),
+            "installed": True,
+            "served": True,
+            "endpoint": "http://localhost:11434/v1",
+        })
+    return out
+
+
 def v_model_list(argv: List[str]) -> int:
     pos = positional(argv)
     root = Path(pos[0]).expanduser() if pos else _default_models_dir()
@@ -269,6 +311,9 @@ def v_model_list(argv: List[str]) -> int:
                     "size_gb": round(size / 1024**3, 2),
                     "quant": _guess_quant(p.name),
                 })
+    # spec 05 §9 — ALSO index the Ollama store so already-pulled models (the ones a user
+    # can pick in chat right now) show up in the library, not just files we downloaded.
+    models.extend(_ollama_installed_models())
     return emit("model.list", root=str(root), exists=root.is_dir(),
                 models=models, count=len(models))
 

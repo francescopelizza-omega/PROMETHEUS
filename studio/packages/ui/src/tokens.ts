@@ -761,3 +761,6 @@ export {
   type AnsiRole,
   type AnsiColorName,
 } from "./tokens/ansi.js";
+
+// the user's "Pelly Colors" syntax scheme (raw hex lives under tokens/, §6-exempt).
+export { PELLY_SYNTAX, PELLY_SPAN_BG, type PellySynStyle } from "./tokens/pelly-syntax.js";

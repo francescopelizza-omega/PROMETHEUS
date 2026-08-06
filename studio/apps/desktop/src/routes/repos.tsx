@@ -237,16 +237,35 @@ export function ReposRoute(): ReactElement {
             {clone.isPending ? "staging + scanning…" : "+ Clone"}
           </Button>
         </form>
+        {clone.isError && (
+          <p role="alert" style={{ color: "var(--danger)", margin: "8px 0 0", fontSize: "0.8rem" }}>
+            Clone failed to reach the engine — check the URL and try again.
+          </p>
+        )}
+        {clone.data && !clone.data.ok && !clone.data.gate && !clone.data.forcedDanger && (
+          <p role="alert" style={{ color: "var(--danger)", margin: "8px 0 0", fontSize: "0.8rem" }}>
+            Clone failed: {clone.data.error ?? "unknown error"}
+          </p>
+        )}
       </Panel>
 
       <Panel title="Repos" elevation="e1">
         <p style={{ marginTop: 0, color: "var(--text-secondary, #9a9aa3)", fontSize: "0.78rem" }}>
           ● clean · ◐ warn · ✕ blocked · ◌ stale · Force… = deep-red override (typed confirm)
         </p>
-        {reposQ.isPending ? (
+        {reposQ.isError || (reposQ.data && !reposQ.data.ok) ? (
+          // was disguised as "no repos cloned yet." — a sidecar error must not read as empty.
+          <p role="alert" style={{ color: "var(--danger)" }}>
+            Couldn't load repos:{" "}
+            {reposQ.data?.error ?? "the repo sidecar didn't respond — try again."}
+          </p>
+        ) : reposQ.isPending ? (
           <p style={{ color: "var(--text-secondary, #9a9aa3)" }}>loading repos…</p>
         ) : repos.length === 0 ? (
-          <p style={{ color: "var(--text-secondary, #9a9aa3)" }}>no repos cloned yet.</p>
+          <p style={{ color: "var(--text-secondary, #9a9aa3)" }}>
+            No repos yet — clone a GitHub repo above (staged + nemesis-scanned before anything
+            lands).
+          </p>
         ) : (
           <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "0.82rem" }}>
             <thead>
@@ -284,7 +303,7 @@ export function ReposRoute(): ReactElement {
                     </td>
                     <td style={{ padding: "4px 8px" }}>{r.lastVerdict?.verdict ?? "—"}</td>
                     <td style={{ padding: "4px 8px" }}>{r.status}</td>
-                    <td style={{ padding: "4px 8px", display: "flex", gap: 6 }}>
+                    <td style={{ padding: "4px 8px", display: "flex", gap: 6, flexWrap: "wrap" }}>
                       <Button
                         variant="ghost"
                         onClick={() => r.localPath && openFolderInWorkspace(r.localPath)}
@@ -345,12 +364,14 @@ export function ReposRoute(): ReactElement {
           verdict={gateToVerdict(pendingGate.gate, pendingGate.id ?? pendingGate.url ?? "repo")}
           onProceed={() => {
             // proceed = a warn the user accepts → re-run the SAME operation (engine re-gates).
+            // force=true: a warn is kept-staged (not promoted); force+confirm is the ONLY
+            // renderer lever to admit it. force:false re-gates → identical warn → loop.
             if (pendingGate.kind === "clone" && pendingGate.url) {
-              clone.mutate({ url: pendingGate.url, branch: pendingGate.branch, force: false });
+              clone.mutate({ url: pendingGate.url, branch: pendingGate.branch, force: true });
             } else if (pendingGate.kind === "rescan" && pendingGate.id) {
               rescan.mutate(pendingGate.id);
             } else if (pendingGate.kind === "update" && pendingGate.id) {
-              update.mutate({ id: pendingGate.id, force: false });
+              update.mutate({ id: pendingGate.id, force: true });
             }
             setPendingGate(null);
           }}

@@ -1,0 +1,228 @@
+/**
+ * agent/authorization.ts — the `--authorisation(s)` autonomy SCALE (0–7).
+ *
+ * A single crescent knob: level 0 asks the human before EVERY action; each higher level
+ * auto-approves one more CATEGORY of action, up to level 7 which runs everything with no
+ * prompts. It refines the coarser permission-modes.ts posture (which the TUI Shift-Tab
+ * cycle still shows) — the level is the fine-grained source of truth for "allow vs ask".
+ *
+ * Crescent categories (ascending risk): read < write < config < command < install < destructive.
+ *   0 paranoid  — auto: (nothing)                          ask even reads
+ *   1 readonly  — auto: read                               ask every change      ← default
+ *   2 edits     — auto: read, write                        ask commands/installs
+ *   3 config    — auto: read, write, config                ask commands/installs
+ *   4 commands  — auto: read, write, config, command       ask installs
+ *   5 installs  — auto: read, write, config, command, install
+ *   6 trusted   — auto: EVERYTHING the engine allows       (nemesis gate still BLOCKs)
+ *   7 runall    — trusted + run-to-done, zero prompts/pauses
+ *
+ * LOAD-BEARING INVARIANT (C5): this is AUTONOMY, never a safety verdict. Even level 7 only
+ * skips the HUMAN confirm — it NEVER passes --force, so the nemesis gate still BLOCKs a
+ * dangerous fetch/exec. "Run everything" = auto-approve here + the engine BLOCK tier there.
+ *
+ * PURE: no IO. The host owns the prompt + indicator paint; this module classifies + decides.
+ */
+import type { PermissionModeId } from "./permission-modes.js";
+
+/** A tool's effect class for the authorization scale (finer than permission-modes' 3). */
+export type AuthCategory = "read" | "write" | "config" | "command" | "install" | "destructive";
+
+/** The annotation slice we classify on (subset of the MCP ToolAnnotations). */
+export interface AuthToolEffect {
+  readOnlyHint?: boolean;
+  destructiveHint?: boolean;
+  openWorldHint?: boolean;
+}
+
+/** Static metadata for one authorization level. */
+export interface AuthLevelMeta {
+  level: number; // 0..7
+  /** the canonical name accepted by `--authorisation <name>`. */
+  name: string;
+  /** short status label. */
+  label: string;
+  description: string;
+  /** categories auto-approved WITHOUT asking (everything else prompts the human). */
+  auto: readonly AuthCategory[];
+  /** run-to-done: auto-continue past the per-turn cap (no pauses). Level 7 only. */
+  runToDone: boolean;
+}
+
+/** Ascending-risk category order; a level N auto-approves the first N of these (N = level, capped). */
+const CATEGORY_ORDER: readonly AuthCategory[] = [
+  "read",
+  "write",
+  "config",
+  "command",
+  "install",
+  "destructive",
+];
+
+/** The first `n` categories (the cumulative auto-approve set for a level). */
+function cumulative(n: number): AuthCategory[] {
+  return CATEGORY_ORDER.slice(0, Math.max(0, Math.min(n, CATEGORY_ORDER.length)));
+}
+
+/** The 8 authorization levels (index === level). Crescent: each unlocks one more category. */
+export const AUTH_LEVELS: readonly AuthLevelMeta[] = Object.freeze([
+  {
+    level: 0,
+    name: "paranoid",
+    label: "paranoid",
+    description: "Ask before EVERY action — even reading a file. Maximum control.",
+    auto: [],
+    runToDone: false,
+  },
+  {
+    level: 1,
+    name: "readonly",
+    label: "read-only",
+    description: "Auto-approve reads/scans; ask before every change. The safe default.",
+    auto: cumulative(1),
+    runToDone: false,
+  },
+  {
+    level: 2,
+    name: "edits",
+    label: "edits",
+    description: "Auto reads + file writes/edits; ask before commands and installs.",
+    auto: cumulative(2),
+    runToDone: false,
+  },
+  {
+    level: 3,
+    name: "config",
+    label: "config",
+    description: "Auto reads + edits + local config changes; ask before commands and installs.",
+    auto: cumulative(3),
+    runToDone: false,
+  },
+  {
+    level: 4,
+    name: "commands",
+    label: "commands",
+    description: "Auto reads + edits + config + shell commands; ask before installs/fetches.",
+    auto: cumulative(4),
+    runToDone: false,
+  },
+  {
+    level: 5,
+    name: "installs",
+    label: "installs",
+    description: "Auto reads + edits + config + commands + installs; ask only before destructive.",
+    auto: cumulative(5),
+    runToDone: false,
+  },
+  {
+    level: 6,
+    name: "trusted",
+    label: "trusted",
+    description: "Auto-run EVERYTHING the engine allows. The nemesis gate still BLOCKs danger.",
+    auto: cumulative(6),
+    runToDone: false,
+  },
+  {
+    level: 7,
+    name: "runall",
+    label: "RUN ALL",
+    description:
+      "Run everything with NO prompts and no pauses (run-to-done). Nemesis still hard-stops danger.",
+    auto: cumulative(6),
+    runToDone: true,
+  },
+]);
+
+/** The default level when no `--authorisation` flag is given (matches the classic ask-for-changes posture). */
+export const DEFAULT_AUTH_LEVEL = 1;
+
+/** Clamp any number to a valid level and return its metadata. */
+export function authLevelMeta(level: number): AuthLevelMeta {
+  const i = Math.max(0, Math.min(Math.trunc(level), AUTH_LEVELS.length - 1));
+  return AUTH_LEVELS[i] as AuthLevelMeta;
+}
+
+/** The level's canonical name (e.g. 7 → "runall"). */
+export function authLevelName(level: number): string {
+  return authLevelMeta(level).name;
+}
+
+/**
+ * Classify a tool into an authorization category from its ref + annotations.
+ * Order matters: readOnly wins first, then the CLI-local file writers, then network installs,
+ * then shell commands, then irreversible destructive, else a plain local config mutation.
+ */
+export function classifyAuth(ref: string, ann: AuthToolEffect | undefined): AuthCategory {
+  if (ann?.readOnlyHint) return "read";
+  const base = ref.includes(":") ? (ref.split(":").pop() ?? ref) : ref;
+  if (ref === "write_file" || ref === "propose_edit" || base === "write" || base === "edit") {
+    return "write";
+  }
+  if (ann?.openWorldHint) return "install"; // install / fetch / repo add (network or remote code)
+  if (ref === "run_command" || base === "exec" || base === "run" || base === "command") {
+    return "command";
+  }
+  if (ann?.destructiveHint) return "destructive"; // uninstall / delete / overwrite
+  return "config"; // other local mutation (enable / disable / set)
+}
+
+/**
+ * Decide ONE tool call under an authorization level: "allow" (run, no prompt) or "ask"
+ * (prompt the human). There is no "deny" — the scale is purely about prompt frequency
+ * (plan-mode's read-only DENY lives in permission-modes, orthogonal to this).
+ */
+export function authDecision(
+  level: number,
+  ref: string,
+  ann: AuthToolEffect | undefined,
+): "allow" | "ask" {
+  const meta = authLevelMeta(level);
+  return meta.auto.includes(classifyAuth(ref, ann)) ? "allow" : "ask";
+}
+
+/** Whether the level runs to done (auto-continues past the per-turn cap). Level 7 only. */
+export function authRunToDone(level: number): boolean {
+  return authLevelMeta(level).runToDone;
+}
+
+/**
+ * Parse a `--authorisation(s)` value: a digit "0".."7" OR a level name (case-insensitive).
+ * Returns the level 0–7, or null when unrecognized (the caller reports the valid set).
+ */
+export function parseAuthLevel(raw: string): number | null {
+  const s = raw.trim().toLowerCase();
+  if (/^[0-7]$/.test(s)) return Number(s);
+  const byName = AUTH_LEVELS.find((l) => l.name === s);
+  return byName ? byName.level : null;
+}
+
+/** A one-line `0 paranoid · 1 readonly · … · 7 runall` legend for help / error text. */
+export function authLevelLegend(): string {
+  return AUTH_LEVELS.map((l) => `${l.level} ${l.name}`).join(" · ");
+}
+
+/* ── bridge to the coarse permission-modes (Shift-Tab cycle + indicator) ─────── */
+
+/** Map a level onto the nearest permission MODE so the TUI indicator + Shift-Tab start sensibly. */
+export function authLevelToMode(level: number): PermissionModeId {
+  const l = authLevelMeta(level).level;
+  if (l >= 7) return "yolo";
+  if (l >= 6) return "bypassPermissions";
+  if (l >= 2) return "acceptEdits"; // auto-approves at least file edits
+  return "default"; // 0–1: ask for changes (0 also asks reads, handled by the fine decision)
+}
+
+/** Map a permission MODE back onto a level (keeps the two in sync when Shift-Tab changes the mode). */
+export function modeToAuthLevel(mode: PermissionModeId): number {
+  switch (mode) {
+    case "yolo":
+      return 7;
+    case "bypassPermissions":
+      return 6;
+    case "acceptEdits":
+      return 2;
+    case "plan":
+      return 0; // plan is read-only DENY; the fine scale can't express deny, so pin low
+    default:
+      return DEFAULT_AUTH_LEVEL;
+  }
+}

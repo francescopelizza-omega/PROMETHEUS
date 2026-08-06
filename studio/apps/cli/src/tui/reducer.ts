@@ -629,9 +629,11 @@ export function reduce(state: TuiState, rawKey: KeyEvent, ctx: ReduceCtx): Reduc
       return result(commit(state, state.input, nextWord(a, state.cursor), ctx));
     case "home":
     case "ctrl-a":
+    case "line-home": // ⌘←
       return result(commit(state, state.input, lineStart(a, state.cursor), ctx));
     case "end":
     case "ctrl-e":
+    case "line-end": // ⌘→
       return result(commit(state, state.input, lineEnd(a, state.cursor), ctx));
     case "up": {
       const mv = verticalMove(state, -1);
@@ -645,6 +647,12 @@ export function reduce(state: TuiState, rawKey: KeyEvent, ctx: ReduceCtx): Reduc
         return result({ ...commit(state, state.input, mv.cursor, ctx, true), goalCol: mv.goalCol });
       return result(historyNext(state, ctx));
     }
+    // ⌘↑ / ⌘↓: jump directly between WHOLE history prompts, regardless of the cursor's line
+    // in a multi-line draft (⌘↓ walks back toward newer entries and finally the empty draft).
+    case "history-entry-prev":
+      return result(historyPrev(state, ctx));
+    case "history-entry-next":
+      return result(historyNext(state, ctx));
     case "ctrl-u": {
       const ls = lineStart(a, state.cursor);
       return result(commit(state, join([...a.slice(0, ls), ...a.slice(state.cursor)]), ls, ctx));

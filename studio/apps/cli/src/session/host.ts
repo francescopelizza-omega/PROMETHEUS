@@ -82,7 +82,9 @@ import {
   restoreCheckpoint,
   runMessageTurn,
   sessionUsage,
+  warmupLocalModel,
 } from "./agent-runtime.js";
+import { readSavedAuthLevel, saveAuthLevel } from "./authorisation-store.js";
 import { type SessionCtx as VerbCtx, execVerb } from "./command-exec.js";
 import { realGitSpawn } from "./git-helpers.js";
 import {
@@ -447,6 +449,8 @@ export async function launchSession(parsed: ParsedArgs, deps: SessionDeps = {}):
         model: { provider: backends.localRunner?.name ?? "ollama", modelId: endpoint.model ?? "" },
       },
     });
+    // pre-load the local model NOW (fire-and-forget) so the user's first prompt is warm.
+    warmupLocalModel(endpoint);
   }
 
   // Orchestrator mode: when we're inside a live tmux session, start with 3 subagents by
@@ -586,6 +590,8 @@ export async function launchSession(parsed: ParsedArgs, deps: SessionDeps = {}):
         type: "tune",
         patch: { model: { provider: "ollama", modelId: r.endpoint.model ?? "" } },
       });
+      // pre-load the just-chosen model so the next prompt is warm.
+      warmupLocalModel(endpoint);
       writeLine(c.green(`✓ session now using ${r.endpoint.model}`));
     }
   };
@@ -752,12 +758,20 @@ export async function launchSession(parsed: ParsedArgs, deps: SessionDeps = {}):
     if (!res.capped) continueCount = 0; // chain complete
   };
 
+  // the 0–7 --authorisation level for the plain host: persisted across sessions like the TUI.
+  let hostAuthLevel = readSavedAuthLevel(home) ?? agent.DEFAULT_AUTH_LEVEL;
+
   // The rich context handed to every host-side /command (slash-registry).
   const slashCtx: SlashCtx = {
     write: writeLine,
     json: parsed.json,
     tuning: () => state.tuning,
     cwd: () => state.cwd,
+    getAuthLevel: () => hostAuthLevel,
+    setAuthLevel: (level) => {
+      hostAuthLevel = agent.authLevelMeta(level).level;
+      saveAuthLevel(hostAuthLevel, home); // last-set becomes the next-session default
+    },
     runVerb: async (tokens) => {
       const outcome = await handlers.execVerb(tokens, verbCtxFor(writeLine));
       if (outcome.text) writeLine(outcome.text);

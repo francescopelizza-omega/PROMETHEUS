@@ -522,7 +522,10 @@ function PaneStrip({
         gap: 2,
         borderBottom: "1px solid var(--border-subtle, #232329)",
         background: "var(--bg-surface, #101015)",
-        overflowX: "auto",
+        // NO overflowX:auto — it coerces overflow-y to clip too, hiding the "+ ▾" launcher
+        // menu (position:absolute; top:100%). Wrap tabs to a second line instead so both the
+        // tabs AND the dropdown stay fully visible.
+        flexWrap: "wrap",
         flexShrink: 0,
       }}
     >
@@ -658,7 +661,9 @@ function PaneStrip({
               style={{
                 position: "absolute",
                 top: "100%",
-                left: 0,
+                // right-anchored: the controls sit at the far right, so grow leftward into
+                // the viewport (left:0 pushed a ≥230px menu off the right edge).
+                right: 0,
                 marginTop: 2,
                 minWidth: 230,
                 background: "var(--bg-surface-2, #16161b)",

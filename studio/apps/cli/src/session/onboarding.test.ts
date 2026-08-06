@@ -65,7 +65,7 @@ test("buildLocalEndpoint: maps a runner → an OpenAI-compatible local endpoint"
   assert.equal(ep.locality, "local");
   assert.equal(ep.baseUrl, "http://localhost:11434/v1");
   assert.equal(ep.model, "qwen2.5-coder:7b"); // first served model
-  assert.equal(ep.supportsTools, false); // text-only stream
+  assert.equal(ep.supportsTools, true); // local OpenAI-compatible runners expose native tool_calls
 });
 
 test("detectBackends: a live ollama with a model → a ready local endpoint", async () => {
