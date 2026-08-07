@@ -114,6 +114,7 @@ export type { AuthCategory, AuthLevelMeta, AuthToolEffect } from "./authorizatio
 export {
   AUTH_LEVELS,
   DEFAULT_AUTH_LEVEL,
+  UNSCOPED_AUTO_LEVEL,
   authDecision,
   authLevelLegend,
   authLevelMeta,
@@ -123,6 +124,7 @@ export {
   classifyAuth,
   modeToAuthLevel,
   parseAuthLevel,
+  scopedWriteDecision,
 } from "./authorization.js";
 // --- human-readable elapsed-duration formatter (turn/subtask timing) ---------------- //
 export { formatDuration } from "./duration.js";

@@ -15,6 +15,8 @@ import {
   acceptAc,
   isOpen,
   moveAc,
+  requiresArg,
+  submitLine,
   syncAutocomplete,
 } from "./autocomplete.js";
 import { type InvokeOverlayState, onInvokeKey } from "./invoke-overlay.js";
@@ -558,11 +560,20 @@ export function reduce(state: TuiState, rawKey: KeyEvent, ctx: ReduceCtx): Reduc
       }
       case "enter": {
         const sel = state.ac.items[state.ac.index];
-        const line = acceptAc(state.ac);
+        const line = submitLine(state.ac, state.input);
         if (!sel || !line) return result(state);
-        // a command that takes args → complete + await args; else run it now.
-        if (sel.args) return result(commit(state, line, cps(line).length, ctx));
-        return submit(state, `/${sel.name}`, ctx);
+        // Hold for args ONLY when the command REQUIRES one ("<name>") and none is typed yet.
+        // Testing `sel.args` at all held ~40 commands with merely OPTIONAL args ("[action]")
+        // on the first Enter, so `/faq` needed two presses and the next command was glued on
+        // as its argument. Everything else submits what the user actually typed — which keeps
+        // the alias (`/effort` stays `/effort`) and any already-typed remainder.
+        const completed = acceptAc(state.ac);
+        if (requiresArg(sel) && line.slice(1).trim().split(/\s+/).length < 2) {
+          return completed
+            ? result(commit(state, completed, cps(completed).length, ctx))
+            : result(state);
+        }
+        return submit(state, line, ctx);
       }
       case "esc":
         return result({ ...state, ac: { items: [], index: 0, query: "" } });

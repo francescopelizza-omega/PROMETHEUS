@@ -90,7 +90,7 @@ import {
 } from "../session/slash-exec.js";
 import { type SlashCtx, findSlash } from "../session/slash-registry.js";
 import { createSteeringController } from "../session/steering.js";
-import { createWorkingSet } from "../session/working-set.js";
+import { createWorkingSet, isPathAllowed } from "../session/working-set.js";
 import { insideTmux } from "../tmux/tmux.js";
 import { runUpdates } from "../updates/updates-cmd.js";
 import { copyReplyStatus, lastAssistantReply } from "./clipboard.js";
@@ -472,6 +472,15 @@ export async function createSessionBridge(deps: BridgeDeps): Promise<SessionBrid
   // a file-write annotation (propose_edit/write_file both classify as the "write" category).
   const WRITE_ANN = { destructiveHint: true } as const;
 
+  // The live read/write scope: cwd (implicit root) + every `/add-dir` dir — the SAME list the
+  // tool runner path-guards against (turnCtx.workingSet). Recomputed per call (dirs change live).
+  const scopeRoots = (): string[] => [state.cwd, ...ws.list()];
+
+  // Is a write target inside the working set? Fail-closed: an unresolvable path counts as OUTSIDE
+  // (so it prompts rather than silently auto-approving).
+  const insideScope = (path: string): boolean =>
+    isPathAllowed(isAbsolute(path) ? path : resolve(state.cwd, path), scopeRoots());
+
   // propose_edit gating (CLI-010): show the diff card, then decide by the 0–7 authorisation level
   // (auto ≥ level 2 "edits"; plan mode still refuses read-only; else prompt the human).
   const confirmEdit = async (call: ToolCall): Promise<agent.ConfirmResult> => {
@@ -536,9 +545,30 @@ export async function createSessionBridge(deps: BridgeDeps): Promise<SessionBrid
     if (permMode === "plan") {
       return { approved: false, reason: JSON.stringify(agent.planModeRefusal(call.name)) };
     }
-    if (agent.authDecision(authLevel, "write_file", WRITE_ANN) === "allow") {
+    // SCOPED auto-approve: `write_file` has no working-set guard of its own (the confirm prompt IS
+    // its authorization), so a target outside cwd + /add-dir must always reach a human — otherwise
+    // level ≥ 2 ("auto-approve edits") would silently authorize writes to ~/.ssh, ~/.zshrc, …
+    const inScope = insideScope(path);
+    if (agent.scopedWriteDecision(authLevel, "write_file", WRITE_ANN, inScope) === "allow") {
       auditBypass(call);
       return true;
+    }
+    if (!inScope) {
+      write(
+        paint(
+          `  ⚠ ${abs} is OUTSIDE the working set (${scopeRoots().join(", ")}) — approval required`,
+          "stErr",
+          caps,
+        ),
+      );
+      // an outside-scope write is always human-authorized → audit it whatever the mode.
+      const okOut = await deps.confirm(`write file OUTSIDE the working set: ${abs}?`);
+      if (okOut) {
+        appendPermissionAudit(call.name, call.args, "approved-outside-working-set", home);
+        return true;
+      }
+      const why = (await deps.ask("reject reason (optional):").catch(() => "")).trim();
+      return { approved: false, reason: why || "rejected (outside the working set)" };
     }
     const ok = await deps.confirm(`write file ${path}?`);
     if (ok) return true;

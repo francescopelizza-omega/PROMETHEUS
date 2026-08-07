@@ -2,10 +2,17 @@ __pycache__/
 *.py[cod]
 .venv/
 venv/
-env/
+# `env/` unanchored also swallowed studio/packages/ui/src/env/ — 10 real source files,
+# which made a fresh clone fail to typecheck. Anchor it: a stray root-level virtualenv is
+# ignored, nested `.venv`/`venv` are covered above, and source dirs named `env` are safe.
+/env/
 node_modules/
 dist/
 build/
+# electron-builder's buildResources (icons, entitlements, the afterPack + notarize hooks)
+# live in a dir literally named `build/`. Without these a packaged app has no icon, no
+# entitlements, and no exec bit on the node-pty spawn-helper ("No terminal backend").
+!studio/apps/desktop/build/
 out/
 .next/
 .turbo/

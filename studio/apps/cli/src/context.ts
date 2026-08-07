@@ -58,7 +58,15 @@ export function suppressProgress(ctx: { json: boolean; quiet: boolean }): boolea
   return ctx.json || ctx.quiet;
 }
 
-export function makeContext(args: ParsedArgs): CliContext {
+/**
+ * Build the per-invocation context.
+ *
+ * `client` is an OPTIONAL pre-built gateway: the interactive session already owns one
+ * EngineClient for its whole lifetime (C5 — one gateway), so it hands that instance in
+ * instead of letting every verb mint a second connection. Omitted (the one-shot CLI) →
+ * a fresh client, exactly as before.
+ */
+export function makeContext(args: ParsedArgs, client?: EngineClient): CliContext {
   // Discover a per-project `.prom.toml` (CLI-046) and announce it ONCE on stderr (never under
   // --json, never on stdout). PROM_NO_PROJECT_CONFIG=1 short-circuits inside discoverProjectConfigPath.
   const projectConfigPath = discoverProjectConfigPath(args.cwd ?? process.cwd());
@@ -67,7 +75,7 @@ export function makeContext(args: ParsedArgs): CliContext {
     process.stderr.write(`using project config: ${projectConfigPath}\n`);
   }
   return {
-    client: createEngineClient(),
+    client: client ?? createEngineClient(),
     json: args.json,
     quiet: args.quiet,
     args,

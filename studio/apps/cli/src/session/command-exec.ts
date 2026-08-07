@@ -1,12 +1,12 @@
 /**
  * session/command-exec.ts — run a `prometheus` VERB from inside the interactive
- * session (P4) over the SAME parity router the one-shot CLI and the GUI palette
- * use. This is what makes "anything you can type as `prometheus <verb>` you can type
- * at the session prompt" STRUCTURAL: single-token spec verbs go straight through
- * `invoke()` (the canonical router) sharing the session's EngineClient (C5 — one
- * gateway); every other verb path falls back to the one-shot `dispatch()` so the
- * full §2 tree (rich renderers + multi-word nouns + honest stubs) is reachable
- * with zero per-verb glue.
+ * session (P4) through the SAME dispatcher the one-shot CLI uses. This is what makes
+ * "anything you can type as `prometheus <verb>` you can type at the session prompt"
+ * STRUCTURAL: EVERY verb goes to `dispatch()` — rich renderers, multi-word §2 nouns,
+ * and honest stubs alike — with the session's own EngineClient injected so the
+ * one-gateway invariant (C5) holds without a second routing path. Spec verbs with no
+ * bespoke renderer still land on `invoke()`, because `dispatch` itself falls through
+ * to `routeViaRegistry` — the canonical router the GUI palette calls.
  *
  * NEVER-FORCE / GATE-FIRST: a mutating verb carrying --force is held BEFORE it
  * reaches the engine. The session must type-confirm the override via ctx.confirm;
@@ -15,7 +15,7 @@
  * "safe" — that stays the engine's nemesis verdict (C5). Every turn is wrapped so
  * an engine/transport error renders a friendly line and the session continues.
  */
-import { type RawArgs, cliProfiles, getCommandSpec, invoke } from "@prometheus/core";
+import { cliProfiles } from "@prometheus/core";
 import type { EngineClient } from "@prometheus/engine-bridge";
 
 import type { CommandOutcome } from "../context.js";
@@ -77,37 +77,6 @@ function blocked(command: string, reason: string): CommandOutcome {
 }
 
 /**
- * Build the registry's RawArgs from parsed CLI args (+ lifted §1 globals), mirroring
- * commands/route.ts::toRawArgs so single-token verbs receive their declared flags
- * (install --dry-run/--force, etc.) when routed straight through invoke().
- */
-function toRawArgs(parsed: ParsedArgs): RawArgs {
-  const flags: Record<string, string | boolean> = {};
-  for (const [k, v] of Object.entries(parsed.flags)) flags[k] = v;
-  // parse.ts hoists engine globals OFF `flags` into typed fields — lift them back.
-  if (parsed.dryRun) flags["dry-run"] = true;
-  if (parsed.yes) flags.yes = true;
-  if (parsed.strict) flags.strict = true;
-  if (parsed.force) flags.force = true;
-  return { positionals: parsed.positionals, flags };
-}
-
-/** Render a routed RouterResult to a CommandOutcome (text summary + machine payload). */
-async function routeViaInvoke(
-  specId: string,
-  parsed: ParsedArgs,
-  ctx: SessionCtx,
-): Promise<CommandOutcome> {
-  // SAME router the GUI palette calls — sharing the SESSION's client (C5).
-  const res = await invoke(specId, { client: ctx.client }, toRawArgs(parsed));
-  const payload = {
-    ...((res.verdict ?? res.envelope ?? {}) as Record<string, unknown>),
-    ok: res.ok,
-  };
-  return { text: res.summary, json: payload, exitCode: res.ok ? 0 : 2 };
-}
-
-/**
  * Gate a forced, mutating verb behind a typed confirm (never-force, §4).
  *
  * Returns:
@@ -145,9 +114,8 @@ async function forceGate(
  * Execute a session verb. `tokens` is the raw word list the user typed AFTER the
  * leading verb is included (e.g. ["install","foo","--dry-run"], ["plugin","list"],
  * ["scan"]). Parses with the SAME parser the one-shot CLI uses, applies the
- * never-force gate, then routes:
- *   - single-token spec verb  → invoke() (shares ctx.client, the GUI's exact path)
- *   - everything else         → dispatch() (full §2 tree + rich renderers + stubs)
+ * never-force gate, then routes everything through dispatch() over ctx.client — the
+ * full §2 tree (rich renderers + multi-word nouns + parity registry + honest stubs).
  *
  * Crash-free: any thrown engine/transport error becomes a friendly CommandOutcome
  * (the session loop renders it and continues; it never sees a raw stack).
@@ -187,19 +155,19 @@ export async function execVerb(tokens: string[], ctx: SessionCtx): Promise<Comma
     const gate = await forceGate(parsed, command, ctx);
     if (gate) return gate;
 
-    // STRUCTURAL PARITY: a single-token verb that maps to a CommandSpec routes
-    // straight through the canonical router over the SESSION client (C5). This is
-    // the byte-for-byte path the GUI palette uses, so describe/harden/chat/install/
-    // apps/… reach the session with zero glue and share one engine connection.
-    if (parsed.command.length === 1 && getCommandSpec(parsed.command[0] as string)) {
-      return await routeViaInvoke(parsed.command[0] as string, parsed, ctx);
-    }
-
-    // Otherwise fall back to the one-shot dispatcher: rich renderers (scan/list/
-    // info/gate/env/model/provider), multi-word §2 nouns (plugin install / repo add),
-    // prom-native (profile/config), and honest not-yet-wired stubs — all reuse the
-    // exact one-shot behavior, so the session is a true superset of the CLI.
-    return await dispatch(parsed);
+    // ONE path for every verb: the one-shot dispatcher, over the SESSION's client.
+    //
+    // A single-token spec verb used to short-circuit into invoke() here so it could share
+    // the session's EngineClient (C5 — one gateway). But `dispatch` is not a superset of
+    // invoke() only for the verbs WITHOUT a hand-written renderer — for `scan`/`list`/
+    // `info`/`doctor`/`apps`/… it is strictly richer, and the short-circuit meant 28 of the
+    // 121 slash commands printed `<verb>: ok` in-session while the identical shell command
+    // printed a full table. Injecting the client keeps the one-gateway invariant while the
+    // routing itself stays single-sourced: `dispatch` falls through to `routeViaRegistry`
+    // (the SAME `invoke(id, {client})` the GUI palette calls) for every spec verb that has
+    // no richer renderer, so parity is preserved by construction rather than by a list that
+    // can drift.
+    return await dispatch(parsed, { client: ctx.client });
   } catch (err) {
     // Never leak a stack into the session; render a friendly line and continue.
     return outcomeFromError(err);

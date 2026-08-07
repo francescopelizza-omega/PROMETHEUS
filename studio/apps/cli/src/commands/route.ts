@@ -17,6 +17,8 @@
 import { type RawArgs, getCommandSpec, invoke } from "@prometheus/core";
 
 import type { CliContext, CommandOutcome } from "../context.js";
+import { renderEnvelope } from "../render/envelope-view.js";
+import { renderVerdictCard } from "../verdict-view.js";
 
 /**
  * Resolve a parsed command path to a CommandSpec id (or undefined).
@@ -50,14 +52,23 @@ function toRawArgs(ctx: CliContext): RawArgs {
 /** Route through the registry and render the RouterResult to a CommandOutcome. */
 export async function routeViaRegistry(id: string, ctx: CliContext): Promise<CommandOutcome> {
   const res = await invoke(id, { client: ctx.client }, toRawArgs(ctx));
-  // text surface: the spec's one-line summary; json surface: the raw verdict /
-  // engine envelope (machine channel). A non-ok routed command exits 2 (C5).
+  // json surface: the raw verdict / engine envelope (machine channel), unchanged.
   const payload = {
     ...((res.verdict ?? res.envelope ?? {}) as Record<string, unknown>),
     ok: res.ok,
   };
+  // TEXT surface: the ENVELOPE, rendered. `res.summary` is a one-line toast ("<id>: ok") —
+  // correct as a summary, wrong as the only thing a human sees, which is why `superscan`,
+  // `matrix`, `inventory`, `vault`, `where` and `describe` printed one word while their
+  // payload (and, for `audit`, a live nemesis verdict) was thrown away. The summary stays
+  // as the fallback for an envelope with no renderable body, so nothing is ever invented.
+  const text = ctx.json
+    ? res.summary // --json never prints text; don't pay for the render (or the ANSI)
+    : ((res.verdict ? renderVerdictCard(res.verdict) : null) ??
+      (res.envelope ? renderEnvelope(id, res.envelope) : null) ??
+      res.summary);
   return {
-    text: res.summary,
+    text,
     json: payload,
     exitCode: res.ok ? 0 : 2,
   };

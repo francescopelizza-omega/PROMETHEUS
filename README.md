@@ -319,11 +319,44 @@ per-agent adapter** — fully gated, one machine-readable result returned.
 
 ## Install & run
 
+### Quick install
+
+```bash
+curl -fsSL https://gitlab.com/red-beard-phoenix/PROMETHEUS/-/raw/main/install.sh | bash
+```
+
+Installs to `~/.prometheus`, links **`prometheus`** (CLI/TUI) and **`prometheus-app`**
+(the Studio desktop app) into `~/.local/bin`, and adds that to your `PATH`. No `sudo`,
+nothing written outside your home directory.
+
+```bash
+prometheus              # the interactive TUI
+prometheus scan         # detect the AI agents on this machine
+prometheus doctor       # check the environment end to end
+prometheus-app          # launch Prometheus Studio
+```
+
+This runs a script from the internet. Before you do that, you may want to read it —
+[`install.sh`](install.sh) — or see exactly what it would do without changing anything:
+
+```bash
+curl -fsSL https://gitlab.com/red-beard-phoenix/PROMETHEUS/-/raw/main/install.sh -o install.sh
+bash install.sh --dry-run
+```
+
+Useful flags: `--ref <tag>` (pin a revision instead of tracking `main`), `--prefix DIR`,
+`--home DIR`, `--with-app` (also build the desktop app), `--no-modify-path`, `--uninstall`.
+`install.sh --help` lists them all.
+
+Already have a checkout? `./install.sh --from-local .` wires up the same commands without
+cloning anything.
+
 ### Requirements
 
-- **macOS or Linux**, a stock **`python3`** (3.9+) — the engine and nemesis are
-  standard-library only, **zero pip deps**.
-- For Studio / `prometheus` from source: **Node ≥ 20** and **pnpm 10** (`corepack enable`).
+- **macOS or Linux** (Windows: use WSL), a stock **`python3`** (3.9+) — the engine and
+  nemesis are standard-library only, **zero pip deps**.
+- **Node ≥ 20** — the installer builds the CLI bundle from source. `pnpm` comes from
+  `corepack`, which ships with Node.
 - `git` on `PATH` (installs stage via git clone).
 
 ### 1) The engine directly (no build step)
@@ -356,8 +389,12 @@ pnpm package             # build a distributable (staged engine + pyruntime + el
 cd studio
 pnpm install
 pnpm dev:cli             # run the CLI/TUI in dev
-pnpm build               # compile; bins: prometheus / prometheus (apps/cli)
+pnpm --filter @prometheus/cli run prepack   # build the bundle bin/prometheus launches
 ```
+
+`bin/prometheus` and `bin/prometheus-app` work straight out of a checkout — put `bin/` on
+your `PATH`, or let `./install.sh --from-local .` link them for you. Both resolve the
+checkout from their own location, so symlinking them anywhere is safe.
 
 > **macOS note:** a Finder/Dock-launched Studio build repairs its `PATH` at startup so
 > Homebrew/`~/.local` tools (git, ollama, hf, …) are visible to the engine's install
@@ -429,6 +466,8 @@ diff for anything you're about to grant credentials to.
 
 | Path | What it is |
 |---|---|
+| `install.sh` | The one-command installer (`--dry-run`, `--from-local`, `--uninstall`). Builds the CLI, wires the engine, links the commands, patches `PATH`. |
+| `bin/` | `prometheus` and `prometheus-app` launchers. POSIX shell, resolve the checkout from their own path, safe to symlink anywhere. |
 | `prometheus.py` | The zero-dep Python engine (installer/manager). Reading this file alone documents the whole system (it carries the full operator manual). |
 | `nemesis` | The stdlib-only supply-chain security scanner / gate. |
 | `studio/` | pnpm + Turbo monorepo: `apps/desktop` (Electron Studio), `apps/cli` (`prometheus`), `packages/*` (`core`, `engine-bridge`, `ui`), `python/sidecar` (gated sidecars), `staging/pyruntime` (bundled CPython). |

@@ -1,1 +1,112 @@
-/Users/dev/ALPHA/PROMETHEUS/studio/apps/cli/dist/bin.js
+#!/bin/sh
+# prometheus — launcher for the Prometheus CLI / interactive TUI.
+#
+# Resolves the checkout from its OWN location (following symlinks), so this file works
+# whether it is run in place, symlinked into ~/.local/bin, or copied by install.sh.
+# It pins the engine to the checkout it belongs to — a `prometheus` on PATH must never
+# drive a prometheus.py from some other tree — while leaving an explicit PROMETHEUS_PY
+# / NEMESIS_BIN in the environment untouched.
+#
+# Environment:
+#   PROMETHEUS_NODE   node binary to use (default: the first usable one found)
+#   PROMETHEUS_PY     engine script      (default: <checkout>/prometheus.py)
+#   NEMESIS_BIN       security scanner   (default: <checkout>/nemesis)
+#   PROMETHEUS_CLI_JS CLI bundle         (default: <checkout>/studio/apps/cli/dist/bin.js)
+set -eu
+
+MIN_NODE_MAJOR=20
+
+# ── resolve this script's real directory ──────────────────────────────────────
+# POSIX only: macOS `readlink` has no -f, and `realpath` is not guaranteed present.
+self=$0
+# 40 hops is far beyond any legitimate symlink chain; the bound stops a symlink LOOP
+# from hanging the launcher forever.
+hops=0
+while [ -L "$self" ]; do
+  hops=$((hops + 1))
+  if [ "$hops" -gt 40 ]; then
+    echo "prometheus: symlink loop while resolving $0" >&2
+    exit 1
+  fi
+  target=$(readlink "$self")
+  case $target in
+  /*) self=$target ;;
+  *) self=$(dirname -- "$self")/$target ;;
+  esac
+done
+BIN_DIR=$(CDPATH= cd -- "$(dirname -- "$self")" && pwd -P)
+ROOT=$(CDPATH= cd -- "$BIN_DIR/.." && pwd -P)
+
+# ── locate node ───────────────────────────────────────────────────────────────
+# A Finder/Dock-launched terminal (and some CI shells) get a minimal PATH that omits
+# Homebrew and the version managers, so fall back to the usual install roots rather
+# than failing with a bare "node: not found".
+node_major() {
+  "$1" --version 2>/dev/null | sed -n 's/^v\([0-9][0-9]*\)\..*/\1/p'
+}
+
+find_node() {
+  if [ -n "${PROMETHEUS_NODE:-}" ]; then
+    printf '%s\n' "$PROMETHEUS_NODE"
+    return 0
+  fi
+  if command -v node >/dev/null 2>&1; then
+    command -v node
+    return 0
+  fi
+  for candidate in \
+    /opt/homebrew/bin/node \
+    /usr/local/bin/node \
+    /usr/bin/node \
+    "$HOME/.volta/bin/node" \
+    "$HOME/.local/share/fnm/aliases/default/bin/node" \
+    "$HOME/.nvm/versions/node"/*/bin/node; do
+    [ -x "$candidate" ] || continue
+    printf '%s\n' "$candidate"
+    return 0
+  done
+  return 1
+}
+
+NODE=$(find_node) || {
+  cat >&2 <<EOF
+prometheus: Node.js >= $MIN_NODE_MAJOR is required but no \`node\` was found.
+
+  install it        https://nodejs.org  (or: brew install node / apt install nodejs)
+  or point at one   PROMETHEUS_NODE=/path/to/node prometheus ...
+EOF
+  exit 127
+}
+
+MAJOR=$(node_major "$NODE")
+if [ -z "$MAJOR" ] || [ "$MAJOR" -lt "$MIN_NODE_MAJOR" ]; then
+  echo "prometheus: Node.js >= $MIN_NODE_MAJOR required, but $NODE is $("$NODE" --version 2>/dev/null || echo unknown)" >&2
+  echo "            set PROMETHEUS_NODE to a newer node to override." >&2
+  exit 127
+fi
+
+# ── locate the CLI bundle ─────────────────────────────────────────────────────
+CLI_JS=${PROMETHEUS_CLI_JS:-$ROOT/studio/apps/cli/dist/bin.js}
+if [ ! -f "$CLI_JS" ]; then
+  cat >&2 <<EOF
+prometheus: the CLI bundle is missing.
+
+  expected  $CLI_JS
+
+  build it  cd "$ROOT/studio" && corepack enable && pnpm install && pnpm --filter @prometheus/cli run prepack
+  or        "$ROOT/install.sh" --from-local "$ROOT"
+EOF
+  exit 1
+fi
+
+# ── pin the engine to THIS checkout (an explicit env value still wins) ─────────
+if [ -z "${PROMETHEUS_PY:-}" ] && [ -f "$ROOT/prometheus.py" ]; then
+  PROMETHEUS_PY=$ROOT/prometheus.py
+  export PROMETHEUS_PY
+fi
+if [ -z "${NEMESIS_BIN:-}" ] && [ -x "$ROOT/nemesis" ]; then
+  NEMESIS_BIN=$ROOT/nemesis
+  export NEMESIS_BIN
+fi
+
+exec "$NODE" "$CLI_JS" "$@"

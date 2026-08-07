@@ -306,11 +306,153 @@ export function renderVerdictCard(v: SecurityVerdict | NemesisVerdict): string {
   return renderCard("top_findings" in v ? cardFromNemesis(v) : cardFromSecurity(v));
 }
 
+/* ── `prometheus audit <plugin>` (CLI-039 / P1.3) ──────────────────────────────── *
+ * The audit envelope is NOT a verdict object: it is one scan_report + nemesis_verdicts[]
+ * PER (agent, method) pair, under a top-level `worst_verdict`. Summarizing it to
+ * "audit: engine returned ok:false" threw a real security result away — the findings,
+ * their rule ids, and the file:line each was seen at. Render them. */
+
+interface AuditFinding {
+  rule_id?: string;
+  rule?: string;
+  severity?: unknown;
+  desc?: string;
+  detail?: string;
+  snippet?: string;
+  rel_path?: string;
+  path?: string;
+  line?: number;
+}
+interface AuditScanReport {
+  verdict?: string;
+  scanned_files?: number;
+  active_findings?: AuditFinding[];
+  downgraded_count?: number;
+}
+interface AuditNemesisVerdict {
+  source?: string;
+  verdict?: string;
+  risk_score?: number;
+  recommendation?: string;
+  blocking_reasons?: string[];
+}
+interface AuditEntry {
+  agent?: string;
+  method?: string;
+  scan_report?: AuditScanReport;
+  nemesis_verdicts?: AuditNemesisVerdict[];
+}
+
+/** Banner text per tier for the audit card (tones are shared with the gate BANNER). */
+const AUDIT_BANNER: Record<VerdictTier, string> = {
+  allow: "AUDIT CLEAN",
+  warn: "AUDIT WARN",
+  block: "AUDIT BLOCKED",
+  error: "AUDIT ERROR — FAIL-CLOSED",
+};
+
+/**
+ * Two DIFFERENT vocabularies meet in this envelope and must not be conflated:
+ *
+ *  - `nemesis_verdicts[].verdict` is a decision TIER (allow/warn/block/error);
+ *  - `worst_verdict` is a SEVERITY word (clean/low/medium/high/critical) — the engine's
+ *    own `ok` is `worst in (clean, low)`, and it only reaches "critical" when nemesis
+ *    actually returned block. Reading "high" as BLOCK would cry wolf on every audit whose
+ *    scanner merely warned, which is how a security banner gets trained away.
+ *
+ * Both fail toward WARN on an unrecognized word — never silently down to allow.
+ */
+function tierOf(raw: unknown): VerdictTier {
+  const s = String(raw ?? "").toLowerCase();
+  if (s === "allow") return "allow";
+  if (s === "block") return "block";
+  if (s === "error") return "error";
+  return "warn";
+}
+
+function severityTier(raw: unknown): VerdictTier {
+  const s = String(raw ?? "").toLowerCase();
+  if (s === "clean" || s === "low") return "allow";
+  if (s === "critical") return "block";
+  if (s === "error") return "error";
+  return "warn"; // medium / high / anything unknown
+}
+
+/** Render the `audit` envelope: worst-verdict banner + a per-agent findings table. */
+function renderAuditCard(e: Record<string, unknown>): string {
+  const audits = (Array.isArray(e.audits) ? e.audits : []) as AuditEntry[];
+  const target = String(
+    (e.request as Record<string, unknown> | undefined)?.plugin ?? e.plugin ?? "—",
+  );
+  const worst = severityTier(e.worst_verdict);
+  const out: string[] = [bgBanner(AUDIT_BANNER[worst], BANNER[worst].tone), ""];
+  out.push(kv("target", target));
+  // show the engine's OWN word alongside the tier — "warn (high)" is more informative,
+  // and more honest, than either half on its own.
+  out.push(
+    kv(
+      "worst verdict",
+      `${tierLabel(worst)}${e.worst_verdict ? c.dim(` (${String(e.worst_verdict)})`) : ""}`,
+    ),
+  );
+
+  for (const a of audits) {
+    const sr = a.scan_report ?? {};
+    const findings = Array.isArray(sr.active_findings) ? sr.active_findings : [];
+    out.push("");
+    out.push(
+      c.bold(`${a.agent ?? "?"}`) +
+        c.dim(
+          ` · ${a.method ?? "?"} · ${sr.scanned_files ?? 0} files scanned · verdict ${String(sr.verdict ?? "?")}`,
+        ),
+    );
+    if (findings.length > 0) {
+      const exMax = Math.max(20, termWidth() - 56);
+      const shown = findings.slice(0, MAX_CARD_ROWS);
+      out.push(
+        table(
+          [{ header: "RULE" }, { header: "SEVERITY" }, { header: "WHERE" }, { header: "DETAIL" }],
+          shown.map((f) => [
+            f.rule_id || f.rule || "—",
+            severityColor(normalizeSeverity(f.severity)),
+            c.dim(
+              `${f.rel_path ?? f.path ?? "—"}${typeof f.line === "number" ? `:${f.line}` : ""}`,
+            ),
+            truncateExcerpt(f.desc || f.detail || f.snippet || "—", exMax),
+          ]),
+        ),
+      );
+      if (findings.length > shown.length) {
+        out.push(c.dim(`  … and ${findings.length - shown.length} more (use --json)`));
+      }
+    } else {
+      out.push(c.dim("  no active findings"));
+    }
+    if (typeof sr.downgraded_count === "number" && sr.downgraded_count > 0) {
+      out.push(c.dim(`  ${sr.downgraded_count} finding(s) downgraded as expected-for-category`));
+    }
+    for (const nv of a.nemesis_verdicts ?? []) {
+      const t = tierOf(nv.verdict);
+      out.push(
+        `  nemesis ${c.dim(nv.source ?? "—")} → ${tierLabel(t)}${
+          typeof nv.risk_score === "number" ? c.dim(` (risk ${nv.risk_score})`) : ""
+        }`,
+      );
+      if (nv.recommendation) out.push(c.dim(`    ${nv.recommendation}`));
+      for (const r of nv.blocking_reasons ?? []) out.push(c.red(`    ! ${r}`));
+    }
+  }
+
+  out.push("");
+  out.push(c.dim(NEXT_STEP[worst]));
+  return out.join("\n");
+}
+
 /**
  * Opportunistically render a verdict card from an ENGINE ENVELOPE (the install flow) — a nested
- * `nemesis.verdict/1` object or an install `forced_danger[]` block. Returns null when nothing
- * parseable is present (the caller then passes the engine text through unchanged); NEVER re-runs
- * the gate. Pretty-mode only — the caller keeps `--json` byte-identical.
+ * `nemesis.verdict/1` object, an install `forced_danger[]` block, or an `audit` result tree.
+ * Returns null when nothing parseable is present (the caller then passes the engine text through
+ * unchanged); NEVER re-runs the gate. Pretty-mode only — the caller keeps `--json` byte-identical.
  */
 export function verdictCardFromEnvelope(env: unknown): string | null {
   if (!env || typeof env !== "object") return null;
@@ -324,5 +466,7 @@ export function verdictCardFromEnvelope(env: unknown): string | null {
       cardFromForcedDanger(fd as ForcedDangerFull[], String(e.command ?? "install")),
     );
   }
+  // `audit`: a per-agent scan_report tree, not a verdict object.
+  if (Array.isArray(e.audits) && e.audits.length > 0) return renderAuditCard(e);
   return null;
 }

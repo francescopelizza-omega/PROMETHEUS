@@ -1261,6 +1261,7 @@ function applyWriteFile(
   args: Record<string, unknown>,
   roots: string[] | undefined,
   cwd: string,
+  approvedOutside?: ReadonlySet<string>,
 ): { outcome: ToolOutcome; record?: EditRecord } {
   const rawPath = typeof args.path === "string" ? args.path : "";
   if (!rawPath || rawPath.startsWith("-")) {
@@ -1271,14 +1272,21 @@ function applyWriteFile(
   }
   const content = args.content;
   const abs = isAbsolute(rawPath) ? rawPath : resolve(cwd, rawPath);
-  // NOTE: no working-set rejection here. `write_file` is destructiveHint ⇒ the broker ALWAYS
-  // routes it to a human confirm that shows the EXACT absolute path; that approval IS the
-  // authorization (and in acceptEdits/bypass/yolo the user opted into auto-approval globally).
-  // A redundant working-set guard here only broke legitimate writes the user explicitly asked
-  // for (e.g. `~/hello.py` while cwd is the repo) and — worse — made the model RETRY the blocked
-  // write every round, burning the whole turn. The confirm prompt is the real gate. `roots` is
-  // intentionally unused now (kept in the signature for call-site symmetry with propose_edit).
-  void roots;
+  // Working-set boundary (defense in depth). `write_file` is the one applier with no scope guard
+  // of its own — the human confirm IS its authorization — so this checks that an OUT-OF-SCOPE
+  // target really did pass a confirm seam for THIS exact path (`approvedOutside`, recorded by
+  // runMessageTurn when the call was approved). In-scope writes are untouched, so the legitimate
+  // `~/hello.py`-while-cwd-is-the-repo case still works: the confirm layer asks, the human says
+  // yes, the path lands in the set, and the write proceeds. Without an approval seam wired up
+  // (a bare makeToolRunner) an out-of-scope write is refused rather than silently applied.
+  if (roots && roots.length > 0 && !isPathAllowed(abs, roots) && !approvedOutside?.has(abs)) {
+    return {
+      outcome: {
+        ok: false,
+        summary: `write_file: path outside the working set (not approved): ${rawPath}`,
+      },
+    };
+  }
   // capture the pre-image (for revert): existing content, or "" when the file is new.
   let preImage = "";
   let existed = false;
@@ -1486,6 +1494,24 @@ function errMsg(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
+/** Tools whose only authorization is the confirm prompt itself → the prompt MUST name the target. */
+const PATH_CONFIRM_TOOLS = new Set(["write_file", "propose_edit"]);
+
+/**
+ * The human-facing confirm prompt for ONE tool call (the plain-host seam). For a file writer it
+ * resolves and shows the EXACT absolute path, and flags a target that escapes the working set —
+ * "run tool write_file?" is uninformed consent for the one call that can create/overwrite any
+ * file. PURE (path resolution + an isPathAllowed scope test); every other tool keeps the terse form.
+ */
+export function confirmPrompt(call: ToolCall, cwd: string, roots?: string[]): string {
+  const raw = typeof call.args?.path === "string" ? call.args.path : "";
+  if (!PATH_CONFIRM_TOOLS.has(call.name) || !raw) return `run tool ${call.name}?`;
+  const abs = isAbsolute(raw) ? raw : resolve(cwd, raw);
+  const verb = call.name === "write_file" ? "write file" : "edit file";
+  const outside = roots && roots.length > 0 && !isPathAllowed(abs, roots);
+  return outside ? `${verb} OUTSIDE the working set: ${abs}?` : `${verb} ${abs}?`;
+}
+
 export function makeToolRunner(
   client: EngineClient,
   opts: {
@@ -1494,6 +1520,9 @@ export function makeToolRunner(
     editHistory?: EditRecord[];
     fetchImpl?: FetchImpl;
     checkpoint?: CheckpointHook;
+    /** absolute paths a confirm seam approved for an OUT-OF-working-set `write_file` this turn
+     *  (populated by runMessageTurn's confirm wrapper). Unset ⇒ out-of-scope writes are refused. */
+    approvedWrites?: ReadonlySet<string>;
   } = {},
 ): ToolRunner {
   const roots = opts.roots;
@@ -1517,7 +1546,12 @@ export function makeToolRunner(
     // write_file: CREATE a new file or OVERWRITE an existing one (path-guarded, atomic,
     // pre-image kept). Reaches here only AFTER human confirm (destructiveHint ⇒ always confirm).
     if (tool.name === "write_file") {
-      const { outcome, record } = applyWriteFile(args, roots, opts.cwd ?? process.cwd?.() ?? ".");
+      const { outcome, record } = applyWriteFile(
+        args,
+        roots,
+        opts.cwd ?? process.cwd?.() ?? ".",
+        opts.approvedWrites,
+      );
       if (record) {
         if (opts.editHistory) opts.editHistory.push(record);
         if (opts.checkpoint) captureIntoCheckpoint(opts.checkpoint, record.path, record.preImage);
@@ -1911,9 +1945,15 @@ export async function runMessageTurn(
           }
         : {}),
     });
+  // Absolute paths an OUT-OF-working-set `write_file` was approved for through the confirm seam
+  // this turn. The loop always routes write_file through confirm (destructiveHint is never
+  // auto-approvable in the broker), so recording on approval is complete; applyWriteFile refuses
+  // any out-of-scope target that isn't in here.
+  const approvedWrites = new Set<string>();
   const runTool =
     deps.runTool ??
     makeToolRunner(ctx.client, {
+      approvedWrites,
       ...(ctx.workingSet ? { roots: ctx.workingSet } : {}),
       ...(ctx.cwd ? { cwd: ctx.cwd } : {}),
       ...(ctx.editHistory ? { editHistory: ctx.editHistory } : {}),
@@ -1930,7 +1970,19 @@ export async function runMessageTurn(
         : {}),
     });
   // never-force: confirm DEFAULTS TO DENY — a human must type the confirmation.
-  const confirm = ctx.confirm ?? (() => false);
+  const rawConfirm = ctx.confirm ?? (() => false);
+  // …wrapped so an APPROVED write_file records its resolved absolute path: that approval is what
+  // authorizes a target outside the working set (see applyWriteFile). Approval-only — a decline
+  // records nothing, and the path is resolved exactly as the applier resolves it.
+  const confirm = async (call: ToolCall): Promise<ConfirmResult> => {
+    const answer = await rawConfirm(call);
+    const approved = typeof answer === "boolean" ? answer : answer.approved;
+    if (approved && call.name === "write_file" && typeof call.args.path === "string") {
+      const p = call.args.path;
+      approvedWrites.add(isAbsolute(p) ? p : resolve(ctx.cwd ?? process.cwd?.() ?? ".", p));
+    }
+    return answer;
+  };
 
   // CLI-053: inject the budgeted repo map as a SECOND system block when the technique is enabled,
   // so the agent grounds "where is X defined" from the map instead of a grep. Getter → toggles live.

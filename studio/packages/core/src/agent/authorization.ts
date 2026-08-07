@@ -184,6 +184,36 @@ export function authRunToDone(level: number): boolean {
   return authLevelMeta(level).runToDone;
 }
 
+/** The lowest level whose opt-in is global ("trusted" and up): auto-approve is no longer scoped
+ *  to the working set, because the human asked for EVERYTHING to run unprompted. */
+export const UNSCOPED_AUTO_LEVEL = 6;
+
+/**
+ * Decide ONE file-write call, SCOPED to the working set (cwd + every `/add-dir`).
+ *
+ * The plain `authDecision` scale says "level ≥ 2 auto-approves writes" — but "edits" means the
+ * files the human is working on, not an arbitrary-write primitive over `~/.ssh/authorized_keys`
+ * or `~/.zshrc`. So a write whose target lands OUTSIDE the working set falls back to "ask" even
+ * at an auto level: the human sees the absolute path and answers. Levels 6–7 (trusted / runall)
+ * are an explicit global opt-in, so they keep auto-approving everywhere.
+ *
+ * PURE: the caller resolves the path and computes `insideWorkingSet` (fail-closed — an
+ * unresolvable target counts as OUTSIDE, so it prompts).
+ */
+export function scopedWriteDecision(
+  level: number,
+  ref: string,
+  ann: AuthToolEffect | undefined,
+  insideWorkingSet: boolean,
+): "allow" | "ask" {
+  const base = authDecision(level, ref, ann);
+  if (base !== "allow" || insideWorkingSet) return base;
+  // scope applies to the WRITE category only — a read auto-approved by the level stays auto
+  // (reads are separately path-guarded by the runner's fail-closed working-set check).
+  if (classifyAuth(ref, ann) !== "write") return base;
+  return authLevelMeta(level).level < UNSCOPED_AUTO_LEVEL ? "ask" : "allow";
+}
+
 /**
  * Parse a `--authorisation(s)` value: a digit "0".."7" OR a level name (case-insensitive).
  * Returns the level 0–7, or null when unrecognized (the caller reports the valid set).

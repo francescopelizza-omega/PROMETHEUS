@@ -9,6 +9,7 @@ import {
   classifyAuth,
   modeToAuthLevel,
   parseAuthLevel,
+  scopedWriteDecision,
 } from "./authorization.js";
 import { formatDuration } from "./duration.js";
 
@@ -52,6 +53,25 @@ test("authDecision: paranoid asks reads; higher levels progressively allow", () 
   // level 6/7 allow everything
   assert.equal(authDecision(6, "prometheus_uninstall", { destructiveHint: true }), "allow");
   assert.equal(authDecision(7, "prometheus_uninstall", { destructiveHint: true }), "allow");
+});
+
+test("scopedWriteDecision: an auto-approved write outside the working set falls back to ask", () => {
+  const W = { destructiveHint: true } as const;
+  // level 2 ("edits") auto-approves ONLY inside the working set…
+  assert.equal(scopedWriteDecision(2, "write_file", W, true), "allow");
+  assert.equal(scopedWriteDecision(2, "write_file", W, false), "ask");
+  // …same for the levels between (3–5) that also auto-approve the write category
+  for (const lvl of [3, 4, 5]) {
+    assert.equal(scopedWriteDecision(lvl, "write_file", W, false), "ask", `level ${lvl} scopes`);
+  }
+  // levels 6/7 are an explicit global opt-in → auto everywhere
+  assert.equal(scopedWriteDecision(6, "write_file", W, false), "allow");
+  assert.equal(scopedWriteDecision(7, "write_file", W, false), "allow");
+  // it never LOOSENS the base decision: a level that would ask still asks in scope
+  assert.equal(scopedWriteDecision(1, "write_file", W, true), "ask");
+  assert.equal(scopedWriteDecision(0, "write_file", W, true), "ask");
+  // non-write categories are untouched (scope is a write-path concept)
+  assert.equal(scopedWriteDecision(1, "prometheus_list", { readOnlyHint: true }, false), "allow");
 });
 
 test("authRunToDone: only level 7", () => {

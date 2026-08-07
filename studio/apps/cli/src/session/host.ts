@@ -78,6 +78,7 @@ import {
   type SessionCtx as TurnCtx,
   applyEditIntentsLocal,
   compactSession,
+  confirmPrompt,
   effectiveTools,
   makeSummarizer,
   restoreCheckpoint,
@@ -637,8 +638,10 @@ export async function launchSession(parsed: ParsedArgs, deps: SessionDeps = {}):
     json: parsed.json,
     // a detected/adopted local endpoint → the real streaming path (not the offline fallback).
     ...(endpoint ? { endpoint } : {}),
-    // agent-runtime's confirm is (call: ToolCall) — surface the tool name for the human.
-    confirm: (call) => confirm(`run tool ${call.name}?`),
+    // agent-runtime's confirm is (call: ToolCall) — surface the tool name AND, for the file
+    // writers, the EXACT absolute target (+ a warning when it escapes the working set). The
+    // prompt is write_file's only authorization, so "run tool write_file?" was uninformed consent.
+    confirm: (call) => confirm(confirmPrompt(call, state.cwd, [state.cwd, ...ws.list()])),
     write,
     // read scope = cwd (implicit) + every /add-dir dir (CLI-004), resolved fail-closed.
     workingSet: [state.cwd, ...ws.list()],

@@ -35,6 +35,7 @@ import {
   checkBudgetGate,
   checkMeteredConsent,
   compactSession,
+  confirmPrompt,
   effectiveTools,
   extractiveSummary,
   makeLlmClient,
@@ -822,6 +823,125 @@ test("makeToolRunner: fail-closed read scope honors the working set (CLI-004)", 
   // no roots configured → no path guard (current 14-tool catalog is path-free)
   const unguarded = makeToolRunner(client);
   assert.equal((await unguarded(tool, { path: join(outside, "f.txt") })).ok, true);
+});
+
+test("makeToolRunner: write_file outside the working set needs a recorded approval", async () => {
+  const { mkdtempSync, existsSync, readFileSync, realpathSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const root = realpathSync.native(mkdtempSync(join(tmpdir(), "prom-wf-in-")));
+  const away = realpathSync.native(mkdtempSync(join(tmpdir(), "prom-wf-out-")));
+  const escaped = join(away, "authorized_keys");
+
+  const { client, calls } = fakeEngine(() => ({ ok: true }));
+  const tool = fakeTool("write_file", () => []);
+
+  // in-scope write applies as before
+  const guarded = makeToolRunner(client, { roots: [root], cwd: root });
+  const inRes = await guarded(tool, { path: "note.txt", content: "hi\n" });
+  assert.equal(inRes.ok, true);
+  assert.equal(readFileSync(join(root, "note.txt"), "utf8"), "hi\n");
+
+  // out-of-scope write with NO approval recorded → refused, nothing written, engine untouched
+  const outRes = await guarded(tool, { path: escaped, content: "ssh-rsa pwned\n" });
+  assert.equal(outRes.ok, false);
+  assert.match(outRes.summary, /outside the working set/);
+  assert.equal(existsSync(escaped), false, "a refused write must not touch the disk");
+  assert.equal(calls.length, 0, "write_file never reaches the engine either way");
+
+  // the SAME write once a confirm seam approved that exact absolute path → applies
+  const approved = makeToolRunner(client, {
+    roots: [root],
+    cwd: root,
+    approvedWrites: new Set([escaped]),
+  });
+  const okRes = await approved(tool, { path: escaped, content: "explicitly approved\n" });
+  assert.equal(okRes.ok, true);
+  assert.equal(readFileSync(escaped, "utf8"), "explicitly approved\n");
+});
+
+test("runMessageTurn: only a confirm-seam approval authorizes a write outside the set", async () => {
+  const { mkdtempSync, existsSync, readFileSync, realpathSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const root = realpathSync.native(mkdtempSync(join(tmpdir(), "prom-wf-turn-")));
+  const away = realpathSync.native(mkdtempSync(join(tmpdir(), "prom-wf-away-")));
+  const escaped = join(away, "zshrc");
+  const endpoint = {
+    id: "local:test",
+    baseUrl: "http://x",
+    locality: "local" as const,
+    contextWindow: 8192,
+    supportsTools: true,
+  };
+  const { client } = fakeEngine(() => ({ ok: true }));
+
+  // APPROVED: the confirm seam said yes for this exact target → the turn records it and the
+  // out-of-scope write applies (the deliberate escape hatch for "write ~/hello.py from the repo").
+  const blind = fakeCtx(client, { endpoint, workingSet: [root], cwd: root, confirm: () => true });
+  await runMessageTurn(undefined, "write it", {
+    ctx: blind.ctx,
+    llm: scriptedLlm([
+      { kind: "tool_call", call: { name: "write_file", args: { path: escaped, content: "x\n" } } },
+      { kind: "final" },
+    ]),
+    now: fixedNow,
+    newId: fixedId,
+  });
+  assert.equal(readFileSync(escaped, "utf8"), "x\n", "an explicitly approved path is authorized");
+
+  // DECLINED: the seam says no — which is what scopedWriteDecision now forces for an out-of-scope
+  // target at every auto level below trusted (level ≥ 2 used to auto-approve it silently).
+  const escaped2 = join(away, "profile");
+  const denied = fakeCtx(client, {
+    endpoint,
+    workingSet: [root],
+    cwd: root,
+    confirm: () => false,
+  });
+  await runMessageTurn(undefined, "write it", {
+    ctx: denied.ctx,
+    llm: scriptedLlm([
+      { kind: "tool_call", call: { name: "write_file", args: { path: escaped2, content: "y\n" } } },
+      { kind: "final" },
+    ]),
+    now: fixedNow,
+    newId: fixedId,
+  });
+  assert.equal(existsSync(escaped2), false, "a declined write never reaches the disk");
+});
+
+test("confirmPrompt: the file writers name the absolute target and flag an escape", async () => {
+  const { mkdtempSync, realpathSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  // isPathAllowed re-resolves BOTH sides on disk, so the scope test needs real dirs.
+  const repo = realpathSync.native(mkdtempSync(join(tmpdir(), "prom-cp-repo-")));
+  const away = realpathSync.native(mkdtempSync(join(tmpdir(), "prom-cp-away-")));
+  const call = (name: string, path: string): ToolCall => ({ name, args: { path } });
+
+  assert.equal(
+    confirmPrompt(call("write_file", "note.txt"), repo, [repo]),
+    `write file ${join(repo, "note.txt")}?`,
+  );
+  assert.equal(
+    confirmPrompt(call("propose_edit", join(repo, "a.ts")), repo, [repo]),
+    `edit file ${join(repo, "a.ts")}?`,
+  );
+  // a target outside the roots is called out
+  assert.equal(
+    confirmPrompt(call("write_file", join(away, "hosts")), repo, [repo]),
+    `write file OUTSIDE the working set: ${join(away, "hosts")}?`,
+  );
+  // no roots configured, or a path-free tool → the terse form
+  assert.equal(
+    confirmPrompt(call("write_file", "a.txt"), repo),
+    `write file ${join(repo, "a.txt")}?`,
+  );
+  assert.equal(
+    confirmPrompt({ name: "prometheus_list", args: {} }, repo, [repo]),
+    "run tool prometheus_list?",
+  );
 });
 
 test("runMessageTurn: an added dir does NOT grant exec — destructive stays gated (CLI-004)", async () => {

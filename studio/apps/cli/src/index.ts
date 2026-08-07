@@ -1,4 +1,5 @@
 import { updates } from "@prometheus/core";
+import type { EngineClient } from "@prometheus/engine-bridge";
 import { runAgentsCommand } from "./commands/agents-cmd.js";
 import { runCompletion } from "./commands/completion.js";
 import { runDiagram } from "./commands/diagram-cmd.js";
@@ -58,9 +59,16 @@ function key(path: string[]): string {
 /**
  * Dispatch a fully-parsed invocation to its command. Top-level help/version are
  * handled here. Unknown commands produce a help outcome with a nonzero exit.
+ *
+ * `opts.client` injects an EXISTING engine gateway — the interactive session passes its
+ * own so a session verb reaches the rich renderers here without opening a second
+ * connection (C5, one gateway). Absent → the one-shot path builds its own.
  */
-export async function dispatch(parsed: ParsedArgs): Promise<CommandOutcome> {
-  const ctx = makeContext(parsed);
+export async function dispatch(
+  parsed: ParsedArgs,
+  opts?: { client?: EngineClient },
+): Promise<CommandOutcome> {
+  const ctx = makeContext(parsed, opts?.client);
 
   // version / help short-circuits (no engine call)
   if (parsed.version) return runVersion(ctx);

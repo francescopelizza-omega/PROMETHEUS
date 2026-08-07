@@ -26,6 +26,10 @@ const ITEMS: AcItem[] = [
   { name: "scan", summary: "scan" },
   { name: "status", summary: "status" },
   { name: "install", summary: "install", args: "<id>" },
+  // an OPTIONAL arg (must still run on the first Enter) and an ALIASED command (the typed
+  // alias must survive submit) — neither matches "s"/"sc", so the ranking tests are unchanged.
+  { name: "vault", summary: "vault", args: "[action]" },
+  { name: "think", summary: "think", aliases: ["effort"] },
 ];
 const CTX: ReduceCtx = { items: ITEMS, running: false };
 
@@ -118,16 +122,56 @@ test("slash opens the dropdown; ↑/↓ navigate; Tab completes", () => {
   assert.equal(s.ac.items.length, 0); // closed (trailing space)
 });
 
-test("Enter on a no-arg command runs it; on an arg command completes", () => {
+test("Enter on a no-arg command runs it; on a REQUIRED-arg command completes", () => {
   // no-arg → submit
   const noArg = run(initialTuiState(), typed("/scan"));
   const r1 = reduce(noArg.state, k("enter"), CTX);
   assert.deepEqual(r1.effects, [{ type: "submit", text: "/scan" }]);
-  // arg command → complete + await args (no submit)
+  // required-arg command → complete + await args (no submit)
   const s = run(initialTuiState(), typed("/install")).state;
   const r2 = reduce(s, k("enter"), CTX);
   assert.equal(r2.state.input, "/install ");
   assert.equal(r2.effects.length, 0);
+});
+
+test("Enter SUBMITS a command whose arg is OPTIONAL — one press, not two", () => {
+  // "[action]" is optional: holding it made ~40 commands need a second Enter, and the
+  // next command typed after the first press got glued on as this one's argument.
+  const s = run(initialTuiState(), typed("/vault")).state;
+  const r = reduce(s, k("enter"), CTX);
+  assert.deepEqual(r.effects, [{ type: "submit", text: "/vault" }]);
+  assert.equal(r.state.input, "");
+});
+
+test("Enter on a required-arg command SUBMITS once the arg is typed", () => {
+  // type the whole line, then walk the caret back INTO the command token so the dropdown
+  // re-opens over "/install" — the arg is already there, so Enter must run it, not re-hold.
+  const s = run(initialTuiState(), [
+    ...typed("/install foo"),
+    k("left"),
+    k("left"),
+    k("left"),
+    k("left"),
+  ]).state;
+  assert.equal(s.ac.items[s.ac.index]?.name, "install"); // dropdown is open again
+  const r = reduce(s, k("enter"), CTX);
+  assert.deepEqual(r.effects, [{ type: "submit", text: "/install foo" }]);
+});
+
+test("Enter submits the TYPED alias, not the primary name", () => {
+  // "/effort" is an alias of "think": submitting `/${sel.name}` silently ran a different
+  // command than the one the user typed.
+  const s = run(initialTuiState(), typed("/effort")).state;
+  assert.equal(s.ac.items[s.ac.index]?.name, "think");
+  const r = reduce(s, k("enter"), CTX);
+  assert.deepEqual(r.effects, [{ type: "submit", text: "/effort" }]);
+});
+
+test("Enter on a PARTIAL completes to the highlighted command's primary name", () => {
+  const s = run(initialTuiState(), typed("/sca")).state;
+  assert.equal(s.ac.items[s.ac.index]?.name, "scan");
+  const r = reduce(s, k("enter"), CTX);
+  assert.deepEqual(r.effects, [{ type: "submit", text: "/scan" }]);
 });
 
 test("Tab on a closed slash buffer opens the menu FILTERED by the query (not all)", () => {

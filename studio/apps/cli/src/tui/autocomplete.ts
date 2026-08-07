@@ -107,9 +107,16 @@ export function syncAutocomplete(
   const query = slashQuery(input, cursor);
   if (query === null) return EMPTY;
   const items = rankSlash(query, all);
-  // clamp the numeric selection into the new range (spec: recompute clamps sel; a
-  // narrowing query keeps the best match at the top without surprising index jumps).
-  const index = items.length === 0 ? 0 : Math.min(Math.max(prev.index, 0), items.length - 1);
+  // A CHANGED query re-ranks the list, so the previous numeric index points at a DIFFERENT
+  // command — clamping it kept a stale highlight alive ("/s" + ↓↓↓ then "tatus" ran
+  // /plugin-status). Reset to the best match; only an unchanged query (cursor moved, list
+  // re-synced) keeps the user's own ↑/↓ selection, clamped into range.
+  const index =
+    items.length === 0
+      ? 0
+      : query === prev.query
+        ? Math.min(Math.max(prev.index, 0), items.length - 1)
+        : 0;
   return { items, index, query };
 }
 
@@ -128,6 +135,37 @@ export function moveAc(state: AcState, delta: number): AcState {
 export function acceptAc(state: AcState): string | null {
   const sel = state.items[state.index];
   return sel ? `/${sel.name} ` : null;
+}
+
+/**
+ * Does this command REQUIRE an argument? Registry convention (slash-registry `verb()`):
+ * `"<name>"` is required, `"[action]"` is optional. Only a REQUIRED arg may hold Enter —
+ * an optional one must still run on the first press.
+ */
+export function requiresArg(item: AcItem): boolean {
+  return typeof item.args === "string" && item.args.trim().startsWith("<");
+}
+
+/**
+ * The line to SUBMIT when Enter is pressed on the highlighted item, given the live buffer.
+ *
+ * Two things `acceptAc` cannot do, both of which silently ran the WRONG command:
+ *  - it always yields the PRIMARY name, so submitting it rewrote `/effort` → `/think`;
+ *  - it drops whatever the user already typed after the command token.
+ * So: keep the typed token when it is exactly the command's own name or one of its aliases,
+ * else complete to the primary name, and re-attach the remainder of the buffer verbatim.
+ * Returns null when nothing is highlighted.
+ */
+export function submitLine(state: AcState, input: string): string | null {
+  const sel = state.items[state.index];
+  if (!sel) return null;
+  const typed = state.query;
+  // `input` always starts with "/" + query (slashQuery slices a PREFIX of it).
+  const rest = input.slice(1 + typed.length);
+  const t = typed.toLowerCase();
+  const exact =
+    t === sel.name.toLowerCase() || (sel.aliases ?? []).some((a) => a.toLowerCase() === t);
+  return `/${exact ? typed : sel.name}${rest}`;
 }
 
 /* ── render ───────────────────────────────────────────────────────────────── */

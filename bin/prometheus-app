@@ -1,0 +1,153 @@
+#!/bin/sh
+# prometheus-app — launch Prometheus Studio, the Electron desktop app.
+#
+# Resolution order (first hit wins), so the command means the same thing whether the
+# user installed a release or is working in a checkout:
+#
+#   1. $PROMETHEUS_APP            — an explicit app bundle / AppImage / executable
+#   2. an INSTALLED app           — /Applications, ~/Applications, /opt, PATH
+#   3. a LOCAL BUILD              — <checkout>/studio/apps/desktop/release/...
+#   4. the dev server             — electron-vite preview, when the sources are present
+#
+# Usage:
+#   prometheus-app [--where] [--build] [--dev] [--wait] [-- <args passed to the app>]
+#
+#   --where   print the resolved app path and exit (nothing is launched)
+#   --build   build/package the desktop app from source first
+#   --dev     skip the packaged app and run the dev server directly
+#   --wait    stay in the foreground until the app exits (macOS: `open -W`)
+set -eu
+
+# ── resolve this script's real directory (see bin/prometheus for the why) ─────
+self=$0
+hops=0
+while [ -L "$self" ]; do
+  hops=$((hops + 1))
+  if [ "$hops" -gt 40 ]; then
+    echo "prometheus-app: symlink loop while resolving $0" >&2
+    exit 1
+  fi
+  target=$(readlink "$self")
+  case $target in
+  /*) self=$target ;;
+  *) self=$(dirname -- "$self")/$target ;;
+  esac
+done
+BIN_DIR=$(CDPATH= cd -- "$(dirname -- "$self")" && pwd -P)
+ROOT=$(CDPATH= cd -- "$BIN_DIR/.." && pwd -P)
+DESKTOP=$ROOT/studio/apps/desktop
+
+WHERE=0
+BUILD=0
+DEV=0
+WAIT=0
+while [ $# -gt 0 ]; do
+  case $1 in
+  --where) WHERE=1 ;;
+  --build) BUILD=1 ;;
+  --dev) DEV=1 ;;
+  --wait | -W) WAIT=1 ;;
+  --) shift; break ;;
+  -h | --help)
+    # the header comment verbatim, stopping at the first line of actual code
+    sed -n '2,${/^[^#]/q; s/^# \{0,1\}//p;}' "$self"
+    exit 0
+    ;;
+  *) break ;;
+  esac
+  shift
+done
+
+have_sources() { [ -f "$DESKTOP/package.json" ]; }
+
+die() {
+  echo "prometheus-app: $1" >&2
+  exit "${2:-1}"
+}
+
+# ── build from source ─────────────────────────────────────────────────────────
+if [ "$BUILD" -eq 1 ]; then
+  have_sources || die "--build needs the sources; $DESKTOP not found"
+  command -v pnpm >/dev/null 2>&1 || corepack enable >/dev/null 2>&1 || true
+  command -v pnpm >/dev/null 2>&1 || die "pnpm not found — run \`corepack enable\` (Node >= 20)"
+  echo "prometheus-app: packaging Prometheus Studio (this takes a few minutes)…"
+  # `package` stages the engine + the relocatable CPython, then runs electron-builder.
+  ( cd "$ROOT/studio" && pnpm install && pnpm run package )
+fi
+
+# ── find an app to launch ─────────────────────────────────────────────────────
+APP=""
+try() { [ -z "$APP" ] && [ -e "$1" ] && APP=$1; return 0; }
+
+if [ "$DEV" -eq 0 ]; then
+  # explicit `if` rather than `[ … ] && try …`: a failing left operand makes the whole
+  # AND-list nonzero, and `set -e` handling of that differs between bash and dash.
+  if [ -n "${PROMETHEUS_APP:-}" ]; then try "$PROMETHEUS_APP"; fi
+
+  case $(uname -s) in
+  Darwin)
+    try "/Applications/Prometheus Studio.app"
+    try "$HOME/Applications/Prometheus Studio.app"
+    # local electron-builder output — arch-specific dir first, then the universal one
+    for d in mac-arm64 mac-x64 mac mac-universal; do
+      try "$DESKTOP/release/$d/Prometheus Studio.app"
+    done
+    ;;
+  Linux)
+    try "$HOME/.local/bin/Prometheus Studio.AppImage"
+    try "/opt/Prometheus Studio/prometheus-studio"
+    try "/usr/bin/prometheus-studio"
+    if [ -z "$APP" ] && command -v prometheus-studio >/dev/null 2>&1; then
+      APP=$(command -v prometheus-studio)
+    fi
+    for f in "$DESKTOP/release"/*.AppImage; do try "$f"; done
+    try "$DESKTOP/release/linux-unpacked/prometheus-studio"
+    ;;
+  esac
+fi
+
+if [ "$WHERE" -eq 1 ]; then
+  if [ -n "$APP" ]; then
+    printf '%s\n' "$APP"
+    exit 0
+  fi
+  if have_sources; then
+    echo "(no packaged app; dev server available at $DESKTOP)"
+    exit 0
+  fi
+  die "no Prometheus Studio app found" 1
+fi
+
+# ── launch ────────────────────────────────────────────────────────────────────
+if [ -n "$APP" ]; then
+  case $APP in
+  *.app)
+    # macOS bundle: `open` detaches by default; --wait blocks until it quits.
+    if [ "$WAIT" -eq 1 ]; then
+      exec open -W -a "$APP" ${1+--args "$@"}
+    fi
+    exec open -a "$APP" ${1+--args "$@"}
+    ;;
+  *)
+    [ -x "$APP" ] || die "$APP is not executable"
+    exec "$APP" "$@"
+    ;;
+  esac
+fi
+
+# ── fall back to the dev server ───────────────────────────────────────────────
+if have_sources; then
+  command -v pnpm >/dev/null 2>&1 || corepack enable >/dev/null 2>&1 || true
+  command -v pnpm >/dev/null 2>&1 || die "pnpm not found — run \`corepack enable\` (Node >= 20)"
+  echo "prometheus-app: no packaged app found — starting the dev server." >&2
+  echo "                run \`prometheus-app --build\` once to get a real app bundle." >&2
+  exec sh -c 'cd "$0/studio" && exec pnpm dev' "$ROOT"
+fi
+
+cat >&2 <<EOF
+prometheus-app: Prometheus Studio is not installed.
+
+  build it from a checkout   prometheus-app --build
+  or point at an app bundle  PROMETHEUS_APP="/path/to/Prometheus Studio.app" prometheus-app
+EOF
+exit 1

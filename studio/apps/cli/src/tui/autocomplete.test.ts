@@ -11,7 +11,9 @@ import {
   moveAc,
   rankSlash,
   renderDropdown,
+  requiresArg,
   slashQuery,
+  submitLine,
   syncAutocomplete,
 } from "./autocomplete.js";
 
@@ -60,6 +62,42 @@ test("syncAutocomplete opens/closes + clamps the selection index across keystrok
   assert.ok(next.index >= 0 && next.index < next.items.length);
   // closed when past a space
   assert.equal(isOpen(syncAutocomplete("/scan x", 7, ITEMS)), false);
+});
+
+test("a CHANGED query resets the highlight; an unchanged one keeps the user's ↑/↓ pick", () => {
+  // "/s" → [scan, status, install(subseq)…]; ↓ moves off the best match.
+  const a = syncAutocomplete("/s", 2, ITEMS);
+  const moved = moveAc(a, 1);
+  assert.notEqual(moved.items[moved.index]?.name, moved.items[0]?.name);
+  // finishing the word RE-RANKS the list — the stale index must not survive it, or Enter
+  // runs a command the user never typed (the /status → /plugin-status bug).
+  const narrowed = syncAutocomplete("/status", 7, ITEMS, moved);
+  assert.equal(narrowed.index, 0);
+  assert.equal(narrowed.items[narrowed.index]?.name, "status");
+  // same query re-synced (e.g. a caret move) → the selection is preserved.
+  const resynced = syncAutocomplete("/s", 2, ITEMS, moved);
+  assert.equal(resynced.index, moved.index);
+});
+
+test("requiresArg: only a REQUIRED '<arg>' holds Enter, not an optional '[arg]'", () => {
+  assert.equal(requiresArg({ name: "install", summary: "", args: "<id>" }), true);
+  assert.equal(requiresArg({ name: "skills", summary: "", args: "[action]" }), false);
+  assert.equal(requiresArg({ name: "scan", summary: "" }), false);
+});
+
+test("submitLine keeps the typed alias + trailing args, completes a partial", () => {
+  // typed token IS the alias → submit the alias, never the primary name.
+  const alias = syncAutocomplete("/s", 2, ITEMS);
+  assert.equal(alias.items[alias.index]?.name, "scan");
+  assert.equal(submitLine(alias, "/s"), "/s");
+  // a partial that is neither name nor alias completes to the primary name.
+  const partial = syncAutocomplete("/inst", 5, ITEMS);
+  assert.equal(submitLine(partial, "/inst"), "/install");
+  // text already typed after the command token is preserved (caret parked inside the name).
+  const withArgs = syncAutocomplete("/install foo", 8, ITEMS);
+  assert.equal(submitLine(withArgs, "/install foo"), "/install foo");
+  // nothing highlighted → null
+  assert.equal(submitLine(syncAutocomplete("/zzz", 4, ITEMS), "/zzz"), null);
 });
 
 test("moveAc wraps; acceptAc returns the completed line", () => {
