@@ -56,6 +56,42 @@ export interface StatusModel {
   /** the focused pane (CLI-060). Shown as a chip only when NOT the default "transcript" pane, so
    *  Ctrl+G (CLI-067) has a visible effect without cluttering the single-pane home. */
   activePane?: string;
+  /**
+   * Reasoning-effort state for the ACTIVE model. Rendered inlaid in the composer's bottom
+   * border, NOT as a status chip down here — the bar is already dense, and this is exactly
+   * the fact a user needs at the moment they switch models.
+   *
+   * `available:false` ⇒ the model has no usable reasoning control, for whichever of the three
+   * distinct reasons `detail` explains (no capability / always-on / this runtime ignores it).
+   */
+  effort?: {
+    tier: string;
+    available: boolean;
+    /** true when the tier was clamped or emulated rather than applied verbatim. */
+    degraded: boolean;
+    /** one-sentence explanation, shown on the `/effort` line (too long for the border). */
+    detail?: string;
+  };
+}
+
+/**
+ * The composer's bottom-border badge: `effort: high` or `effort: not available`. Returns
+ * undefined when there is nothing worth saying.
+ *
+ * The `not available` wording is deliberate. Showing a tier the model will ignore is the bug
+ * this whole feature exists to remove, so an unusable knob must read as unusable — not as a
+ * setting that merely happens to be inert.
+ *
+ * The badge shows the tier that was APPLIED and carries no degradation marker: `~` already
+ * means "estimated" on this same chrome (`~12.3k` context, `~$0.12` cost), so a second
+ * meaning would be ambiguous. A clamped or emulated tier is signalled by the warn tint, and
+ * spelled out in full by `/effort` and `/status`.
+ */
+export function effortBadge(m: StatusModel): string | undefined {
+  const e = m.effort;
+  if (!e) return undefined;
+  if (!e.available) return "effort: not available";
+  return `effort: ${e.tier}`;
 }
 
 /** Compact-k format: 12300 → "12.3k" (1 decimal <100k, floored), 131072 → "131k", <1000 → "N". */

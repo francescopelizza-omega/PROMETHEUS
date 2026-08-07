@@ -114,3 +114,51 @@ test("clickToOffset: a click on a wrapped 2nd row maps into that row (CLI-069)",
   assert.equal(clickToOffset("helloworld", 5, 1, 2), 7);
   assert.equal(clickToOffset("helloworld", 5, 9, 0), 10); // below text → buffer end
 });
+
+/* ── the inlaid bottom-border badge (per-model effort state) ─────────────────── */
+
+test("a badge is inlaid in the BOTTOM border, right-aligned, preserving box width", () => {
+  const l = layoutComposer("hi", 2, 40, { badge: "effort: high" });
+  const bottom = l.lines[2] ?? "";
+  // width must be unchanged — the redraw math depends on lines.length AND column count.
+  assert.equal([...bottom].length, 40);
+  assert.ok(bottom.startsWith("╰"));
+  assert.ok(bottom.endsWith("╯"));
+  assert.match(bottom, /effort: high/);
+  // right-aligned: exactly two trailing dashes before the corner.
+  assert.match(bottom, /effort: high ──╯$/);
+  // the TOP border stays a clean rule.
+  assert.equal(l.lines[0], `╭${"─".repeat(38)}╮`);
+});
+
+test("the badge does not disturb cursor math", () => {
+  const plain = layoutComposer("hello", 5, 40);
+  const badged = layoutComposer("hello", 5, 40, { badge: "effort: not available" });
+  assert.equal(badged.cursorRow, plain.cursorRow);
+  assert.equal(badged.cursorCol, plain.cursorCol);
+  assert.equal(badged.height, plain.height);
+});
+
+test("a badge too wide for the box is dropped whole, never truncated", () => {
+  // a half-rendered "effort: not availa" reads as a rendering bug, not as information.
+  const l = layoutComposer("hi", 2, 20, { badge: "effort: not available" });
+  const bottom = l.lines[2] ?? "";
+  assert.equal([...bottom].length, 20);
+  assert.equal(bottom, `╰${"─".repeat(18)}╯`);
+  assert.equal(bottom.includes("effort"), false);
+});
+
+test("no badge renders the classic plain rule", () => {
+  const l = layoutComposer("hi", 2, 30);
+  assert.equal(l.lines[2], `╰${"─".repeat(28)}╯`);
+});
+
+test("the badge is painted independently of the border", () => {
+  const l = layoutComposer("hi", 2, 40, {
+    badge: "effort: high",
+    paint: { border: (s) => `<b>${s}</b>`, badge: (s) => `<E>${s}</E>` },
+  });
+  const bottom = l.lines[2] ?? "";
+  assert.match(bottom, /<E> effort: high <\/E>/);
+  assert.match(bottom, /^<b>╰<\/b>/);
+});

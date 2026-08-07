@@ -14,6 +14,7 @@ import {
   repl,
   type AiEndpoint,
   agent,
+  ai,
   cliProfiles,
   loadPricing,
   mcpServer,
@@ -818,6 +819,7 @@ export async function createSessionBridge(deps: BridgeDeps): Promise<SessionBrid
     tune: (patch) => {
       state = repl.reduce(state, { type: "tune", patch });
     },
+    effortResolution,
     getAuthLevel: () => authLevel,
     setAuthLevel: (level) => {
       authLevel = agent.authLevelMeta(level).level; // clamp 0–7
@@ -1140,6 +1142,22 @@ export async function createSessionBridge(deps: BridgeDeps): Promise<SessionBrid
     await runAgentMessage(trimmed, opts);
   };
 
+  /**
+   * What the ACTIVE endpoint would really do with a tier. Recomputed per call because the
+   * model can change mid-session (`/model`), and this is precisely the moment the answer
+   * flips — `high` on a thinking model, `not available` on the next one.
+   */
+  // a hoisted declaration: the SlashCtx literal above closes over this before it is reached.
+  function effortResolution(tier: ai.EffortTier): ai.EffortResolution | undefined {
+    if (!endpoint) return undefined;
+    const cap = ai.resolveCapability({
+      modelId: endpoint.model ?? endpoint.id,
+      runtime: ai.runtimeFromBaseUrl(endpoint.baseUrl, endpoint.locality),
+      locality: endpoint.locality,
+    }).cap;
+    return ai.resolveEffort(tier, cap);
+  }
+
   const statusModel = (): StatusModel => {
     const model = state.tuning.model.modelId ?? "";
     const provider = state.tuning.model.provider;
@@ -1178,6 +1196,22 @@ export async function createSessionBridge(deps: BridgeDeps): Promise<SessionBrid
         estimated: true,
       },
       ...(cost ? { cost } : {}),
+      ...(effortStatus() ?? {}),
+    };
+  };
+
+  /** The composer-border effort badge input. Omitted entirely when no endpoint is bound yet. */
+  const effortStatus = (): Pick<StatusModel, "effort"> | undefined => {
+    const tier = state.tuning.effort ?? "medium";
+    const res = effortResolution(tier);
+    if (!res) return undefined;
+    return {
+      effort: {
+        tier: res.applied ?? tier,
+        available: res.applied !== null,
+        degraded: res.degraded !== null,
+        ...(res.degraded ? { detail: res.degraded.message } : {}),
+      },
     };
   };
 

@@ -40,6 +40,7 @@ import {
   repl,
   type AiEndpoint,
   agent,
+  ai,
   cliProfiles,
   loadPricing,
   mcpServer,
@@ -799,6 +800,17 @@ export async function launchSession(parsed: ParsedArgs, deps: SessionDeps = {}):
     },
     tune: (patch) => {
       state = repl.reduce(state, { type: "tune", patch });
+    },
+    // Lets `/effort` report what the ACTIVE model will really do, instead of echoing a tier
+    // it may quietly drop. Re-derived per call — `/setup` and `/model` can rebind `endpoint`.
+    effortResolution: (tier) => {
+      if (!endpoint) return undefined;
+      const cap = ai.resolveCapability({
+        modelId: endpoint.model ?? endpoint.id,
+        runtime: ai.runtimeFromBaseUrl(endpoint.baseUrl, endpoint.locality),
+        locality: endpoint.locality,
+      }).cap;
+      return ai.resolveEffort(tier, cap);
     },
     control: (signal) => {
       if (signal === "quit") {

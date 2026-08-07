@@ -1473,3 +1473,128 @@ test("CLI-088 runMessageTurn injects the terse directive when terse-output enabl
     .map((m) => m.content);
   assert.ok(!offSystems.some((s) => /TERSE/.test(String(s))), "no terse block when disabled");
 });
+
+/* ── the /effort tier actually reaching the wire (was stored-and-discarded) ──── */
+
+/** Capture the JSON body of the single request a turn makes. */
+function capturingFetch(sse: string): {
+  fetch: unknown;
+  body: () => Record<string, unknown>;
+  urls: string[];
+} {
+  const urls: string[] = [];
+  let captured: Record<string, unknown> = {};
+  const fetch = async (url: string, init?: { body?: string }) => {
+    urls.push(url);
+    captured = JSON.parse(init?.body ?? "{}");
+    return {
+      ok: true,
+      status: 200,
+      statusText: "OK",
+      body: streamFromString(sse),
+      async text() {
+        return "";
+      },
+    };
+  };
+  return { fetch, body: () => captured, urls };
+}
+
+const DONE_SSE = 'data: {"choices":[{"delta":{"content":"ok"}}]}\ndata: [DONE]\n';
+
+const OLLAMA_ENDPOINT = {
+  id: "local:gemma4",
+  baseUrl: "http://127.0.0.1:11434/v1",
+  locality: "local" as const,
+  contextWindow: 8192,
+  supportsTools: false,
+  model: "gemma4:12b",
+};
+
+test("makeLlmClient: a thinking-capable model carries the effort tier on the wire", async () => {
+  // The regression this guards: `/effort` used to set tuning.effort, echo it, and show it in
+  // /status while `makeLlmClient.turn` named the parameter `_tuning` and ignored it — so the
+  // model received nothing and the user was told otherwise.
+  const f = capturingFetch(DONE_SSE);
+  const llm = makeLlmClient(OLLAMA_ENDPOINT, {
+    fetch: f.fetch as never,
+    effortCapability: {
+      mechanism: "effort-enum",
+      field: "reasoning_effort",
+      supported: ["off", "low", "medium", "high", "max"],
+      enumMap: { off: "none", low: "low", medium: "medium", high: "high", max: "max" },
+    },
+  });
+  await collect(llm.turn(thread("hi"), fakeTuning({ effort: "high" }), []));
+  assert.equal(f.body().reasoning_effort, "high");
+});
+
+test("makeLlmClient: a model with no reasoning control sends NO effort field", async () => {
+  const f = capturingFetch(DONE_SSE);
+  const llm = makeLlmClient(OLLAMA_ENDPOINT, {
+    fetch: f.fetch as never,
+    effortCapability: { mechanism: "none", supported: [] },
+  });
+  await collect(llm.turn(thread("hi"), fakeTuning({ effort: "max" }), []));
+  const body = f.body();
+  // Not "sent as null", not "sent as none" — ABSENT. Forwarding it hopefully is what makes
+  // GPT-4o-class endpoints 400.
+  assert.equal("reasoning_effort" in body, false);
+  assert.equal("think" in body, false);
+  assert.equal("chat_template_kwargs" in body, false);
+});
+
+test("makeLlmClient: no /effort set at all leaves the body untouched", async () => {
+  const f = capturingFetch(DONE_SSE);
+  const llm = makeLlmClient(OLLAMA_ENDPOINT, {
+    fetch: f.fetch as never,
+    effortCapability: {
+      mechanism: "effort-enum",
+      field: "reasoning_effort",
+      supported: ["low", "high"],
+      enumMap: { low: "low", high: "high" },
+    },
+  });
+  await collect(llm.turn(thread("hi"), fakeTuning(), []));
+  assert.equal("reasoning_effort" in f.body(), false);
+});
+
+test("toolTurn (the tool-capable transport) also carries the effort tier", async () => {
+  // toolTurn used to take no tuning parameter AT ALL, so even a correctly wired text path
+  // would have silently dropped the tier for every agentic turn — i.e. almost all of them.
+  const sse =
+    'data: {"choices":[{"delta":{"content":"hi"}}]}\ndata: {"choices":[{"finish_reason":"stop"}]}\ndata: [DONE]\n';
+  const f = capturingFetch(sse);
+  const llm = makeLlmClient(
+    { ...OLLAMA_ENDPOINT, supportsTools: true },
+    {
+      fetch: f.fetch as never,
+      effortCapability: {
+        mechanism: "effort-enum",
+        field: "reasoning_effort",
+        supported: ["off", "low", "medium", "high", "max"],
+        enumMap: { off: "none", low: "low", medium: "medium", high: "high", max: "max" },
+      },
+    },
+  );
+  const tools = [{ name: "noop", description: "does nothing", schema: {} }] as never[];
+  await collect(llm.turn(thread("hi"), fakeTuning({ effort: "max" }), tools));
+  assert.equal(f.body().reasoning_effort, "max");
+  // the pre-existing local keep_alive extension must survive alongside it
+  assert.equal(f.body().keep_alive, "30m");
+});
+
+test("makeLlmClient: gpt-oss puts `Reasoning:` in the system prompt, not the body", async () => {
+  const f = capturingFetch(DONE_SSE);
+  const llm = makeLlmClient(
+    { ...OLLAMA_ENDPOINT, model: "gpt-oss:20b" },
+    { fetch: f.fetch as never },
+  );
+  await collect(llm.turn(thread("hi"), fakeTuning({ effort: "high" }), []));
+  const body = f.body() as { messages: Array<{ role: string; content: string }> };
+  assert.equal("reasoning_effort" in f.body(), false);
+  assert.ok(
+    body.messages.some((m) => m.role === "system" && m.content.includes("Reasoning: high")),
+    "the harmony system line must be present",
+  );
+});

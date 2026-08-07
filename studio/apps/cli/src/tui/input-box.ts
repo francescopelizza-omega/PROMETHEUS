@@ -11,7 +11,7 @@
  * computed in VISIBLE coordinates and never drift when ANSI is added. PURE + tested.
  */
 
-import { charWidth, clipToWidth, padToWidth } from "./width.js";
+import { charWidth, clipToWidth, padToWidth, stringWidth } from "./width.js";
 
 const TL = "╭";
 const TR = "╮";
@@ -26,6 +26,8 @@ export interface ComposerPaint {
   prompt?: (s: string) => string;
   placeholder?: (s: string) => string;
   text?: (s: string) => string;
+  /** the inline bottom-border badge (see `ComposerOpts.badge`). */
+  badge?: (s: string) => string;
 }
 
 export interface ComposerOpts {
@@ -37,6 +39,42 @@ export interface ComposerOpts {
   paint?: ComposerPaint;
   /** clamp the box to at most this many visual text rows (scrolls the tail). */
   maxRows?: number;
+  /**
+   * A short label inlaid into the BOTTOM border, right-aligned: `╰──── effort: high ──╯`.
+   *
+   * This is where per-model state that changes under the user's feet belongs. The status bar
+   * below is already dense, and a chip that appears there is easy to miss at the exact moment
+   * it matters — the turn right after switching to a model whose reasoning knob works
+   * differently, or not at all. On the box the user is typing into, it is unmissable.
+   *
+   * Dropped silently when the box is too narrow to hold it without crowding the corners.
+   */
+  badge?: string;
+}
+
+/** Minimum dashes kept on each side of an inlaid badge so it never crowds a corner. */
+const BADGE_PAD_LEFT = 2;
+const BADGE_PAD_RIGHT = 2;
+
+/**
+ * Inlay `badge` into a horizontal rule, right-aligned: `─────── effort: high ──`.
+ * Returns the plain rule unchanged when there isn't room. `inner` is the rule's total width.
+ */
+export function inlayBadge(
+  inner: number,
+  badge: string | undefined,
+  paintBadge: (s: string) => string,
+  paintBorder: (s: string) => string,
+): string {
+  const rule = H.repeat(Math.max(0, inner));
+  if (!badge) return paintBorder(rule);
+  const label = ` ${badge} `;
+  const w = stringWidth(label);
+  const lead = inner - w - BADGE_PAD_RIGHT;
+  // too narrow to inlay without crowding a corner → keep the plain rule (never truncate the
+  // badge: a half-shown "effort: not availa" reads as a rendering bug, not as information).
+  if (lead < BADGE_PAD_LEFT) return paintBorder(rule);
+  return `${paintBorder(H.repeat(lead))}${paintBadge(label)}${paintBorder(H.repeat(BADGE_PAD_RIGHT))}`;
 }
 
 export interface ComposerLayout {
@@ -148,6 +186,7 @@ export function layoutComposer(
   const pp = paint.prompt ?? id;
   const ph = paint.placeholder ?? id;
   const pt = paint.text ?? id;
+  const pbadge = paint.badge ?? id;
 
   // clamp width so the math never goes negative on a tiny terminal.
   const outer = Math.max(width, 8);
@@ -179,7 +218,7 @@ export function layoutComposer(
     const g = isFirst ? pp(gutter) : gutter;
     lines.push(`${pb(V)} ${g}${body} ${pb(V)}`);
   });
-  lines.push(pb(`${BL}${bar}${BR}`));
+  lines.push(`${pb(BL)}${inlayBadge(outer - 2, opts.badge, pbadge, pb)}${pb(BR)}`);
 
   // cursor: row 0 is the top border; body rows follow. col 0 is the left border.
   // layout: V(1) + space(1) + gutter(2) + text → text starts at column 4.

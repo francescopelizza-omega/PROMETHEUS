@@ -17,7 +17,7 @@ import { renderInvokeOverlay } from "./invoke-overlay.js";
  */
 import { type ColorCaps, paint, painter } from "./palette.js";
 import type { TuiState } from "./reducer.js";
-import { type StatusModel, statusLines } from "./status.js";
+import { type StatusModel, effortBadge, statusLines } from "./status.js";
 import { clipToWidth, graphemeSlice, splitGraphemes, stringWidth, wrapLine } from "./width.js";
 
 export interface FrameInput {
@@ -95,14 +95,26 @@ export function renderFrame(input: FrameInput): Frame {
   const borderRole =
     state.permMode === "bypassPermissions" || state.permMode === "yolo" ? "danger" : "accent";
   const boxMaxRows = Math.max(1, Math.min(8, rows - dropdown.length - 4));
+  // Reasoning-effort state rides in the composer's own bottom border rather than the status
+  // bar: it changes when the MODEL changes, and the border of the box you are typing into is
+  // the one piece of chrome that cannot be scrolled away or lost in a dense chip row.
+  const badge = effortBadge(status);
   const composer = layoutComposer(state.input, state.cursor, width, {
     prompt: "›",
     placeholder: input.placeholder ?? DEFAULT_PLACEHOLDER,
     maxRows: boxMaxRows,
+    ...(badge ? { badge } : {}),
     paint: {
       border: (s) => p[borderRole](s),
       prompt: (s) => p.brand(s),
       placeholder: (s) => p.muted(s),
+      // an unavailable knob reads as muted (a fact), a degraded one as a warning (a caveat).
+      badge: (s) =>
+        status.effort && !status.effort.available
+          ? p.muted(s)
+          : status.effort?.degraded
+            ? p.warn(s)
+            : p.muted(s),
       // CLI-063: paint live `[Pasted text #N, L lines]` chips in accent so they read as tokens,
       // not typed text (ANSI is zero-width → the caret math upstream is unaffected).
       text: (s) => {

@@ -31,8 +31,10 @@ export interface AgentTuning {
   dryRun: boolean;
   verbosity: "quiet" | "normal" | "debug";
   yes: boolean;
-  /** reasoning effort for the bound worker model (the `/think` command). Optional. */
-  effort?: "low" | "medium" | "high" | "max";
+  /** reasoning effort for the bound worker model (the `/think` command). Optional.
+   *  Translated per-backend by `ai/effort` — NOT forwarded raw, because the same intent is
+   *  `reasoning_effort` on one endpoint, `think` on another, and unsendable on a third. */
+  effort?: "off" | "low" | "medium" | "high" | "max";
   /** max model⇄tool rounds per turn (CLI-032); default 8. A hard runaway backstop — NOT a
    *  product limit: on reaching it the loop emits a `capped` event and the host offers
    *  `/continue` (CLI-072). Honored from config via `agent.maxIterations` (resolveTuning). */

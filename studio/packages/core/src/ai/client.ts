@@ -18,6 +18,9 @@
  * node:http stub (no real model), per the env limits.
  */
 
+import { applyEffort, applyEffortToMessages } from "./effort/apply.js";
+import type { EffortResolution } from "./effort/types.js";
+
 /* ------------------------------------------------------------------------- *
  * Endpoint, policy, and message types (file 07 §7)
  * ------------------------------------------------------------------------- */
@@ -60,6 +63,13 @@ export interface ChatOpts {
   maxTokens?: number;
   /** abort the in-flight stream (forwarded to fetch). */
   signal?: AbortSignal;
+  /**
+   * A RESOLVED reasoning-effort decision (ai/effort). Already translated to this backend's
+   * dialect by `resolveEffort`, so the transport only applies it — it never guesses a
+   * parameter name. Omitted, or resolved to `applied: null`, ⇒ nothing is added to the body,
+   * which is what keeps a knobless model from taking a 400.
+   */
+  effort?: EffortResolution;
 }
 
 /** A streamed chat delta. */
@@ -336,16 +346,26 @@ export function createAiClient(
     const url = /\/v1$/.test(cleanBase)
       ? `${cleanBase}/chat/completions`
       : joinUrl(cleanBase, "/v1/chat/completions");
-    const body = JSON.stringify({
-      model: endpoint.model ?? endpoint.id,
-      messages,
-      stream: true,
-      // ask for a terminal usage frame (CLI-029). Most OpenAI-compatible servers honor
-      // this; older llama.cpp / a few gateways ignore it → the caller's chars/4 fallback.
-      stream_options: { include_usage: true },
-      ...(opts.temperature !== undefined ? { temperature: opts.temperature } : {}),
-      ...(opts.maxTokens !== undefined ? { max_tokens: opts.maxTokens } : {}),
-    });
+    // A prompt-shaped effort knob (gpt-oss's `Reasoning: high`) rewrites the messages; a
+    // body-shaped one adds a field. `applyEffort` also enforces the side-constraints that
+    // would otherwise 400 — dropping temperature where the model rejects it, raising a
+    // max_tokens floor where reasoning and answer must share the budget.
+    const effMessages = applyEffortToMessages(messages, opts.effort);
+    const body = JSON.stringify(
+      applyEffort(
+        {
+          model: endpoint.model ?? endpoint.id,
+          messages: effMessages,
+          stream: true,
+          // ask for a terminal usage frame (CLI-029). Most OpenAI-compatible servers honor
+          // this; older llama.cpp / a few gateways ignore it → the caller's chars/4 fallback.
+          stream_options: { include_usage: true },
+          ...(opts.temperature !== undefined ? { temperature: opts.temperature } : {}),
+          ...(opts.maxTokens !== undefined ? { max_tokens: opts.maxTokens } : {}),
+        },
+        opts.effort,
+      ),
+    );
 
     const res = await doFetch(url, {
       method: "POST",

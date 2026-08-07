@@ -64,6 +64,7 @@ import type {
   AiClient,
   AiClientDeps,
   AiEndpoint,
+  FetchLike,
   Msg,
   Pricing,
   SseTokenUsage,
@@ -116,6 +117,10 @@ type ConfirmResult = agent.ConfirmResult;
 type ToolOutcome = agent.ToolOutcome;
 type ToolRunner = agent.ToolRunner;
 type ToolDef = mcpServer.ToolDef;
+type EffortCapability = ai.EffortCapability;
+type EffortResolution = ai.EffortResolution;
+const { applyEffort, applyEffortToMessages, resolveCapability, resolveEffort, runtimeFromBaseUrl } =
+  ai;
 
 // runtime fns off the namespace (re-bound locally for terse call sites).
 const { appendTurn, createSession, runAgentTurn, serializeSession } = agent;
@@ -670,6 +675,10 @@ export interface LlmClientDeps extends AiClientDeps {
   signal?: AbortSignal;
   /** per-turn token accounting sink (CLI-029): fed the SSE `usage`, else a chars/4 estimate. */
   onUsage?: (rec: AccountingRecord) => void;
+  /** A probe-backed effort capability (e.g. from Ollama's /api/show `capabilities`). When
+   *  omitted the client falls back to matching the model NAME, which is strictly worse —
+   *  Gemma 3 and Gemma 4 differ on this within one family. */
+  effortCapability?: EffortCapability;
   /** clock for the accounting timestamp (injected in tests). */
   now?: () => string;
 }
@@ -757,6 +766,10 @@ async function* toolTurn(
   tools: ToolDef[],
   policy: WorkspacePolicy,
   signal?: AbortSignal,
+  effort?: EffortResolution,
+  // The injected fetch seam `createAiClient` already honors. Without it this transport —
+  // the one nearly every agentic turn takes — could not be intercepted by a test at all.
+  doFetch: FetchLike = fetch,
 ): AsyncIterable<LlmTurn> {
   if (policy.neverSendToCloud && endpoint.locality === "cloud") {
     yield { kind: "text", text: "cloud endpoint refused (workspace never-send-to-cloud is on)" };
@@ -785,30 +798,37 @@ async function* toolTurn(
   const hardTimer = setTimeout(() => ac.abort(), HARD_TIMEOUT_MS);
   try {
     yield { kind: "status", text: `→ ${model}: sending request…` };
-    const res = await fetch(url, {
+    const res = await doFetch(url, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
         Authorization: "Bearer local",
         Accept: "text/event-stream",
       },
-      body: JSON.stringify({
-        model,
-        // Our tool results are already human-readable (`[tool_result …]`) and carry no
-        // OpenAI `tool_call_id` linkage; send them as plain `user` context so a strict
-        // endpoint never rejects an unpaired `role:"tool"` message on the follow-up round.
-        messages: messages.map((m) => ({
-          role: m.role === "tool" ? "user" : m.role,
-          content: m.content,
-        })),
-        tools: toOpenAiTools(tools),
-        tool_choice: "auto",
-        stream: true,
-        // Ollama extension (ignored by other endpoints): keep the model resident 30m so a
-        // second prompt doesn't pay the multi-second cold RELOAD. Only for LOCAL runners —
-        // never send a non-standard field to a cloud endpoint.
-        ...(endpoint.locality === "local" ? { keep_alive: "30m" } : {}),
-      }),
+      body: JSON.stringify(
+        applyEffort(
+          {
+            model,
+            // Our tool results are already human-readable (`[tool_result …]`) and carry no
+            // OpenAI `tool_call_id` linkage; send them as plain `user` context so a strict
+            // endpoint never rejects an unpaired `role:"tool"` message on the follow-up round.
+            messages: applyEffortToMessages(messages, effort).map((m) => ({
+              role: m.role === "tool" ? "user" : m.role,
+              content: m.content,
+            })),
+            tools: toOpenAiTools(tools),
+            tool_choice: "auto",
+            stream: true,
+            // Ollama extension (ignored by other endpoints): keep the model resident 30m so a
+            // second prompt doesn't pay the multi-second cold RELOAD. Only for LOCAL runners —
+            // never send a non-standard field to a cloud endpoint.
+            ...(endpoint.locality === "local" ? { keep_alive: "30m" } : {}),
+          },
+          // Same discipline as `keep_alive` above: a field goes on the wire only when THIS
+          // model is known to accept it. A knobless model gets nothing rather than a 400.
+          effort,
+        ),
+      ),
       signal: ac.signal,
     });
     if (!res.ok || !res.body) {
@@ -948,15 +968,30 @@ export function makeLlmClient(endpoint: AiEndpoint, deps: LlmClientDeps = {}): L
   const { policy: _omit, signal, ...aiDeps } = deps;
   const client: AiClient = createAiClient(endpoint, policy, aiDeps);
 
+  // The model's effort capability is a property of the endpoint, so resolve it once here and
+  // only the TIER varies per turn. `deps.effortCapability` lets the host pass a probe-backed
+  // capability (Ollama /api/show) instead of the name-matched guess.
+  const capability: EffortCapability =
+    deps.effortCapability ??
+    resolveCapability({
+      modelId: endpoint.model ?? endpoint.id,
+      runtime: runtimeFromBaseUrl(endpoint.baseUrl, endpoint.locality),
+      locality: endpoint.locality,
+    }).cap;
+
   return {
-    async *turn(thread: Thread, _tuning: AgentTuning, tools: ToolDef[]): AsyncIterable<LlmTurn> {
+    async *turn(thread: Thread, tuning: AgentTuning, tools: ToolDef[]): AsyncIterable<LlmTurn> {
       const messages = threadToMessages(thread);
+      // The `/think` tier finally reaches the wire (it was stored and discarded here before).
+      // `resolveEffort` returns null-applied for a model with no knob, and `applyEffort`
+      // then adds nothing — so an unsupported model is a no-op, never a 400.
+      const effort = tuning.effort ? resolveEffort(tuning.effort, capability) : undefined;
       // Tool-capable transport: when the agent offers tools AND the model supports them, use a
       // non-streaming request so a capable local model returns native tool_calls (which the
       // text-only SSE below never carries). This is what lets Prometheus ACT — create/edit
       // files, run gated verbs — instead of only describing.
       if (tools.length > 0 && endpoint.supportsTools) {
-        yield* toolTurn(endpoint, messages, tools, policy, signal);
+        yield* toolTurn(endpoint, messages, tools, policy, signal, effort, deps.fetch);
         return;
       }
       let any = false;
@@ -965,7 +1000,10 @@ export function makeLlmClient(endpoint: AiEndpoint, deps: LlmClientDeps = {}): L
       try {
         // thread the signal so fetch() aborts AND the SSE reader is cancelled — a bare
         // fetch abort still lets the parser drain buffered bytes (post-abort deltas).
-        for await (const chunk of client.chat(messages, signal ? { signal } : {})) {
+        for await (const chunk of client.chat(messages, {
+          ...(signal ? { signal } : {}),
+          ...(effort ? { effort } : {}),
+        })) {
           if (signal?.aborted) break; // stop yielding the instant Ctrl-C fires
           if (chunk.delta) {
             any = true;

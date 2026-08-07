@@ -15,7 +15,7 @@
  * / tune / control / ask / askPath / agents / …) and do their work; the host just
  * dispatches. Pure data + thin closures — fully unit-testable with a fake SlashCtx.
  */
-import { COMMAND_SPECS, agent, tokenEconomy } from "@prometheus/core";
+import { COMMAND_SPECS, agent, ai, tokenEconomy } from "@prometheus/core";
 
 import { CATEGORY_LABEL, PATH_CATEGORIES, type PathCategory } from "../home.js";
 import { c } from "../render.js";
@@ -44,6 +44,25 @@ import { type SteeringFile, renderSteeringList } from "./steering.js";
 import type { ResolveResult } from "./working-set.js";
 
 type AgentTuning = agent.AgentTuning;
+type EffortTier = ai.EffortTier;
+type EffortResolution = ai.EffortResolution;
+const { isEffortTier } = ai;
+
+/**
+ * The `/status` think line. Reports what the ACTIVE model will do with the stored tier, not
+ * the stored tier alone — `think max` beside a model that cannot reason is the exact
+ * misreport this feature removes.
+ */
+function describeThink(ctx: SlashCtx): string {
+  const tier = ctx.tuning().effort;
+  const res = ctx.effortResolution?.(tier ?? "medium");
+  if (!res) return tier ?? "default";
+  if (res.applied === null) {
+    return `not available (${res.degraded?.message ?? "no reasoning control"})`;
+  }
+  const label = tier ?? `${res.applied} (default)`;
+  return res.degraded ? `${label} → ${res.applied} (${res.degraded.message})` : label;
+}
 
 /** The full agent tool surface (for /tools list + name validation, CLI-018). */
 const AGENT_TOOL_DEFS = agent.exposedTools({ enabled: true, allow: [], deny: [] });
@@ -68,6 +87,10 @@ export interface SlashCtx {
   continueTurn: () => Promise<void>;
   /** apply a tuning patch + redraw the footer. */
   tune: (patch: Partial<AgentTuning>) => void;
+  /** What the ACTIVE model would actually do with a given effort tier — so `/effort` can
+   *  report "not available" instead of echoing a success it cannot deliver. Optional so
+   *  existing fake SlashCtx fixtures keep compiling. */
+  effortResolution?: (tier: EffortTier) => EffortResolution | undefined;
   /** the active 0–7 --authorisation level. */
   getAuthLevel: () => number;
   /** set the 0–7 --authorisation level (persists as the next-session default). */
@@ -800,15 +823,29 @@ export const SLASH_REGISTRY: readonly SlashCmd[] = Object.freeze([
     name: "think",
     aliases: ["effort"],
     group: "model",
-    summary: "Set the worker's reasoning effort (low/medium/high/max).",
-    args: "[low|medium|high|max]",
+    summary: "Set the worker's reasoning effort (off/low/medium/high/max).",
+    args: "[off|low|medium|high|max]",
     run: (rest, ctx) => {
       const v = rest.trim().toLowerCase();
-      if (v === "low" || v === "medium" || v === "high" || v === "max") {
+      if (isEffortTier(v)) {
         ctx.tune({ effort: v });
-        ctx.write(c.cyan(`think → ${v}`));
+        // Report what the ACTIVE model will actually do with it, not just what was stored —
+        // `/effort max` on a model with no reasoning mode used to echo success and send
+        // nothing, which is the exact failure this feature exists to remove.
+        const res = ctx.effortResolution?.(v);
+        if (res && res.applied === null) {
+          ctx.write(
+            `${c.cyan(`think → ${v}`)} ${c.dim(`(not available — ${res.degraded?.message ?? "no reasoning control"})`)}`,
+          );
+        } else if (res?.degraded) {
+          ctx.write(`${c.cyan(`think → ${res.applied}`)} ${c.dim(`(${res.degraded.message})`)}`);
+        } else {
+          ctx.write(c.cyan(`think → ${v}`));
+        }
       } else {
-        ctx.write(c.dim(`think: ${ctx.tuning().effort ?? "default"} (use low|medium|high|max)`));
+        ctx.write(
+          c.dim(`think: ${ctx.tuning().effort ?? "default"} (use off|low|medium|high|max)`),
+        );
       }
     },
   },
@@ -1439,7 +1476,7 @@ export const SLASH_REGISTRY: readonly SlashCmd[] = Object.freeze([
     run: (_r, ctx) => {
       const t = ctx.tuning();
       ctx.write(
-        `${c.bold("Status")}\n  worker     ${t.model.provider}:${t.model.modelId}\n  gate       ${t.gateMode}\n  think      ${t.effort ?? "default"}\n  cwd        ${ctx.cwd()}\n  subagents  ${ctx.agents.count()}${ctx.agents.insideTmux ? " (tmux)" : ""}`,
+        `${c.bold("Status")}\n  worker     ${t.model.provider}:${t.model.modelId}\n  gate       ${t.gateMode}\n  think      ${describeThink(ctx)}\n  cwd        ${ctx.cwd()}\n  subagents  ${ctx.agents.count()}${ctx.agents.insideTmux ? " (tmux)" : ""}`,
       );
     },
   },

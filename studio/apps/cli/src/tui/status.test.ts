@@ -9,6 +9,7 @@ import {
   composerHint,
   contextMeterSegment,
   costMeterSegment,
+  effortBadge,
   justify,
   statusLines,
 } from "./status.js";
@@ -201,4 +202,50 @@ test("statusLines: cost chip width sweep 5..200 — bar never exceeds width (CLI
     const bar = statusLines({ ...BASE, cost: { estTokens: 42000, estUsd: 1.23 } }, w, "none")[0];
     assert.ok(stringWidth(strip(bar ?? "")) <= w, `width ${w}: cost bar exceeds ${w}`);
   }
+});
+
+/* ── the composer-border effort badge ───────────────────────────────────────── */
+
+test("effortBadge names the unavailable case instead of showing an inert tier", () => {
+  // Showing `effort: high` on a model that will ignore it is the exact misreport the
+  // whole feature exists to remove, so the unusable case must read as unusable.
+  assert.equal(
+    effortBadge({ ...BASE, effort: { tier: "high", available: false, degraded: true } }),
+    "effort: not available",
+  );
+});
+
+test("effortBadge shows the APPLIED tier and never a degradation marker", () => {
+  assert.equal(
+    effortBadge({ ...BASE, effort: { tier: "high", available: true, degraded: false } }),
+    "effort: high",
+  );
+  // A clamped/emulated tier reads identically. `~` already means "estimated" on this same
+  // chrome (`~12.3k` context, `~$0.12` cost), so a second meaning would be ambiguous; the
+  // warn tint carries it instead, and `/effort` spells it out.
+  assert.equal(
+    effortBadge({ ...BASE, effort: { tier: "high", available: true, degraded: true } }),
+    "effort: high",
+  );
+  // and nothing in the badge may contain a tilde at all
+  for (const degraded of [true, false]) {
+    const badge = effortBadge({ ...BASE, effort: { tier: "max", available: true, degraded } });
+    assert.equal(badge?.includes("~"), false);
+  }
+});
+
+test("effortBadge is absent before an endpoint is bound", () => {
+  assert.equal(effortBadge(BASE), undefined);
+});
+
+test("the effort badge does NOT leak into the status bar", () => {
+  // It belongs in the composer border; the bar is already dense and a chip there is easy
+  // to miss at the moment it matters (the turn right after switching models).
+  const withEffort = statusLines(
+    { ...BASE, effort: { tier: "high", available: false, degraded: true } },
+    80,
+    "none",
+  ).join("\n");
+  assert.equal(withEffort.includes("effort"), false);
+  assert.equal(withEffort, statusLines(BASE, 80, "none").join("\n"));
 });
