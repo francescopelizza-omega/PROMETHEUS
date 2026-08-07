@@ -1,5 +1,5 @@
 /**
- * commands/diagram-cmd.ts — `prom diagram <uml|deps> <path>` over the diagram.py
+ * commands/diagram-cmd.ts — `prometheus diagram <uml|deps> <path>` over the diagram.py
  * sidecar (CLI-008). A read-only AST walk → a Mermaid (+ Graphviz DOT) diagram
  * string; this renders it to stdout, a terse `--summary`, or a `--out <file>`
  * artifact. `--json` emits the sidecar envelope unmodified. The CLI never spawns
@@ -16,7 +16,7 @@ const SUMMARY_LINES = 8;
 
 function badPath(verb: string, p: string): CommandOutcome {
   return {
-    text: `prom diagram ${verb}: refusing option-shaped path: ${p}`,
+    text: `prometheus diagram ${verb}: refusing option-shaped path: ${p}`,
     json: { ok: false, error: "bad-path", path: p },
     exitCode: 2,
   };
@@ -29,7 +29,7 @@ export async function runDiagram(
   const verb = ctx.args.command[1];
   if (verb !== "uml" && verb !== "deps") {
     return {
-      text: `prom diagram: unknown verb ${verb ? `"${verb}"` : "(none)"} — valid: ${VERBS.join(", ")}`,
+      text: `prometheus diagram: unknown verb ${verb ? `"${verb}"` : "(none)"} — valid: ${VERBS.join(", ")}`,
       json: { ok: false, error: "unknown-verb", valid: VERBS },
       exitCode: 2,
     };
@@ -60,7 +60,7 @@ export async function runDiagram(
     if (out.startsWith("-")) return badPath(verb, out);
     if (existsSync(out) && !ctx.args.force) {
       return {
-        text: `prom diagram: ${out} exists — re-run with ${c.bold("--force")} to overwrite`,
+        text: `prometheus diagram: ${out} exists — re-run with ${c.bold("--force")} to overwrite`,
         json: { ok: false, error: "exists", path: out },
         exitCode: 2,
       };

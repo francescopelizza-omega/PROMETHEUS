@@ -76,7 +76,7 @@ function severityColor(sev: Finding["severity"]): string {
 }
 
 /**
- * Render a full SecurityVerdict to a multi-line string for `prom gate`.
+ * Render a full SecurityVerdict to a multi-line string for `prometheus gate`.
  * Includes the colored verdict, the risk score, signed flag, and a findings
  * table when present.
  */
@@ -139,9 +139,9 @@ const BANNER: Record<VerdictTier, { text: string; tone: "ok" | "warn" | "danger"
 /** One dim next-step line per verdict class (deliverable 4). */
 const NEXT_STEP: Record<VerdictTier, string> = {
   allow: "Next: safe to proceed — add --sign to record a verifiable verdict in the audit log.",
-  warn: "Next: review the findings; `prom secure disinfect <target>` neutralizes the fixable ones.",
+  warn: "Next: review the findings; `prometheus secure disinfect <target>` neutralizes the fixable ones.",
   block: "Next: do NOT install/run — inspect with `nemesis defang <target>` or quarantine it.",
-  error: "Next: fail-closed, no trustworthy verdict — check `prom doctor` and $NEMESIS_BIN.",
+  error: "Next: fail-closed, no trustworthy verdict — check `prometheus doctor` and $NEMESIS_BIN.",
 };
 
 const TIER_RANK: Record<VerdictTier, number> = { allow: 0, warn: 1, block: 2, error: 3 };

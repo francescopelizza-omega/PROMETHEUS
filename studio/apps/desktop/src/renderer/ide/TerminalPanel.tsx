@@ -56,7 +56,7 @@ import {
  */
 const FALLBACK_MENU: readonly IdeTerminalMenuItem[] = Object.freeze([
   { id: "shell.project", title: "Project shell", kind: "shell" },
-  { id: "ai.prom-chat", title: "prom chat", kind: "ai-preset", detectBin: "prom" },
+  { id: "ai.prom-chat", title: "prometheus chat", kind: "ai-preset", detectBin: "prometheus" },
   {
     id: "ai.claude",
     title: "claude",

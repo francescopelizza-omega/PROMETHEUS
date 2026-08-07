@@ -1,5 +1,5 @@
 /**
- * commands/info.ts — `prom info <name>`: details for one registry plugin.
+ * commands/info.ts — `prometheus info <name>`: details for one registry plugin.
  *
  * Renders the engine's `info` envelope (plugin{}). The engine returns ok:false /
  * "unknown plugin" for a bad name — we surface that with exit 2.
@@ -27,7 +27,7 @@ export async function runInfo(ctx: CliContext): Promise<CommandOutcome> {
   const name = ctx.args.positionals[0];
   if (!name) {
     return {
-      text: c.red("usage: prom info <plugin-name>"),
+      text: c.red("usage: prometheus info <plugin-name>"),
       json: { ok: false, error: "missing name" },
       exitCode: 2,
     };

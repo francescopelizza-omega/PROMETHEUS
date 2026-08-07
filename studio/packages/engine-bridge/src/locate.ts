@@ -28,7 +28,7 @@ export interface EnginePathsOptions extends EngineConfig {
   /** override process.resourcesPath (Electron sets it; tests inject a fake dir). */
   resourcesPath?: string;
   /**
-   * SEA / portable-binary engine hint (CLI-099): a single-file `prom` binary has NO
+   * SEA / portable-binary engine hint (CLI-099): a single-file `prometheus` binary has NO
    * `resourcesPath` and no sibling checkout, so it resolves the engine from `$PROMETHEUS_HOME/engine/`
    * as a documented lane BELOW explicit env (PROMETHEUS_PY/NEMESIS_BIN) and ABOVE the dev sibling/PATH.
    * Defaults to `process.env.PROMETHEUS_HOME`. Electron's `resourcesPath` still wins when present.

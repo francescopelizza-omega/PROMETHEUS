@@ -76,7 +76,7 @@ export function makeContext(args: ParsedArgs): CliContext {
 }
 
 /**
- * The `prom` exit-code convention (CLI-084) — the SINGLE reference table. Every command's
+ * The `prometheus` exit-code convention (CLI-084) — the SINGLE reference table. Every command's
  * failure exit MUST map onto this; `outcomeFromError` below is the ONE place a thrown error
  * becomes an exit code (a command hand-rolling its own error→code mapping is a divergence to fix):
  *
@@ -87,8 +87,8 @@ export function makeContext(args: ParsedArgs): CliContext {
  *      NEVER renumber a correct 2.
  *
  * Documented exceptions (a genuinely different, intentional contract):
- *   • `prom secure scan` uses a 0/1/2 scripting map (allow=0 · warn=1 · block/error=2), distinct
- *     from `prom gate`'s nemesis-mirroring 0/10/20/2 — both are deliberate per CLI-040/CLI-039.
+ *   • `prometheus secure scan` uses a 0/1/2 scripting map (allow=0 · warn=1 · block/error=2), distinct
+ *     from `prometheus gate`'s nemesis-mirroring 0/10/20/2 — both are deliberate per CLI-040/CLI-039.
  */
 
 /** Clamp a raw exit code to a valid non-zero FAILURE code (CLI-084): a bogus/absent/0/256-wrap

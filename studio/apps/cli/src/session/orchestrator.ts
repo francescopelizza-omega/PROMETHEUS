@@ -75,7 +75,7 @@ export interface RunEvent {
   text: string;
 }
 
-/** A serialisable snapshot of a run (for `prom agents` list / --json). */
+/** A serialisable snapshot of a run (for `prometheus agents` list / --json). */
 export interface RunRecord {
   id: string;
   model: string;
@@ -103,7 +103,7 @@ interface RunEntry extends RunRecord {
  * The in-process background-run table (CLI-034). A run keeps executing (and appending to its
  * ring buffer) after the user leaves the pane; `attach` replays the buffer then streams live
  * with NO gap/dup at the seam (replay ends at seq N, the next append is N+1); `kill` fires the
- * CLI-002 AbortController. In-process only — a second `prom` process sees only persisted runs.
+ * CLI-002 AbortController. In-process only — a second `prometheus` process sees only persisted runs.
  */
 export class RunRegistry {
   private readonly runs = new Map<string, RunEntry>();
@@ -169,7 +169,7 @@ export class RunRegistry {
     if (!e) return false;
     if (e.state !== "done" && e.state !== "failed" && e.state !== "killed") {
       try {
-        e.controller.abort("killed by prom agents kill");
+        e.controller.abort("killed by prometheus agents kill");
       } catch {
         /* an already-aborted controller is fine */
       }
@@ -227,7 +227,7 @@ export class RunRegistry {
   }
 }
 
-/** The process-wide background-run registry the session + `prom agents` share. */
+/** The process-wide background-run registry the session + `prometheus agents` share. */
 export const runRegistry = new RunRegistry();
 
 /** What a background run body receives: its id, an output sink, and the CLI-002 abort signal. */

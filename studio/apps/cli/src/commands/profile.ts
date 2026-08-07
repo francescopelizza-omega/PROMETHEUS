@@ -1,6 +1,6 @@
 import { existsSync } from "node:fs";
 /**
- * commands/profile.ts — `prom profile …` + `prom config …` (file 11 §6, prom-native).
+ * commands/profile.ts — `prometheus profile …` + `prometheus config …` (file 11 §6, prom-native).
  *
  * Profiles bundle agent tuning + engine defaults, shared with the GUI under
  * ~/.config/prometheus-studio/profiles/. `profile use/new/edit/list` are REAL (CLI-044):
@@ -50,24 +50,24 @@ function formatConfigValue(v: cliProfiles.TomlValue | undefined): string {
 }
 
 const missingName = (sub: string): CommandOutcome => ({
-  text: `prom profile ${sub}: needs a profile name`,
+  text: `prometheus profile ${sub}: needs a profile name`,
   json: { ok: false, error: "missing-name" },
   exitCode: 2,
 });
 
 /** A profile name becomes `<name>.toml` under the profiles dir — so it must be a plain filename with
- *  NO path separator or `.`/`..` traversal (mirrors safeSessionId), else `prom profile new ../x`
+ *  NO path separator or `.`/`..` traversal (mirrors safeSessionId), else `prometheus profile new ../x`
  *  would write outside the sandbox. */
 function isSafeProfileName(name: string): boolean {
   return /^[A-Za-z0-9._-]+$/.test(name) && name !== "." && name !== "..";
 }
 const badProfileName = (sub: string, name: string): CommandOutcome => ({
-  text: `prom profile ${sub}: invalid name "${name}" — use letters/digits/._- only (no path separators)`,
+  text: `prometheus profile ${sub}: invalid name "${name}" — use letters/digits/._- only (no path separators)`,
   json: { ok: false, error: "bad-name", id: name },
   exitCode: 2,
 });
 
-/** `prom profile [list|use <name>|new <name> [--seed b]|edit <name>]`. */
+/** `prometheus profile [list|use <name>|new <name> [--seed b]|edit <name>]`. */
 export function runProfile(
   path: string[],
   ctx: CliContext,
@@ -102,7 +102,7 @@ export function runProfile(
     if (!isSafeProfileName(name)) return badProfileName(sub, name);
     if (!profileExists(name)) {
       return {
-        text: `prom profile use: no such profile "${name}" (builtin or ${cliProfiles.profilePath(name)})`,
+        text: `prometheus profile use: no such profile "${name}" (builtin or ${cliProfiles.profilePath(name)})`,
         json: { ok: false, error: "unknown-profile", id: name },
         exitCode: 2,
       };
@@ -126,7 +126,7 @@ export function runProfile(
     const seed = cliProfiles.getCliProfile(seedName);
     if (!seed) {
       return {
-        text: `prom profile new: unknown --seed "${seedName}" (builtins: ${Object.keys(cliProfiles.BUILTIN_CLI_PROFILES).join(", ")})`,
+        text: `prometheus profile new: unknown --seed "${seedName}" (builtins: ${Object.keys(cliProfiles.BUILTIN_CLI_PROFILES).join(", ")})`,
         json: { ok: false, error: "unknown-seed", seed: seedName },
         exitCode: 2,
       };
@@ -134,7 +134,7 @@ export function runProfile(
     const file = cliProfiles.profilePath(name);
     if (existsSync(file)) {
       return {
-        text: `prom profile new: "${name}" already exists at ${file} (refusing to overwrite)`,
+        text: `prometheus profile new: "${name}" already exists at ${file} (refusing to overwrite)`,
         json: { ok: false, error: "exists", path: file },
         exitCode: 2,
       };
@@ -142,14 +142,14 @@ export function runProfile(
     const toml = cliProfiles.serializeProfile({ ...seed, name });
     if (!cliProfiles.parseProfile(toml, name)) {
       return {
-        text: "prom profile new: internal error — scaffolded TOML did not round-trip",
+        text: "prometheus profile new: internal error — scaffolded TOML did not round-trip",
         json: { ok: false, error: "bad-scaffold" },
         exitCode: 2,
       };
     }
     writeTextAtomic(file, toml);
     return {
-      text: `created profile ${name} (from seed ${seedName}) → ${file}\nedit it: prom profile edit ${name}`,
+      text: `created profile ${name} (from seed ${seedName}) → ${file}\nedit it: prometheus profile edit ${name}`,
       json: { ok: true, id: name, seed: seedName, path: file },
       exitCode: 0,
     };
@@ -164,7 +164,7 @@ export function runProfile(
       const seed = cliProfiles.getCliProfile(name);
       if (!seed) {
         return {
-          text: `prom profile edit: no such profile "${name}" (builtin or ${file})`,
+          text: `prometheus profile edit: no such profile "${name}" (builtin or ${file})`,
           json: { ok: false, error: "unknown-profile", id: name },
           exitCode: 2,
         };
@@ -195,10 +195,10 @@ export function runProfile(
     };
   }
 
-  return { text: `prom profile: unknown action "${sub}"`, json: { ok: false }, exitCode: 2 };
+  return { text: `prometheus profile: unknown action "${sub}"`, json: { ok: false }, exitCode: 2 };
 }
 
-/** `prom config [path|get <key>|set <key> <value>]` — real TOML-backed reads/writes. */
+/** `prometheus config [path|get <key>|set <key> <value>]` — real TOML-backed reads/writes. */
 export function runConfig(path: string[], ctx: CliContext): CommandOutcome {
   const sub = path[1] ?? "path";
   if (sub === "path") {
@@ -212,7 +212,7 @@ export function runConfig(path: string[], ctx: CliContext): CommandOutcome {
     const key = ctx.args.positionals[0];
     if (!key) {
       return {
-        text: "prom config get: needs a key (e.g. `prom config get a.b.c`)",
+        text: "prometheus config get: needs a key (e.g. `prometheus config get a.b.c`)",
         json: { ok: false, error: "missing-key" },
         exitCode: 2,
       };
@@ -234,7 +234,7 @@ export function runConfig(path: string[], ctx: CliContext): CommandOutcome {
     const rawValue = ctx.args.positionals[1];
     if (!key || rawValue === undefined) {
       return {
-        text: "prom config set: needs <key> <value> (e.g. `prom config set a.b 1`)",
+        text: "prometheus config set: needs <key> <value> (e.g. `prometheus config set a.b 1`)",
         json: { ok: false, error: "usage" },
         exitCode: 2,
       };
@@ -313,5 +313,5 @@ export function runConfig(path: string[], ctx: CliContext): CommandOutcome {
     return { text: lines.join("\n"), exitCode: 0 };
   }
 
-  return { text: `prom config: unknown action "${sub}"`, json: { ok: false }, exitCode: 2 };
+  return { text: `prometheus config: unknown action "${sub}"`, json: { ok: false }, exitCode: 2 };
 }

@@ -1,5 +1,5 @@
 /**
- * doctor-bridge.ts — `prom doctor --bridge` engine-discovery check (file 11 §8).
+ * doctor-bridge.ts — `prometheus doctor --bridge` engine-discovery check (file 11 §8).
  *
  * Verifies the bridge end-to-end: where prometheus.py / nemesis / python resolve
  * (via enginePaths — env → bundled → sibling → PATH), and that the --json contract
@@ -84,10 +84,10 @@ function classifyEngine(scriptVersion: string | null): HandshakeVerdict {
 }
 
 function handshakeWarnLine(verdict: HandshakeVerdict, scriptVersion: string | null): string {
-  if (verdict === "missing") return "engine not found — run: prom doctor";
+  if (verdict === "missing") return "engine not found — run: prometheus doctor";
   if (verdict === "mismatch")
-    return `engine ${scriptVersion ?? "?"} < required ${MIN_ENGINE} — run: prom doctor`;
-  return "engine version unknown — run: prom doctor";
+    return `engine ${scriptVersion ?? "?"} < required ${MIN_ENGINE} — run: prometheus doctor`;
+  return "engine version unknown — run: prometheus doctor";
 }
 
 /**
@@ -220,12 +220,12 @@ export async function runDoctorBridge(ctx: CliContext): Promise<CommandOutcome> 
   const r = await probeBridge();
   const mark = (ok: boolean): string => (ok ? "✓" : "✗");
   const lines = [
-    "prom doctor --bridge",
+    "prometheus doctor --bridge",
     `  prometheus.py  ${mark(r.pyFound)}  ${r.paths.py}`,
     `  nemesis        ${mark(r.nemesisFound)}  ${r.paths.nemesis}`,
     `  python         ${r.paths.python}`,
     `  --json probe   ${mark(r.probeOk)}${r.error ? `  (${r.error})` : ""}`,
-    `  ollama runner  ${mark(r.runnerFound)}  ${r.runnerFound ? "installed" : "not installed (prom model pull offers to install it)"}`,
+    `  ollama runner  ${mark(r.runnerFound)}  ${r.runnerFound ? "installed" : "not installed (prometheus model pull offers to install it)"}`,
   ];
   const ok = r.pyFound && r.probeOk;
   return {
@@ -235,7 +235,7 @@ export async function runDoctorBridge(ctx: CliContext): Promise<CommandOutcome> 
   };
 }
 
-/* ── `prom doctor` — the comprehensive environment health report (CLI-051) ───────── */
+/* ── `prometheus doctor` — the comprehensive environment health report (CLI-051) ───────── */
 
 export type CheckStatus = "pass" | "warn" | "fail";
 export interface CheckResult {
@@ -321,7 +321,7 @@ export function buildDoctorChecks(deps: DoctorDeps): DoctorCheck[] {
           return {
             status: "fail",
             detail: `engine not found or no --version (${(v.raw ?? "").trim().slice(0, 60) || "no output"})`,
-            remedy: "place prometheus.py beside prom or set $PROMETHEUS_ENGINE",
+            remedy: "place prometheus.py beside prometheus or set $PROMETHEUS_ENGINE",
           };
         }
         // compareSemver(engine, MIN) === -1 ⇒ engine is OLDER than the minimum.
@@ -397,7 +397,7 @@ export function buildDoctorChecks(deps: DoctorDeps): DoctorCheck[] {
         return {
           status: "warn",
           detail: "ollama not installed (local models unavailable)",
-          remedy: "install ollama (prom model pull offers to)",
+          remedy: "install ollama (prometheus model pull offers to)",
         };
       },
     },
@@ -422,7 +422,7 @@ function statusMark(s: CheckStatus): string {
   return s === "pass" ? c.green("✓") : s === "warn" ? c.yellow("⚠") : c.red("✗");
 }
 
-/** `prom doctor` — run every environment check, render a table (+ --json), exit 1 iff any FAILS. */
+/** `prometheus doctor` — run every environment check, render a table (+ --json), exit 1 iff any FAILS. */
 export async function runDoctor(
   ctx: CliContext,
   deps: DoctorDeps = defaultDoctorDeps(),
@@ -434,7 +434,7 @@ export async function runDoctor(
   const anyFail = results.some((r) => r.status === "fail");
   const exitCode = anyFail ? 1 : 0;
   if (ctx.json) return { json: { ok: !anyFail, checks: results }, exitCode };
-  const lines = [heading("prom doctor — environment health"), ""];
+  const lines = [heading("prometheus doctor — environment health"), ""];
   lines.push(
     table(
       [{ header: "CHECK" }, { header: "" }, { header: "DETAIL" }],

@@ -2,7 +2,7 @@
  * FloatingTerminalWindow.tsx — the ⧉ tear-off terminal window content (file 13 §1.2/§3.5).
  *
  * The renderer content mounted in a borderless secondary BrowserWindow that hosts ONE
- * terminal on a second monitor (e.g. a parked `prom chat`). It carries its OWN
+ * terminal on a second monitor (e.g. a parked `prometheus chat`). It carries its OWN
  * `data-theme` (per-window theming, §3.5) — applied via @prometheus/ui's `themes` to
  * THIS window's root only. It drives the SAME `window.prometheus.ide.*` PTY host as the
  * main window (the host is window-agnostic).

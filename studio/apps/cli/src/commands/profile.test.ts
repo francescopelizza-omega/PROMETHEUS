@@ -1,5 +1,5 @@
 /**
- * profile.test.ts — `prom config get/set` real TOML-backed reads/writes (CLI-005).
+ * profile.test.ts — `prometheus config get/set` real TOML-backed reads/writes (CLI-005).
  * Hermetic: points os.homedir() at a temp dir via $HOME, then restores it.
  */
 import assert from "node:assert/strict";

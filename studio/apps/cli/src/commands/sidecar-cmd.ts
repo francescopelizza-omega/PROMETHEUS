@@ -9,7 +9,7 @@
  *                  EXECUTE when the human passes `--yes` (or `--force`). This
  *                  mirrors the GUI's plan→confirm→execute flow (file 06/0C) in a
  *                  one-shot CLI: the engine/sidecar still runs the REAL nemesis
- *                  gate on execute (C5) — prom never pre-judges "safe".
+ *                  gate on execute (C5) — prometheus never pre-judges "safe".
  *
  * NEVER-FORCE / GATE-FIRST (§4): `--force` overrides a nemesis BLOCK, so under the
  * non-interactive `ci` profile it is hard-blocked (no human to type the confirm)
@@ -118,7 +118,7 @@ export function forceBlocked(ctx: CliContext, command: string): CommandOutcome |
       `--force is blocked under the 'ci' profile. Set PROM_ALLOW_FORCE=1 to override ` +
       "(there is no human to type the confirmation).";
     return {
-      text: `prom ${command}: ${reason}`,
+      text: `prometheus ${command}: ${reason}`,
       json: { ok: false, error: "force-blocked", command },
       exitCode: 2,
     };
@@ -141,7 +141,7 @@ export function execArgv(ctx: CliContext, base: string[], useConfirm = true): st
 /** A usage error for a missing required positional (exit 2 — never a silent 0). */
 export function usageError(command: string, usage: string): CommandOutcome {
   return {
-    text: `prom ${command}: missing argument.\n  ${c.dim("usage:")} prom ${command} ${usage}`,
+    text: `prometheus ${command}: missing argument.\n  ${c.dim("usage:")} prometheus ${command} ${usage}`,
     json: { ok: false, error: "missing-argument", command, usage },
     exitCode: 2,
   };
@@ -161,7 +161,7 @@ export function previewOutcome(
   const plan = `${script} ${argv.join(" ")}`;
   return {
     text:
-      `${c.bold(`prom ${command}`)}  ${c.dim("(preview — nothing changed)")}\n` +
+      `${c.bold(`prometheus ${command}`)}  ${c.dim("(preview — nothing changed)")}\n` +
       `  ${c.cyan("would")}  ${note}\n` +
       `  ${c.dim("plan")}   ${c.dim(plan)}\n` +
       `  ${c.dim("re-run with")} ${c.bold("--yes")} ${c.dim("to execute")} ${c.dim("(or --force to override a BLOCK).")}`,
@@ -178,7 +178,7 @@ export function previewOutcome(
 export function previewAction(command: string, note: string): CommandOutcome {
   return {
     text:
-      `${c.bold(`prom ${command}`)}  ${c.dim("(preview — nothing changed)")}\n` +
+      `${c.bold(`prometheus ${command}`)}  ${c.dim("(preview — nothing changed)")}\n` +
       `  ${c.cyan("would")}  ${note}\n` +
       `  ${c.dim("re-run with")} ${c.bold("--yes")} ${c.dim("to execute")} ${c.dim("(or --force to override a BLOCK).")}`,
     json: { ok: true, status: "preview", command },
@@ -208,7 +208,7 @@ export function renderMutation(
     const tag = blocked ? c.red("BLOCKED") : c.red("failed");
     const quarantined =
       typeof env.quarantined === "string" ? `\n  ${c.dim("quarantined:")} ${env.quarantined}` : "";
-    return { text: `prom ${command}: ${tag} — ${reason}${quarantined}`, exitCode: 2 };
+    return { text: `prometheus ${command}: ${tag} — ${reason}${quarantined}`, exitCode: 2 };
   }
   return { text: `${c.green("✓")} ${command}`, exitCode: 0 };
 }

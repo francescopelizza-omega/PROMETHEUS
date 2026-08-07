@@ -1,7 +1,7 @@
 /**
  * commands/registry.ts — the SHARED command registry.
  *
- * This is the single surface BOTH the `prom` CLI and the desktop GUI render:
+ * This is the single surface BOTH the `prometheus` CLI and the desktop GUI render:
  * one list of commands, each with a stable id, a title, a group, and a `run(ctx)`
  * that drives the engine through the @prometheus/engine-bridge EngineClient.
  *

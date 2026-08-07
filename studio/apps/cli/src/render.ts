@@ -1,5 +1,5 @@
 /**
- * render.ts — tiny ANSI color + table helpers for the prom CLI.
+ * render.ts — tiny ANSI color + table helpers for the prometheus CLI.
  *
  * The 16-color SGR codes are NOT hand-declared here: they are sourced from the
  * design system's single ANSI artifact, `@prometheus/ui/tokens` (`ANSI_SGR` /

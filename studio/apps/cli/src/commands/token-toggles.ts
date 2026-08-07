@@ -1,5 +1,5 @@
 /**
- * commands/token-toggles.ts — per-technique enable/disable persistence for `prom tokens` (CLI-088).
+ * commands/token-toggles.ts — per-technique enable/disable persistence for `prometheus tokens` (CLI-088).
  *
  * The toggle state lives in the SAME config home as the CLI profiles (`<config>/token-toggles.json`,
  * a flat `{ [id]: boolean }`) — no new store family. @prometheus/core stays PURE (no fs); this fs

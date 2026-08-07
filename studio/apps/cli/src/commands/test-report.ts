@@ -1,5 +1,5 @@
 /**
- * commands/test-report.ts — PURE CI-report formatters for `prom test run` (CLI-093).
+ * commands/test-report.ts — PURE CI-report formatters for `prometheus test run` (CLI-093).
  *
  * Two additional output modes over the SAME per-test data CLI-007's `run` already collects — this
  * file does NOT touch the raw `--json` envelope shape (owned by CLI-007) nor watch mode (CLI-092):

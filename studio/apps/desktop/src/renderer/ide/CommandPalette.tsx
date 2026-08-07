@@ -11,7 +11,7 @@
  * so no source floods). Each async source is stale-guarded (a per-effect `alive` flag tears
  * down with the query, so a slow `workspace/symbol` can't clobber a newer `ide:search`).
  *
- * The command surface MIRRORS the core editor command registry (ids match `prom`'s parity
+ * The command surface MIRRORS the core editor command registry (ids match `prometheus`'s parity
  * surface, §8/§10) via the pure `PALETTE_COMMANDS`. Ranking is the pure fuzzy matcher; the
  * fuse/tab math is the pure `search-preview` module. All IPC lives here (C5: the pure
  * modules never touch window.prometheus / monaco).

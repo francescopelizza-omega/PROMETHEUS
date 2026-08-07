@@ -1,5 +1,5 @@
 /**
- * env-cmd.test.ts — the `prom env …` sidecar surface: preview→execute, the exact
+ * env-cmd.test.ts — the `prometheus env …` sidecar surface: preview→execute, the exact
  * sidecar argv per verb, the never-force gate, and usage errors. Deterministic: a
  * FAKE runSidecar (records argv, never spawns python) is injected as deps.
  */

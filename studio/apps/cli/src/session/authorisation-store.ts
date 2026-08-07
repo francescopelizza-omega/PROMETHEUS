@@ -1,6 +1,6 @@
 /**
  * session/authorisation-store.ts — persist the last-set `--authorisation` level so it
- * becomes the DEFAULT for every future prom session (CLI-SVC).
+ * becomes the DEFAULT for every future prometheus session (CLI-SVC).
  *
  * Lives in the SAME config home as the CLI profiles + token toggles
  * (`<config>/authorisation.json`, a flat `{ "level": 0..7 }`). @prometheus/core stays PURE

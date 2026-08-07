@@ -9,7 +9,7 @@ import { test } from "node:test";
 import { type TestReport, toGithubAnnotations, toJUnitXml } from "./test-report.js";
 
 const passing: TestReport = {
-  suiteName: "prom test",
+  suiteName: "prometheus test",
   cases: [
     { id: "tests/test_a.py::TestA::test_ok", status: "pass", durationMs: 12 },
     { id: "tests/test_a.py::TestA::test_skip", status: "skip" },
@@ -18,7 +18,7 @@ const passing: TestReport = {
 };
 
 const failing: TestReport = {
-  suiteName: "prom test",
+  suiteName: "prometheus test",
   cases: [
     { id: "tests/test_b.py::test_pass", status: "pass" },
     {
@@ -35,7 +35,7 @@ const failing: TestReport = {
 };
 
 const empty: TestReport = {
-  suiteName: "prom test",
+  suiteName: "prometheus test",
   cases: [],
   summary: { total: 0, passed: 0, failed: 0, skipped: 0 },
 };
@@ -44,7 +44,10 @@ test("toJUnitXml: passing run → <testsuites> root + required attrs + <skipped/
   const xml = toJUnitXml(passing);
   assert.match(xml, /^<\?xml version="1\.0" encoding="UTF-8"\?>/);
   assert.match(xml, /<testsuites tests="2" failures="0" errors="0" skipped="1" time="0\.0200">/);
-  assert.match(xml, /<testsuite name="prom test" tests="2" failures="0" errors="0" skipped="1"/);
+  assert.match(
+    xml,
+    /<testsuite name="prometheus test" tests="2" failures="0" errors="0" skipped="1"/,
+  );
   assert.match(
     xml,
     /<testcase name="test_ok" classname="tests\/test_a\.py\.TestA" time="0\.0120"\/>/,
@@ -70,7 +73,7 @@ test("toJUnitXml: failures + errors → <failure>/<error> with escaping + ESC st
 test("toJUnitXml: empty run → a valid tests=0 suite, never an empty file (CLI-093)", () => {
   const xml = toJUnitXml(empty);
   assert.match(xml, /<testsuites tests="0" failures="0" errors="0" skipped="0"/);
-  assert.match(xml, /<testsuite name="prom test" tests="0"/);
+  assert.match(xml, /<testsuite name="prometheus test" tests="0"/);
   assert.match(xml, /<\/testsuites>/);
 });
 

@@ -7,7 +7,7 @@
  *
  * Deliberately NO react / NO zustand import — core must stay isomorphic and be
  * consumed by BOTH the desktop renderer (which wraps this in a Zustand store)
- * and the `prom` CLI. The Zustand binding lives in apps/desktop/src; this file
+ * and the `prometheus` CLI. The Zustand binding lives in apps/desktop/src; this file
  * owns only the transition math + selectors so both surfaces behave identically.
  *
  * GOLDEN RULE (C5): nothing here decides "safe". The state machine MODELS the
@@ -177,7 +177,7 @@ const TRANSITIONS: Readonly<Record<PkgState, Partial<Record<PkgEvent, PkgState>>
  * input state unchanged) so the table is total and never throws.
  *
  * This is the single source of lifecycle truth: the Zustand binding in the
- * renderer and the `prom pkg` CLI both call THIS, so a row can never reach a
+ * renderer and the `prometheus pkg` CLI both call THIS, so a row can never reach a
  * state the security model forbids (e.g. blocked → installed without force).
  */
 export function pkgTransition(state: PkgState, event: PkgEvent): PkgState {

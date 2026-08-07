@@ -11,7 +11,7 @@
  * (from @prometheus/core/templates) runs BEFORE Monaco, leaving those tabstops untouched.
  *
  * Keeping the registry PURE (no react/monaco) makes it node:test-able and reusable by the
- * prom CLI `/snippets` surface later. User templates persist via the APP-017 settings IPC
+ * prometheus CLI `/snippets` surface later. User templates persist via the APP-017 settings IPC
  * (template-store.ts) and layer over the seeds via the kind-scoped `mergeTemplates`.
  */
 

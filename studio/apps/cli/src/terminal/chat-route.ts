@@ -2,7 +2,7 @@
  * terminal/chat-route.ts — lift a parsed `chat --cli …` invocation into the P5/P6
  * terminal-chat handoff (runTerminalChat). This is the ONE place that maps
  * `ParsedArgs` → `TerminalChatOpts`, so both surfaces share it:
- *   - one-shot   `prom chat --cli claude --open`  (bin.ts owns the readline confirm),
+ *   - one-shot   `prometheus chat --cli claude --open`  (bin.ts owns the readline confirm),
  *   - in-session `chat --cli claude --tmux`        (command-exec.ts passes the host's
  *                                                   typed-confirm + write seam).
  *

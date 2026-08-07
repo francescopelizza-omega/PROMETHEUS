@@ -23,7 +23,7 @@ import {
 const sessions: SessionView[] = [
   { id: "1", title: "zsh", status: "running", group: "project" },
   { id: "2", title: "pytest", status: "exited", group: "project" },
-  { id: "3", title: "prom chat", status: "running", group: "ai" },
+  { id: "3", title: "prometheus chat", status: "running", group: "ai" },
   { id: "5", title: "remote ssh", status: "running", group: "floating" },
 ];
 

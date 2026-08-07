@@ -1,5 +1,5 @@
 /**
- * commands/refactor-cmd.ts — `prom refactor <structure|imports|callgraph> <file>`
+ * commands/refactor-cmd.ts — `prometheus refactor <structure|imports|callgraph> <file>`
  * over the refactor.py sidecar (CLI-009). Read-only AST analyses: a structure
  * tree, an import list, and the intra-module call graph. runSidecar is the sole
  * gateway (C5/C7); `--json` emits the envelope unmodified. Distinct from the
@@ -51,7 +51,7 @@ export async function runRefactor(
   // validate the VERB before the path so a bad verb never spawns python.
   if (verb !== "structure" && verb !== "imports" && verb !== "callgraph") {
     return {
-      text: `prom refactor: unknown verb ${verb ? `"${verb}"` : "(none)"} — valid: ${VERBS.join(", ")}`,
+      text: `prometheus refactor: unknown verb ${verb ? `"${verb}"` : "(none)"} — valid: ${VERBS.join(", ")}`,
       json: { ok: false, error: "unknown-verb", valid: VERBS },
       exitCode: 2,
     };
@@ -59,7 +59,7 @@ export async function runRefactor(
   const file = ctx.args.positionals[0] ?? ".";
   if (file.startsWith("-")) {
     return {
-      text: `prom refactor ${verb}: refusing option-shaped path: ${file}`,
+      text: `prometheus refactor ${verb}: refusing option-shaped path: ${file}`,
       json: { ok: false, error: "bad-path", path: file },
       exitCode: 2,
     };

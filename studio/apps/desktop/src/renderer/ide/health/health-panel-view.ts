@@ -39,7 +39,9 @@ export function deriveSystemHealthView(
       ...(health.version
         ? { detail: `v${health.version}${health.contractOk ? "" : " · contract mismatch"}` }
         : {}),
-      ...(engineStatus !== "ok" ? { remediation: "run `prom doctor` to diagnose the engine" } : {}),
+      ...(engineStatus !== "ok"
+        ? { remediation: "run `prometheus doctor` to diagnose the engine" }
+        : {}),
     });
     // nemesis presence (security scanner) — degraded (soft) when absent
     components.push({

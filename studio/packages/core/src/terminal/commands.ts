@@ -3,7 +3,7 @@
  *
  * The bindable command ids the terminal launcher contributes. These COMPOSE the
  * product's one binding surface (07 §8): the Keymap UI (§2.2) binds them, the Command
- * Palette lists them, and `prom` ([[11]]) can mirror `runPrompt`/`runActiveFile`. They
+ * Palette lists them, and `prometheus` ([[11]]) can mirror `runPrompt`/`runActiveFile`. They
  * are NOT engine subcommands — they never enter the frozen `COMMAND_SPECS` (commands.ts)
  * and never bypass the run-gate. Pure DATA: id + title + default keys + a `when` context
  * expr (evaluated by 07's `evaluateWhen`).
@@ -77,7 +77,7 @@ export function getTerminalCommand(id: string): IdeCommand | undefined {
 }
 
 /**
- * The §1.6 read→run flows, in order. Each is a registry id so `prom` + the keymap bind
+ * The §1.6 read→run flows, in order. Each is a registry id so `prometheus` + the keymap bind
  * them; the headline is `terminal.runPrompt` (selection → an AI-preset terminal).
  */
 export const READ_TO_RUN_FLOWS: readonly string[] = Object.freeze([

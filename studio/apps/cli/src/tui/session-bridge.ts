@@ -288,7 +288,7 @@ export interface BridgeDeps {
   backends?: Backends;
   /** terminal columns for streamed word-wrap (CLI-003); read per turn. */
   width?: () => number;
-  /** `prom --continue` — resume the newest past session on startup (CLI-013). */
+  /** `prometheus --continue` — resume the newest past session on startup (CLI-013). */
   continueSession?: boolean;
 }
 
@@ -637,7 +637,7 @@ export async function createSessionBridge(deps: BridgeDeps): Promise<SessionBrid
     appendTurnEvents(home, sessionId, [{ role: "user", text: input }, ...res.events]);
     rotateSessions(home, { maxBytes: SESSION_TRANSCRIPT_CAP_BYTES, liveId: sessionId });
     if (res.reply.trim()) {
-      state = repl.reduce(state, { type: "message", role: "prom", text: res.reply });
+      state = repl.reduce(state, { type: "message", role: "prometheus", text: res.reply });
       history = [
         ...history,
         { role: "user", content: input },
@@ -682,7 +682,7 @@ export async function createSessionBridge(deps: BridgeDeps): Promise<SessionBrid
     appendTurnEvents(home, sessionId, [{ role: "user", text: "/continue" }, ...res.events]);
     rotateSessions(home, { maxBytes: SESSION_TRANSCRIPT_CAP_BYTES, liveId: sessionId });
     if (res.reply.trim()) {
-      state = repl.reduce(state, { type: "message", role: "prom", text: res.reply });
+      state = repl.reduce(state, { type: "message", role: "prometheus", text: res.reply });
       const last = history.at(-1);
       if (last?.role === "assistant") last.content += res.reply;
       else history = [...history, { role: "assistant", content: res.reply }];
@@ -759,8 +759,8 @@ export async function createSessionBridge(deps: BridgeDeps): Promise<SessionBrid
       if (p.role === "you") {
         state = repl.reduce(state, { type: "message", role: "you", text: p.text });
         write(`› ${p.text}`);
-      } else if (p.role === "prom") {
-        state = repl.reduce(state, { type: "message", role: "prom", text: p.text });
+      } else if (p.role === "prometheus") {
+        state = repl.reduce(state, { type: "message", role: "prometheus", text: p.text });
         write(p.text);
       } else {
         write(c.dim(p.text));
@@ -1224,7 +1224,7 @@ export async function createSessionBridge(deps: BridgeDeps): Promise<SessionBrid
     return lines.join("\n");
   };
 
-  // `prom --continue`: resume the newest past session, or honestly start fresh (CLI-013).
+  // `prometheus --continue`: resume the newest past session, or honestly start fresh (CLI-013).
   if (deps.continueSession) {
     const newest = [...listSessions(home)].sort(
       (a, b) => b.ts.localeCompare(a.ts) || b.id.localeCompare(a.id),

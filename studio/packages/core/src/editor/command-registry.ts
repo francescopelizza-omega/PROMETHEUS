@@ -2,7 +2,7 @@
  * editor/command-registry.ts — the EDITOR command registry (file 07 §8).
  *
  * `CommandPalette.tsx` is fed by THIS registry — the single source of editor
- * command ids shared with `prom` (file 11) and the menu/keybind system. It is the
+ * command ids shared with `prometheus` (file 11) and the menu/keybind system. It is the
  * NEW, complementary editor-surface registry: distinct from the engine parity
  * router (`commands.ts`, which maps the full prometheus.py/nemesis surface) and
  * from the M1 `commands/registry.ts` (the hand-tuned provider/scan summaries).
@@ -38,7 +38,7 @@ export type EditorCommandCategory =
 
 /**
  * The runtime context handed to an editor command's `run`. The host (renderer
- * shell / `prom`) fills the bindings; core never reaches past them. `engine` is
+ * shell / `prometheus`) fills the bindings; core never reaches past them. `engine` is
  * the parity-router context used to delegate `prometheus.*` ids (§8/§10).
  */
 export interface EditorCommandCtx {
@@ -54,7 +54,7 @@ export interface EditorCommandCtx {
 export interface EditorCommandResult {
   id: string;
   ok: boolean;
-  /** a short summary line for the palette toast / `prom` stdout. */
+  /** a short summary line for the palette toast / `prometheus` stdout. */
   summary: string;
   /** the engine RouterResult, when the command delegated to the engine. */
   engineResult?: RouterResult;

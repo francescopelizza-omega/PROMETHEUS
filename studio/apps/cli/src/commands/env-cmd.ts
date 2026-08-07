@@ -1,5 +1,5 @@
 /**
- * commands/env-cmd.ts — the FULL `prom env …` surface over the envmgr.py sidecar
+ * commands/env-cmd.ts — the FULL `prometheus env …` surface over the envmgr.py sidecar
  * (C7), at parity with the GUI Environments panel (file 04). Reads run straight;
  * mutations PREVIEW first and EXECUTE on `--yes` (sidecar runs the REAL nemesis
  * gate on the gated verbs — clone/import/pkg-install/cuda-torch — C5).
@@ -295,7 +295,7 @@ export async function runEnvCommand(
 
     default:
       return {
-        text: `prom env ${verb}: unknown env verb.\n  ${c.dim("try:")} list · info · doctor · use · export · create · clone · delete · import ·\n       add · remove · update · upgrade · enable · disable · cuda · templates · template`,
+        text: `prometheus env ${verb}: unknown env verb.\n  ${c.dim("try:")} list · info · doctor · use · export · create · clone · delete · import ·\n       add · remove · update · upgrade · enable · disable · cuda · templates · template`,
         json: { ok: false, error: "unknown-verb", command: `env ${verb}` },
         exitCode: 2,
       };
@@ -321,7 +321,7 @@ async function runCreateWithTemplate(
   if (!wantsExecute(ctx)) {
     return {
       text:
-        `${c.bold("prom env create")}  ${c.dim("(preview — nothing changed)")}\n` +
+        `${c.bold("prometheus env create")}  ${c.dim("(preview — nothing changed)")}\n` +
         `  ${c.cyan("would")}  create ${flagSet(ctx, "conda") ? "conda" : "venv"} env '${name}', then apply template '${template}' (gated)\n` +
         `  ${c.dim("plan")}   ${c.dim(`${SCRIPT} ${createBase.join(" ")} --confirm`)}\n` +
         `         ${c.dim(`${SCRIPT} ${commitBase.join(" ")} --confirm`)}\n` +
@@ -362,7 +362,7 @@ function renderTemplates(e: Record<string, unknown>): CommandOutcome {
   lines.push("");
   lines.push(
     c.dim(
-      "apply one with: prom env template <id> --env <env>  ·  or `prom env create <name> --template <id>`",
+      "apply one with: prometheus env template <id> --env <env>  ·  or `prometheus env create <name> --template <id>`",
     ),
   );
   return { text: lines.join("\n"), exitCode: 0 };

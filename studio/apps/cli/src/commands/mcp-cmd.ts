@@ -1,5 +1,5 @@
 /**
- * commands/mcp-cmd.ts — `prom mcp [list|add|remove|test]` (CLI-036).
+ * commands/mcp-cmd.ts — `prometheus mcp [list|add|remove|test]` (CLI-036).
  *
  * Manage MCP connectors from the terminal, at parity with the desktop Extensions panel:
  * list configured servers, add a nemesis-GATED stdio server, remove one (typed confirm),
@@ -233,7 +233,7 @@ export async function runMcpCommand(
   if (ctx.json) return { json: { ok: true, servers }, exitCode: 0 };
   if (servers.length === 0)
     return {
-      text: c.dim("no MCP servers configured — add one: prom mcp add <name> --cmd <bin>"),
+      text: c.dim("no MCP servers configured — add one: prometheus mcp add <name> --cmd <bin>"),
       exitCode: 0,
     };
   const rows = servers.map((s) => [
@@ -268,7 +268,7 @@ function healthCell(h: mcpHost.McpServerHealth): string {
 
 function usage(command: string, usageStr: string): CommandOutcome {
   return {
-    text: `prom ${command}: missing argument.\n  ${c.dim("usage:")} prom ${command} ${usageStr}`,
+    text: `prometheus ${command}: missing argument.\n  ${c.dim("usage:")} prometheus ${command} ${usageStr}`,
     json: { ok: false, error: "missing-argument", command },
     exitCode: 2,
   };

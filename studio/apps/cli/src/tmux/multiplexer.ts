@@ -1,8 +1,8 @@
 /**
  * tmux/multiplexer.ts — the P6 tmux multiplexer entry point.
  *
- * `launchTmuxSession(parsed)` is the multi-window surface bare `prom session`
- * (and `prom session --tmux NAME`) lands in. Its contract is a single, sharp
+ * `launchTmuxSession(parsed)` is the multi-window surface bare `prometheus session`
+ * (and `prometheus session --tmux NAME`) lands in. Its contract is a single, sharp
  * decision:
  *
  *   - tmux is NOT available, OR the user did not enable it  ⇒  FALL BACK to the
@@ -242,7 +242,9 @@ export async function launchTmuxSession(
     return await runTmux(spec);
   } catch (err) {
     write(
-      c.yellow(`prom: tmux launch failed (${errMessage(err)}) — falling back to a single window.`),
+      c.yellow(
+        `prometheus: tmux launch failed (${errMessage(err)}) — falling back to a single window.`,
+      ),
     );
     return runSingleWindow(parsed, launchSingle, write);
   }
@@ -261,7 +263,7 @@ async function runSingleWindow(
   try {
     return await launchSingle(parsed);
   } catch (err) {
-    write(c.red(`prom: could not start a session (${errMessage(err)}).`));
+    write(c.red(`prometheus: could not start a session (${errMessage(err)}).`));
     return 1;
   }
 }

@@ -34,7 +34,7 @@ export interface CatalogListOptions {
 }
 
 /**
- * Render a catalog (`prom list`) as a colored table or a compact list.
+ * Render a catalog (`prometheus list`) as a colored table or a compact list.
  * Returns a multi-line string with no trailing newline; empty catalogs render
  * a single dim "No catalog entries." line so callers always get a printable.
  */
@@ -166,7 +166,7 @@ export function renderItemCard(item: ItemCard): string {
     for (const line of plainMarkdown(item.tutorial)) out.push(line);
   } else if (item.has_tutorial) {
     out.push("");
-    out.push(c.dim(`Run \`prom tutorial ${item.id}\` for the full dossier.`));
+    out.push(c.dim(`Run \`prometheus tutorial ${item.id}\` for the full dossier.`));
   }
 
   return out.join("\n");

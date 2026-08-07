@@ -2,7 +2,7 @@
  * catalog/index.ts — the @prometheus/core catalog surface (file 06 §2, §7).
  *
  * The framework-free projection + reconciliation + cache layer the catalog browser (desktop)
- * and `prom` CLI both render. It depends ONLY on @prometheus/engine-bridge (for the C3
+ * and `prometheus` CLI both render. It depends ONLY on @prometheus/engine-bridge (for the C3
  * verdict ref) and Node-free pure logic. NOTHING here decides "safe" (C5): it shapes the
  * engine's catalog reads + stores the engine's SIGNED verdict refs.
  */

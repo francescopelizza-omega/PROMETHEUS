@@ -1,5 +1,5 @@
 /**
- * keymap.test.ts — `prom keymap list [--preset <id>]` over pure core settings.
+ * keymap.test.ts — `prometheus keymap list [--preset <id>]` over pure core settings.
  */
 import assert from "node:assert/strict";
 import test from "node:test";

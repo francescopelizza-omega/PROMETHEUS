@@ -1,5 +1,5 @@
 /**
- * commands/keymap.ts — `prom keymap list [--preset <id>]`: the file-13 §2.2 keymap
+ * commands/keymap.ts — `prometheus keymap list [--preset <id>]`: the file-13 §2.2 keymap
  * presets + conflict report the GUI Settings keymap editor renders, headlessly.
  *
  * Read-only over pure core (`settings.BUILTIN_KEYMAPS` / `resolveBindings` /
@@ -16,7 +16,7 @@ export function runKeymap(ctx: CliContext): CommandOutcome {
   const action = ctx.args.command[1] ?? "list";
   if (action !== "list") {
     return {
-      text: `prom keymap ${action}: unknown verb.\n  ${c.dim("try:")} keymap list [--preset <id>]`,
+      text: `prometheus keymap ${action}: unknown verb.\n  ${c.dim("try:")} keymap list [--preset <id>]`,
       json: { ok: false, error: "unknown-verb", command: `keymap ${action}` },
       exitCode: 2,
     };
@@ -87,6 +87,6 @@ export function runKeymap(ctx: CliContext): CommandOutcome {
     ),
   );
   lines.push("");
-  lines.push(c.dim("inspect one with: prom keymap list --preset <id>"));
+  lines.push(c.dim("inspect one with: prometheus keymap list --preset <id>"));
   return { text: lines.join("\n"), exitCode: 0 };
 }

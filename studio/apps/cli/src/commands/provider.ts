@@ -1,5 +1,5 @@
 /**
- * commands/provider.ts — `prom provider list`: render the C11 provider
+ * commands/provider.ts — `prometheus provider list`: render the C11 provider
  * promotion policy from @prometheus/core. Sorted Tier-A-first; a green cost
  * light + "Recommended (free, local)" badge on Tier A; a red metered warning on
  * Tier C. The CLI reads the policy from core — it does not re-decide tiers.
@@ -120,7 +120,7 @@ export async function runProviderList(ctx: CliContext): Promise<CommandOutcome> 
 }
 
 /**
- * `prom provider show <id>` — the full C11 policy record for one provider (the GUI
+ * `prometheus provider show <id>` — the full C11 policy record for one provider (the GUI
  * ProviderPicker detail). Pure read over providers.config.json; `--json` dumps the
  * Provider. Mirrors the list's tier/cost-light semantics for a single row.
  */
@@ -128,7 +128,7 @@ export async function runProviderShow(ctx: CliContext): Promise<CommandOutcome> 
   const id = ctx.args.positionals[0];
   if (!id) {
     return {
-      text: c.red("usage: prom provider show <id>"),
+      text: c.red("usage: prometheus provider show <id>"),
       json: { ok: false, error: "missing-id" },
       exitCode: 2,
     };
@@ -147,7 +147,7 @@ export async function runProviderShow(ctx: CliContext): Promise<CommandOutcome> 
   const p = providers.find((x) => x.id === id || x.aliases?.includes(id));
   if (!p) {
     return {
-      text: c.red(`provider '${id}' not found. List with: prom provider list`),
+      text: c.red(`provider '${id}' not found. List with: prometheus provider list`),
       json: { ok: false, error: "not-found", id },
       exitCode: 2,
     };
@@ -326,7 +326,7 @@ async function verifyPing(
   }
 }
 
-/** `prom provider connect <id>` — store the key in the keychain + verify at setup. */
+/** `prometheus provider connect <id>` — store the key in the keychain + verify at setup. */
 export async function runProviderConnect(
   ctx: CliContext,
   io: ProviderIoDeps = defaultProviderIo(),
@@ -334,7 +334,7 @@ export async function runProviderConnect(
   const id = ctx.args.positionals[0];
   if (!id) {
     return {
-      text: c.red("usage: prom provider connect <id>"),
+      text: c.red("usage: prometheus provider connect <id>"),
       json: { ok: false, error: "missing-id" },
       exitCode: 2,
     };
@@ -342,7 +342,7 @@ export async function runProviderConnect(
   const p = orchestration.apiProviderFor(id);
   if (!p) {
     return {
-      text: c.red(`'${id}' is not a known API provider. List with: prom provider status`),
+      text: c.red(`'${id}' is not a known API provider. List with: prometheus provider status`),
       json: { ok: false, error: "not-found", id },
       exitCode: 2,
     };
@@ -400,7 +400,7 @@ export async function runProviderConnect(
   };
 }
 
-/** `prom provider status [--json]` — configured/reachable/modelCount for all 16 providers. */
+/** `prometheus provider status [--json]` — configured/reachable/modelCount for all 16 providers. */
 export async function runProviderStatus(
   ctx: CliContext,
   io: ProviderIoDeps = defaultProviderIo(),
@@ -468,7 +468,7 @@ export async function runProviderStatus(
   return { text: lines.join("\n"), exitCode: 0 };
 }
 
-/** `prom provider disconnect <id>` — confirm then delete the keychain key. */
+/** `prometheus provider disconnect <id>` — confirm then delete the keychain key. */
 export async function runProviderDisconnect(
   ctx: CliContext,
   io: ProviderIoDeps = defaultProviderIo(),
@@ -476,7 +476,7 @@ export async function runProviderDisconnect(
   const id = ctx.args.positionals[0];
   if (!id) {
     return {
-      text: c.red("usage: prom provider disconnect <id>"),
+      text: c.red("usage: prometheus provider disconnect <id>"),
       json: { ok: false, error: "missing-id" },
       exitCode: 2,
     };
@@ -572,7 +572,7 @@ function readOneLine(): Promise<string> {
 }
 
 /**
- * `prom provider enable-metered <id>` — the §4.1 typed-confirm. Prints the cost warning,
+ * `prometheus provider enable-metered <id>` — the §4.1 typed-confirm. Prints the cost warning,
  * then requires the EXACT phrase `ENABLE METERED` (case-sensitive, no trim; max 3 tries).
  * `--json` / non-TTY NEVER prompt (would hang a bridge) — they refuse fail-closed.
  */
@@ -583,7 +583,7 @@ export async function runProviderEnableMetered(
   const id = ctx.args.positionals[0];
   if (!id) {
     return {
-      text: c.red("usage: prom provider enable-metered <id>"),
+      text: c.red("usage: prometheus provider enable-metered <id>"),
       json: { ok: false, error: "missing-id" },
       exitCode: 2,
     };
@@ -591,7 +591,7 @@ export async function runProviderEnableMetered(
   const p = orchestration.apiProviderFor(id);
   if (!p) {
     return {
-      text: c.red(`'${id}' is not a metered API provider. List with: prom provider status`),
+      text: c.red(`'${id}' is not a metered API provider. List with: prometheus provider status`),
       json: { ok: false, error: "not-found", id },
       exitCode: 2,
     };
@@ -607,7 +607,7 @@ export async function runProviderEnableMetered(
   if (ctx.json || !deps.isTty) {
     return {
       text: c.red(
-        `metered provider "${p.id}" needs an interactive consent — run in a terminal: prom provider enable-metered ${p.id}`,
+        `metered provider "${p.id}" needs an interactive consent — run in a terminal: prometheus provider enable-metered ${p.id}`,
       ),
       json: { ok: false, reason: "interactive-consent-required", provider: p.id },
       exitCode: 2,

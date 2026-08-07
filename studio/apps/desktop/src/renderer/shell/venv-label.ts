@@ -3,7 +3,7 @@
  *
  * Projects the already-fetched envList envelope (qk.envs — the same read the
  * Environments route and Home share; no new IPC) into the StatusBar's venv label,
- * e.g. "py3.12 (prom)". JSX-free (the -view.ts convention) for node:test.
+ * e.g. "py3.12 (prometheus)". JSX-free (the -view.ts convention) for node:test.
  */
 
 import type { EnvelopeResult } from "../../shared/ipc-contract.js";

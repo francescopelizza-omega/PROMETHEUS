@@ -154,7 +154,7 @@ test("searchFiles honours maxResults and sets truncated", () => {
 });
 
 test("searchFiles on a missing root returns an empty, non-thrown result", () => {
-  const res = searchFiles({ root: "/no/such/dir/exists/prom" });
+  const res = searchFiles({ root: "/no/such/dir/exists/prometheus" });
   assert.deepEqual(res.matches, []);
   assert.equal(res.scanned, 0);
 });

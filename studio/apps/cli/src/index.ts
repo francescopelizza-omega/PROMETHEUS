@@ -3,7 +3,7 @@ import { runAgentsCommand } from "./commands/agents-cmd.js";
 import { runCompletion } from "./commands/completion.js";
 import { runDiagram } from "./commands/diagram-cmd.js";
 /**
- * index.ts — the prom command dispatcher. Maps a parsed command path to a
+ * index.ts — the prometheus command dispatcher. Maps a parsed command path to a
  * command runner and returns a CommandOutcome. Pure-ish: it builds the context
  * (which constructs the EngineClient) and awaits the command. bin.ts owns
  * argv reading, printing, color setup, and process.exit — keeping this unit
@@ -68,7 +68,7 @@ export async function dispatch(parsed: ParsedArgs): Promise<CommandOutcome> {
     return runHelp(ctx);
   }
   if (parsed.help && key(parsed.command) !== "help") {
-    // `prom <cmd> --help` → that command's help from the registry (CLI-049); an unknown command
+    // `prometheus <cmd> --help` → that command's help from the registry (CLI-049); an unknown command
     // topic yields exit 2 + the nearest-match suggestion inside helpForTopic.
     const topic = parsed.command[0];
     if (topic) return helpForTopic(ctx, topic);
@@ -84,7 +84,7 @@ export async function dispatch(parsed: ParsedArgs): Promise<CommandOutcome> {
   }
 }
 
-/** Top-level §2 verbs prom recognizes DIRECTLY — the single source of truth is the leaf
+/** Top-level §2 verbs prometheus recognizes DIRECTLY — the single source of truth is the leaf
  *  route-table (CLI-050), shared with the help screen so the two can never drift. */
 const RECOGNIZED = new Set(RECOGNIZED_VERBS);
 
@@ -97,7 +97,7 @@ function isKnownCommand(path: string[]): boolean {
 /** The interactive REPL/TUI needs the Ink view (apps/cli/src/repl) — a TTY thing. */
 function replStub(path: string[]): CommandOutcome {
   return {
-    text: `prom ${path.join(" ")}: the interactive REPL/agent runs the full-screen Ink TUI.\nLaunch it with a bare \`prom\` (no args). The REPL brain (slash/tuning/agent loop) lives\nin @prometheus/core; the Ink view binds it once \`ink\` is installed.`,
+    text: `prometheus ${path.join(" ")}: the interactive REPL/agent runs the full-screen Ink TUI.\nLaunch it with a bare \`prometheus\` (no args). The REPL brain (slash/tuning/agent loop) lives\nin @prometheus/core; the Ink view binds it once \`ink\` is installed.`,
     json: { ok: false, command: path.join(" "), status: "repl-tui" },
     exitCode: 0,
   };
@@ -108,12 +108,12 @@ async function runByKey(path: string[], ctx: CliContext): Promise<CommandOutcome
   const head = path[0];
   // doctor --bridge (engine-discovery check, §8) before the generic doctor.
   if (head === "doctor" && ctx.args.flags.bridge === true) return runDoctorBridge(ctx);
-  // `prom doctor` → the comprehensive environment health report (CLI-051).
+  // `prometheus doctor` → the comprehensive environment health report (CLI-051).
   if (head === "doctor") return runDoctor(ctx);
   // prom-native (§6): profiles + config read the shared core, no engine call.
   if (head === "profile") return runProfile(path, ctx);
   if (head === "config") return runConfig(path, ctx);
-  // `prom updates` — one-shot update check (vendor CLIs · local models · Prometheus self).
+  // `prometheus updates` — one-shot update check (vendor CLIs · local models · Prometheus self).
   if (head === "updates") {
     const lines: string[] = [];
     const report = await runUpdates(path.slice(1).join(" "), {
@@ -136,7 +136,7 @@ async function runByKey(path: string[], ctx: CliContext): Promise<CommandOutcome
     }
     return { text: lines.join("\n"), json: { ...updates.toUpdatesJson(report) }, exitCode: 0 };
   }
-  // `prom sessions` (PLURAL) is the one-shot session browser — distinct from the
+  // `prometheus sessions` (PLURAL) is the one-shot session browser — distinct from the
   // singular `session` which enters the interactive REPL below.
   if (head === "sessions") return runSessions(ctx);
   // the full-screen interactive REPL/TUI (P4) — one-shot context can't host it.
@@ -148,7 +148,7 @@ async function runByKey(path: string[], ctx: CliContext): Promise<CommandOutcome
   if (head === "chat" && isTerminalChatCli(ctx.args)) {
     return routeTerminalChat(ctx.args, { client: ctx.client, json: ctx.json, previewOnly: true });
   }
-  // bare `prom chat` is the interactive chat surface (REPL pane, P4) → stub for now;
+  // bare `prometheus chat` is the interactive chat surface (REPL pane, P4) → stub for now;
   // `chat --cli/--local/<message>` is a real one-shot → falls through to the registry.
   if (
     head === "chat" &&

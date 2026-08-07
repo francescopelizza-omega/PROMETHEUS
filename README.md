@@ -11,7 +11,7 @@ It ships as three surfaces over one gated engine:
 | Surface | What it is |
 |---|---|
 | 🖥️ **Studio** | A hardened **Electron desktop IDE** — code editor, catalog/installer, local-model hub, environments, repos, security console, and an AI chat rail. |
-| ⌨️ **`prom` CLI / TUI** | A terminal-first Node CLI + interactive TUI with **full Studio feature parity** over the same engine. |
+| ⌨️ **`prometheus` CLI / TUI** | A terminal-first Node CLI + interactive TUI with **full Studio feature parity** over the same engine. |
 | 🔌 **Plugin (MCP)** | A cross-agent bridge that exposes PROMETHEUS to **Claude Code, Codex, Gemini, Cursor, Windsurf, Zed, Continue, Cline** and any MCP-capable CLI. |
 
 All three route through **`prometheus.py`** (the zero-dependency Python engine) and
@@ -29,7 +29,7 @@ its **`nemesis`** security gate.
 - [The engine — `prometheus.py`](#the-engine--prometheuspy)
 - [The security gate — `nemesis`](#the-security-gate--nemesis)
 - [Studio — the desktop app](#studio--the-desktop-app)
-- [`prom` — the CLI / TUI](#prom--the-cli--tui)
+- [`prometheus` — the CLI / TUI](#prom--the-cli--tui)
 - [The plugin — drive it from any AI agent](#the-plugin--drive-it-from-any-ai-agent)
 - [Install & run](#install--run)
 - [Configuration, state & exit codes](#configuration-state--exit-codes)
@@ -45,7 +45,7 @@ Installing AI tooling means running other people's code — bash installers, git
 clones in any language, `docker-compose` stacks, downloaded ZIPs, even piped
 `curl | sh` bodies. PROMETHEUS treats **every** such artifact as untrusted and puts
 a real security scan **between "fetched" and "executed"**, on every install path,
-whether the action came from a human clicking *Install* in Studio, from the `prom`
+whether the action came from a human clicking *Install* in Studio, from the `prometheus`
 CLI, or from an AI agent calling an MCP tool.
 
 Three ideas hold it together:
@@ -68,7 +68,7 @@ Three ideas hold it together:
   You / an AI agent
         │
         ├── Studio (Electron)  ─┐
-        ├── prom  (CLI / TUI)  ─┤   thin clients — read-only + gated actions
+        ├── prometheus  (CLI / TUI)  ─┤   thin clients — read-only + gated actions
         └── MCP plugin tools   ─┘
                                 │   bridge contract:  --json → exactly ONE JSON object
                                 ▼
@@ -271,13 +271,13 @@ run-to-done *YOLO* mode — where **autonomy never overrides the security gate**
 
 ---
 
-## `prom` — the CLI / TUI
+## `prometheus` — the CLI / TUI
 
-`studio/apps/cli` builds `prom` (and `prometheus`) — a Node ≥20 terminal CLI with
+`studio/apps/cli` builds `prometheus` (and `prometheus`) — a Node ≥20 terminal CLI with
 **full Studio feature parity over the same engine-bridge**, plus an interactive TUI.
 It exposes scan/gate, catalog install/audit, model + provider management,
 environments, repos, MCP management, agent sessions, refactors, health/doctor, token
-economy, and more. Because it speaks the same bridge, anything Studio can do, `prom`
+economy, and more. Because it speaks the same bridge, anything Studio can do, `prometheus`
 can do headless.
 
 ---
@@ -323,7 +323,7 @@ per-agent adapter** — fully gated, one machine-readable result returned.
 
 - **macOS or Linux**, a stock **`python3`** (3.9+) — the engine and nemesis are
   standard-library only, **zero pip deps**.
-- For Studio / `prom` from source: **Node ≥ 20** and **pnpm 10** (`corepack enable`).
+- For Studio / `prometheus` from source: **Node ≥ 20** and **pnpm 10** (`corepack enable`).
 - `git` on `PATH` (installs stage via git clone).
 
 ### 1) The engine directly (no build step)
@@ -350,13 +350,13 @@ pnpm dev                 # run the desktop app (electron-vite dev)
 pnpm package             # build a distributable (staged engine + pyruntime + electron-builder)
 ```
 
-### 4) `prom` CLI (from source)
+### 4) `prometheus` CLI (from source)
 
 ```bash
 cd studio
 pnpm install
 pnpm dev:cli             # run the CLI/TUI in dev
-pnpm build               # compile; bins: prom / prometheus (apps/cli)
+pnpm build               # compile; bins: prometheus / prometheus (apps/cli)
 ```
 
 > **macOS note:** a Finder/Dock-launched Studio build repairs its `PATH` at startup so
@@ -431,7 +431,7 @@ diff for anything you're about to grant credentials to.
 |---|---|
 | `prometheus.py` | The zero-dep Python engine (installer/manager). Reading this file alone documents the whole system (it carries the full operator manual). |
 | `nemesis` | The stdlib-only supply-chain security scanner / gate. |
-| `studio/` | pnpm + Turbo monorepo: `apps/desktop` (Electron Studio), `apps/cli` (`prom`), `packages/*` (`core`, `engine-bridge`, `ui`), `python/sidecar` (gated sidecars), `staging/pyruntime` (bundled CPython). |
+| `studio/` | pnpm + Turbo monorepo: `apps/desktop` (Electron Studio), `apps/cli` (`prometheus`), `packages/*` (`core`, `engine-bridge`, `ui`), `python/sidecar` (gated sidecars), `staging/pyruntime` (bundled CPython). |
 | `prometheus_plugin/` | The cross-agent bridge: `mcp-server`, `tui`, `installer`, `adapters/`. |
 | `AI_SKILLS_WONDERLAND/`, `MDS/` | Skill dossiers and design/build specs that drive the catalog. |
 

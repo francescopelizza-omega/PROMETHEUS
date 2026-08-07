@@ -1,5 +1,5 @@
 /**
- * stdin.ts — read a piped/redirected prompt from stdin for a one-shot `prom chat` (CLI-083).
+ * stdin.ts — read a piped/redirected prompt from stdin for a one-shot `prometheus chat` (CLI-083).
  *
  * Only fires when bin.ts detects a non-TTY stdin AND no positional message was given, so the two
  * stdin consumers (this read + the interactive readline confirm) never compete for the stream. The
@@ -10,7 +10,7 @@
 export const STDIN_PROMPT_CAP_BYTES = 4 * 1024 * 1024; // 4 MiB
 
 /**
- * Should `prom chat` read its prompt from stdin (CLI-083)? Only for `chat` with NO positional
+ * Should `prometheus chat` read its prompt from stdin (CLI-083)? Only for `chat` with NO positional
  * message (a positional takes precedence — stdin is a fallback source), NOT the `--cli` terminal
  * path, and only when stdin is piped/redirected (`isTTY !== true` — it is `undefined` for a pipe,
  * not `false`, so `=== false` alone would miss it; mirrors bin.ts's `=== true` interactive gate).

@@ -21,7 +21,7 @@
  * @prometheus/core RUNTIME (its barrel re-exports the C8 ServerSupervisor, which
  * pulls node:child_process — unbundlable in the sandboxed renderer). The §5
  * download + §2.4 serve state machines are re-stated here as the SAME pure tables
- * the core `modelhub/store.ts` owns (the canonical source the `prom` CLI binds),
+ * the core `modelhub/store.ts` owns (the canonical source the `prometheus` CLI binds),
  * so both surfaces transition identically without dragging node built-ins into
  * the browser bundle — exactly the discipline the env store uses.
  */

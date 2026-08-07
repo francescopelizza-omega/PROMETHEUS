@@ -46,7 +46,7 @@ export const PREVIEW_CHROME: readonly PreviewLine[] = [
 
 /** The terminal preview content. */
 export const PREVIEW_TERMINAL: readonly PreviewLine[] = [
-  { text: "(.venv)$ prom chat" },
-  { text: "● prom ✓ CLEAN risk 4", role: "ok" },
+  { text: "(.venv)$ prometheus chat" },
+  { text: "● prometheus ✓ CLEAN risk 4", role: "ok" },
   { text: "$ _" },
 ];

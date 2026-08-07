@@ -1,5 +1,5 @@
 /**
- * commands/model.ts — `prom model hw` / `prom model list` via modelhub.py (C7).
+ * commands/model.ts — `prometheus model hw` / `prometheus model list` via modelhub.py (C7).
  *   model hw   -> hw.scan: host CPU/RAM/GPU + usable-weight budget for fit.
  *   model list -> model.list: locally-present model files.
  */

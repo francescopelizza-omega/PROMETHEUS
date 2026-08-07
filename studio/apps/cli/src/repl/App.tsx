@@ -9,7 +9,7 @@
  *
  *   ┌─ prometheus ──────────────────────────────────────────────────────────────┐
  *   │  ▸ you   <message>                                                          │
- *   │  ● prom  <agent reply / tool verdict>                                       │
+ *   │  ● prometheus  <agent reply / tool verdict>                                       │
  *   ├────────────────────────────────────────────────────────────────────────────┤
  *   │ › _                                                            ⏎ send · / cmd │
  *   └─ model … · tools:on · gate:enforce · dry-run:off · verbosity:normal ─────────┘
@@ -82,7 +82,7 @@ export function App({ parsed }: AppProps): JSX.Element {
     next = repl.reduce(next, { type: "message", role: "you", text: trimmed });
     next = repl.reduce(next, {
       type: "message",
-      role: "prom",
+      role: "prometheus",
       text: agent.exposedTools(next.tuning.tools).length
         ? "(agent backend not configured in this build — wire an LLM client to runAgentTurn)"
         : "(tools are off — use /tools on)",
@@ -105,7 +105,7 @@ export function App({ parsed }: AppProps): JSX.Element {
     }
   });
 
-  const rolePrefix: Record<string, string> = { you: "▸ you", prom: "● prom", system: "·" };
+  const rolePrefix: Record<string, string> = { you: "▸ you", prometheus: "● prometheus", system: "·" };
 
   return (
     <Box flexDirection="column">

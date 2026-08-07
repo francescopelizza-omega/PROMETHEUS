@@ -3,7 +3,7 @@
  *
  * This is the full-page "sheet" form of a security verdict, used by the
  * interactive session host (P4) and any verb that wants a boxed, scannable
- * verdict panel rather than the one-line `prom gate` form. It is pure
+ * verdict panel rather than the one-line `prometheus gate` form. It is pure
  * presentation over a verdict the engine-bridge already decided (C5): the CLI
  * NEVER upgrades/downgrades safety here — it only renders the tier, the
  * findings, and (when blocking) the typed-confirm override affordance.
@@ -168,7 +168,7 @@ export function renderVerdictSheet(
   }
 
   // --- canonical verdict body (target/risk/signed + findings table). ---
-  // Reuse ../verdict-view.ts so the body never drifts from `prom gate`.
+  // Reuse ../verdict-view.ts so the body never drifts from `prometheus gate`.
   out.push(renderVerdict(verdict));
 
   // --- override affordance (blocking tiers only) — never-force / gate-first. ---

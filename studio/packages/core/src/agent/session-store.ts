@@ -1,7 +1,7 @@
 /**
  * agent/session-store.ts — named, searchable, resumable conversation store (file 14 §3.10).
  *
- * GUI/CLI parity with `prom`'s /save//resume: a transcript store the agent pane + the
+ * GUI/CLI parity with `prometheus`'s /save//resume: a transcript store the agent pane + the
  * REPL share, each session pinned to a per-turn ChangeSet/checkpoint id so "revert this
  * message" reuses the 07 §7.4 atomic undo. PURE model + search + JSONL serialize;
  * persistence (writing `.prometheus/sessions/*.jsonl`) is the caller's. Secrets NEVER

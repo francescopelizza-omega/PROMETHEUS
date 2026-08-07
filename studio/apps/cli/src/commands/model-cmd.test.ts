@@ -1,5 +1,5 @@
 /**
- * model-cmd.test.ts — the `prom model …` modelhub surface: discovery reads, the
+ * model-cmd.test.ts — the `prometheus model …` modelhub surface: discovery reads, the
  * gated `pull` (confirm:false — modelhub has no --confirm toggle), and the honest
  * supervisor-owned boundary for serve/stop/ps. FAKE runSidecar; no python spawn.
  */
@@ -201,7 +201,7 @@ test("model pull: daemon-absent failure appends honest recovery hint", async () 
   const { deps } = fake({ ok: false, error: "ollama daemon not running" });
   const out = await runModelCommand(ctxFor(["model", "pull", "llama3:8b", "--yes"]), deps);
   assert.equal(out.exitCode, 2);
-  assert.match(out.text ?? "", /prom doctor · prom model install-runner/);
+  assert.match(out.text ?? "", /prometheus doctor · prometheus model install-runner/);
 });
 
 test("model pull --json --yes: folds the feasibility verdict into the envelope", async () => {
@@ -426,7 +426,7 @@ test("model serve --yes: occupied port fails fast (exit 2), no serving status", 
   if (deps.serveHost)
     deps.serveHost.start = async () => ({
       ok: false,
-      error: "port 8080 in use (pid 999) — try --port or prom model stop",
+      error: "port 8080 in use (pid 999) — try --port or prometheus model stop",
     });
   const out = await runModelCommand(ctxFor(["model", "serve", "m", "--yes"]), deps);
   assert.equal(out.exitCode, 2);

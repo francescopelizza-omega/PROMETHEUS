@@ -58,7 +58,7 @@ const CTX: ResolveContext = {
 
 // ---- profiles + presets ---------------------------------------------------- //
 
-test("ships 3 builtin shells + 5 AI presets; prom chat is the default preset", () => {
+test("ships 3 builtin shells + 5 AI presets; prometheus chat is the default preset", () => {
   assert.equal(BUILTIN_SHELL_PROFILES.length, 3);
   assert.equal(BUILTIN_AI_PRESETS.length, 5);
   assert.equal(DEFAULT_PROFILE_ID, "shell.project");
@@ -105,17 +105,17 @@ test("system env never activates a venv", () => {
 
 test("resolveProfile yields the AI launch command + workspace context for an AI preset", () => {
   const r = resolveProfile(PRESET_PROM_CHAT, CTX);
-  assert.equal(r.ai?.command, "prom chat");
+  assert.equal(r.ai?.command, "prometheus chat");
   assert.equal(r.ai?.autorun, true);
   assert.equal(r.args.env.PROM_CWD, "/home/u/proj");
 });
 
 test("aiLaunchFor appends the model hint when present", () => {
   const withHint = { ...PRESET_PROM_CHAT, modelHint: "--model ollama:qwen3" };
-  assert.equal(aiLaunchFor(withHint, CTX).command, "prom chat --model ollama:qwen3");
+  assert.equal(aiLaunchFor(withHint, CTX).command, "prometheus chat --model ollama:qwen3");
 });
 
-test("presetAvailable: prom always available; vendor CLIs gate on PATH detection", () => {
+test("presetAvailable: prometheus always available; vendor CLIs gate on PATH detection", () => {
   assert.equal(presetAvailable(PRESET_PROM_CHAT, new Set()), true);
   assert.equal(presetAvailable(PRESET_CLAUDE, new Set()), false);
   assert.equal(presetAvailable(PRESET_CLAUDE, new Set(["claude"])), true);

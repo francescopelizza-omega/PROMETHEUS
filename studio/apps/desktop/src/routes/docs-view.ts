@@ -3,7 +3,7 @@
  *
  * Turns the canonical engine registry (COMMAND_SPECS) into searchable, grouped doc
  * rows for the GUI Docs view + its live search box. The same id/title/group/args/
- * description the CLI `--docs` and the prom `/docs` render — one source of truth.
+ * description the CLI `--docs` and the prometheus `/docs` render — one source of truth.
  */
 import type { CommandSpec } from "@prometheus/core/commands";
 

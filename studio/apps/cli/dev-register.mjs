@@ -1,6 +1,6 @@
 /**
  * dev-register.mjs — register the workspace dev resolver so `node --import
- * ./dev-register.mjs src/bin.ts <cmd>` runs the prom CLI straight from TS source
+ * ./dev-register.mjs src/bin.ts <cmd>` runs the prometheus CLI straight from TS source
  * (no build, no node_modules). Dev/proof convenience only; production uses the
  * compiled dist/bin.js via the package "bin".
  */

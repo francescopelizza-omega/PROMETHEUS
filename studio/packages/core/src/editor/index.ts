@@ -4,7 +4,7 @@
  * One import surface for the PURE editor logic: the ChangeSet apply/reject engine
  * (changeset.ts), the editor command registry (command-registry.ts), and the
  * smart-key + clipboard-ring math (smart-keys.ts). Everything here is framework-
- * free (NO monaco/react/electron), so this subpath is safe for BOTH the `prom`
+ * free (NO monaco/react/electron), so this subpath is safe for BOTH the `prometheus`
  * CLI and the C5-sandboxed renderer (the ROOT `@prometheus/core` barrel is not:
  * it eagerly evaluates node:fs modules).
  *

@@ -27,7 +27,7 @@ export interface ShellStatusBarProps {
   verdict: VerdictTier | null;
   /** whether the nemesis threat DB is stale (drives the "stale" shield). */
   dbStale?: boolean;
-  /** active venv label, e.g. "py3.12 (prom)". */
+  /** active venv label, e.g. "py3.12 (prometheus)". */
   venv?: string;
   /** served model label, e.g. "qwen3:8b". */
   model?: string;

@@ -16,7 +16,7 @@ export interface SemverParts {
 
 const SEMVER_RE = /\bv?(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?\b/;
 
-/** Parse the FIRST semver found in `input` (handles "v1.2.3", "prom 0.0.0", "2.0.0-rc.1"). */
+/** Parse the FIRST semver found in `input` (handles "v1.2.3", "prometheus 0.0.0", "2.0.0-rc.1"). */
 export function parseVersion(input: unknown): SemverParts | null {
   if (typeof input !== "string") return null;
   const m = SEMVER_RE.exec(input);

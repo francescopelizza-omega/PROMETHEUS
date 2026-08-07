@@ -134,8 +134,8 @@ export function presetAvailable(
   preset: AiTerminalPreset,
   binsOnPath: ReadonlySet<string>,
 ): boolean {
-  // `prom` always ships with Studio ([[11]] §8); presets with no detect are always available.
-  if (preset.cli === "prom" || !preset.detect?.bin) return true;
+  // `prometheus` always ships with Studio ([[11]] §8); presets with no detect are always available.
+  if (preset.cli === "prometheus" || !preset.detect?.bin) return true;
   return binsOnPath.has(preset.detect.bin);
 }
 

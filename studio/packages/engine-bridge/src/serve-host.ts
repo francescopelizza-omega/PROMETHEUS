@@ -2,7 +2,7 @@
  * serve-host.ts — the CLI-owned local model-runner supervisor (CLI-022).
  *
  * The desktop C8 ServerSupervisor (core/supervisor/registry.ts) owns GUI-launched
- * servers in the long-lived MAIN process. A one-shot `prom` process can't hold that
+ * servers in the long-lived MAIN process. A one-shot `prometheus` process can't hold that
  * registry in memory, so the CLI needs its OWN durable supervisor: it spawns the
  * fit-derived runner argv (built PURELY by serve.py), records the pid in a state file
  * SEPARATE from serve-profiles.json, and later finds/kills ONLY the pids it recorded —
@@ -200,7 +200,7 @@ export function createServeHost(deps: ServeHostDeps = {}): ServeHostApi {
     if (!probe.free) {
       return {
         ok: false,
-        error: `port ${spec.port} in use${probe.pid ? ` (pid ${probe.pid})` : ""} — try --port or prom model stop`,
+        error: `port ${spec.port} in use${probe.pid ? ` (pid ${probe.pid})` : ""} — try --port or prometheus model stop`,
         ...(probe.pid ? { heldByPid: probe.pid } : {}),
       };
     }

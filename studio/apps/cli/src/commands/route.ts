@@ -1,8 +1,8 @@
 /**
- * route.ts — route a prom command through the CANONICAL parity registry
+ * route.ts — route a prometheus command through the CANONICAL parity registry
  * (@prometheus/core COMMAND_SPECS / invoke).
  *
- * This is what makes "anything you can do in the GUI you can do in prom"
+ * This is what makes "anything you can do in the GUI you can do in prometheus"
  * STRUCTURAL: the CLI maps its verb to a CommandSpec id and invokes the SAME
  * run() the GUI palette uses, over the SAME EngineClient (C5 — the one gateway).
  * Verbs with a richer hand-written renderer (scan/gate/list/info/env/model/

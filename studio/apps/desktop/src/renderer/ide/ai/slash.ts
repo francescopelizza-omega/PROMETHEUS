@@ -2,7 +2,7 @@
  * ai/slash.ts — PURE slash-command detection + filtering for the AgentPane composer (APP-092).
  *
  * Typing `/` at the START of the composer opens a filterable command popup fed by the shell
- * command registry (mirrors the prom TUI `/` autocomplete). This owns the caret math + the
+ * command registry (mirrors the prometheus TUI `/` autocomplete). This owns the caret math + the
  * fuzzy filter — no react/registry import, so it is node:test-able. The AgentPane feeds it the
  * registry rows and executes the picked command via its `onRunCommand` prop.
  */

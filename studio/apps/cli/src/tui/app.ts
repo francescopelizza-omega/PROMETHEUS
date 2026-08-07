@@ -230,7 +230,7 @@ export async function launchTui(parsed: ParsedArgs, deps: TuiDeps = {}): Promise
     caps,
     // stream word-wrap width: cols-1 dodges the last-column autowrap glitch (?7l region).
     width: () => Math.max(20, size.cols - 1),
-    // `prom --continue` resumes the newest past session on startup (CLI-013).
+    // `prometheus --continue` resumes the newest past session on startup (CLI-013).
     continueSession: parsed.flags.continue === true,
     ...(deps.client ? { client: deps.client } : {}),
     ...(deps.home ? { home: deps.home } : {}),

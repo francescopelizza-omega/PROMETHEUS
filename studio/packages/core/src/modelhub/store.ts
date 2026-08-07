@@ -9,7 +9,7 @@
  *   3. the SERVE-PROFILE state — stopped | starting | ready | error per profile.
  *
  * Deliberately NO react / NO zustand import — core stays isomorphic and is wrapped
- * by BOTH the desktop renderer (Zustand) and the `prom` CLI. This file owns only
+ * by BOTH the desktop renderer (Zustand) and the `prometheus` CLI. This file owns only
  * the transition math + selectors so both surfaces behave identically.
  *
  * GOLDEN RULE (C5): nothing here decides "safe". The download state machine MODELS
@@ -147,7 +147,7 @@ const DL_TRANSITIONS: Readonly<
  * the input unchanged) so the table is total and never throws.
  *
  * This is the single source of download-lifecycle truth: the renderer's Zustand
- * binding and the `prom model download` CLI both call THIS, so an item can never
+ * binding and the `prometheus model download` CLI both call THIS, so an item can never
  * reach `admitted` except through the verdict the REAL nemesis produced (C5).
  */
 export function downloadTransition(state: DownloadState, event: DownloadEvent): DownloadState {

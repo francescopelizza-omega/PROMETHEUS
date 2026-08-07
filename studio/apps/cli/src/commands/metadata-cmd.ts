@@ -1,9 +1,9 @@
 /**
- * commands/metadata-cmd.ts — `prom metadata …` over the metadata.py sidecar
+ * commands/metadata-cmd.ts — `prometheus metadata …` over the metadata.py sidecar
  * (C7 / file 0C), at parity with the GUI Metadata privacy panel. Read/strip/edit/
  * normalize the metadata of ONE user-selected file. Mutations are copy-then-replace
  * (the original is never lost on failure) and PREVIEW first — the sidecar returns a
- * plan unless `--confirm`, which prom adds only on `--yes` (typed intent). Nothing
+ * plan unless `--confirm`, which prometheus adds only on `--yes` (typed intent). Nothing
  * here decides safety; this is local privacy hygiene on a file the user names.
  *
  *   metadata inspect   <file>                          read all fields       [read]
@@ -95,7 +95,7 @@ export async function runMetadataCommand(
     default:
       return {
         text:
-          `prom metadata ${verb}: unknown metadata verb.\n` +
+          `prometheus metadata ${verb}: unknown metadata verb.\n` +
           `  ${c.dim("try:")} inspect · scrub · edit · timestomp`,
         json: { ok: false, error: "unknown-verb", command: `metadata ${verb}` },
         exitCode: 2,

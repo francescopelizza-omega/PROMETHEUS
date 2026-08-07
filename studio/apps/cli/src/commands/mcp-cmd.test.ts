@@ -1,5 +1,5 @@
 /**
- * mcp-cmd.test.ts — `prom mcp` (CLI-036). Unit tests use an InMemory store + a fake gate +
+ * mcp-cmd.test.ts — `prometheus mcp` (CLI-036). Unit tests use an InMemory store + a fake gate +
  * FakeTransport; two tests use the REAL core stdio transport against a fixture MCP server.
  */
 import assert from "node:assert/strict";
@@ -80,7 +80,7 @@ test("mcp add: gated + persisted; list shows it (disk store survives a fresh pro
       source: "manual",
       health: "unknown",
     });
-    // a FRESH store instance (simulating a second `prom` process) still sees it.
+    // a FRESH store instance (simulating a second `prometheus` process) still sees it.
     const fresh = new CliMcpConfigStore(mcpStorePath(home));
     assert.equal(fresh.get("fake")?.transport.kind, "stdio");
     assert.equal(fresh.list().length, 1);

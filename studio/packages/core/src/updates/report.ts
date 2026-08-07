@@ -35,8 +35,8 @@ export interface ModelUpdateStatus {
 
 /** The Prometheus self-update section. */
 export interface SelfUpdateStatus {
-  /** current prom CLI version. */
-  prom: string;
+  /** current prometheus CLI version. */
+  prometheus: string;
   /** current python engine version, if known. */
   engine?: string;
   /** latest version if discoverable. */
@@ -89,7 +89,7 @@ export function toUpdatesJson(r: UpdateReport): UpdatesJson {
   const components: UpdateComponentJson[] = [
     {
       name: "prometheus",
-      current: r.self.prom,
+      current: r.self.prometheus,
       latest: r.self.latest ?? null,
       severity: r.self.updateAvailable ? "update" : "none",
       action: r.self.plan.command,
@@ -171,7 +171,7 @@ export function formatUpdateReport(r: UpdateReport): string {
   // --- Prometheus self ---
   lines.push("");
   lines.push("Prometheus");
-  const selfVer = `prom ${r.self.prom}${r.self.engine ? ` · engine ${r.self.engine}` : ""}`;
+  const selfVer = `prometheus ${r.self.prometheus}${r.self.engine ? ` · engine ${r.self.engine}` : ""}`;
   if (r.self.updateAvailable) {
     lines.push(`  ${selfVer}  →  ${r.self.latest ?? "newer"} available`);
     for (const s of r.self.plan.steps) lines.push(`    ${s}`);

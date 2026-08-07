@@ -1,5 +1,5 @@
 /**
- * metadata-cmd.test.ts — the `prom metadata …` privacy surface over metadata.py:
+ * metadata-cmd.test.ts — the `prometheus metadata …` privacy surface over metadata.py:
  * inspect READ, the plan→confirm mutations (scrub/edit/timestomp use --confirm),
  * and usage errors. FAKE runSidecar; the original file is never touched.
  */

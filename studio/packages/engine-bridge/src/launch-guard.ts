@@ -2,7 +2,7 @@
  * launch-guard.ts — the shared 90% CPU/RAM launch ceiling (CLI-021).
  *
  * The desktop Model Hub refuses to start a heavy model when CPU% OR RAM% is at/above a
- * ceiling (telemetry.ts, default 90%). The CLI `prom model pull` needs the SAME guard —
+ * ceiling (telemetry.ts, default 90%). The CLI `prometheus model pull` needs the SAME guard —
  * so the ceiling + verdict live here (one constant, shared) rather than a forked `90`.
  * The sample uses node:os only (no spawn); the verdict is pure + testable.
  */

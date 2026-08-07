@@ -11,7 +11,7 @@ import { parseModelRef } from "../cli-profiles/profile.js";
 import { type PaneId, cyclePane } from "./panes.js";
 
 export interface ReplMessage {
-  role: "you" | "prom" | "system";
+  role: "you" | "prometheus" | "system";
   text: string;
 }
 

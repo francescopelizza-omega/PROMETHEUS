@@ -1,5 +1,5 @@
 /**
- * commands/help.ts — `prom help [topic]` / `prom <cmd> --help` / the global usage screen.
+ * commands/help.ts — `prometheus help [topic]` / `prometheus <cmd> --help` / the global usage screen.
  *
  * Per-command help (CLI-049) is generated from the central CommandSpec registry: `renderCommandHelp`
  * renders a spec's synopsis (explicit `spec.help` or synthesized from `description`/`argsSchema`),
@@ -50,103 +50,120 @@ export const PROM_VERSION = resolvePromVersion();
 /**
  * Help for CLI verbs NOT in the CommandSpec registry — the prom-native commands (config/profile/
  * updates/sessions/mcp/…) and the §2 lifecycle trees whose spec ids don't match the verb (env→
- * env-list, model→model-hw, …). One-line synopsis + ≥1 example each; keeps `prom <verb> --help`
+ * env-list, model→model-hw, …). One-line synopsis + ≥1 example each; keeps `prometheus <verb> --help`
  * useful for every real command, not just the spec'd ones.
  */
 const CLI_NATIVE_HELP: Record<string, { synopsis: string; examples: readonly string[] }> = {
-  updates: { synopsis: "prom updates [--json]", examples: ["prom updates", "prom updates --json"] },
+  updates: {
+    synopsis: "prometheus updates [--json]",
+    examples: ["prometheus updates", "prometheus updates --json"],
+  },
   config: {
-    synopsis: "prom config <path | get <key> | set <key> <val> | list> [--json]",
-    examples: ["prom config list", "prom config set profile.active ci"],
+    synopsis: "prometheus config <path | get <key> | set <key> <val> | list> [--json]",
+    examples: ["prometheus config list", "prometheus config set profile.active ci"],
   },
   profile: {
-    synopsis: "prom profile <list | use <name> | new <name> [--seed b] | edit <name>>",
+    synopsis: "prometheus profile <list | use <name> | new <name> [--seed b] | edit <name>>",
     examples: [
-      "prom profile list",
-      "prom profile use ci",
-      "prom profile new mine --seed local-safe",
+      "prometheus profile list",
+      "prometheus profile use ci",
+      "prometheus profile new mine --seed local-safe",
     ],
   },
   sessions: {
-    synopsis: "prom sessions <list | search <q> | fork <id> | delete <id>>",
-    examples: ["prom sessions list", "prom sessions search auth"],
+    synopsis: "prometheus sessions <list | search <q> | fork <id> | delete <id>>",
+    examples: ["prometheus sessions list", "prometheus sessions search auth"],
   },
   mcp: {
-    synopsis: "prom mcp <list | add <name> --cmd <bin> | add <name> --url <https> | remove | test>",
-    examples: ["prom mcp list", "prom mcp add fs --cmd node --args server.mjs"],
+    synopsis:
+      "prometheus mcp <list | add <name> --cmd <bin> | add <name> --url <https> | remove | test>",
+    examples: ["prometheus mcp list", "prometheus mcp add fs --cmd node --args server.mjs"],
   },
-  keymap: { synopsis: "prom keymap list [--preset N]", examples: ["prom keymap list"] },
+  keymap: { synopsis: "prometheus keymap list [--preset N]", examples: ["prometheus keymap list"] },
   tokens: {
-    synopsis: "prom tokens [--paid | all | nano]",
-    examples: ["prom tokens", "prom tokens --paid"],
+    synopsis: "prometheus tokens [--paid | all | nano]",
+    examples: ["prometheus tokens", "prometheus tokens --paid"],
   },
   quarantine: {
-    synopsis: "prom quarantine <list | restore <vault-dir> | purge <dir>|--all>",
-    examples: ["prom quarantine list", "prom quarantine restore <dir>"],
+    synopsis: "prometheus quarantine <list | restore <vault-dir> | purge <dir>|--all>",
+    examples: ["prometheus quarantine list", "prometheus quarantine restore <dir>"],
   },
   env: {
-    synopsis: "prom env <list | create | clone | delete | use | export | import | doctor | ...>",
-    examples: ["prom env list", "prom env create myenv"],
+    synopsis:
+      "prometheus env <list | create | clone | delete | use | export | import | doctor | ...>",
+    examples: ["prometheus env list", "prometheus env create myenv"],
   },
   model: {
     synopsis:
-      "prom model <hw | list | search | info | fit | pull | serve | stop | endpoints | ...>",
-    examples: ["prom model list", "prom model pull qwen2.5-coder:7b"],
+      "prometheus model <hw | list | search | info | fit | pull | serve | stop | endpoints | ...>",
+    examples: ["prometheus model list", "prometheus model pull qwen2.5-coder:7b"],
   },
   repo: {
-    synopsis: "prom repo <add | list | status | update | pin | branch | rescan | remove | vault>",
-    examples: ["prom repo list", "prom repo add https://github.com/o/r"],
+    synopsis:
+      "prometheus repo <add | list | status | update | pin | branch | rescan | remove | vault>",
+    examples: ["prometheus repo list", "prometheus repo add https://github.com/o/r"],
   },
   metadata: {
-    synopsis: "prom metadata <inspect | scrub | edit | timestomp> <file>",
-    examples: ["prom metadata inspect photo.jpg"],
+    synopsis: "prometheus metadata <inspect | scrub | edit | timestomp> <file>",
+    examples: ["prometheus metadata inspect photo.jpg"],
   },
   provider: {
-    synopsis: "prom provider <list | show | connect | status | disconnect | enable-metered>",
-    examples: ["prom provider list", "prom provider connect openai"],
+    synopsis: "prometheus provider <list | show | connect | status | disconnect | enable-metered>",
+    examples: ["prometheus provider list", "prometheus provider connect openai"],
   },
   agents: {
-    synopsis: "prom agents <list | attach <id> | kill <id>>",
-    examples: ["prom agents list"],
+    synopsis: "prometheus agents <list | attach <id> | kill <id>>",
+    examples: ["prometheus agents list"],
   },
   diagram: {
-    synopsis: "prom diagram <uml | deps> [path] [--out FILE]",
-    examples: ["prom diagram deps ./src", "prom diagram uml file.py --out d.mmd"],
+    synopsis: "prometheus diagram <uml | deps> [path] [--out FILE]",
+    examples: ["prometheus diagram deps ./src", "prometheus diagram uml file.py --out d.mmd"],
   },
   refactor: {
-    synopsis: "prom refactor <structure | imports | callgraph> <file>",
-    examples: ["prom refactor structure app.py"],
+    synopsis: "prometheus refactor <structure | imports | callgraph> <file>",
+    examples: ["prometheus refactor structure app.py"],
   },
   test: {
     synopsis:
-      "prom test <discover | run | coverage | watch> [path] [--junit <file>] [--github-annotations] [--retry-failed <n>] [--tolerate-flaky]",
+      "prometheus test <discover | run | coverage | watch> [path] [--junit <file>] [--github-annotations] [--retry-failed <n>] [--tolerate-flaky]",
     examples: [
-      "prom test discover",
-      "prom test run tests/ --junit report.xml",
-      "prom test run --retry-failed 3",
-      "prom test watch python/sidecar",
+      "prometheus test discover",
+      "prometheus test run tests/ --junit report.xml",
+      "prometheus test run --retry-failed 3",
+      "prometheus test watch python/sidecar",
     ],
   },
-  health: { synopsis: "prom health [--json]", examples: ["prom health"] },
+  health: { synopsis: "prometheus health [--json]", examples: ["prometheus health"] },
   plugin: {
-    synopsis: "prom plugin <list | info | install | uninstall | enable | disable | sync | ...>",
-    examples: ["prom plugin list"],
+    synopsis:
+      "prometheus plugin <list | info | install | uninstall | enable | disable | sync | ...>",
+    examples: ["prometheus plugin list"],
   },
-  skill: { synopsis: "prom skill <list | enable | disable | mute>", examples: ["prom skill list"] },
+  skill: {
+    synopsis: "prometheus skill <list | enable | disable | mute>",
+    examples: ["prometheus skill list"],
+  },
   app: {
-    synopsis: "prom app <list | install | uninstall | update | enable | disable | status | ...>",
-    examples: ["prom app list"],
+    synopsis:
+      "prometheus app <list | install | uninstall | update | enable | disable | status | ...>",
+    examples: ["prometheus app list"],
   },
   session: {
-    synopsis: "prom session [--tmux [N]]   (the interactive single-window session)",
-    examples: ["prom session"],
+    synopsis: "prometheus session [--tmux [N]]   (the interactive single-window session)",
+    examples: ["prometheus session"],
   },
   repl: {
-    synopsis: "prom repl   (the interactive REPL/agent — bare `prom`)",
-    examples: ["prom repl"],
+    synopsis: "prometheus repl   (the interactive REPL/agent — bare `prometheus`)",
+    examples: ["prometheus repl"],
   },
-  tui: { synopsis: "prom tui   (the full-screen Ink TUI — bare `prom`)", examples: ["prom tui"] },
-  version: { synopsis: "prom version   (print the CLI version)", examples: ["prom version"] },
+  tui: {
+    synopsis: "prometheus tui   (the full-screen Ink TUI — bare `prometheus`)",
+    examples: ["prometheus tui"],
+  },
+  version: {
+    synopsis: "prometheus version   (print the CLI version)",
+    examples: ["prometheus version"],
+  },
 };
 
 function argPlaceholder(a: ArgSpec): string {
@@ -156,7 +173,7 @@ function argPlaceholder(a: ArgSpec): string {
 
 /** Synthesize a synopsis from a spec's id + argsSchema when no explicit `spec.help.synopsis`. */
 function synthSynopsis(spec: CommandSpec): string {
-  const parts = [`prom ${spec.id}`];
+  const parts = [`prometheus ${spec.id}`];
   for (const p of spec.argsSchema.positionals ?? []) parts.push(argPlaceholder(p));
   for (const f of spec.argsSchema.flags ?? []) parts.push(argPlaceholder(f));
   return parts.join(" ");
@@ -184,7 +201,7 @@ export function renderCommandHelp(spec: CommandSpec): string {
       lines.push(`  ${c.cyan(`--${f.name}${val}`)}  ${f.description ?? ""}${choices}`);
     }
   }
-  const examples = spec.help?.examples ?? [`prom ${spec.id}`]; // always ≥1 example
+  const examples = spec.help?.examples ?? [`prometheus ${spec.id}`]; // always ≥1 example
   lines.push("", c.bold("EXAMPLES"));
   for (const ex of examples) lines.push(`  ${c.dim(ex)}`);
   return lines.join("\n");
@@ -192,7 +209,7 @@ export function renderCommandHelp(spec: CommandSpec): string {
 
 function renderNativeHelp(topic: string, h: (typeof CLI_NATIVE_HELP)[string]): string {
   const lines = [
-    `${c.bold(topic)} — prom ${topic}`,
+    `${c.bold(topic)} — prometheus ${topic}`,
     "",
     c.bold("SYNOPSIS"),
     `  ${h.synopsis}`,
@@ -222,7 +239,7 @@ export function helpForTopic(ctx: CliContext, rawTopic: string): CommandOutcome 
         ok: true,
         id: spec.id,
         synopsis: spec.help?.synopsis ?? synthSynopsis(spec),
-        examples: spec.help?.examples ?? [`prom ${spec.id}`],
+        examples: spec.help?.examples ?? [`prometheus ${spec.id}`],
       },
       exitCode: 0,
     };
@@ -251,14 +268,14 @@ export function helpForTopic(ctx: CliContext, rawTopic: string): CommandOutcome 
 // Built lazily (a function, not a const) so color state set in bin.ts AFTER
 // module import is respected — a top-level const would freeze color too early.
 const usage =
-  (): string => `${c.bold("prom")} — Prometheus Studio CLI (over @prometheus/engine-bridge)
+  (): string => `${c.bold("prometheus")} — Prometheus Studio CLI (over @prometheus/engine-bridge)
 
 ${c.bold("USAGE")}
-  prom [--json] [--no-color] <command> [args]
-  prom                  (no args) → the interactive single-window session
+  prometheus [--json] [--no-color] <command> [args]
+  prometheus            (no args) → the interactive single-window session
 
 ${c.bold("INTERACTIVE SESSION")}
-  ${c.cyan("prom")}                 Unified session in ONE window: chat + agent loop + panes
+  ${c.cyan("prometheus")}            Unified session in ONE window: chat + agent loop + panes
                        (catalog/models/env/security/health), slash + /help
   ${c.cyan("session")} [--tmux [N]]  Span MANY tmux windows when enabled (--tmux / PROMETHEUS_TMUX=1);
                        single-window fallback when tmux is absent or disabled
@@ -324,14 +341,14 @@ ${c.bold("GLOBAL FLAGS")}
 ${c.dim("Security verdicts come from the engine/nemesis — the CLI only renders them.")}`;
 
 export function runHelp(ctx: CliContext): CommandOutcome {
-  // `prom help <topic>` → per-command help (CLI-049); bare `prom help` → the global screen below.
+  // `prometheus help <topic>` → per-command help (CLI-049); bare `prometheus help` → the global screen below.
   const topic = ctx.args.positionals[0];
   if (topic) return helpForTopic(ctx, topic);
   if (ctx.json) {
     return {
       json: {
         ok: true,
-        name: "prom",
+        name: "prometheus",
         version: PROM_VERSION,
         // CLI-050: generated from the leaf route-table (the SAME source the router's RECOGNIZED
         // set derives from) — the hand-typed list is gone, so help can never drift from routing.
@@ -354,7 +371,7 @@ export async function runVersion(ctx: CliContext): Promise<CommandOutcome> {
     engine = null;
   }
   if (ctx.json) {
-    return { json: { ok: true, name: "prom", version: PROM_VERSION, engine }, exitCode: 0 };
+    return { json: { ok: true, name: "prometheus", version: PROM_VERSION, engine }, exitCode: 0 };
   }
-  return { text: `prom ${PROM_VERSION} (engine ${engine ?? "unknown"})`, exitCode: 0 };
+  return { text: `prometheus ${PROM_VERSION} (engine ${engine ?? "unknown"})`, exitCode: 0 };
 }

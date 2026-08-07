@@ -1,5 +1,5 @@
 /**
- * refactor-cmd.test.ts — `prom refactor structure|imports|callgraph` with an
+ * refactor-cmd.test.ts — `prometheus refactor structure|imports|callgraph` with an
  * injected fake runSidecar (no real python spawn): verb routing, rendering, exit
  * codes, --json passthrough, and the pre-spawn verb/path guards (CLI-009).
  */

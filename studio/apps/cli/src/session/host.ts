@@ -1,8 +1,8 @@
 /**
  * session/host.ts — the P4 single-window interactive SESSION host.
  *
- * `launchSession(parsed)` is the ONE interactive surface bare `prom`, `prom repl`,
- * `prom tui`, and bare `prom chat` all land in. It is built on node:readline + node
+ * `launchSession(parsed)` is the ONE interactive surface bare `prometheus`, `prometheus repl`,
+ * `prometheus tui`, and bare `prometheus chat` all land in. It is built on node:readline + node
  * built-ins ONLY — no ink/react/.tsx (the Ink view under apps/cli/src/repl/ stays
  * EXCLUDED). It owns the readline lifecycle: seed the agent tuning from `--profile`
  * (via @prometheus/core cliProfiles), boot the PURE core REPL state machine, print a
@@ -391,8 +391,8 @@ export async function launchSession(parsed: ParsedArgs, deps: SessionDeps = {}):
   const isTty = deps.isTty ?? process.stdin.isTTY === true;
   if (!isTty && deps.makeReadline === undefined) {
     writeLine(
-      `${c.yellow("prom: the interactive session needs a TTY.")}\n${c.dim(
-        "Run a one-shot command instead — e.g. `prom scan`, `prom plugin list`.",
+      `${c.yellow("prometheus: the interactive session needs a TTY.")}\n${c.dim(
+        "Run a one-shot command instead — e.g. `prometheus scan`, `prometheus plugin list`.",
       )}`,
     );
     return 1;
@@ -676,7 +676,7 @@ export async function launchSession(parsed: ParsedArgs, deps: SessionDeps = {}):
   };
 
   // CLI-082: structured JSON export sibling — the readline host has no per-turn JSONL store, so it
-  // projects the in-memory transcript (you→user, prom/tool→assistant text) through the SAME
+  // projects the in-memory transcript (you→user, prometheus/tool→assistant text) through the SAME
   // buildSessionExport. Additive; never perturbs the plain-text path above.
   const exportTranscriptJson = (file?: string): string => {
     try {
@@ -712,7 +712,7 @@ export async function launchSession(parsed: ParsedArgs, deps: SessionDeps = {}):
     });
     session = res.session;
     if (res.reply.trim()) {
-      state = repl.reduce(state, { type: "message", role: "prom", text: res.reply });
+      state = repl.reduce(state, { type: "message", role: "prometheus", text: res.reply });
       history = [
         ...history,
         { role: "user", content: input },
@@ -749,7 +749,7 @@ export async function launchSession(parsed: ParsedArgs, deps: SessionDeps = {}):
     });
     session = res.session;
     if (res.reply.trim()) {
-      state = repl.reduce(state, { type: "message", role: "prom", text: res.reply });
+      state = repl.reduce(state, { type: "message", role: "prometheus", text: res.reply });
       // merge the continuation into the last assistant turn (keep history as user/assistant text).
       const last = history.at(-1);
       if (last?.role === "assistant") last.content += res.reply;

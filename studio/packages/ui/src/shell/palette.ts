@@ -5,7 +5,7 @@
  * engine ENTITIES (catalog items, models, venvs, files, settings) and runs
  * verdict-gated actions inline. This module owns the PURE filter/rank logic
  * (no React, no DOM) so it is unit-testable from TS source and reusable by the
- * `prom` TUI palette (file 08 §8: ⌘K commands are CLI subcommands).
+ * `prometheus` TUI palette (file 08 §8: ⌘K commands are CLI subcommands).
  *
  * The matcher is a forgiving SUBSEQUENCE fuzzy match (Cursor/VS-Code style):
  * "srvq" matches "Serve qwen3", "nv" matches "New venv". Contiguous runs,

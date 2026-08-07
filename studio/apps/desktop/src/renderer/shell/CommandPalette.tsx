@@ -5,7 +5,7 @@
  * editor command-registry ids, re-stated via the IDE palette's PALETTE_COMMANDS —
  * the renderer can't import core's runtime, C5) PLUS the activity-rail GO-TO nav
  * (Home/Editor/Catalog/Model Hub/…). Filtering + ranking is the shared PURE
- * filterPalette() (fuzzy subsequence) from @prometheus/ui (also drives the prom
+ * filterPalette() (fuzzy subsequence) from @prometheus/ui (also drives the prometheus
  * TUI palette, §8). Verdict-gated actions can carry a pinned inline verdict — a
  * cosmetic badge before they run; the engine still decides (C5).
  *

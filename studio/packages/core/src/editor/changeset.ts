@@ -289,7 +289,7 @@ function fileEditCounts(edit: FileEdit): { added: number; removed: number } {
 
 /**
  * Build the multi-file plan summary for a ChangeSet (pure). Used both by the GUI
- * DiffReview header and the `prom agent` patch preview (file 07 §10 parity). The
+ * DiffReview header and the `prometheus agent` patch preview (file 07 §10 parity). The
  * `newFiles` list is what the caller hands to the run-gate — AI-authored code is
  * untrusted-until-gated, exactly like cloned code (§7.4).
  */

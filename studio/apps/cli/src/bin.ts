@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * bin.ts — the `prom` CLI entrypoint. Reads argv, sets up color, dispatches to
+ * bin.ts — the `prometheus` CLI entrypoint. Reads argv, sets up color, dispatches to
  * the command, prints the outcome, and exits with the command's exit code.
  *
  * This is the ONLY file that touches process.argv / process.stdout / process.exit
@@ -50,7 +50,7 @@ function readlineConfirm(prompt: string, phrase: string): Promise<boolean> {
 
 // The OPTIONAL Ink renderer lives under ./repl/, EXCLUDED from this tsc build (ink
 // is a packaging-time dep). It is loaded via a NON-LITERAL specifier so the type-check
-// never requires it; it is opt-in only (`prom --ink`). If it (or ink) is absent we fall
+// never requires it; it is opt-in only (`prometheus --ink`). If it (or ink) is absent we fall
 // back to the zero-dep node:readline session host below.
 async function launchInkRepl(parsed: ParsedArgs): Promise<boolean> {
   try {
@@ -65,14 +65,14 @@ async function launchInkRepl(parsed: ParsedArgs): Promise<boolean> {
 }
 
 /**
- * Does this invocation want the interactive single-window session? Bare `prom`,
- * `prom repl`, `prom tui`, and a bare `prom chat` (no message / no --local / --cli)
+ * Does this invocation want the interactive single-window session? Bare `prometheus`,
+ * `prometheus repl`, `prometheus tui`, and a bare `prometheus chat` (no message / no --local / --cli)
  * all land in the session host. `chat --local`/`--cli` + every other verb stay
  * one-shot and route through dispatch().
  */
 function wantsInteractiveSession(parsed: ParsedArgs): boolean {
   if (parsed.version || parsed.help) return false;
-  if (parsed.repl) return true; // bare `prom`
+  if (parsed.repl) return true; // bare `prometheus`
   const head = parsed.command[0];
   if (head === "repl" || head === "tui" || head === "session") return true;
   if (
@@ -95,8 +95,8 @@ async function main(): Promise<void> {
   // CLI-097: unicode glyphs degrade to ASCII on a dumb terminal (orthogonal to color).
   setUnicodeEnabled(defaultUnicodeEnabled());
 
-  // CLI-083: `prom chat` with piped/redirected stdin (no positional message, not `--cli`) reads the
-  // prompt from stdin — `cat task.md | prom chat`. Done HERE, before any readline is created (else
+  // CLI-083: `prometheus chat` with piped/redirected stdin (no positional message, not `--cli`) reads the
+  // prompt from stdin — `cat task.md | prometheus chat`. Done HERE, before any readline is created (else
   // the two would compete for the stream), and BEFORE the interactive check below so the injected
   // positional makes it a one-shot (a real positional message takes precedence — stdin is fallback).
   if (
@@ -105,14 +105,14 @@ async function main(): Promise<void> {
     const piped = await readStdinPrompt();
     if (piped.error) {
       if (parsed.json) emitJson({ ok: false, error: piped.error });
-      else process.stderr.write(`prom chat: ${piped.error}\n`);
+      else process.stderr.write(`prometheus chat: ${piped.error}\n`);
       process.exitCode = 2;
       return;
     }
     parsed.positionals.push(piped.text as string);
   }
 
-  // Interactive single-window session (§1): bare `prom`, `prom repl|tui`, bare `chat`.
+  // Interactive single-window session (§1): bare `prometheus`, `prometheus repl|tui`, bare `chat`.
   // Needs a TTY; without one we fall through to dispatch() (json/stub contract intact).
   if (wantsInteractiveSession(parsed) && process.stdin.isTTY === true) {
     // `--ink` opts into the optional Ink renderer; default = zero-dep readline host.
@@ -142,7 +142,7 @@ async function main(): Promise<void> {
     return;
   }
 
-  // One-shot terminal-chat LAUNCH (`prom chat --cli X --open|--tmux`): the engine
+  // One-shot terminal-chat LAUNCH (`prometheus chat --cli X --open|--tmux`): the engine
   // returns the injection-safe argv and we spawn it ourselves (a live pty / tmux).
   // Owned here (not dispatch) because it drives the real terminal. A bypass launch
   // type-confirms over readline on a TTY; with no TTY there is no confirm → denied.
@@ -169,7 +169,7 @@ async function main(): Promise<void> {
     if (parsed.json) {
       emitJson({ ok: false, error: message });
     } else {
-      process.stderr.write(`prom: fatal: ${message}\n`);
+      process.stderr.write(`prometheus: fatal: ${message}\n`);
     }
     process.exitCode = 2;
     return;
@@ -194,15 +194,15 @@ function friendly(err: unknown): string {
 // An interactive session/pty/tmux child failure already degrades in-loop; these are
 // the absolute backstop so the CLI can NEVER terminate on an uncaught error.
 process.on("unhandledRejection", (reason) => {
-  process.stderr.write(`prom: unexpected: ${friendly(reason)}\n`);
+  process.stderr.write(`prometheus: unexpected: ${friendly(reason)}\n`);
   process.exitCode = 2;
 });
 process.on("uncaughtException", (err) => {
-  process.stderr.write(`prom: unexpected: ${friendly(err)}\n`);
+  process.stderr.write(`prometheus: unexpected: ${friendly(err)}\n`);
   process.exitCode = 2;
 });
 
 main().catch((err) => {
-  process.stderr.write(`prom: unexpected: ${friendly(err)}\n`);
+  process.stderr.write(`prometheus: unexpected: ${friendly(err)}\n`);
   process.exitCode = 2;
 });

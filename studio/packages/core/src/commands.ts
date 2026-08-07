@@ -1,14 +1,14 @@
 /**
  * commands.ts — the CANONICAL COMMAND PARITY ROUTER (file 01 §11.3 / 11 §2+§5).
  *
- * ONE registry that BOTH the desktop GUI and the `prom` CLI route through, so
+ * ONE registry that BOTH the desktop GUI and the `prometheus` CLI route through, so
  * parity is STRUCTURAL, not aspirational: every capability is a single
  * `CommandSpec` whose `surfaces` declares which of {GUI, CLI} expose it, and
  * whose `run(ctx, args)` drives the engine through @prometheus/engine-bridge —
  * the ONLY JS->engine gateway (C5). The GUI iterates `listCommands("GUI")` to
  * build its palette; the CLI maps its argv to a spec id via `listCommands("CLI")`.
  * Neither surface re-implements the routing — they share THIS table, which is
- * what makes "anything in the GUI you can do in prom, and vice-versa" a
+ * what makes "anything in the GUI you can do in prometheus, and vice-versa" a
  * compile-/test-time invariant (see commands.parity.test.ts).
  *
  * This file COMPLEMENTS the existing M1 `commands/registry.ts` (the seeded,
@@ -499,7 +499,7 @@ function nameSpec(
 /**
  * A prometheus.py "manager" command (apps/worldsim/pentest/localai/models/vault)
  * shaped as `<subcommand> [action] [tool]`. Forwards the parsed positionals
- * verbatim — the engine owns the action grammar, prom does not re-invent it.
+ * verbatim — the engine owns the action grammar, prometheus does not re-invent it.
  */
 function managerSpec(
   init: Omit<SpecInit, "run" | "binding" | "argsSchema"> & {
@@ -774,7 +774,7 @@ export const COMMAND_SPECS: readonly CommandSpec[] = Object.freeze([
     run: async (ctx, args) => {
       const f = args.flags;
       // mirror engine-bridge LifecycleClient.install argv EXACTLY (globals BEFORE the
-      // subcommand) so the single-word `prom install` matches the GUI affordance set.
+      // subcommand) so the single-word `prometheus install` matches the GUI affordance set.
       const argv = [
         ...globalFlagArgv(f),
         "install",
@@ -920,11 +920,11 @@ export const COMMAND_SPECS: readonly CommandSpec[] = Object.freeze([
     binding: { kind: "nemesis", verb: "gate" },
     argsSchema: TARGET_ARG,
     help: {
-      synopsis: "prom gate <path|git-url|owner/repo> [--fresh] [--sign] [--policy <file>]",
+      synopsis: "prometheus gate <path|git-url|owner/repo> [--fresh] [--sign] [--policy <file>]",
       examples: [
-        "prom gate .                      # gate the current directory",
-        "prom gate owner/repo --fresh     # bypass the verdict cache",
-        "prom gate ./pkg --json           # machine-readable verdict",
+        "prometheus gate .                      # gate the current directory",
+        "prometheus gate owner/repo --fresh     # bypass the verdict cache",
+        "prometheus gate ./pkg --json           # machine-readable verdict",
       ],
     },
     run: async (ctx, args) => {
@@ -967,7 +967,7 @@ export const COMMAND_SPECS: readonly CommandSpec[] = Object.freeze([
     description:
       "The FREE nemesis threat scan (backdoors / malware / supply-chain / code threats) of any " +
       "path, git URL, or owner/repo — the SAME fail-closed verdict the install gate uses (C5), " +
-      "available identically from the CLI (`prom nemesis <target>` / `/nemesis`) and the app GUI.",
+      "available identically from the CLI (`prometheus nemesis <target>` / `/nemesis`) and the app GUI.",
     binding: { kind: "nemesis", verb: "gate" },
     argsSchema: TARGET_ARG,
     run: async (ctx, args) => {
@@ -1299,7 +1299,7 @@ export function coveredPrometheusSubcommands(): Set<PrometheusSubcommand> {
 
 /**
  * The router: validate args against the spec, then route through the engine
- * client. The SINGLE entry point both `prom` and the GUI call — this is what
+ * client. The SINGLE entry point both `prometheus` and the GUI call — this is what
  * makes parity structural. Throws on unknown id or invalid args (callers render
  * the error). The spec's run() NEVER decides "safe" (C5).
  */

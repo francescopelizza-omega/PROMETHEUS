@@ -72,7 +72,7 @@ test("shlexQuote: embedded single quote escapes as '\"'\"'", () => {
 
 test("shlexJoin joins an argv into one shell-safe string", () => {
   assert.equal(shlexJoin(["claude", "--model", "opus"]), "claude --model opus");
-  assert.equal(shlexJoin(["prom", "chat", "hello world"]), "prom chat 'hello world'");
+  assert.equal(shlexJoin(["prometheus", "chat", "hello world"]), "prometheus chat 'hello world'");
 });
 
 test("windowCommand prefixes shlex-quoted env then the joined argv", () => {

@@ -2,7 +2,7 @@
  * commands/squat-guard.ts — a pre-install TYPOSQUAT / "slopsquatting" heuristic for
  * pip package names (file 11 §4 / nemesis thesis). AI assistants hallucinate package
  * names at scale (~20% of AI-suggested installs reference a non-existent package), and
- * attackers register the typo-adjacent / hallucinated names. Before `prom env add`
+ * attackers register the typo-adjacent / hallucinated names. Before `prometheus env add`
  * stages a pip install (which the engine STILL gates with the real nemesis), this
  * surfaces a cheap, OFFLINE warning when a name is one keystroke from a popular package
  * or matches a suspicious pattern.

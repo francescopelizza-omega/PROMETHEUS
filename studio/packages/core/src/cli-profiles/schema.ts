@@ -23,7 +23,7 @@ export const CONFIG_SCHEMA: Readonly<Record<string, ConfigKeySpec>> = {
   "profile.active": {
     type: "string",
     default: "",
-    description: "The active profile name applied at startup (set by `prom profile use`).",
+    description: "The active profile name applied at startup (set by `prometheus profile use`).",
   },
 };
 

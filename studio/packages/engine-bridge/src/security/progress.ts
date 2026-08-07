@@ -2,7 +2,7 @@
  * security/progress.ts — parse a nemesis stderr progress line into a typed scan STAGE (CLI-040).
  *
  * `runNemesis` already line-buffers stderr and hands `onStderr` COMPLETE lines; this maps a line
- * to one of four ordered stages (resolve → static rules → threat feeds → verdict) so `prom secure
+ * to one of four ordered stages (resolve → static rules → threat feeds → verdict) so `prometheus secure
  * scan` can print `[i/4] <label> — <detail>` on a stage transition instead of raw noise. This
  * nemesis build emits little-to-no stderr in --json mode, so the patterns are keyed defensively
  * off nemesis' source wording (fetching/scanning/feeds/verdict); ANY unrecognized line degrades

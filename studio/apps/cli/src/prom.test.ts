@@ -1,5 +1,5 @@
 /**
- * prom.test.ts — file 11 additions: §1 globals, toEngineArgv, the §2 tree routing,
+ * prometheus.test.ts — file 11 additions: §1 globals, toEngineArgv, the §2 tree routing,
  * profiles, and the doctor --bridge probe.
  */
 import assert from "node:assert/strict";
@@ -257,7 +257,7 @@ test("engineSubcommand maps the tree; unknown verbs → not-yet-wired", () => {
 
 test("single-token registry verbs are REACHABLE (in ONE_WORD — not swallowed to the help screen)", () => {
   // regression: these are real CommandSpec ids; if absent from ONE_WORD, parseArgs flags
-  // help:true and `prom install foo` prints usage instead of installing (GUI-parity bug).
+  // help:true and `prometheus install foo` prints usage instead of installing (GUI-parity bug).
   for (const v of [
     "install",
     "uninstall",
@@ -364,7 +364,7 @@ test("gate --help shows gate synopsis/flags/examples, not the global screen (CLI
   const out = await run(["gate", "--help"]);
   assert.equal(out.exitCode, 0);
   assert.match(out.text ?? "", /SYNOPSIS/);
-  assert.match(out.text ?? "", /prom gate <path\|git-url\|owner\/repo>/);
+  assert.match(out.text ?? "", /prometheus gate <path\|git-url\|owner\/repo>/);
   assert.match(out.text ?? "", /EXAMPLES/);
   assert.doesNotMatch(out.text ?? "", /Prometheus Studio CLI \(over @prometheus/); // NOT the global usage
 });
@@ -372,10 +372,10 @@ test("gate --help shows gate synopsis/flags/examples, not the global screen (CLI
 test("help updates shows native usage; a leading slash resolves the same (CLI-049)", async () => {
   const u = await run(["help", "updates"]);
   assert.equal(u.exitCode, 0);
-  assert.match(u.text ?? "", /prom updates/);
+  assert.match(u.text ?? "", /prometheus updates/);
   const slash = await run(["help", "/updates"]);
   assert.equal(slash.exitCode, 0);
-  assert.match(slash.text ?? "", /prom updates/);
+  assert.match(slash.text ?? "", /prometheus updates/);
 });
 
 test("unknown help topic exits 2 and suggests the closest command (CLI-049)", async () => {
@@ -446,7 +446,7 @@ test("parity guard: a fake verb is neither routable nor listed (both directions)
   for (const v of RECOGNIZED_VERBS) assert.ok(ROUTED_VERBS.includes(v), `${v} routed but unlisted`);
 });
 
-/* ── CLI-083: stdin-piped prompt for a one-shot `prom chat` ─────────────────────── */
+/* ── CLI-083: stdin-piped prompt for a one-shot `prometheus chat` ─────────────────────── */
 
 /** An async source over a list of chunks (mimics process.stdin). */
 async function* src(...chunks: (string | Buffer)[]): AsyncIterable<string | Buffer> {
@@ -499,7 +499,7 @@ test("CLI-083 shouldReadStdinPrompt: only chat + no positional + non-TTY + not -
 
 test("CLI-086 PROM_VERSION is real + equals apps/cli/package.json (never 0.0.0, module-relative)", () => {
   assert.notEqual(PROM_VERSION, "0.0.0", "PROM_VERSION must not regress to the hardcoded 0.0.0");
-  // read package.json via a MODULE-relative path (this test file is apps/cli/src/prom.test.ts →
+  // read package.json via a MODULE-relative path (this test file is apps/cli/src/prometheus.test.ts →
   // ../package.json), matching how resolvePromVersion walks up from its own module — cwd-independent.
   const pkg = JSON.parse(
     readFileSync(join(dirname(fileURLToPath(import.meta.url)), "..", "package.json"), "utf8"),
@@ -517,8 +517,9 @@ test("CLI-098 package.json is npm-publish-ready (pack-audit: whitelist + zero wo
   // strict files whitelist ⇒ no src/test/map/dev-register can ever reach the tarball.
   assert.deepEqual(pkg.files, ["dist/bin.js", "README.md"]);
   assert.equal(pkg.engines?.node, ">=20");
-  assert.equal(pkg.bin?.prom, "dist/bin.js");
+  // `prometheus` is the ONE published command name — the old `prom` alias is gone.
   assert.equal(pkg.bin?.prometheus, "dist/bin.js");
+  assert.deepEqual(Object.keys(pkg.bin ?? {}), ["prometheus"]);
   assert.equal(pkg.publishConfig?.access, "public");
   assert.ok(pkg.scripts?.prepack?.includes("bundle"), "prepack must produce the bundle");
   // the published `dependencies` must carry NO `workspace:*` (they'd 404 on install) — the
@@ -539,7 +540,10 @@ test("CLI-086 runVersion reports the CLI + detected ENGINE version, exits 0 (tex
   assert.ok(j.json?.engine === null || typeof j.json?.engine === "string"); // honest null when missing
   const t = await runVersion(makeContext(parseArgs(["--version"])));
   assert.equal(t.exitCode, 0);
-  assert.match(t.text ?? "", new RegExp(`^prom ${PROM_VERSION.replace(/\./g, "\\.")} \\(engine `));
+  assert.match(
+    t.text ?? "",
+    new RegExp(`^prometheus ${PROM_VERSION.replace(/\./g, "\\.")} \\(engine `),
+  );
 });
 
 test("CLI-086 an unlocatable engine → engine null, CLI still exits 0", async () => {
@@ -596,7 +600,7 @@ test("CLI-087 missing engine → ONE warning, no probe (spawn-free fast path)", 
   const m = memHandshake({ enginePath: () => undefined });
   const r = await engineHandshake(m.deps);
   assert.equal(r.verdict, "missing");
-  assert.match(r.warning ?? "", /engine not found.*prom doctor/);
+  assert.match(r.warning ?? "", /engine not found.*prometheus doctor/);
   assert.equal(r.probed, false);
   assert.equal(m.detectCalls, 0);
 });

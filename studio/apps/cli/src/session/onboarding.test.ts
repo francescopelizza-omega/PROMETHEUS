@@ -130,7 +130,7 @@ test("runSetup: paid branch lists installed CLIs (no endpoint adopted)", async (
     ask: scriptedAsk(["2"]),
   });
   assert.equal(r.endpoint, undefined);
-  assert.match(out.join("\n"), /prom chat --cli claude --open/);
+  assert.match(out.join("\n"), /prometheus chat --cli claude --open/);
 });
 
 test("runSetup: choosing 0 skips cleanly (no endpoint, no spawn)", async () => {

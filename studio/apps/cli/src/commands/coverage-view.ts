@@ -1,5 +1,5 @@
 /**
- * commands/coverage-view.ts — PURE terminal coverage-bar renderer for `prom test coverage` (CLI-095).
+ * commands/coverage-view.ts — PURE terminal coverage-bar renderer for `prometheus test coverage` (CLI-095).
  *
  * A fixed-width fill bar (`█████████▌░` via the left-eighth block set U+258F..U+2588) drawn from a
  * coverage percentage. GLYPH-ONLY (no ANSI): the caller tints it with the SAME threshold roles the

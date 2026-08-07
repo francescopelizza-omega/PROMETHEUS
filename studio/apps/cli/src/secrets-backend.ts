@@ -1,7 +1,7 @@
 /**
  * secrets-backend.ts — a CLI-process `SecretsStore` over the OS keychain (CLI-028).
  *
- * The desktop's Electron `safeStorage` backend is NOT reachable from a bare `prom`
+ * The desktop's Electron `safeStorage` backend is NOT reachable from a bare `prometheus`
  * process, so the CLI stores provider keys with the OS keychain TOOLS directly:
  * macOS `security …-generic-password`, Linux `secret-tool` (libsecret). Both run via a
  * shell-free spawn with a sanitized env; the account/service argv never start with `-`

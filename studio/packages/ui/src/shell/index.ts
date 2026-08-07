@@ -1,6 +1,6 @@
 /**
  * shell/ barrel (file 08 §4). The PURE, framework-free shell model shared by the
- * desktop IDE frame AND the `prom` TUI (file 08 §8): the activity-rail routing,
+ * desktop IDE frame AND the `prometheus` TUI (file 08 §8): the activity-rail routing,
  * the ⌘K palette fuzzy filter, the nemesis-shield state machine, and the §6
  * theme-resolution brain. No React, no DOM — every export is unit-testable from
  * TS source. The desktop renderer's shell/ components BIND these to React + the

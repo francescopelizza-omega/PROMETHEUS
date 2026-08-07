@@ -202,7 +202,7 @@ function modeRole(mode: PermissionModeId): Role {
  */
 export function statusLines(m: StatusModel, width: number, caps: ColorCaps): string[] {
   const meta = permissionModeMeta(m.permMode);
-  const modeChip = `[PROM:${meta.label.toUpperCase().replace(/\s+/g, "-")}]`;
+  const modeChip = `[PROMETHEUS:${meta.label.toUpperCase().replace(/\s+/g, "-")}]`;
 
   const left: Segment[] = [
     { text: modeChip, role: modeRole(m.permMode) },

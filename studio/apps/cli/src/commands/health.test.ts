@@ -1,5 +1,5 @@
 /**
- * health.test.ts — the `prom doctor` environment-check registry (CLI-051).
+ * health.test.ts — the `prometheus doctor` environment-check registry (CLI-051).
  *
  * Every check is exercised through injected deps — NO real spawn / fs / network — so the table,
  * the per-status marks, the remedy lines, the exit-code aggregation, and the --json shape are all

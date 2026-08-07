@@ -25,7 +25,7 @@ const ALL_IDS = [...new Set(COMMAND_SPECS.map((c) => c.id))];
 
 test("CLI-100 bash: valid shape + `bash -n` syntax check passes", () => {
   const script = bashCompletion();
-  assert.match(script, /complete -F _prom prom prometheus/);
+  assert.match(script, /complete -F _prometheus prometheus/);
   assert.match(script, /compgen -W/);
   // syntactically valid to the actual shell (a metachar name would fail here even if it "appears").
   const bash = spawnSync("bash", ["-n"], { input: script, encoding: "utf8" });
@@ -35,17 +35,17 @@ test("CLI-100 bash: valid shape + `bash -n` syntax check passes", () => {
 
 test("CLI-100 zsh: #compdef header + _describe", () => {
   const script = zshCompletion();
-  assert.match(script, /^#compdef prom prometheus/);
+  assert.match(script, /^#compdef prometheus/);
   assert.match(script, /_describe -t commands/);
   // zsh -n if available.
   const zsh = spawnSync("zsh", ["-n"], { input: script, encoding: "utf8" });
   if (!zsh.error) assert.equal(zsh.status, 0, `zsh -n failed: ${zsh.stderr}`);
 });
 
-test("CLI-100 fish: complete -c prom lines, single-quoted + auto-load convention", () => {
+test("CLI-100 fish: complete -c prometheus lines, single-quoted + auto-load convention", () => {
   const script = fishCompletion();
-  assert.match(script, /complete -c prom -f/);
-  assert.match(script, /complete -c prom -n '__fish_use_subcommand' -a '/);
+  assert.match(script, /complete -c prometheus -f/);
+  assert.match(script, /complete -c prometheus -n '__fish_use_subcommand' -a '/);
 });
 
 test("CLI-100 REGRESSION GUARD: every CommandSpec id appears in every generated script", () => {
@@ -84,7 +84,7 @@ test("CLI-100 security: interpolated command/flag names are metachar-free (can't
 
 test("CLI-100 runCompletion: bash/zsh/fish print scripts; unknown shell → exit 2", () => {
   const ctx = (argv: string[]) => makeContext(parseArgs(argv));
-  assert.match(runCompletion(ctx(["completion", "bash"])).text ?? "", /complete -F _prom/);
+  assert.match(runCompletion(ctx(["completion", "bash"])).text ?? "", /complete -F _prometheus/);
   assert.equal(runCompletion(ctx(["completion", "zsh"])).exitCode, 0);
   assert.equal(runCompletion(ctx(["completion", "fish"])).exitCode, 0);
   const bad = runCompletion(ctx(["completion", "powershell"]));
@@ -103,7 +103,7 @@ test("CLI-100 runCompletion: bash/zsh/fish print scripts; unknown shell → exit
 
 test("CLI-100 man: valid roff header + a .TP per command + copyable flags (\\-)", () => {
   const page = manPage({ version: "0.1.0", date: "2026-07-18" });
-  assert.match(page, /^\.TH PROM 1 "2026-07-18" "prom 0\.1\.0"/);
+  assert.match(page, /^\.TH PROMETHEUS 1 "2026-07-18" "prometheus 0\.1\.0"/);
   assert.match(page, /\.SH NAME/);
   assert.match(page, /\.SH SYNOPSIS/);
   assert.match(page, /\.SH COMMANDS/);

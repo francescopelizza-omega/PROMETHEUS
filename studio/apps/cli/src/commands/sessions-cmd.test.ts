@@ -1,5 +1,5 @@
 /**
- * sessions-cmd.test.ts — `prom sessions list/search/fork/delete` routing, exit
+ * sessions-cmd.test.ts — `prometheus sessions list/search/fork/delete` routing, exit
  * codes, --json envelopes, and the delete typed-confirm gate (CLI-014).
  */
 import assert from "node:assert/strict";

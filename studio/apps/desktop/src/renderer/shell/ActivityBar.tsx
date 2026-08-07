@@ -3,7 +3,7 @@
  *
  * "Where am I": an ordered icon list, each opening a contextual sidebar + a
  * default workbench route. Renders the PURE ACTIVITIES + PINNED model from
- * @prometheus/ui (shared with the prom TUI, §8). The active item is brand-tinted
+ * @prometheus/ui (shared with the prometheus TUI, §8). The active item is brand-tinted
  * (rounded pill + glowing left bar + brand→accent gradient glyph); the
  * pinned-bottom group is the engine status pulse (+ glowing health dot) + Settings.
  *

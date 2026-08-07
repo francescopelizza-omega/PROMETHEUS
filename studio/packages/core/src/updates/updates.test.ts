@@ -10,7 +10,12 @@ import { updates as u } from "../index.js";
 
 test("parseVersion tolerates v-prefix, surrounding text, prerelease", () => {
   assert.deepEqual(u.parseVersion("v1.2.3"), { major: 1, minor: 2, patch: 3, prerelease: "" });
-  assert.deepEqual(u.parseVersion("prom 0.0.0"), { major: 0, minor: 0, patch: 0, prerelease: "" });
+  assert.deepEqual(u.parseVersion("prometheus 0.0.0"), {
+    major: 0,
+    minor: 0,
+    patch: 0,
+    prerelease: "",
+  });
   assert.equal(u.parseVersion("2.0.0-rc.1+build")?.prerelease, "rc.1");
   assert.equal(u.parseVersion("not a version"), null);
 });
@@ -116,7 +121,7 @@ function sampleReport(over: Partial<u.UpdateReport> = {}): u.UpdateReport {
     ],
     models: { diff: { changed: ["qwen2.5-coder:7b"], added: [], removed: [] }, suggestions: [] },
     self: {
-      prom: "0.0.0",
+      prometheus: "0.0.0",
       engine: "0.15.0",
       updateAvailable: false,
       plan: u.buildSelfUpdatePlan({ method: "git", repoDir: "/p" }),

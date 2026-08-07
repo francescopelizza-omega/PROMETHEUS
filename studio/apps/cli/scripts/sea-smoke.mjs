@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * sea-smoke.mjs — prove the SEA `prom` binary works WITHOUT node_modules / a repo checkout (CLI-099).
+ * sea-smoke.mjs — prove the SEA `prometheus` binary works WITHOUT node_modules / a repo checkout (CLI-099).
  *
  * Runs the built binary from a throwaway temp cwd for `help`, `--version`, and `gate <fixture>`, and
  * asserts:
@@ -19,8 +19,8 @@ import { fileURLToPath } from "node:url";
 const HERE = dirname(fileURLToPath(import.meta.url));
 const CLI = join(HERE, "..");
 const target = `${process.platform}-${process.arch}`;
-// mirror build-sea.mjs's output naming: Windows → prom.exe, else prom-<os>-<arch>.
-const bin = join(CLI, "release", target.startsWith("win") ? "prom.exe" : `prom-${target}`);
+// mirror build-sea.mjs's output naming: Windows → prometheus.exe, else prom-<os>-<arch>.
+const bin = join(CLI, "release", target.startsWith("win") ? "prometheus.exe" : `prom-${target}`);
 
 if (!existsSync(bin)) {
   console.error(`[smoke] binary not found: ${bin} — run \`node scripts/build-sea.mjs\` first`);
@@ -52,24 +52,27 @@ const runDev = (args) =>
 
 try {
   const help = runBin(["help"]);
-  check("prom help exits 0 (no node_modules)", help.status === 0, `exit ${help.status}`);
-  check("prom help prints usage", /USAGE|prom /.test(help.stdout ?? ""));
+  check("prometheus help exits 0 (no node_modules)", help.status === 0, `exit ${help.status}`);
+  check("prometheus help prints usage", /USAGE|prometheus /.test(help.stdout ?? ""));
 
   const ver = runBin(["--version"]);
-  check("prom --version exits 0", ver.status === 0, `exit ${ver.status}`);
-  check("prom --version prints a version", /prom \d|prom \S/.test(ver.stdout ?? ""));
+  check("prometheus --version exits 0", ver.status === 0, `exit ${ver.status}`);
+  check(
+    "prometheus --version prints a version",
+    /prometheus \d|prometheus \S/.test(ver.stdout ?? ""),
+  );
 
   // gate parity: the binary and the dev CLI must agree on the tier exit code for the same input+env.
   const VALID_TIERS = new Set([0, 10, 20, 2]);
   const gBin = runBin(["gate", fixture]);
   const gDev = runDev(["gate", fixture]);
   check(
-    "prom gate returns a valid nemesis tier exit",
+    "prometheus gate returns a valid nemesis tier exit",
     VALID_TIERS.has(gBin.status ?? -1),
     `exit ${gBin.status}`,
   );
   check(
-    "prom gate exit matches the dev/npm CLI (parity)",
+    "prometheus gate exit matches the dev/npm CLI (parity)",
     gBin.status === gDev.status,
     `binary ${gBin.status} vs dev ${gDev.status}`,
   );

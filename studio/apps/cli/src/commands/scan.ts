@@ -1,5 +1,5 @@
 /**
- * commands/scan.ts — `prom scan`: detect installed AI agents/CLIs/IDEs.
+ * commands/scan.ts — `prometheus scan`: detect installed AI agents/CLIs/IDEs.
  *
  * Renders the engine's `scan` envelope (agents[]) as a table. Pure rendering of
  * what the engine reported (C5) — the CLI decides nothing about the host.

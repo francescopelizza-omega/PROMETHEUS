@@ -766,7 +766,7 @@ export function EditorRoute({
             }),
           );
           break;
-        // Run toolbar surface (APP-034) — ids namespaced run.* (the prom CLI
+        // Run toolbar surface (APP-034) — ids namespaced run.* (the prometheus CLI
         // reserves plain `run`).
         case "run.config": {
           const cfg = runConfigs[runCfgIdx];

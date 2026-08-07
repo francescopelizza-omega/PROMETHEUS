@@ -149,7 +149,7 @@ jobs:
         run: npm publish --dry-run
 
       # Install the packed tarball into a throwaway prefix and prove the shims run on Node 20.
-      - name: Pack + global install smoke (prom --version / prom help)
+      - name: Pack + global install smoke (prometheus --version / prometheus help)
         working-directory: PROMETHEUS/studio/apps/cli
         run: |
           set -euo pipefail
@@ -161,6 +161,6 @@ jobs:
           fi
           PREFIX="$(mktemp -d)"
           npm i -g --prefix "$PREFIX" "./$TGZ"
-          "$PREFIX/bin/prom" --version
-          "$PREFIX/bin/prom" help >/dev/null
+          "$PREFIX/bin/prometheus" --version
+          "$PREFIX/bin/prometheus" help >/dev/null
           echo "install smoke OK"

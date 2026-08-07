@@ -233,7 +233,7 @@ export function CustomThemeEditor({
           <div style={{ color: "var(--text-primary)" }}>2 def run(cmd): ...</div>
           <div style={{ color: "var(--danger)" }}>3 os.system(cmd) ⛔ PROM-OS-EXEC-001</div>
           <div style={{ color: "var(--text-secondary)", marginTop: "var(--space-2, 4px)" }}>
-            chrome · prom py3.12 · ⎇ main
+            chrome · prometheus py3.12 · ⎇ main
           </div>
           <div style={{ color: "var(--ok)" }}>● 4 passed</div>
         </div>

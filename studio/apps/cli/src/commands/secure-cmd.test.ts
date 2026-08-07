@@ -1,5 +1,5 @@
 /**
- * secure-cmd.test.ts — the `prom secure …` surface (file 03): the trust ledger /
+ * secure-cmd.test.ts — the `prometheus secure …` surface (file 03): the trust ledger /
  * threat-DB reads, the preview→execute remediation, and the never-force gate. The
  * engine-bridge security functions are injected as fakes — no nemesis spawn.
  */
@@ -355,7 +355,7 @@ test("CLI-079 the filter the CLI builds is the one handed to auditLog", async ()
 test("CLI-079 `gate history` reuses `secure trust log`'s exact renderer (one code path, no drift)", () => {
   // gate.ts imports `buildAuditFilter` + `renderAuditLog` from secure-cmd (proven by this shared
   // import compiling); the renderer is deterministic, so identical (json, filter, rows) → identical
-  // output. `prom gate history` itself is verified to return the audit envelope end-to-end.
+  // output. `prometheus gate history` itself is verified to return the audit envelope end-to-end.
   const ctx = ctxFor2(["secure", "trust", "log", "--blocks", "--since", "2026-07-03", "--json"]);
   const filter = buildAuditFilter(ctx);
   const rows: never[] = [];

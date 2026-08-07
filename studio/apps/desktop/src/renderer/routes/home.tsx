@@ -727,7 +727,7 @@ function wordmark(): CSSProperties {
  * re-tints with the scheme.
  */
 function PrometheusMark({ height = 58 }: { height?: number }): ReactElement {
-  // The muscular Titan holding a thunderbolt (Ϟ) — ported VERBATIM from the `prom` CLI
+  // The muscular Titan holding a thunderbolt (Ϟ) — ported VERBATIM from the `prometheus` CLI
   // startup banner (apps/cli/src/session/host.ts → ZEUS_ROWS) so desktop and terminal
   // share ONE identity. Rendered as block glyphs in a monospace <pre>, colored per
   // muscle zone: silver hair · yellow bolt · cyan arms/pecs · brand abs · blue quads.

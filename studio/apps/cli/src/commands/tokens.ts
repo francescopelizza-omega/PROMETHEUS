@@ -1,13 +1,13 @@
 /**
- * commands/tokens.ts — `prom tokens`: the token-saving toolkit Prometheus proposes
+ * commands/tokens.ts — `prometheus tokens`: the token-saving toolkit Prometheus proposes
  * to cut $ on paid closed models + compute on free local LLMs. Pure read over the
  * core `tokenEconomy` registry; no engine call, no gating.
  *
- *   prom tokens                 the default proposals (low-friction, high-value)
- *   prom tokens --paid          tailored for a paid closed model ($ savings first)
- *   prom tokens all             the full menu (every technique, incl. opt-in)
- *   prom tokens <id>            detail for one tool (install + usage + tradeoff)
- *   prom tokens nano            the honest Gemini-Nano local-feasibility assessment
+ *   prometheus tokens                 the default proposals (low-friction, high-value)
+ *   prometheus tokens --paid          tailored for a paid closed model ($ savings first)
+ *   prometheus tokens all             the full menu (every technique, incl. opt-in)
+ *   prometheus tokens <id>            detail for one tool (install + usage + tradeoff)
+ *   prometheus tokens nano            the honest Gemini-Nano local-feasibility assessment
  */
 import { loadPricing, tokenEconomy } from "@prometheus/core";
 
@@ -18,7 +18,7 @@ import { latestAccountingSession, readAccounting } from "../session/history-stor
 import { isTokenEnabled, readTokenToggles, setTokenToggle } from "./token-toggles.js";
 import { type CacheEconomyReport, buildCacheReport } from "./tokens-report.js";
 
-/** CLI-088: `prom tokens enable|disable <id>` — validate the id, persist the toggle, and label the
+/** CLI-088: `prometheus tokens enable|disable <id>` — validate the id, persist the toggle, and label the
  *  wired/advisory reality (enabling an advisory technique persists but warns it has no runtime effect). */
 function runTokenToggle(ctx: CliContext, verb: "enable" | "disable"): CommandOutcome {
   // action can arrive as command[1] or positionals[0]; the id is the NEXT positional either way.
@@ -30,7 +30,7 @@ function runTokenToggle(ctx: CliContext, verb: "enable" | "disable"): CommandOut
     const near =
       ids.find((x) => id && (x.includes(id) || id.includes(x))) ??
       ids.find((x) => id && x[0] === id[0]);
-    const msg = `unknown technique: ${id || "(none)"}${near ? ` — did you mean '${near}'?` : ""}. See: prom tokens all`;
+    const msg = `unknown technique: ${id || "(none)"}${near ? ` — did you mean '${near}'?` : ""}. See: prometheus tokens all`;
     return { text: c.red(msg), json: { ok: false, error: msg }, exitCode: 1 };
   }
   const enabled = verb === "enable";
@@ -44,7 +44,7 @@ function runTokenToggle(ctx: CliContext, verb: "enable" | "disable"): CommandOut
   const note =
     enabled && advisory
       ? c.yellow(
-          ` — advisory: no runtime effect (apply it yourself; detail: prom tokens ${tool.id})`,
+          ` — advisory: no runtime effect (apply it yourself; detail: prometheus tokens ${tool.id})`,
         )
       : "";
   return { text: `${head} ${c.bold(tool.name)} ${c.dim(`[${wiring}]`)}${note}`, exitCode: 0 };
@@ -63,7 +63,7 @@ function estUsd(n: number): string {
 }
 
 /**
- * CLI-090: `prom tokens report` — MEASURED effectiveness of the token-economy techniques for THIS
+ * CLI-090: `prometheus tokens report` — MEASURED effectiveness of the token-economy techniques for THIS
  * session (the latest accounting file). Reads the cache counters CLI-029 now records; techniques
  * with no runtime signal are labeled "advisory only" rather than shown as a fabricated 0.
  */
@@ -134,8 +134,8 @@ function renderReport(r: CacheEconomyReport): string[] {
   lines.push(
     c.dim(
       r.measurable
-        ? "$ saved is an ESTIMATE from the CLI-058 pricing table · raw counters: prom tokens report --json"
-        : "no cache-read data captured this session (provider may not expose it) · prom tokens report --json",
+        ? "$ saved is an ESTIMATE from the CLI-058 pricing table · raw counters: prometheus tokens report --json"
+        : "no cache-read data captured this session (provider may not expose it) · prometheus tokens report --json",
     ),
   );
   return lines;
@@ -235,14 +235,14 @@ export function runTokens(ctx: CliContext): CommandOutcome {
     );
     lines.push(`  ${c.dim(t.pitch)}`);
     lines.push(`  ${c.dim("→")} ${c.dim(t.tokenSaving)}`);
-    lines.push(`  ${c.dim(`detail: prom tokens ${t.id}`)}`);
+    lines.push(`  ${c.dim(`detail: prometheus tokens ${t.id}`)}`);
   }
   lines.push("");
   lines.push(
     c.dim(
       full
-        ? "★ = proposed by default · detail: prom tokens <id> · Gemini Nano: prom tokens nano"
-        : "full menu: prom tokens all · for a paid model: prom tokens --paid · Gemini Nano: prom tokens nano",
+        ? "★ = proposed by default · detail: prometheus tokens <id> · Gemini Nano: prometheus tokens nano"
+        : "full menu: prometheus tokens all · for a paid model: prometheus tokens --paid · Gemini Nano: prometheus tokens nano",
     ),
   );
   return { text: lines.join("\n"), exitCode: 0 };
@@ -276,7 +276,7 @@ function renderNano(ctx: CliContext): CommandOutcome {
   lines.push("");
   lines.push(c.bold("recommended open ~4GB alternatives (account-free, license-clean)"));
   for (const a of n.alternatives) {
-    lines.push(`  ${c.green("●")} ${a.label}  ${c.dim(`· prom model info ${a.id}`)}`);
+    lines.push(`  ${c.green("●")} ${a.label}  ${c.dim(`· prometheus model info ${a.id}`)}`);
   }
   lines.push("");
   lines.push(c.dim(n.recommendation));

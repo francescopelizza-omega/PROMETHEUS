@@ -339,7 +339,7 @@ test("checkMeteredConsent: metered + no receipt → blocked with the enable-mete
   const ctx = gateCtx({ metered: { providerId: "groq", home: "/x" } });
   const r = checkMeteredConsent(ctx, () => false);
   assert.equal(r.blocked, true);
-  assert.match(r.message ?? "", /prom provider enable-metered groq/);
+  assert.match(r.message ?? "", /prometheus provider enable-metered groq/);
 });
 
 test("checkMeteredConsent: metered + receipt present → allowed", () => {
@@ -1106,7 +1106,7 @@ test("rebuildThread: user/assistant alternate, tool events folded + repainted", 
   assert.match(messages[1]?.content ?? "", /Sure, I'll add it\./);
   assert.match(messages[1]?.content ?? "", /propose_edit/); // tool folded into context
   assert.equal(messages[2]?.content, "now test it");
-  // repaint has the you/prom/tool lines
+  // repaint has the you/prometheus/tool lines
   assert.ok(painted.some((p) => p.role === "you" && p.text === "add a flag"));
   assert.ok(painted.some((p) => p.role === "tool"));
 });

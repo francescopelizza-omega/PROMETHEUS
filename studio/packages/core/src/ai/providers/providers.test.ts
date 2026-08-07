@@ -183,7 +183,7 @@ test("resolveBrain falls to B then C as tiers drop out", () => {
 
 test("resolveBrain returns null when nothing is enabled for the surface", () => {
   const r = resolveBrain(
-    [connector({ providerId: "local", kind: "local-serve", enabledFor: ["prom"] })],
+    [connector({ providerId: "local", kind: "local-serve", enabledFor: ["prometheus"] })],
     "embeddings",
   );
   assert.equal(r, null);

@@ -1,11 +1,11 @@
 import type { CliContext, CommandOutcome } from "../context.js";
 import { c, heading, table } from "../render.js";
 /**
- * commands/agents-cmd.ts — `prom agents [list|attach|kill]` over the background-run table
+ * commands/agents-cmd.ts — `prometheus agents [list|attach|kill]` over the background-run table
  * (CLI-034). A run started detached keeps executing after the pane is left; this surface
  * lists running/finished runs, re-streams a run's buffered + live output on `attach`
  * (Ctrl-C detaches, never kills), and aborts one on `kill`. In-process only — a second
- * `prom` process sees only what it started; that is stated honestly, never faked live.
+ * `prometheus` process sees only what it started; that is stated honestly, never faked live.
  */
 import { type RunRecord, type RunRegistry, runRegistry } from "../session/orchestrator.js";
 
@@ -55,7 +55,7 @@ export async function runAgentsCommand(
     const id = ctx.args.positionals[0];
     if (!id)
       return {
-        text: c.red("usage: prom agents kill <id>"),
+        text: c.red("usage: prometheus agents kill <id>"),
         json: { ok: false, error: "missing-id" },
         exitCode: 2,
       };
@@ -77,7 +77,7 @@ export async function runAgentsCommand(
     const id = ctx.args.positionals[0];
     if (!id)
       return {
-        text: c.red("usage: prom agents attach <id>"),
+        text: c.red("usage: prometheus agents attach <id>"),
         json: { ok: false, error: "missing-id" },
         exitCode: 2,
       };

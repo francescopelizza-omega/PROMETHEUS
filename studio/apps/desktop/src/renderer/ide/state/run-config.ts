@@ -6,7 +6,7 @@
  * `RunConfig[]`, and resolves a compound configuration into its ordered member launch
  * sequence (cycle-guarded). This is the model DebugPanel's picker + the future Run
  * toolbar consume; keeping it PURE (no react/monaco/engine) makes it node:test-able and
- * shareable with the prom CLI `/run` surface. The DAP request mapping stays in
+ * shareable with the prometheus CLI `/run` surface. The DAP request mapping stays in
  * DebugPanel (it is transport-specific).
  */
 

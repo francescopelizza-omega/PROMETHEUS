@@ -1,5 +1,5 @@
 /**
- * diagram-cmd.test.ts — `prom diagram uml|deps` with an injected fake runSidecar
+ * diagram-cmd.test.ts — `prometheus diagram uml|deps` with an injected fake runSidecar
  * (no real python spawn). Covers verb routing, exit codes, --json passthrough,
  * --out write (+ .md fence + overwrite guard), --summary, and the path guard (CLI-008).
  */

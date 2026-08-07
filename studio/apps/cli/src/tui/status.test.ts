@@ -43,7 +43,7 @@ test("justify places left + right with a gap filling the width", () => {
 
 test("justify drops right segments tail-first when they don't fit", () => {
   const line = justify(
-    [{ text: "[PROM:DEFAULT]", role: "muted" }],
+    [{ text: "[PROMETHEUS:DEFAULT]", role: "muted" }],
     [
       { text: "modelnamelong", role: "muted" },
       { text: "/default", role: "modelOpen" },
@@ -53,7 +53,7 @@ test("justify drops right segments tail-first when they don't fit", () => {
     "none",
   );
   assert.ok(strip(line).length <= 24);
-  assert.ok(strip(line).includes("[PROM:DEFAULT]")); // left is load-bearing, kept
+  assert.ok(strip(line).includes("[PROMETHEUS:DEFAULT]")); // left is load-bearing, kept
 });
 
 test("default mode: bar + hint only (no indicator line)", () => {
@@ -61,7 +61,7 @@ test("default mode: bar + hint only (no indicator line)", () => {
   // immediately left of the model and is always kept — it drops last on a narrow terminal).
   const lines = statusLines(BASE, 80, "none");
   assert.equal(lines.length, 2); // bar + hint
-  assert.match(lines[0] ?? "", /\[PROM:DEFAULT\]/);
+  assert.match(lines[0] ?? "", /\[PROMETHEUS:DEFAULT\]/);
   assert.match(lines[0] ?? "", /auth:1·readonly/); // authorisation chip, left of the model
   assert.match(lines[0] ?? "", /\/default/); // profile chip
   assert.match(lines[1] ?? "", /commands/); // hint
@@ -70,7 +70,7 @@ test("default mode: bar + hint only (no indicator line)", () => {
 test("bypass mode: indicator line shows the exact bypass text", () => {
   const lines = statusLines({ ...BASE, permMode: "bypassPermissions" }, 60, "none");
   assert.equal(lines.length, 3); // bar + indicator + hint
-  assert.match(lines[0] ?? "", /\[PROM:BYPASS-PERMISSIONS\]/);
+  assert.match(lines[0] ?? "", /\[PROMETHEUS:BYPASS-PERMISSIONS\]/);
   assert.equal(lines[1], "⏵⏵ bypass permissions on");
 });
 
@@ -83,9 +83,11 @@ test("plan + acceptEdits indicators", () => {
 });
 
 test("local model paints modelOpen, cloud paints modelPaid (truecolor)", () => {
-  const local = statusLines(BASE, 60, "truecolor")[0] ?? "";
+  // 80 cols: the narrowest width that still paints the model segment (the `[PROMETHEUS:…]`
+  // chip is wider than the old `[PROM:…]`, so 60 now drops the model on both sides).
+  const local = statusLines(BASE, 80, "truecolor")[0] ?? "";
   const cloud =
-    statusLines({ ...BASE, model: "opus", modelSource: "cloud" }, 60, "truecolor")[0] ?? "";
+    statusLines({ ...BASE, model: "opus", modelSource: "cloud" }, 80, "truecolor")[0] ?? "";
   assert.match(local, /38;2;/); // colored
   assert.notEqual(strip(local), strip(cloud)); // different model text
 });

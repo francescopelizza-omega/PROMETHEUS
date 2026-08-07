@@ -1,5 +1,5 @@
 /**
- * tokens.test.ts — `prom tokens` (toolkit proposals + tool detail + Gemini Nano).
+ * tokens.test.ts — `prometheus tokens` (toolkit proposals + tool detail + Gemini Nano).
  */
 import assert from "node:assert/strict";
 import test from "node:test";
@@ -10,26 +10,26 @@ import { runTokens } from "./tokens.js";
 
 const ctxFor = (argv: string[]) => makeContext(parseArgs(argv));
 
-test("prom tokens: proposes the default toolkit (exit 0)", () => {
+test("prometheus tokens: proposes the default toolkit (exit 0)", () => {
   const out = runTokens(ctxFor(["tokens"]));
   assert.equal(out.exitCode, 0);
   assert.match(out.text ?? "", /Token-saving toolkit/);
 });
 
-test("prom tokens all --json: full menu includes experimental nano connector", () => {
+test("prometheus tokens all --json: full menu includes experimental nano connector", () => {
   const out = runTokens(ctxFor(["tokens", "all", "--json"]));
   const j = out.json as { tools: { id: string }[] };
   assert.ok(j.tools.some((t) => t.id === "gemini-nano-chrome"));
   assert.ok(j.tools.some((t) => t.id === "terse-output"));
 });
 
-test("prom tokens <id>: tool detail renders install + tradeoff", () => {
+test("prometheus tokens <id>: tool detail renders install + tradeoff", () => {
   const out = runTokens(ctxFor(["tokens", "terse-output"]));
   assert.equal(out.exitCode, 0);
   assert.match(out.text ?? "", /tradeoff/);
 });
 
-test("prom tokens nano: honest PARTIAL verdict, no weight extraction endorsed", () => {
+test("prometheus tokens nano: honest PARTIAL verdict, no weight extraction endorsed", () => {
   const out = runTokens(ctxFor(["tokens", "nano", "--json"]));
   const j = out.json as { geminiNano: { feasible: string; weightsRedistributable: boolean } };
   assert.equal(j.geminiNano.feasible, "partial");
@@ -103,7 +103,7 @@ test("CLI-088 persistence round-trips across a fresh read (restart-equivalent) o
   }
 });
 
-/* ── CLI-090: `prom tokens report` — measured effectiveness ──────────────────────── */
+/* ── CLI-090: `prometheus tokens report` — measured effectiveness ──────────────────────── */
 
 import { mkdirSync, writeFileSync } from "node:fs";
 

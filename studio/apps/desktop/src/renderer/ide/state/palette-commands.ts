@@ -6,7 +6,7 @@
  * actually handled by EditorRoute.runCommand — no entry may fall into its default.
  *
  * Ids mirror @prometheus/core's editor-command-registry EDITOR_COMMANDS (the single
- * source shared with `prom`) by convention. NOTE `ai.openAgent` is deliberately NOT
+ * source shared with `prometheus`) by convention. NOTE `ai.openAgent` is deliberately NOT
  * surfaced here (APP-004): in the editor route the agent pane is always mounted, so
  * the entry was a documented no-op. The id itself still exists in core EDITOR_COMMANDS
  * and the shell registry (where it toggles the right rail) — only this surfacing died.
@@ -91,7 +91,7 @@ export const PALETTE_COMMANDS: readonly PaletteCommand[] = [
   { id: "generate.docstring", title: "Generate: Docstring Stub (Python)", category: "Generate" },
   { id: "generate.newFile", title: "Generate: New File from Template", category: "Generate" },
   { id: "generate.copyright", title: "Generate: Insert Copyright Header", category: "Generate" },
-  // Run toolbar + Run-Anything picker (APP-034) — ids namespaced run.* (the prom
+  // Run toolbar + Run-Anything picker (APP-034) — ids namespaced run.* (the prometheus
   // CLI reserves plain `run`); dispatched by EditorRoute.runCommand.
   { id: "run.config", title: "Run: Selected Configuration", category: "Run" },
   { id: "run.debug", title: "Run: Debug Selected Configuration", category: "Run" },

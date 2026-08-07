@@ -1,5 +1,5 @@
 /**
- * commands/flaky-detect.ts — PURE flaky-test classification for `prom test run --retry-failed` (CLI-094).
+ * commands/flaky-detect.ts — PURE flaky-test classification for `prometheus test run --retry-failed` (CLI-094).
  *
  * A test's truth isn't one pass/fail — it's the SEQUENCE across repeated runs. This file owns the
  * pure decision logic (no subprocess, no fs, no clock); test-cmd.ts drives the actual re-runs and

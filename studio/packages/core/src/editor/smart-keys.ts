@@ -5,7 +5,7 @@
  * Framework-free by contract (file 07 §8 / this package's GOLDEN RULE): every
  * function here RETURNS plain data — `{ range, text }` edits with 1-based
  * line/col positions — and the host (EditorPane via Monaco `executeEdits`,
- * `prom` via its buffer math) translates to its own types. NO monaco/react/
+ * `prometheus` via its buffer math) translates to its own types. NO monaco/react/
  * electron imports, ever: leaking a `monaco.Selection` here breaks the core
  * build for the CLI.
  *
@@ -15,7 +15,7 @@
  * (Monaco's getLineContent strips the EOL, so the host never passes one). The
  * worst case is a slightly-off completion the user undoes — the edit is always
  * confined to the caret's line plus the lines it inserts, never other content.
- * `clipPush`/`clipCycle` are the host-agnostic ring reducer for `prom` parity; the
+ * `clipPush`/`clipCycle` are the host-agnostic ring reducer for `prometheus` parity; the
  * renderer's own clipboard-store keeps its `pushClip` (same math, its own tests).
  *
  * Node built-ins only (none needed — pure string math).

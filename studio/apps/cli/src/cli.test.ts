@@ -1,5 +1,5 @@
 /**
- * cli.test.ts — node:test smoke + unit tests for the prom CLI.
+ * cli.test.ts — node:test smoke + unit tests for the prometheus CLI.
  *
  * Covers: the hand-rolled arg parser (global flags, two-word commands, aliases,
  * "--" passthrough), the verdict->exit-code mapping, and a LIVE smoke test of
@@ -123,7 +123,7 @@ test("parseSidecarObject returns null on garbage", () => {
 test("dispatch version --json", async () => {
   const out = await dispatch(parseArgs(["--version", "--json"]));
   assert.equal(out.exitCode, 0);
-  assert.equal((out.json as { name: string }).name, "prom");
+  assert.equal((out.json as { name: string }).name, "prometheus");
 });
 
 test("dispatch help is exit 0", async () => {
@@ -142,7 +142,7 @@ const ENGINE_PY =
   process.env.PROMETHEUS_PY ?? "/Users/dev/ALPHA/PROMETHEUS/prometheus.py";
 
 test(
-  "smoke: prom scan returns an agents envelope from the real engine",
+  "smoke: prometheus scan returns an agents envelope from the real engine",
   { skip: existsSync(ENGINE_PY) ? false : `engine not found at ${ENGINE_PY}` },
   async () => {
     const out = await dispatch(parseArgs(["scan", "--json"]));
@@ -155,7 +155,7 @@ test(
 );
 
 test(
-  "smoke: prom env list returns environments from the sidecar (auto-skip)",
+  "smoke: prometheus env list returns environments from the sidecar (auto-skip)",
   {
     skip: existsSync("/Users/dev/ALPHA/PROMETHEUS/studio/python/sidecar/envmgr.py")
       ? false

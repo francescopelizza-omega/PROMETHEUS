@@ -63,12 +63,12 @@ test("renderPane transcript: renders speakers and multi-line continuation", () =
     pane: "transcript",
     state: stateWith([
       { role: "you", text: "hello" },
-      { role: "prom", text: "line one\nline two" },
+      { role: "prometheus", text: "line one\nline two" },
       { role: "system", text: "noted" },
     ]),
   });
   assert.match(out, /you hello/);
-  assert.match(out, /prom line one/);
+  assert.match(out, /prometheus line one/);
   // continuation line is indented under the speaker, not re-prefixed
   assert.match(out, /\n {5}line two/);
   assert.match(out, /system noted/);

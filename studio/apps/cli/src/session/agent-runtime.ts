@@ -312,7 +312,7 @@ export interface SessionCtx {
   /** cost budget guardrail (CLI-030): evaluated before each METERED turn; local turns bypass. */
   budget?: BudgetGuard;
   /** metered-consent gate (CLI-031): set ONLY for a Tier-C api-key endpoint; the first call
-   * refuses until `prom provider enable-metered <id>` mints the consent receipt. */
+   * refuses until `prometheus provider enable-metered <id>` mints the consent receipt. */
   metered?: { providerId: string; home: string };
   /** the built-in repo map (CLI-053): a getter returning the rendered file+symbol map to inject
    * as a dedicated system-context block, or null when OFF / not yet built. A getter (not a value)
@@ -341,7 +341,7 @@ export function checkMeteredConsent(
   if (has(m.providerId, m.home)) return { blocked: false };
   return {
     blocked: true,
-    message: `metered provider "${m.providerId}" not enabled — run: prom provider enable-metered ${m.providerId}`,
+    message: `metered provider "${m.providerId}" not enabled — run: prometheus provider enable-metered ${m.providerId}`,
   };
 }
 
@@ -416,7 +416,7 @@ export function checkBudgetGate(
 
 /** A repaint line for a restored transcript (the pane replays these). */
 export interface RestoredLine {
-  role: "you" | "prom" | "tool";
+  role: "you" | "prometheus" | "tool";
   text: string;
 }
 
@@ -1655,7 +1655,7 @@ async function offlineReply(ctx: SessionCtx, message: string): Promise<string> {
   // NEVER route a paid/cloud model name (e.g. claude-opus) to the LOCAL runner: it isn't
   // an Ollama model and would just fail with a confusing 'server unreachable'. Guide instead.
   if (!LOCAL_PROVIDERS.has(provider)) {
-    return `'${model}' is a paid/cloud model (${provider}) — it can't run on the local runner. Type /setup to download a free local model, or launch a paid CLI (e.g. \`prom chat --cli claude --open\`). To force a local model: /model ollama:<tag>.`;
+    return `'${model}' is a paid/cloud model (${provider}) — it can't run on the local runner. Type /setup to download a free local model, or launch a paid CLI (e.g. \`prometheus chat --cli claude --open\`). To force a local model: /model ollama:<tag>.`;
   }
   try {
     // `--` end-of-options separator: the user message may legitimately start with `-`,

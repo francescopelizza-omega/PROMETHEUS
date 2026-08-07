@@ -156,12 +156,12 @@ test("renderItemCard: methods + tutorial markdown sections appear when present",
 
 test("renderItemCard: tutorial hint shown when available but not fetched", () => {
   const out = renderItemCard(card({ has_tutorial: true, tutorial: undefined }));
-  assert.match(out, /prom tutorial crewai/);
+  assert.match(out, /prometheus tutorial crewai/);
 });
 
 test("renderItemCard: no tutorial hint when none exists", () => {
   const out = renderItemCard(card({ has_tutorial: false, tutorial: undefined }));
-  assert.doesNotMatch(out, /prom tutorial/);
+  assert.doesNotMatch(out, /prometheus tutorial/);
 });
 
 test("renderItemCard: output is plain (no ANSI escapes / no box-drawing)", () => {

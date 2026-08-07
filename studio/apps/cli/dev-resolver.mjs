@@ -1,7 +1,7 @@
 import { existsSync } from "node:fs";
 import { dirname, resolve as resolvePath } from "node:path";
 /**
- * dev-resolver.mjs — a tiny ESM resolver hook so the prom CLI RUNS directly from
+ * dev-resolver.mjs — a tiny ESM resolver hook so the prometheus CLI RUNS directly from
  * TypeScript source under Node 20+ (native type-stripping) WITHOUT a build step
  * or installed node_modules. It maps the workspace bare specifiers
  * `@prometheus/engine-bridge` and `@prometheus/core` to each package's

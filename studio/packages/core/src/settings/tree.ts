@@ -175,7 +175,7 @@ export const SETTINGS_TREE: readonly SettingsNode[] = Object.freeze([
         { searchTerms: ["venv", "conda", "interpreter"] },
       ),
       node("console", "Console", "Build, Execution, Deployment", "13", "page", {
-        searchTerms: ["terminal", "ai preset", "prom chat"],
+        searchTerms: ["terminal", "ai preset", "prometheus chat"],
       }),
       node("services", "Docker / Services", "Build, Execution, Deployment", "05", "page", {
         searchTerms: ["model server", "worldsim", "services"],

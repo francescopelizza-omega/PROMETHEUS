@@ -6,7 +6,7 @@
  * real prometheus.py subcommand and running it through the bridge with the §1 globals
  * BEFORE the subcommand (toEngineArgv). Verbs the engine has no verb for yet (model
  * pull/serve, env create, repo add — owned by [[04]]/[[05]]/[[06]]) return a
- * not-yet-wired stub: prom NEVER fakes success (§2).
+ * not-yet-wired stub: prometheus NEVER fakes success (§2).
  */
 import {
   type EngineEnvelope,
@@ -67,7 +67,7 @@ export function engineSubcommand(path: string[], positionals: string[]): string[
 export function notYetWired(path: string[]): CommandOutcome {
   const cmd = path.join(" ");
   return {
-    text: `prom ${cmd}: not yet wired.\nThis capability is owned by a feature file still landing (file 11 §2). It will route\nthrough the engine once the verb exists — prom never fakes success.`,
+    text: `prometheus ${cmd}: not yet wired.\nThis capability is owned by a feature file still landing (file 11 §2). It will route\nthrough the engine once the verb exists — prometheus never fakes success.`,
     json: { ok: false, command: cmd, status: "not-yet-wired" },
     // a missing capability is NOT success — exit nonzero so scripts/CI never read it as done.
     exitCode: 2,
@@ -76,8 +76,8 @@ export function notYetWired(path: string[]): CommandOutcome {
 
 /**
  * The engine COMMAND flags the §2 tree forwards (globals are added by toEngineArgv).
- * This is what makes `prom plugin install foo --only x --host claude`,
- * `prom app install yt-dlp --path /opt`, `prom pentest build --kali`, etc. carry
+ * This is what makes `prometheus plugin install foo --only x --host claude`,
+ * `prometheus app install yt-dlp --path /opt`, `prometheus pentest build --kali`, etc. carry
  * their full GUI affordance set through to the engine instead of silently dropping.
  * `host` is handled separately (the engine's repeatable append flag).
  */
@@ -140,7 +140,7 @@ export function passthroughArgv(flags: Record<string, string | true>): string[] 
  * (verified live: `apps install …` emits "FAIL/OK …" text, not a JSON envelope).
  * These must go through `rawEngine` — the SAME stdout passthrough the GUI uses (file
  * 06 §4.2) — else the JSON parser fails with a spurious `bad_json` over the table.
- * The engine runs its OWN nemesis gate inside these commands (C5); prom just renders.
+ * The engine runs its OWN nemesis gate inside these commands (C5); prometheus just renders.
  */
 const TEXT_MANAGER_FAMILIES = new Set(["apps", "worldsim", "models", "localai"]);
 
@@ -197,7 +197,7 @@ function ciForceBlock(
 ): CommandOutcome | undefined {
   if (ctx.args.force && mutating && ctx.args.profile === "ci" && !process.env.PROM_ALLOW_FORCE) {
     return {
-      text: `prom ${label}: --force is blocked under the 'ci' profile. Set PROM_ALLOW_FORCE=1 to override (there is no human to type the confirmation).`,
+      text: `prometheus ${label}: --force is blocked under the 'ci' profile. Set PROM_ALLOW_FORCE=1 to override (there is no human to type the confirmation).`,
       json: { ok: false, error: "force-blocked", command: label },
       exitCode: 2,
     };
@@ -258,8 +258,8 @@ export async function runGeneric(path: string[], ctx: CliContext): Promise<Comma
 const FAMILY_ALIAS: Record<string, string> = { app: "apps" };
 
 /**
- * Route a single-token manager family verb (`prom apps list`, `prom models config
- * --set-root D`, `prom worldsim install x`, …) to the SAME engine path the two-word
+ * Route a single-token manager family verb (`prometheus apps list`, `prometheus models config
+ * --set-root D`, `prometheus worldsim install x`, …) to the SAME engine path the two-word
  * `app list` form uses — so human-table reads render cleanly and mutations stay gated,
  * with the per-verb flags forwarded. Mirrors managerSpec but goes through rawEngine for
  * the table reads (the registry managerSpec stays the GUI/parity surface).

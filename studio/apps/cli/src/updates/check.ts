@@ -28,7 +28,7 @@ interface UpdateState {
 
 export interface CheckDeps {
   home: string;
-  /** the prom CLI version (PROM_VERSION). */
+  /** the prometheus CLI version (PROM_VERSION). */
   promVersion: string;
   client?: EngineClient;
   env?: NodeJS.ProcessEnv;
@@ -137,7 +137,7 @@ async function checkModels(
   return { status: { diff, suggestions }, digests: u.snapshotDigests(models) };
 }
 
-/** Check Prometheus itself: prom + engine versions, install method, latest, the plan. */
+/** Check Prometheus itself: prometheus + engine versions, install method, latest, the plan. */
 async function checkSelf(deps: CheckDeps): Promise<u.SelfUpdateStatus> {
   const detect = deps.detectMethod ?? (() => detectInstallMethod(deps.scriptPath, deps.cwd));
   const { method, repoDir } = detect();
@@ -155,7 +155,7 @@ async function checkSelf(deps: CheckDeps): Promise<u.SelfUpdateStatus> {
   const latest = await gh(cfg.repo);
   const updateAvailable = latest !== null && u.isNewer(latest, deps.promVersion);
   return {
-    prom: deps.promVersion,
+    prometheus: deps.promVersion,
     ...(engine ? { engine } : {}),
     ...(latest ? { latest } : {}),
     updateAvailable,

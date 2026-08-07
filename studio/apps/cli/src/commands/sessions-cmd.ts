@@ -1,5 +1,5 @@
 /**
- * commands/sessions-cmd.ts — `prom sessions <list|search|fork|delete>` (CLI-014).
+ * commands/sessions-cmd.ts — `prometheus sessions <list|search|fork|delete>` (CLI-014).
  *
  * A one-shot browser over the persisted session store (history-store.ts): list with
  * descriptors, full-text search over transcripts, fork into an independent copy, and
@@ -37,7 +37,7 @@ function renderTable(records: readonly SessionRecord[]): string {
   return lines.join("\n");
 }
 
-/** `prom sessions <list|search|fork|delete>`. */
+/** `prometheus sessions <list|search|fork|delete>`. */
 export function runSessions(
   ctx: CliContext,
   deps: SessionsDeps = { home: prometheusHome() },
@@ -57,7 +57,7 @@ export function runSessions(
     const query = pos[0];
     if (!query) {
       return {
-        text: "prom sessions search: needs a query",
+        text: "prometheus sessions search: needs a query",
         json: { ok: false, error: "missing-query" },
         exitCode: 2,
       };
@@ -75,7 +75,7 @@ export function runSessions(
     const id = pos[0];
     if (!id) {
       return {
-        text: "prom sessions fork: needs a session id",
+        text: "prometheus sessions fork: needs a session id",
         json: { ok: false, error: "missing-id" },
         exitCode: 2,
       };
@@ -95,7 +95,7 @@ export function runSessions(
     const id = pos[0];
     if (!id) {
       return {
-        text: "prom sessions delete: needs a session id",
+        text: "prometheus sessions delete: needs a session id",
         json: { ok: false, error: "missing-id" },
         exitCode: 2,
       };
@@ -126,7 +126,7 @@ export function runSessions(
   }
 
   return {
-    text: `prom sessions: unknown verb "${verb}" — valid: ${VERBS.join(", ")}`,
+    text: `prometheus sessions: unknown verb "${verb}" — valid: ${VERBS.join(", ")}`,
     json: { ok: false, error: "unknown-verb", valid: VERBS },
     exitCode: 2,
   };

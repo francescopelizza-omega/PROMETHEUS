@@ -1,7 +1,7 @@
 /**
- * commands/health.ts — `prom health`: the engine/scanner RUNTIME posture pill the
- * GUI's System Health panel renders, in the terminal. Distinct from `prom doctor`
- * (OS/agents/git/paths) and `prom doctor --bridge` (engine path discovery): this is
+ * commands/health.ts — `prometheus health`: the engine/scanner RUNTIME posture pill the
+ * GUI's System Health panel renders, in the terminal. Distinct from `prometheus doctor`
+ * (OS/agents/git/paths) and `prometheus doctor --bridge` (engine path discovery): this is
  * the live posture of the engine, the version contract, and the nemesis scanner.
  *
  * PURE-ish: it probes through the injected EngineClient + a nemesis presence probe,
@@ -70,7 +70,7 @@ export async function runHealth(
   components.push(
     health.boolComponent("engine", "Engine", version !== null, {
       ...(version ? { detail: `v${version}` } : {}),
-      remediation: "run `prom doctor --bridge` to locate the engine",
+      remediation: "run `prometheus doctor --bridge` to locate the engine",
     }),
   );
 

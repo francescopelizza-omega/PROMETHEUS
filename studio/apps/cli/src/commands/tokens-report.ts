@@ -1,5 +1,5 @@
 /**
- * commands/tokens-report.ts — the PURE aggregation behind `prom tokens report` (CLI-090).
+ * commands/tokens-report.ts — the PURE aggregation behind `prometheus tokens report` (CLI-090).
  *
  * Turns one SESSION's accounting records (CLI-029, extended with prompt-cache counters) plus the
  * enable/disable toggles (CLI-088) into a measured-effectiveness report: how many cache-read tokens

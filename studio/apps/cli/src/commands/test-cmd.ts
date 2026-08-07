@@ -1,5 +1,5 @@
 /**
- * commands/test-cmd.ts — `prom test <discover|run>` over the testmgr.py sidecar (CLI-007).
+ * commands/test-cmd.ts — `prometheus test <discover|run>` over the testmgr.py sidecar (CLI-007).
  *
  *   discover [path]                    → the discovered test tree (files → cases)
  *   run [path] [--id a,b] [--framework auto|pytest|unittest] [--timeout N]
@@ -53,7 +53,7 @@ function pathArg(ctx: CliContext): string {
 
 function optionShaped(verb: string, p: string): CommandOutcome {
   return {
-    text: `prom test ${verb}: refusing option-shaped path: ${p}`,
+    text: `prometheus test ${verb}: refusing option-shaped path: ${p}`,
     json: { ok: false, error: "bad-path", path: p },
     exitCode: 2,
   };
@@ -139,7 +139,7 @@ function buildRunReport(
     cases.push(rc);
   }
   return {
-    suiteName: "prom test",
+    suiteName: "prometheus test",
     cases,
     summary: {
       total: numOf(summary.total),
@@ -393,7 +393,7 @@ async function run(ctx: CliContext, deps: SidecarDeps): Promise<CommandOutcome> 
 }
 
 /**
- * `prom test coverage [path]` — run the suite under coverage.py (the dedicated APP-086 sidecar,
+ * `prometheus test coverage [path]` — run the suite under coverage.py (the dedicated APP-086 sidecar,
  * NOT a testmgr verb) → a per-file coverage table + total. Like `run`, EXECUTING the suite IS the
  * explicit user action, so it runs directly (no preview gate); an option-shaped path is refused.
  * A missing `coverage` package surfaces the pip remedy + exit 2. `--json` passes the envelope through.
@@ -454,7 +454,7 @@ async function coverage(ctx: CliContext, deps: SidecarDeps): Promise<CommandOutc
 }
 
 /* ==========================================================================
- * `prom test watch [path]` — re-run affected tests on file change (CLI-092).
+ * `prometheus test watch [path]` — re-run affected tests on file change (CLI-092).
  *
  * A long-running loop until `q`/Ctrl-C. Every seam (watcher, keys, timers, clock,
  * write, tty) is injected via WatchIo so the whole orchestration is unit-testable
@@ -562,7 +562,7 @@ function discoverTestFiles(env: Record<string, unknown>): string[] {
 }
 
 /**
- * `prom test watch [path]` (CLI-092). Fails fast on `--json` (streaming JSON is out of scope, exit 2)
+ * `prometheus test watch [path]` (CLI-092). Fails fast on `--json` (streaming JSON is out of scope, exit 2)
  * BEFORE any watcher opens; guards an option-shaped path; then watches + re-runs affected tests until
  * `q`/Ctrl-C, which tears down every watcher + aborts any in-flight run in ONE shared teardown.
  */
@@ -573,7 +573,7 @@ export async function runWatch(
 ): Promise<CommandOutcome> {
   if (ctx.json) {
     return {
-      text: "prom test watch: --json streaming is not supported (out of scope)",
+      text: "prometheus test watch: --json streaming is not supported (out of scope)",
       json: { ok: false, error: "watch-json-unsupported" },
       exitCode: 2,
     };
@@ -756,7 +756,7 @@ function defaultWatchIo(): WatchIo {
   };
 }
 
-/** `prom test <discover|run|coverage|watch>` — dispatch. */
+/** `prometheus test <discover|run|coverage|watch>` — dispatch. */
 export async function runTest(
   ctx: CliContext,
   deps: SidecarDeps = defaultSidecarDeps,
@@ -767,7 +767,7 @@ export async function runTest(
   if (verb === "coverage") return coverage(ctx, deps);
   if (verb === "watch") return runWatch(ctx, deps);
   return {
-    text: `prom test: unknown verb ${verb ? `"${verb}"` : "(none)"} — valid: ${VERBS.join(", ")}`,
+    text: `prometheus test: unknown verb ${verb ? `"${verb}"` : "(none)"} — valid: ${VERBS.join(", ")}`,
     json: { ok: false, error: "unknown-verb", valid: VERBS },
     exitCode: 2,
   };

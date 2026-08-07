@@ -3,7 +3,7 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
-  "description": "Shared domain types & logic for Prometheus Studio (consumed by both the desktop GUI and the prom CLI).",
+  "description": "Shared domain types & logic for Prometheus Studio (consumed by both the desktop GUI and the prometheus CLI).",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "exports": {

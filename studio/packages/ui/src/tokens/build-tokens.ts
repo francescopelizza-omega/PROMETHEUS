@@ -1,7 +1,7 @@
 /**
  * build-tokens.ts — the token GENERATOR (file 08 §2/§6). Emits the two committed build
  * artifacts from the canonical ../tokens.ts source:
- *   - tokens.json : the flat export the `prom` CLI ANSI-16 resolver + the Monaco
+ *   - tokens.json : the flat export the `prometheus` CLI ANSI-16 resolver + the Monaco
  *                   theme-gen read (file 08 §8 / §5.7).
  *   - tokens.css  : the CSS variables for [data-theme] (dark/light/high-contrast) and
  *                   [data-density] (comfortable/compact) — the runtime contract every

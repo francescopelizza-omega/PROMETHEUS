@@ -1,5 +1,5 @@
 /**
- * tokens-report.test.ts — the PURE cache-economy aggregation behind `prom tokens report` (CLI-090).
+ * tokens-report.test.ts — the PURE cache-economy aggregation behind `prometheus tokens report` (CLI-090).
  */
 import assert from "node:assert/strict";
 import test from "node:test";

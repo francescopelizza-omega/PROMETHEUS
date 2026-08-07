@@ -1,7 +1,7 @@
 /**
  * mcp-store.ts — the CLI's disk-backed MCP ConfigStore (CLI-036).
  *
- * Mirrors the desktop DiskConfigStore so a connector added from `prom mcp add` SURVIVES a
+ * Mirrors the desktop DiskConfigStore so a connector added from `prometheus mcp add` SURVIVES a
  * restart and is the SAME `mcp-servers.json` shape the desktop Extensions panel manages.
  * Load once into a Map; write the whole (small) file through on every mutation via an
  * ATOMIC temp+rename so a crash mid-write can't corrupt the file. Fail-soft: a corrupt/

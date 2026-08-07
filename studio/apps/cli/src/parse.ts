@@ -1,5 +1,5 @@
 /**
- * parse.ts — the hand-rolled arg parser for `prom`. ZERO deps.
+ * parse.ts — the hand-rolled arg parser for `prometheus`. ZERO deps.
  *
  * Splits argv into: a command path (one or two tokens, e.g. ["model","hw"]),
  * positional args, and a small set of recognised GLOBAL flags. Unknown flags are
@@ -7,7 +7,7 @@
  * pulled out here so every command sees a consistent { json, noColor } view.
  *
  * Grammar (kept deliberately tiny):
- *   prom [globals] <command> [subcommand] [positional...] [--flags]
+ *   prometheus [globals] <command> [subcommand] [positional...] [--flags]
  * Two-word commands ("model hw", "provider list", "env list") are recognised by
  * a static set; everything after the (sub)command is a positional unless it
  * starts with "-".
@@ -26,7 +26,7 @@ export interface ParsedArgs {
   help: boolean;
   /** -v/--version requested. */
   version: boolean;
-  /** bare `prom` (no command, no -h/-v) → launch the interactive REPL (§1). */
+  /** bare `prometheus` (no command, no -h/-v) → launch the interactive REPL (§1). */
   repl: boolean;
   // ── §1 engine global flags (lifted from `flags`; map 1:1 to engine flags) ──
   dryRun: boolean;
@@ -235,7 +235,7 @@ const ONE_WORD = new Set([
   "help",
   // single-token CommandSpec verbs (the canonical parity registry): these route
   // straight through invoke() — the SAME run() the GUI palette uses — so
-  // `prom install foo`, `prom describe <id>`, `prom apps list`, `prom harden`, …
+  // `prometheus install foo`, `prometheus describe <id>`, `prometheus apps list`, `prometheus harden`, …
   // reach full GUI parity instead of falling through to the usage screen.
   "install",
   "uninstall",
@@ -263,14 +263,14 @@ const isFlag = (t: string): boolean => t.startsWith("-");
 
 /**
  * Flags that NEVER take a value — membership here stops the greedy `--key value`
- * branch from swallowing the following positional (`prom gate --strict ./x` used
+ * branch from swallowing the following positional (`prometheus gate --strict ./x` used
  * to store `flags.strict = "./x"` and drop `./x`). Consulted BEFORE consumption.
  *
- * Classification audit — every flag `prom` consumes must pick a side:
+ * Classification audit — every flag `prometheus` consumes must pick a side:
  *   BOOLEAN (in this set): strict, yes (+alias y), dry-run, force, force-unsafe,
  *     no-gate (+ negation no-strict), verbose, quiet (+alias q), bridge, bypass,
  *     ink, paid, plain, rescan, replace-system, open, summary (diagram terse view),
- *     continue (prom --continue resumes the newest session, CLI-013).
+ *     continue (prometheus --continue resumes the newest session, CLI-013).
  *     (json / no-color / help / version are matched EARLIER, before this branch.)
  *   VALUE-TAKING (deliberately absent, so greedy `--key value` still applies):
  *     profile, engine, python, cwd, gate-mode, only, host, preset, cli, tmux,
@@ -389,12 +389,12 @@ export function parseArgs(argv: string[]): ParsedArgs {
   }
 
   // Lift the §1 engine globals out of the generic flag bag into typed fields, so
-  // every return path (incl. help/version) carries them (e.g. `prom --json --profile ci`).
+  // every return path (incl. help/version) carries them (e.g. `prometheus --json --profile ci`).
   liftGlobals(result);
 
   // Second pass: resolve the command path from the non-flag tokens.
   if (rest.length === 0) {
-    // bare `prom` -> launch the interactive REPL (§1); -h/--version still short-circuit.
+    // bare `prometheus` -> launch the interactive REPL (§1); -h/--version still short-circuit.
     if (!result.version && !result.help) result.repl = true;
     return result;
   }

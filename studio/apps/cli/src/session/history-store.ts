@@ -320,7 +320,7 @@ export function readAccounting(home: string, sessionId: string): AccountingRecor
 
 /**
  * The most-recently-written session's id by `*.acct.jsonl` mtime (CLI-090), or null when no
- * session has any accounting yet. `prom tokens report` reads exactly THIS ONE session so the
+ * session has any accounting yet. `prometheus tokens report` reads exactly THIS ONE session so the
  * report is per-session (each REPL run writes a fresh acct file) — never a cross-session sum.
  * Fail-soft: an unreadable dir ⇒ null.
  */

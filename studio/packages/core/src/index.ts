@@ -1,7 +1,7 @@
 /**
  * @prometheus/core — the shared domain layer for Prometheus Studio.
  *
- * Consumed by BOTH the desktop GUI and the prom CLI. It owns the domain models,
+ * Consumed by BOTH the desktop GUI and the prometheus CLI. It owns the domain models,
  * the C11 provider promotion policy + cost guardrails, the C8 ServerSupervisor
  * (main-process only), and the SHARED command registry that both surfaces render.
  *
@@ -167,7 +167,7 @@ export {
 } from "./templates/index.js";
 
 // --- canonical command PARITY router (file 01 §11.3 / 11 §2+§5) ------------- //
-// The single CommandSpec registry BOTH the GUI and `prom` route through, so
+// The single CommandSpec registry BOTH the GUI and `prometheus` route through, so
 // parity is STRUCTURAL. Exported under `Router*` / `command*Spec` aliases so the
 // new full-surface registry coexists with the M1 commands/registry.ts above
 // (which keeps the hand-tuned scan/provider summaries) without name clashes.
@@ -275,7 +275,7 @@ export {
 
 // --- catalog manager (file 06 §2,§7 — repo/plugin/skill/agent/app/worldsim) - //
 // The framework-free projection + reconciliation + cache layer the catalog browser
-// (desktop) and `prom` CLI both render. PURE: engine list/info/matrix/where -> CatalogItem[]
+// (desktop) and `prometheus` CLI both render. PURE: engine list/info/matrix/where -> CatalogItem[]
 // (OFFICIAL above EXTERNAL, ranked, ties-by-name; DOCUMENTED_ONLY -> installable:false in CORE,
 // not just the UI — file 06 §0/§10), status/inventory -> InstallState (optimistic↔truth), the
 // two-speed cache (registry by engine version+mtime, install-state by TTL), and the Repo-index
@@ -536,7 +536,7 @@ export * as secrets from "./secrets/index.js";
 export type { SecretsStore, SafeStorageBackend } from "./secrets/keychain.js";
 export * as settings from "./settings/index.js";
 
-// --- prom CLI/TUI brain (file 11): the tunable agent loop, the TOML profiles, and
+// --- prometheus CLI/TUI brain (file 11): the tunable agent loop, the TOML profiles, and
 //     the REPL state machine. All PURE + framework-free (no ink/yargs/react) — the
 //     SAME modules apps/desktop's agent pane uses; apps/cli adds only the Ink shell.
 //   agent       — §3.2 runAgentTurn + AgentTuning + the 14-tool exposure (never-force)

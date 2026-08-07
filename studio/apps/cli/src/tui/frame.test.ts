@@ -45,7 +45,7 @@ test("default frame: box + status, caret inside the box", () => {
   // a body row holds the prompt + text
   assert.ok(f.lines.some((l) => strip(l).includes("› hi")));
   // status bar present below the box
-  assert.ok(f.lines.some((l) => strip(l).includes("[PROM:DEFAULT]")));
+  assert.ok(f.lines.some((l) => strip(l).includes("[PROMETHEUS:DEFAULT]")));
   assert.equal(f.cursorRow, 1); // top border row 0, body row 1
   assert.equal(f.cursorCol, 4 + 2); // text col 4 + caret 2
 });

@@ -1,5 +1,5 @@
 /**
- * commands/repo-cmd.ts — the FULL `prom repo …` surface over the repo.py sidecar
+ * commands/repo-cmd.ts — the FULL `prometheus repo …` surface over the repo.py sidecar
  * (C7 / file 06 §3), at parity with the GUI Repos panel. This is the ONLY
  * arbitrary-URL clone path: every fetch is STAGED with safe git flags then run
  * through the REAL nemesis gate (stage → gate → promote | quarantine). A BLOCK
@@ -142,7 +142,7 @@ export async function runRepoCommand(
     default:
       return {
         text:
-          `prom repo ${verb}: unknown repo verb.\n` +
+          `prometheus repo ${verb}: unknown repo verb.\n` +
           `  ${c.dim("try:")} add · list · status · rescan · update · pin · branch · remove · vault`,
         json: { ok: false, error: "unknown-verb", command: `repo ${verb}` },
         exitCode: 2,
@@ -179,7 +179,7 @@ function renderRepos(e: Record<string, unknown>): CommandOutcome {
   const repos = Array.isArray(e.repos) ? (e.repos as RepoRow[]) : [];
   const lines = [heading(`Repos  ${c.dim(`(${repos.length})`)}`), ""];
   if (repos.length === 0) {
-    lines.push(c.dim("No managed repos. Add one with `prom repo add <url> --yes`."));
+    lines.push(c.dim("No managed repos. Add one with `prometheus repo add <url> --yes`."));
     return { text: lines.join("\n"), exitCode: 0 };
   }
   const rows = repos.map((r) => [

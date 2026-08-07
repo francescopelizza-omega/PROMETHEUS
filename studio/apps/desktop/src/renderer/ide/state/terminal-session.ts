@@ -14,7 +14,7 @@ export interface TerminalSession {
   /** the cwd the pty spawns in (the workspace root, captured at creation). */
   cwd: string;
   /** an optional command auto-run after the shell starts — how an AI CLI (claude /
-   *  codex / gemini / prom) is launched into a fresh terminal tab. */
+   *  codex / gemini / prometheus) is launched into a fresh terminal tab. */
   launch?: string;
   /** when true, `launch` is TYPED into the shell but NOT executed (no trailing enter)
    *  — the user reviews it and presses enter. Used for install commands. */

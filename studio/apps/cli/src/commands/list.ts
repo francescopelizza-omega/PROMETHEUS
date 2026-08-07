@@ -1,8 +1,8 @@
 /**
- * commands/list.ts — `prom list`: the installable plugin/agent catalog.
+ * commands/list.ts — `prometheus list`: the installable plugin/agent catalog.
  *
  * Renders the engine's `list` envelope (catalog[]). Read-only; no gating here —
- * a catalog row is gated only when the user explicitly runs `prom gate`/install.
+ * a catalog row is gated only when the user explicitly runs `prometheus gate`/install.
  */
 import type { CliContext, CommandOutcome } from "../context.js";
 import { c, heading, sym, table } from "../render.js";

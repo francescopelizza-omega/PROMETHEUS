@@ -25,19 +25,19 @@ export const FAQ_DB: readonly FaqEntry[] = Object.freeze([
   {
     topic: "start",
     q: "How do I start using Prometheus?",
-    a: "Run a bare `prom` for the interactive session, or one-shot verbs like `prom scan`. First time, if no local model is found, you'll see /setup — pick a free local model or connect a paid CLI.",
+    a: "Run a bare `prometheus` for the interactive session, or one-shot verbs like `prometheus scan`. First time, if no local model is found, you'll see /setup — pick a free local model or connect a paid CLI.",
     keywords: ["begin", "getting", "first", "launch", "run", "open"],
   },
   {
     topic: "model-local",
     q: "How do I run a free local model?",
-    a: "Type /setup → 'Download a free local model'. It uses Ollama (install via `prom apps install ollama`), pulls a model (e.g. qwen2.5-coder:7b), and stores it under ~/.prometheus/open_models. Once a local runner serves a model, the session auto-uses it.",
+    a: "Type /setup → 'Download a free local model'. It uses Ollama (install via `prometheus apps install ollama`), pulls a model (e.g. qwen2.5-coder:7b), and stores it under ~/.prometheus/open_models. Once a local runner serves a model, the session auto-uses it.",
     keywords: ["ollama", "lmstudio", "offline", "free", "gguf", "download model"],
   },
   {
     topic: "model-paid",
     q: "How do I use a paid CLI (Claude/Codex/Gemini)?",
-    a: "Type /setup → 'Connect a paid CLI', or run `prom chat --cli claude --open` to launch a live terminal chat with that CLI. Prometheus previews the injection-safe command first (never-force).",
+    a: "Type /setup → 'Connect a paid CLI', or run `prometheus chat --cli claude --open` to launch a live terminal chat with that CLI. Prometheus previews the injection-safe command first (never-force).",
     keywords: ["claude", "codex", "gemini", "cursor", "opencode", "api", "cloud", "chat"],
   },
   {
@@ -55,13 +55,13 @@ export const FAQ_DB: readonly FaqEntry[] = Object.freeze([
   {
     topic: "gate-target",
     q: "How do I check if a repo/package is safe?",
-    a: "Run `prom gate <path|git-url|owner/repo>` (or /secure scan <target>). It returns the nemesis verdict + findings. Fail-closed: a missing/timed-out scanner blocks.",
+    a: "Run `prometheus gate <path|git-url|owner/repo>` (or /secure scan <target>). It returns the nemesis verdict + findings. Fail-closed: a missing/timed-out scanner blocks.",
     keywords: ["is this safe", "check", "audit url", "vet"],
   },
   {
     topic: "harden",
     q: "How do I check my machine's security posture?",
-    a: "Run `prom harden` (or /harden) — a read-only, THIS-machine-only audit of firewall / open ports / ssh / disk-encryption / secret-perms, with concrete fixes. For deeper testing see `prom pentest`.",
+    a: "Run `prometheus harden` (or /harden) — a read-only, THIS-machine-only audit of firewall / open ports / ssh / disk-encryption / secret-perms, with concrete fixes. For deeper testing see `prometheus pentest`.",
     keywords: ["firewall", "ports", "ssh", "posture", "defensive"],
   },
   {
@@ -115,19 +115,19 @@ export const FAQ_DB: readonly FaqEntry[] = Object.freeze([
   {
     topic: "color",
     q: "Why don't I see colors?",
-    a: 'Color auto-disables when stdout isn\'t a detected TTY (or NO_COLOR / TERM=dumb is set). Force it on with FORCE_COLOR=1 (e.g. `FORCE_COLOR=1 prom`). Check yours: node -e "console.log(process.stdout.isTTY)".',
+    a: 'Color auto-disables when stdout isn\'t a detected TTY (or NO_COLOR / TERM=dumb is set). Force it on with FORCE_COLOR=1 (e.g. `FORCE_COLOR=1 prometheus`). Check yours: node -e "console.log(process.stdout.isTTY)".',
     keywords: ["colour", "ansi", "no color", "force_color", "tty"],
   },
   {
     topic: "no-model",
     q: "Chat says no model / 'ollama unreachable'. What now?",
-    a: "No local runner is serving a model. Type /setup to download a free local model (Ollama), or connect a paid CLI. A paid model name (e.g. claude-opus) can't run locally — use /model ollama:<tag> for local, or `prom chat --cli claude --open`.",
+    a: "No local runner is serving a model. Type /setup to download a free local model (Ollama), or connect a paid CLI. A paid model name (e.g. claude-opus) can't run locally — use /model ollama:<tag> for local, or `prometheus chat --cli claude --open`.",
     keywords: ["unreachable", "no backend", "ollama down", "model error", "server"],
   },
   {
     topic: "commands",
     q: "What commands are available?",
-    a: "/commands lists every /command grouped; /help shows the top ones. Anything you can do as `prom <verb>` you can do as a /verb in-session, plus session/agent/review macros.",
+    a: "/commands lists every /command grouped; /help shows the top ones. Anything you can do as `prometheus <verb>` you can do as a /verb in-session, plus session/agent/review macros.",
     keywords: ["slash", "list commands", "help", "what can"],
   },
   {
@@ -139,7 +139,7 @@ export const FAQ_DB: readonly FaqEntry[] = Object.freeze([
   {
     topic: "trouble",
     q: "Something's broken — how do I diagnose it?",
-    a: "Run /doctor (OS/agents/git/paths) or `prom doctor --bridge` (engine discovery). /status shows the session config. Most read commands are fail-closed — a clear error beats a wrong 'ok'.",
+    a: "Run /doctor (OS/agents/git/paths) or `prometheus doctor --bridge` (engine discovery). /status shows the session config. Most read commands are fail-closed — a clear error beats a wrong 'ok'.",
     keywords: ["broken", "error", "diagnose", "doctor", "debug", "not working"],
   },
 ]);

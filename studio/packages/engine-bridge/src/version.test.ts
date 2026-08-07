@@ -72,7 +72,7 @@ test("compareSemver returns null when EITHER side is unparseable (fail closed)",
 test("parseVersionLine pulls the trailing semver from a --version line", () => {
   assert.equal(parseVersionLine("prometheus.py 0.15.0"), "0.15.0");
   assert.equal(parseVersionLine("  prometheus.py   0.15.0  \n"), "0.15.0");
-  assert.equal(parseVersionLine("prom v1.2.3"), "1.2.3"); // strips leading v
+  assert.equal(parseVersionLine("prometheus v1.2.3"), "1.2.3"); // strips leading v
   // a prog name containing digits must not fool the right-to-left scan:
   assert.equal(parseVersionLine("tool2000 3.4.5"), "3.4.5");
 });

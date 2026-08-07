@@ -742,7 +742,7 @@ export function getScheme(id: string): ColorScheme {
 
 /* ────────────────────────────────────────────────────────────────────────────
  * ANSI-16 resolver re-export (08 §5.7 / §8.1).
- *   Surfaced here so the `prom` CLI + TUI can reach the §5.7 role→ANSI mapping
+ *   Surfaced here so the `prometheus` CLI + TUI can reach the §5.7 role→ANSI mapping
  *   AND the verdict label/glyph/role maps from the SAME react-free entry
  *   ("@prometheus/ui/tokens" = this file). The CLI must not pull the React barrel.
  * ──────────────────────────────────────────────────────────────────────────── */

@@ -1,5 +1,5 @@
 /**
- * commands/gate.ts — `prom gate <target>`: gate an arbitrary path / git URL /
+ * commands/gate.ts — `prometheus gate <target>`: gate an arbitrary path / git URL /
  * owner-repo through nemesis (C4) and RENDER the verdict (C5).
  *
  * The CLI never decides "safe": it calls client.gate(), which fail-closes a
@@ -28,7 +28,7 @@ function wantsRichGate(ctx: CliContext): boolean {
 }
 
 /**
- * Resolve a gate verdict for the current target (shared by `prom gate` and `prom secure scan`).
+ * Resolve a gate verdict for the current target (shared by `prometheus gate` and `prometheus secure scan`).
  * Picks the light `client.gate` (default) or the rich `gateFull` (--fresh/--sign/--policy/--tier)
  * path and threads an optional `onStderr` progress sink. Fail-closed exactly as each path is.
  */
@@ -51,7 +51,7 @@ export async function resolveGateVerdict(
 
 export async function runGate(ctx: CliContext): Promise<CommandOutcome> {
   const target = ctx.args.positionals[0];
-  // CLI-079: `prom gate history [flags]` is a thin ALIAS for `prom secure trust log` — same
+  // CLI-079: `prometheus gate history [flags]` is a thin ALIAS for `prometheus secure trust log` — same
   // filter, same renderer (imported, not re-implemented), so the two are provably one code path.
   if (target === "history") {
     const filter = buildAuditFilter(ctx);
@@ -60,7 +60,7 @@ export async function runGate(ctx: CliContext): Promise<CommandOutcome> {
   if (!target) {
     return {
       text: c.red(
-        "usage: prom gate <path|git-url|owner/repo> [--fresh] [--sign] [--policy <file>] [--tier pentest]",
+        "usage: prometheus gate <path|git-url|owner/repo> [--fresh] [--sign] [--policy <file>] [--tier pentest]",
       ),
       json: { ok: false, error: "missing target" },
       exitCode: 2,

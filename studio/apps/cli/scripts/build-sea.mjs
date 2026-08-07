@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * build-sea.mjs — build a self-contained `prom` binary via Node Single Executable Application (SEA).
+ * build-sea.mjs — build a self-contained `prometheus` binary via Node Single Executable Application (SEA).
  * (CLI-099 / plan 11 §8 M7.)
  *
  * Pipeline:
@@ -9,7 +9,7 @@
  *      fall through to the env/PATH engine lanes — correct for a relocatable binary). node-pty +
  *      the optional Ink view stay `--external` (native / dynamic-import-only, unbundlable).
  *   2. `node --experimental-sea-config` → the prep blob.
- *   3. copy the running `node` → release/prom(-<platform>); on macOS strip its signature FIRST.
+ *   3. copy the running `node` → release/prometheus(-<platform>); on macOS strip its signature FIRST.
  *   4. postject-inject the blob (macOS needs `--macho-segment-name NODE_SEA`); re-sign on macOS
  *      (`codesign --sign -`) or AMFI SIGKILLs the binary.
  *   5. print a size report (blob + final binary — expect ~node-sized, ≈110–120 MB).
@@ -53,9 +53,9 @@ const mb = (bytes) => `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 
 async function main() {
   mkdirSync(SEA, { recursive: true });
-  const blobEntry = join(SEA, "prom.cjs");
+  const blobEntry = join(SEA, "prometheus.cjs");
   const prepBlob = join(SEA, "prom-prep.blob");
-  const binName = target.startsWith("win") ? "prom.exe" : `prom-${target}`;
+  const binName = target.startsWith("win") ? "prometheus.exe" : `prometheus-${target}`;
   const binOut = join(REL, binName);
 
   // 1) esbuild → CJS blob. import.meta.url shimmed to a valid file:// URL via banner + define.

@@ -4,7 +4,7 @@
  * `cliVersion` spawns `<bin> <args>` to read its `--version` (some CLIs print to stderr, so we
  * read both). child_process is loaded LAZILY via createRequire — a runtime call, not the
  * statically-forbidden import (C5) — matching session/onboarding.ts. `which` resolves a bin on
- * PATH (pure fs). `detectInstallMethod` heuristically classifies how prom itself was installed,
+ * PATH (pure fs). `detectInstallMethod` heuristically classifies how prometheus itself was installed,
  * so the self-update plan offers the right command. All fail-soft.
  */
 import { constants, accessSync, existsSync } from "node:fs";

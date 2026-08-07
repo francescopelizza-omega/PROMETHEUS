@@ -1,7 +1,7 @@
 /**
  * tui/sudo.ts — the elevated-privilege (sudo / root) startup gate.
  *
- * When `prom` is launched under sudo or as root, a mistaken auto-run can damage the
+ * When `prometheus` is launched under sudo or as root, a mistaken auto-run can damage the
  * whole machine, not just the workspace. So before the session opens we surface a big
  * RED warning and require an explicit human acknowledgement. Per the product spec the
  * decline path is SAFE: answering no does not abort — it disables bypass and forces

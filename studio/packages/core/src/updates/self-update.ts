@@ -12,7 +12,7 @@
 export type InstallMethod = "npm-global" | "git" | "brew" | "pipx" | "unknown";
 
 export interface SelfUpdateConfig {
-  /** the global npm package name for the prom CLI. */
+  /** the global npm package name for the prometheus CLI. */
   npmPackage: string;
   /** the GitHub "owner/repo" of the source checkout (for the git path + releases). */
   repo: string;

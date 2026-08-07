@@ -1,5 +1,5 @@
 /**
- * test-cmd.test.ts — `prom test discover/run` with an injected fake runSidecar
+ * test-cmd.test.ts — `prometheus test discover/run` with an injected fake runSidecar
  * (no real python spawn). Covers the results table, exit-code matrix, --json
  * passthrough, argv construction, and discover-tree rendering (CLI-007).
  */
@@ -186,7 +186,7 @@ test("discover: renders the tree + counts", async () => {
 
 test("unknown/absent verb → exit 2 listing valid verbs", async () => {
   const { deps } = fakeDeps({});
-  const out = await runTest(makeCtx(["test"]), deps); // `prom test` / `prom test bogus`
+  const out = await runTest(makeCtx(["test"]), deps); // `prometheus test` / `prometheus test bogus`
   assert.equal(out.exitCode, 2);
   assert.match(out.text ?? "", /discover, run/);
 });
@@ -198,13 +198,13 @@ test("option-shaped path is refused before the sidecar (exit 2)", async () => {
   assert.equal(calls.length, 0, "must not spawn on an option-shaped path");
 });
 
-test("`test` appears in `prom help` (json command list)", () => {
+test("`test` appears in `prometheus help` (json command list)", () => {
   const out = runHelp(makeCtx(["help"], [], {}, true));
   const cmds = (out.json as { commands: string[] }).commands;
   assert.ok(cmds.includes("test"), "help must list the test command");
 });
 
-// ── CLI-055: prom test coverage (wraps the coverage.py sidecar, APP-086) ─────────
+// ── CLI-055: prometheus test coverage (wraps the coverage.py sidecar, APP-086) ─────────
 /** A coverage.py-keyed fake: `coverage.py` → covEnv; else the run/discover defaults. */
 function covDeps(covEnv: Record<string, unknown>): {
   deps: SidecarDeps;

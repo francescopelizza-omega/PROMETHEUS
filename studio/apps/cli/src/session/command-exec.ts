@@ -1,7 +1,7 @@
 /**
- * session/command-exec.ts — run a `prom` VERB from inside the interactive
+ * session/command-exec.ts — run a `prometheus` VERB from inside the interactive
  * session (P4) over the SAME parity router the one-shot CLI and the GUI palette
- * use. This is what makes "anything you can type as `prom <verb>` you can type
+ * use. This is what makes "anything you can type as `prometheus <verb>` you can type
  * at the session prompt" STRUCTURAL: single-token spec verbs go straight through
  * `invoke()` (the canonical router) sharing the session's EngineClient (C5 — one
  * gateway); every other verb path falls back to the one-shot `dispatch()` so the
@@ -70,7 +70,7 @@ function isMutating(path: readonly string[]): boolean {
 /** A blocked outcome the caller renders verbatim (exit 2 — never a silent 0). */
 function blocked(command: string, reason: string): CommandOutcome {
   return {
-    text: `prom ${command}: ${reason}`,
+    text: `prometheus ${command}: ${reason}`,
     json: { ok: false, error: reason, command },
     exitCode: 2,
   };
@@ -178,7 +178,7 @@ export async function execVerb(tokens: string[], ctx: SessionCtx): Promise<Comma
       });
       const cli = String(parsed.flags.cli);
       const hint = c.dim(
-        `run \`prom chat --cli ${cli} --open\` from a shell to launch interactively.`,
+        `run \`prometheus chat --cli ${cli} --open\` from a shell to launch interactively.`,
       );
       return { ...preview, text: `${preview.text ?? ""}\n${hint}`.trim() };
     }

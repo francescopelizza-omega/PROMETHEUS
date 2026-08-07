@@ -1,7 +1,7 @@
 /**
  * domain/models.ts — the shared Prometheus Studio domain types.
  *
- * This is the vocabulary BOTH the desktop GUI and the prom CLI render. Every
+ * This is the vocabulary BOTH the desktop GUI and the prometheus CLI render. Every
  * type here is a plain data shape (no behaviour) modelled directly on the REAL
  * envelopes emitted by the engine + sidecars:
  *   - prometheus.py --json scan/list/... (agents[], catalog[])

@@ -4,7 +4,7 @@
  * The activity rail is "where am I": an ordered icon list, each mapping to a
  * default workbench route + a contextual sidebar. This is PURE DATA + PURE
  * routing helpers (no React, no DOM) so it is unit-testable from TS source AND
- * shared with the `prom` TUI (file 08 §8: the activity nouns ARE the CLI's
+ * shared with the `prometheus` TUI (file 08 §8: the activity nouns ARE the CLI's
  * top-level command groups). The desktop ActivityBar renders this list; the CLI
  * reads the same ids.
  *

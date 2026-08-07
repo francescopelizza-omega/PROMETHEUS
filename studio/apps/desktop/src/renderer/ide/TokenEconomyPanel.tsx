@@ -1,7 +1,7 @@
 /**
  * TokenEconomyPanel.tsx — the Token-economy bottom-panel surface.
  *
- * The graphical twin of the CLI `prom tokens`: the curated token-saving toolkit
+ * The graphical twin of the CLI `prometheus tokens`: the curated token-saving toolkit
  * Prometheus proposes by default (terse output / prompt caching / repo map / local
  * RAG / …) + the honest Gemini-Nano local-feasibility assessment. A paid/free toggle
  * tailors the proposal; a "show all" toggle reveals the opt-in techniques.

@@ -149,8 +149,8 @@ function speaker(role: repl.ReplState["transcript"][number]["role"]): string {
   switch (role) {
     case "you":
       return c.role("you", "accent");
-    case "prom":
-      return c.role("prom", "brand");
+    case "prometheus":
+      return c.role("prometheus", "brand");
     default:
       return c.dim("system");
   }

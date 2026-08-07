@@ -5,7 +5,7 @@
  *   • LOCAL  — a running OpenAI-compatible runner (Ollama :11434 / LM Studio :1234)
  *              that serves at least one model → the session streams from it directly.
  *   • PAID   — an installed agent CLI (claude/codex/gemini/cursor/opencode) the user
- *              launches via `prom chat --cli <svc> --open`.
+ *              launches via `prometheus chat --cli <svc> --open`.
  *
  * On startup the host probes for a live local runner+model (fast, ~1s, fail-soft) and,
  * when found, wires its OpenAI-compatible endpoint into the session so chat WORKS with
@@ -186,7 +186,7 @@ export function renderOnboarding(backends: Backends): string {
   lines.push("or connect a paid CLI (Claude / Codex / Gemini / …).");
   lines.push("");
   lines.push(
-    `${c.dim("Save tokens/$ —")} ${c.cyan("prom tokens")} ${c.dim("proposes terse output, prompt caching, a repo map + more.")}`,
+    `${c.dim("Save tokens/$ —")} ${c.cyan("prometheus tokens")} ${c.dim("proposes terse output, prompt caching, a repo map + more.")}`,
   );
   return box(lines, { border: "brand" });
 }
@@ -331,9 +331,9 @@ async function setupLocal(
   if (!ollamaUp) {
     write("");
     write(`${c.yellow("Ollama is not running.")} Install it first:`);
-    write(`  ${c.cyan("prom apps install ollama --yes")}   ${c.dim("(nemesis-gated)")}`);
+    write(`  ${c.cyan("prometheus apps install ollama --yes")}   ${c.dim("(nemesis-gated)")}`);
     write(
-      `then re-run ${c.cyan("/setup")} (or: ${c.cyan(`ollama pull ${tag}`)}), and restart prom.`,
+      `then re-run ${c.cyan("/setup")} (or: ${c.cyan(`ollama pull ${tag}`)}), and restart prometheus.`,
     );
     const go = (await ask("Install Ollama now via the gated installer? [y/N]"))
       .trim()
@@ -361,7 +361,7 @@ async function setupLocal(
   write(`Pulling ${c.bold(tag)} via Ollama (this can take a few minutes)…`);
   const confirm = (await ask(`Run \`ollama pull ${tag}\` now? [y/N]`)).trim().toLowerCase();
   if (confirm !== "y" && confirm !== "yes") {
-    write(c.dim(`skipped. Run \`ollama pull ${tag}\` yourself, then restart prom.`));
+    write(c.dim(`skipped. Run \`ollama pull ${tag}\` yourself, then restart prometheus.`));
     return {};
   }
   const code = await runChild("ollama", ["pull", tag]);
@@ -387,14 +387,14 @@ async function setupPaid(deps: SetupDeps, backends: Backends): Promise<{ endpoin
     write(c.yellow("No agent CLIs detected on PATH."));
     write(
       `Install one (e.g. Claude Code / Codex / Gemini), then chat via ${c.cyan(
-        "prom chat --cli <svc> --open",
+        "prometheus chat --cli <svc> --open",
       )}.`,
     );
     return {};
   }
   write(c.bold("Installed agent CLIs you can chat with:"));
   for (const cli of backends.paidClis) {
-    write(`  ${c.green("•")} ${c.bold(cli)} → ${c.cyan(`prom chat --cli ${cli} --open`)}`);
+    write(`  ${c.green("•")} ${c.bold(cli)} → ${c.cyan(`prometheus chat --cli ${cli} --open`)}`);
   }
   write("");
   write(c.dim("Run one of the commands above from a shell to launch a live terminal chat."));

@@ -4,7 +4,7 @@
  * `@prometheus/core` stays PURE (path math + serialize only); the actual reads of user profile
  * TOMLs, the active-profile persistence into the S005 config, and the `$EDITOR` spawn live here.
  * Active-profile persistence is read-modify-write ATOMIC (temp+fsync+rename) against the shared
- * `config.toml` under the `profile.active` key, so a fresh `prom` process reads the last choice.
+ * `config.toml` under the `profile.active` key, so a fresh `prometheus` process reads the last choice.
  */
 // biome-ignore lint/nursery/noRestrictedImports: interactive $EDITOR launch needs an inherited TTY, which engine-bridge's capture-spawn cannot provide (mirrors pty/backend.ts).
 import { spawnSync } from "node:child_process";
@@ -136,7 +136,7 @@ export function loadProjectProfile(
 /**
  * The full startup profile: builtin ⊕ user(active/flag) ⊕ project `.prom.toml` (project wins).
  * Always returns a valid CliProfile (the builtin default is the floor). Used by the REPL/session
- * startup so a repo's `.prom.toml` pins model/tuning for everyone who runs `prom` inside it.
+ * startup so a repo's `.prom.toml` pins model/tuning for everyone who runs `prometheus` inside it.
  */
 export function loadEffectiveStartupProfile(parsed: {
   profile?: string;

@@ -41,13 +41,13 @@ export interface TerminalProfile {
 }
 
 /** Which agent CLI an AI preset launches (§1.4). */
-export type AiCli = "prom" | "claude" | "codex" | "gemini" | "custom";
+export type AiCli = "prometheus" | "claude" | "codex" | "gemini" | "custom";
 
 /** A profile that auto-runs an agent CLI after the shell starts (§1.4). */
 export interface AiTerminalPreset extends TerminalProfile {
   kind: "ai-preset";
   cli: AiCli;
-  launch: string; // command auto-run on spawn: 'prom chat', 'claude', 'gemini -i'
+  launch: string; // command auto-run on spawn: 'prometheus chat', 'claude', 'gemini -i'
   detect?: { bin: string; install?: string }; // which/where; missing ⇒ disabled + hint (never auto-install)
   modelHint?: string; // optional served Model-Hub endpoint ([[05]]) e.g. --model ollama:qwen3
   autorun: boolean; // type+enter `launch` immediately vs just prime the prompt
@@ -162,12 +162,23 @@ function aiPreset(
   };
 }
 
-/** prom chat ◆ — the in-terminal tunable agent ([[11]] §3). The DEFAULT AI preset. */
-export const PRESET_PROM_CHAT = aiPreset("ai.prom-chat", "prom chat", "prom", "prom chat");
-/** prom (one-shot) — bare REPL; same engine bridge, no auto-chat. */
-export const PRESET_PROM = aiPreset("ai.prom", "prom (one-shot)", "prom", "prom", {
-  autorun: false,
-});
+/** prometheus chat ◆ — the in-terminal tunable agent ([[11]] §3). The DEFAULT AI preset. */
+export const PRESET_PROM_CHAT = aiPreset(
+  "ai.prom-chat",
+  "prometheus chat",
+  "prometheus",
+  "prometheus chat",
+);
+/** prometheus (one-shot) — bare REPL; same engine bridge, no auto-chat. */
+export const PRESET_PROM = aiPreset(
+  "ai.prom",
+  "prometheus (one-shot)",
+  "prometheus",
+  "prometheus",
+  {
+    autorun: false,
+  },
+);
 /** claude — Anthropic CLI if installed; else disabled with an install hint. */
 export const PRESET_CLAUDE = aiPreset("ai.claude", "claude", "claude", "claude", {
   detect: { bin: "claude", install: "npm i -g @anthropic-ai/claude-code — or see Marketplace" },
@@ -181,7 +192,7 @@ export const PRESET_GEMINI = aiPreset("ai.gemini", "gemini", "gemini", "gemini -
   detect: { bin: "gemini", install: "npm i -g @google/gemini-cli — or see Marketplace" },
 });
 
-/** The 5 shipped AI presets (prom chat is the default). */
+/** The 5 shipped AI presets (prometheus chat is the default). */
 export const BUILTIN_AI_PRESETS: readonly AiTerminalPreset[] = Object.freeze([
   PRESET_PROM_CHAT,
   PRESET_PROM,

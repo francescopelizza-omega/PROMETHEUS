@@ -1,12 +1,12 @@
 /**
- * commands/secure-cmd.ts — the FULL `prom secure …` surface (file 03), at parity
+ * commands/secure-cmd.ts — the FULL `prometheus secure …` surface (file 03), at parity
  * with the GUI Security panel: the C4 arbitrary-target gate, the threat-DB, the
  * trust ledger, and remediation. Reads run straight; remediation PREVIEWS first and
  * EXECUTES on `--yes` (with the never-force gate on `--force`). NOTHING here decides
  * "safe" — every verdict is the engine/nemesis result (C5); a fail-closed transport
  * error rides through as a value, never a throw.
  *
- *   secure scan <target>            arbitrary-target gate (alias of `prom gate`)  [read]
+ *   secure scan <target>            arbitrary-target gate (alias of `prometheus gate`)  [read]
  *   secure db [status]              threat-DB feed/cache status                   [read]
  *   secure db update [--force][--all]   refresh signature/IOC feeds            [mutate]
  *   secure trust list               remembered trusted sources                    [read]
@@ -103,7 +103,7 @@ function sub(ctx: CliContext): string {
 
 /* ── `secure scan`: streamed progress + normalized findings + scripting exit (CLI-040) ── *
  * Exit-code CONTRACT: `secure scan` uses a SCRIPTING map — allow→0, warn→1, block/error→2
- * (error stays fail-closed red). This is DELIBERATELY distinct from `prom gate`'s
+ * (error stays fail-closed red). This is DELIBERATELY distinct from `prometheus gate`'s
  * nemesis-mirroring 0/10/20/2 (verdict-view.ts `exitCodeForTier`, which shells branch on and
  * MUST NOT change). The tier→simple map is post-applied here; `exitCodeForTier` is untouched. */
 
@@ -217,7 +217,7 @@ export function makeStageStreamer(write: (s: string) => void): (line: string) =>
   };
 }
 
-/** `prom secure scan <target>` — the C4 gate with streamed stages + normalized JSON + 0/1/2 exit. */
+/** `prometheus secure scan <target>` — the C4 gate with streamed stages + normalized JSON + 0/1/2 exit. */
 /**
  * CLI-079: build the audit-log filter from the CLI flags — shared by `secure trust log` AND
  * `gate history` so they query identically. The 4 parameterized filters (`--target`/`--since`/
@@ -429,7 +429,7 @@ export async function runSecureCommand(
 
     case "scan":
       // the arbitrary-target gate (C4) — streamed stage progress + normalized findings +
-      // the 0/1/2 scripting exit map (distinct from `prom gate`'s 0/10/20/2).
+      // the 0/1/2 scripting exit map (distinct from `prometheus gate`'s 0/10/20/2).
       return runSecureScan(ctx);
 
     case "db":
@@ -447,7 +447,7 @@ export async function runSecureCommand(
     default:
       return {
         text:
-          `prom secure ${verb}: unknown secure verb.\n` +
+          `prometheus secure ${verb}: unknown secure verb.\n` +
           `  ${c.dim("try:")} scan · db · trust · disinfect · quarantine · ignore · accept · audit · verdict · purge`,
         json: { ok: false, error: "unknown-verb", command: `secure ${verb}` },
         exitCode: 2,
@@ -574,7 +574,7 @@ async function runIgnore(ctx: CliContext, deps: SecureDeps): Promise<CommandOutc
     text:
       `${c.yellow("⚠")} secure accept — ${c.dim("not scriptable in this nemesis build")}\n` +
       `  ${c.dim(res.reason)}\n` +
-      `  ${c.dim("read current accepts with")} ${c.bold("prom secure ignore list")}`,
+      `  ${c.dim("read current accepts with")} ${c.bold("prometheus secure ignore list")}`,
     exitCode: 2,
   };
 }

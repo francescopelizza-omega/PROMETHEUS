@@ -1,5 +1,5 @@
 /**
- * repo-cmd.test.ts — the `prom repo …` surface over repo.py: the gated clone
+ * repo-cmd.test.ts — the `prometheus repo …` surface over repo.py: the gated clone
  * (preview→execute, NO --confirm toggle), list/pin/branch argv, and reads. FAKE
  * runSidecar; no python spawn, no network.
  */

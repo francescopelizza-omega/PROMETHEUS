@@ -1,5 +1,5 @@
 /**
- * agents-cmd.test.ts — the background-run registry + `prom agents` surface (CLI-034):
+ * agents-cmd.test.ts — the background-run registry + `prometheus agents` surface (CLI-034):
  * register→list, the attach replay/live seam (the hard part), ring-buffer cap, kill-settles,
  * per-provider concurrency, and the command's list/kill/attach.
  */
@@ -131,7 +131,7 @@ test("startBackgroundRun: a throwing body settles failed (slot still released)",
   assert.match(reg.get(id)?.exitSummary ?? "", /boom/);
 });
 
-/* ── prom agents command ──────────────────────────────────────────────────── */
+/* ── prometheus agents command ──────────────────────────────────────────────────── */
 
 function agentsDeps(reg: RunRegistry, out: string[]): AgentsDeps {
   return {
@@ -141,7 +141,7 @@ function agentsDeps(reg: RunRegistry, out: string[]): AgentsDeps {
   };
 }
 
-test("prom agents list: id/state/model/elapsed table + stable --json", async () => {
+test("prometheus agents list: id/state/model/elapsed table + stable --json", async () => {
   const reg = new RunRegistry({ now: fixedNow });
   reg.register({ id: "r1", model: "qwen", controller: new AbortController() });
   const out: string[] = [];
@@ -155,7 +155,7 @@ test("prom agents list: id/state/model/elapsed table + stable --json", async () 
   assert.equal(env.runs[0]?.id, "r1");
 });
 
-test("prom agents kill <id>: settles killed; unknown → exit 2", async () => {
+test("prometheus agents kill <id>: settles killed; unknown → exit 2", async () => {
   const reg = new RunRegistry({ now: fixedNow });
   const ctl = new AbortController();
   reg.register({ id: "r1", model: "m", controller: ctl });
@@ -168,7 +168,7 @@ test("prom agents kill <id>: settles killed; unknown → exit 2", async () => {
   assert.equal(miss.exitCode, 2);
 });
 
-test("prom agents attach <finished>: replays the buffer in order + final state", async () => {
+test("prometheus agents attach <finished>: replays the buffer in order + final state", async () => {
   const reg = new RunRegistry({ now: fixedNow });
   const id = reg.register({ id: "r1", model: "m", controller: new AbortController() });
   reg.append(id, "line-1");
@@ -181,7 +181,7 @@ test("prom agents attach <finished>: replays the buffer in order + final state",
   assert.match(res.text ?? "", /done/);
 });
 
-test("prom agents attach: unknown run → exit 2", async () => {
+test("prometheus agents attach: unknown run → exit 2", async () => {
   const reg = new RunRegistry({ now: fixedNow });
   const out: string[] = [];
   const res = await runAgentsCommand(ctxFor(["agents", "attach", "nope"]), agentsDeps(reg, out));

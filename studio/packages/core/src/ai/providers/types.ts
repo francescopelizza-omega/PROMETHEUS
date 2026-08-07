@@ -68,7 +68,7 @@ export interface Provider {
 }
 
 /** Where a configured brain is allowed to be used (§2.4). */
-export type EnabledSurface = "inline-edit" | "agent-pane" | "prom" | "embeddings";
+export type EnabledSurface = "inline-edit" | "agent-pane" | "prometheus" | "embeddings";
 
 /** A keychain reference (file 09 §7.2) — NEVER the secret itself. */
 export interface KeychainRef {

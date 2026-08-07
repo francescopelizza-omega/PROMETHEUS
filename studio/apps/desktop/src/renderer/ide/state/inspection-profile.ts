@@ -7,7 +7,7 @@
  * it, lower it, or turn it "off" (suppress). The Problems panel applies a profile to
  * filter/re-rank the live diagnostics; suppress-comments + nemesis-findings-as-
  * inspections layer on top of this same map. Pure (no react/monaco) → node:test-ed +
- * shareable with the prom `/inspect` CLI.
+ * shareable with the prometheus `/inspect` CLI.
  */
 
 /** Effective inspection severity (superset of the 4 LSP levels + "off" = suppressed). */

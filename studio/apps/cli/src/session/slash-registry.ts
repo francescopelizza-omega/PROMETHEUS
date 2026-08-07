@@ -292,8 +292,8 @@ function toggle(name: string, field: "dryRun" | "yes", summary: string): SlashCm
 
 /**
  * Render the token-saving toolkit for the in-session `/savetokens` slash — the terminal
- * twin of the app's "Save tokens" panel + `prom tokens`. Compact (full detail lives in
- * `prom tokens <id>` / the GUI panel). Reads the PURE core `tokenEconomy` registry.
+ * twin of the app's "Save tokens" panel + `prometheus tokens`. Compact (full detail lives in
+ * `prometheus tokens <id>` / the GUI panel). Reads the PURE core `tokenEconomy` registry.
  */
 /** A non-local provider ⇒ paid $ (token caching/compaction matter most). */
 function isPaidProvider(provider: string | undefined): boolean {
@@ -320,7 +320,9 @@ function renderSaveTokens(paid: boolean): string {
     ),
   );
   lines.push(
-    c.dim("detail: prom tokens · prom tokens nano · or the 'Save tokens' panel in the app"),
+    c.dim(
+      "detail: prometheus tokens · prometheus tokens nano · or the 'Save tokens' panel in the app",
+    ),
   );
   return lines.join("\n");
 }

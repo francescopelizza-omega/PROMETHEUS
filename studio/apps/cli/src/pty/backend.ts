@@ -1,7 +1,7 @@
 /**
  * pty/backend.ts — the CLI's pseudo-terminal backend seam (P5).
  *
- * The interactive `prom chat --cli X --open` flow has to SPAWN the engine-previewed
+ * The interactive `prometheus chat --cli X --open` flow has to SPAWN the engine-previewed
  * argv as a live child. The ideal transport is a real PTY (node-pty) so the child
  * believes it owns a terminal (isatty → colors, prompts, paging). But node-pty is a
  * NATIVE addon that is `external` in the build and NOT installed in this env, so we
@@ -113,7 +113,7 @@ export interface PtyBackendDeps {
  * ------------------------------------------------------------------------- */
 
 /**
- * The ambient CommonJS require, if this module runs under one (the prom bin does).
+ * The ambient CommonJS require, if this module runs under one (the prometheus bin does).
  * Returns undefined under pure ESM with no require shim — callers then degrade.
  */
 function runtimeRequire(): RequireFn | undefined {

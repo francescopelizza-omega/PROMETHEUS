@@ -24,7 +24,7 @@ const ESC = "\x1b";
  */
 export const ENTER_TUI = `${ESC}[?2004h${ESC}[?7l${ESC}[?25l`;
 
-/** OSC 11 — force the terminal background to pure black (#000000) while prom runs, so the
+/** OSC 11 — force the terminal background to pure black (#000000) while prometheus runs, so the
  *  vivid Pelly output stays at maximum contrast. Restored to the terminal default on exit
  *  (`BG_RESET`, OSC 111). Emitted ONLY when color is on (NO_COLOR / piped leaves it alone). */
 export const BG_BLACK = `${ESC}]11;#000000\x07`;

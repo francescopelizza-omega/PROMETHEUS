@@ -88,7 +88,7 @@ export interface ConnectorIssue {
   message: string;
 }
 
-const SURFACES = new Set<EnabledSurface>(["inline-edit", "agent-pane", "prom", "embeddings"]);
+const SURFACES = new Set<EnabledSurface>(["inline-edit", "agent-pane", "prometheus", "embeddings"]);
 
 /**
  * Structural + policy validation for a ConnectorConfig (§2.4 / §4).

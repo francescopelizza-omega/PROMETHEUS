@@ -13,11 +13,11 @@ test("active env renders as py<version> (<name>)", () => {
     data: {
       envs: [
         { id: "sys", name: "system", pythonVersion: "3.11", active: false },
-        { id: "prom", name: "prom", pythonVersion: "3.12", active: true },
+        { id: "prometheus", name: "prometheus", pythonVersion: "3.12", active: true },
       ],
     },
   };
-  assert.equal(venvStatusLabel(res), "py3.12 (prom)");
+  assert.equal(venvStatusLabel(res), "py3.12 (prometheus)");
 });
 
 test("fallbacks: version-only, name-only, id fallback", () => {

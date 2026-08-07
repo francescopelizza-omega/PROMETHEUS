@@ -1,5 +1,5 @@
 /**
- * commands/man.ts — `prom man`: a roff-formatted man page generated from CLI-049's `COMMAND_SPECS`
+ * commands/man.ts — `prometheus man`: a roff-formatted man page generated from CLI-049's `COMMAND_SPECS`
  * registry (CLI-100). Same single source as help + completions — never a hand-maintained document.
  *
  * roff escaping (users COPY flags out of a man page): backslash → `\e`, and a literal `-` → `\-` so
@@ -29,12 +29,12 @@ const GLOBAL_OPTIONS: ReadonlyArray<[string, string]> = [
   ["--dry-run", "Preview a mutating command without performing it."],
   ["--yes", "Assume yes for non-security confirmations (never bypasses a nemesis block)."],
   ["--profile <name>", "Use the named profile's tuning + system prompt."],
-  ["--version", "Print the prom + engine version and exit."],
+  ["--version", "Print the prometheus + engine version and exit."],
   ["--help", "Print usage and exit."],
 ];
 
 /**
- * Render the `prom(1)` man page (CLI-100). `date` (ISO `YYYY-MM-DD`) + `version` are injected for
+ * Render the `prometheus(1)` man page (CLI-100). `date` (ISO `YYYY-MM-DD`) + `version` are injected for
  * determinism. Commands come from `COMMAND_SPECS`; global options are the parse.ts §1 flags.
  */
 export function manPage(opts: { version?: string; date?: string } = {}): string {
@@ -42,14 +42,14 @@ export function manPage(opts: { version?: string; date?: string } = {}): string 
   const date = opts.date ?? "";
   const cmds = [...new Set(COMMAND_SPECS.map((c) => c.id))].sort();
   const lines: string[] = [
-    `.TH PROM 1 "${date}" "prom ${roff(version)}" "Prometheus Studio"`,
+    `.TH PROMETHEUS 1 "${date}" "prometheus ${roff(version)}" "Prometheus Studio"`,
     ".SH NAME",
-    "prom \\- Prometheus Studio terminal CLI (scan / gate / install over the engine)",
+    "prometheus \\- Prometheus Studio terminal CLI (scan / gate / install over the engine)",
     ".SH SYNOPSIS",
-    ".B prom",
+    ".B prometheus",
     "[\\fB\\-\\-json\\fR] [\\fB\\-\\-no\\-color\\fR] \\fICOMMAND\\fR [\\fIargs\\fR]",
     ".SH DESCRIPTION",
-    "prom renders the security verdicts the Prometheus engine (prometheus.py / nemesis) produces and",
+    "prometheus renders the security verdicts the Prometheus engine (prometheus.py / nemesis) produces and",
     "mirrors the decision tier into its exit code; it never decides safety itself.",
     ".SH COMMANDS",
   ];
@@ -71,7 +71,7 @@ export function manPage(opts: { version?: string; date?: string } = {}): string 
   return `${lines.join("\n")}\n`;
 }
 
-/** `prom man` — print the roff man page to stdout (`prom man | man -l -`). */
+/** `prometheus man` — print the roff man page to stdout (`prometheus man | man -l -`). */
 export function runMan(ctx: CliContext): CommandOutcome {
   const page = manPage({});
   if (ctx.json) return { json: { ok: true, format: "roff", page }, exitCode: 0 };

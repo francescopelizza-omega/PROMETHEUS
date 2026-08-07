@@ -9,7 +9,7 @@
  * Commands here are READ-ONLY or PREVIEW: describe / tutorial / methods / harden /
  * models config+browse / chat (agentic-local reply + terminal-chat PREVIEW). The
  * terminal preview returns the engine's injection-safe argv; the ACTUAL terminal
- * handoff is the user's (prom CLI / pty panel) — JS never launches a bypassed
+ * handoff is the user's (prometheus CLI / pty panel) — JS never launches a bypassed
  * agent here. No scoring, no allowlist, no verdict upgrade (the SPINE / C5).
  */
 

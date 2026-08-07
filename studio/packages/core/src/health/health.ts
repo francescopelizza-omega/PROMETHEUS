@@ -83,7 +83,7 @@ export function engineComponent(probe: {
 }): HealthComponent {
   if (!probe.ok || !probe.version) {
     return boolComponent("engine", "Engine", false, {
-      remediation: "run `prom doctor` — engine not reachable",
+      remediation: "run `prometheus doctor` — engine not reachable",
     });
   }
   if (!probe.contractOk) {
@@ -129,7 +129,7 @@ export function threatDbComponent(
   if (!seeded) {
     return boolComponent("nemesis-db", "Nemesis DB", false, {
       softFail: true,
-      remediation: "seed the threat DB: `prom secure-scan --refresh`",
+      remediation: "seed the threat DB: `prometheus secure-scan --refresh`",
     });
   }
   if (ageDays !== undefined && ageDays > staleDays) {

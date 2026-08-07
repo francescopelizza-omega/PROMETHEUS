@@ -5,7 +5,7 @@
  * 08 §2), the theme@1 loader/applier (08 §6 + schemas/theme/v1.json), the 20
  * built-in color schemes (13 §3.1), and the minimal-but-real component set.
  *
- * Tokens are the only artifact shared with the CLI (08 §8) — the prom TUI reads
+ * Tokens are the only artifact shared with the CLI (08 §8) — the prometheus TUI reads
  * the same token data to drive its ANSI palette. Components import `react` only.
  */
 
@@ -67,7 +67,7 @@ export * from "./tokens/index.js";
 
 /* ── shell model (08 §4): activity routing + ⌘K palette filter + nemesis-shield
  *    state + the §6 theme-resolution brain. PURE + framework-free, shared with the
- *    prom TUI (08 §8). The desktop shell/ components bind these to React + the DOM. */
+ *    prometheus TUI (08 §8). The desktop shell/ components bind these to React + the DOM. */
 export * from "./shell/index.js";
 
 /* ── custom activity-icon set (08 §4.1): bold inline-SVG glyphs for the rail.
@@ -202,7 +202,7 @@ export * from "./marketplace/index.js";
 /* ── AI providers + billing (file 12 §4/§5): the Tier-A-first provider picker, the
  *    loud §4.1 PAY-PER-USE typed-confirm cost modal, the §4.3 live spend meter, and
  *    the §5.1 AI-Providers settings screen, plus the pure sort/copy/meter projections
- *    the prom CLI shares. Presentational; the container wires core's ai.* + keychain. */
+ *    the prometheus CLI shares. Presentational; the container wires core's ai.* + keychain. */
 export * from "./ai/index.js";
 
 /* ── theming (file 13 Area 3): the scheme registry (08's 20 builtins + user customs),

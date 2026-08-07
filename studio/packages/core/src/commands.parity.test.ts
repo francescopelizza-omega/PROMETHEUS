@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 /**
  * commands.parity.test.ts — proves GUI/CLI parity is STRUCTURAL.
  *
- * The contract (file 11 §5): anything you can do in the GUI you can do in `prom`,
+ * The contract (file 11 §5): anything you can do in the GUI you can do in `prometheus`,
  * and vice-versa, because BOTH route through the one CommandSpec registry. These
  * tests assert that, mechanically:
  *
@@ -203,7 +203,7 @@ test("PARITY: the C4 nemesis gate is bound", () => {
   );
   assert.ok(hasGate, "registry must bind `nemesis gate` (C4 arbitrary-target gate)");
   assert.equal(getCommand("gate")?.engineSubcommand, "nemesis:gate");
-  // the canonical FREE threat scan, surfaced on BOTH the CLI (`prom nemesis` / `/nemesis`) and
+  // the canonical FREE threat scan, surfaced on BOTH the CLI (`prometheus nemesis` / `/nemesis`) and
   // the app GUI (Security route) — must reach the SAME fail-closed nemesis gate.
   const nemesis = getCommand("nemesis");
   assert.ok(nemesis, "registry must expose the `nemesis` free-scan spec");

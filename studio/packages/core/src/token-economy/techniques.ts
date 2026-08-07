@@ -127,12 +127,12 @@ export const TOKEN_TOOLS: readonly TokenTool[] = Object.freeze([
     category: "code-map",
     saves: "input",
     pitch:
-      "Hand the model a signature-only skeleton of the WHOLE repo in a fixed token budget instead of dumping files — so it answers 'where is X defined' without a grep. Built-in to `prom` (`/repomap`); aider's tree-sitter+PageRank map is the richer external option.",
+      "Hand the model a signature-only skeleton of the WHOLE repo in a fixed token budget instead of dumping files — so it answers 'where is X defined' without a grep. Built-in to `prometheus` (`/repomap`); aider's tree-sitter+PageRank map is the richer external option.",
     tokenSaving:
       "Whole-repo context collapsed to a fixed ~2k-token budget (`/repomap`, default OFF); 90%+ input vs sending full files for repo-wide context.",
     bestFor: "both",
     install:
-      "Built-in — enable with `/repomap on` in a `prom` session. (External richer option: python -m pip install aider-install && aider-install.)",
+      "Built-in — enable with `/repomap on` in a `prometheus` session. (External richer option: python -m pip install aider-install && aider-install.)",
     usage:
       "`/repomap on` injects a budgeted file+symbol map into the agent's system context; `/repomap refresh` rebuilds it (walking is the cost, so it's explicit-only). aider's map auto-injects with --map-tokens.",
     openaiCompatible: true,
@@ -250,9 +250,9 @@ export const TOKEN_TOOLS: readonly TokenTool[] = Object.freeze([
       "Compute/$ saving (not a context cut): bulk + offline + privacy work at $0; pair with model-routing (cheap local for easy turns, paid for hard ones).",
     bestFor: "free-local",
     install:
-      "ollama pull qwen3:4b (Apache-2.0) · ollama run gemma3:4b (Gemma license) · phi4-mini (MIT). Or via Prometheus: prom setup → pick a local model.",
+      "ollama pull qwen3:4b (Apache-2.0) · ollama run gemma3:4b (Gemma license) · phi4-mini (MIT). Or via Prometheus: prometheus setup → pick a local model.",
     usage:
-      "Point any OpenAI client at base_url=http://localhost:11434/v1, api_key='ollama'. These are already in the Prometheus catalog with full RAM/feasibility data (prom model browse --free).",
+      "Point any OpenAI client at base_url=http://localhost:11434/v1, api_key='ollama'. These are already in the Prometheus catalog with full RAM/feasibility data (prometheus model browse --free).",
     openaiCompatible: true,
     maturity: "production",
     defaultOn: true,
@@ -272,7 +272,7 @@ export const TOKEN_TOOLS: readonly TokenTool[] = Object.freeze([
     install:
       "Requires Chrome 138+ with Gemini Nano provisioned (chrome://flags → Prompt API for Gemini Nano + on-device model; the model is Chrome's managed component, auto-downloaded). NO account.",
     usage:
-      "In a local page: const s = await LanguageModel.create(); await s.prompt('…'). Headless: drive it via CDP behind a localhost OpenAI-compatible shim. Prometheus surfaces this PATH + the honest feasibility ASSESSMENT via `prom tokens nano` — it documents the connector, it does not ship one yet.",
+      "In a local page: const s = await LanguageModel.create(); await s.prompt('…'). Headless: drive it via CDP behind a localhost OpenAI-compatible shim. Prometheus surfaces this PATH + the honest feasibility ASSESSMENT via `prometheus tokens nano` — it documents the connector, it does not ship one yet.",
     openaiCompatible: true,
     maturity: "experimental",
     defaultOn: false,

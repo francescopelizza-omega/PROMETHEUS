@@ -3,7 +3,7 @@
  *
  * The CLI cannot take a hex value for the terminal's 16-color path, so the design
  * system also publishes the semantic-role → ANSI-color-NAME → SGR-code mapping that
- * both the `prom` CLI (apps/cli render.ts) and the prom TUI consume. This is the
+ * both the `prometheus` CLI (apps/cli render.ts) and the prometheus TUI consume. This is the
  * ONE place the §5.7 row contract lives:
  *
  *   brand → magenta · accent → cyan · ok → green · warn → yellow ·

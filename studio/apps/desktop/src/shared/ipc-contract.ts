@@ -187,7 +187,7 @@ export const IPC = {
   // ── SPECTACULAR power-up: catalog cards + chat + models folder + harden ────
   // Read-only/preview engine commands over a PrometheusEngine facade in MAIN.
   // chat is PREVIEW-only here (the engine assembles an injection-safe argv); the
-  // actual terminal handoff is the user's via the prom CLI / pty panel.
+  // actual terminal handoff is the user's via the prometheus CLI / pty panel.
   spectacularDescribe: "spectacular:describe",
   spectacularTutorial: "spectacular:tutorial",
   spectacularMethods: "spectacular:methods",

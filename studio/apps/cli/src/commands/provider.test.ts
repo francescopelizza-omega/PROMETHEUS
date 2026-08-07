@@ -1,5 +1,5 @@
 /**
- * provider.test.ts — `prom provider list` / `prom provider show <id>` over the C11
+ * provider.test.ts — `prometheus provider list` / `prometheus provider show <id>` over the C11
  * promotion policy (providers.config.json). Reads the REAL bundled config (a pure
  * file read, no engine spawn) — the same policy the GUI ProviderPicker renders.
  */

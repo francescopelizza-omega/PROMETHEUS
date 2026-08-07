@@ -165,7 +165,7 @@ export async function runTerminalChat(
   // An engine-level failure rides through as ok:false — surface it, never launch.
   if (env.ok === false) {
     return {
-      text: `prom chat --cli ${opts.cli}: ${env.error ?? "engine reported failure"}`,
+      text: `prometheus chat --cli ${opts.cli}: ${env.error ?? "engine reported failure"}`,
       json: env,
       exitCode: 2,
     };

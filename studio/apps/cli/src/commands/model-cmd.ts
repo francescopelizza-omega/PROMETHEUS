@@ -1,5 +1,5 @@
 /**
- * commands/model-cmd.ts — the FULL `prom model …` surface over the modelhub.py
+ * commands/model-cmd.ts — the FULL `prometheus model …` surface over the modelhub.py
  * sidecar (C7 / file 05), at parity with the GUI Model Hub. Discovery + fit + the
  * GATED download; serve/stop/status drive a CLI-OWNED runner supervisor
  * (engine-bridge serve-host, CLI-022) that records only the pids it spawns — the
@@ -228,7 +228,7 @@ function feasibilityWarning(
   if (v.suggestSmaller) {
     lines.push(
       c.dim(
-        `  smaller model: prom model browse --free   ·   size your context: prom model fit ${id}`,
+        `  smaller model: prometheus model browse --free   ·   size your context: prometheus model fit ${id}`,
       ),
     );
   }
@@ -342,7 +342,7 @@ async function offerRunnerInstall(
   if (out.ok === false) {
     let t = c.red(`${retry.command}: ${out.error ?? "failed after install"}`);
     if (/ollama|daemon|serve/i.test(t))
-      t += `\n${c.dim("try: prom doctor · prom model install-runner")}`;
+      t += `\n${c.dim("try: prometheus doctor · prometheus model install-runner")}`;
     return { text: t, exitCode: 2 };
   }
   return { text: `${c.green("✓")} ollama installed · ${retry.command} complete`, exitCode: 0 };
@@ -376,7 +376,7 @@ export async function runModelCommand(
         }
         return {
           text: c.red(
-            `prom model info ${id}: not in the bundled open catalog — try \`prom model search ${id}\``,
+            `prometheus model info ${id}: not in the bundled open catalog — try \`prometheus model search ${id}\``,
           ),
           exitCode: 2,
         };
@@ -585,7 +585,7 @@ export async function runModelCommand(
           `${c.green("✓")} serving ${c.bold(r.model)} ${c.dim(`(${r.runner})`)}\n` +
           `  ${kv("profile", r.profileId)}\n  ${kv("port", String(r.port))}\n` +
           `  ${kv("pid", String(r.pid))}${r.baseUrl ? `\n  ${kv("endpoint", r.baseUrl)}` : ""}\n` +
-          `  ${c.dim("stop with")} ${c.bold(`prom model stop ${r.profileId} --yes`)}`,
+          `  ${c.dim("stop with")} ${c.bold(`prometheus model stop ${r.profileId} --yes`)}`,
         json: { ok: true, status: "serving", server: r },
         exitCode: 0,
       };
@@ -671,7 +671,7 @@ export async function runModelCommand(
         typeof out.text === "string" &&
         /ollama|daemon|serve/i.test(out.text)
       ) {
-        out.text += `\n${c.dim("try: prom doctor · prom model install-runner")}`;
+        out.text += `\n${c.dim("try: prometheus doctor · prometheus model install-runner")}`;
       }
       if (feas && typeof out.text === "string" && out.exitCode === 0) {
         out.text = `${feas}\n\n${out.text}`;
@@ -791,7 +791,7 @@ export async function runModelCommand(
     }
     case "tools":
       return {
-        text: `prom model tools: model-RUNNING tools (AirLLM/FlashAttention/…) live under ${c.bold("prom models")}.\n  ${c.dim("try:")} prom models list`,
+        text: `prometheus model tools: model-RUNNING tools (AirLLM/FlashAttention/…) live under ${c.bold("prometheus models")}.\n  ${c.dim("try:")} prometheus models list`,
         json: { ok: true, status: "pointer", see: "models" },
         exitCode: 0,
       };
@@ -799,7 +799,7 @@ export async function runModelCommand(
     default:
       return {
         text:
-          `prom model ${verb}: unknown model verb.\n` +
+          `prometheus model ${verb}: unknown model verb.\n` +
           `  ${c.dim("try:")} hw · list · library · search · browse · info · card · fit · pull · rm · prune · serve · status · stop · endpoints · repoint`,
         json: { ok: false, error: "unknown-verb", command: `model ${verb}` },
         exitCode: 2,
@@ -898,7 +898,7 @@ function renderSearchTable(
   fits: boolean,
 ): CommandOutcome {
   if (ranked.length === 0) {
-    return { text: c.dim("no matches — try `prom model browse`"), exitCode: 0 };
+    return { text: c.dim("no matches — try `prometheus model browse`"), exitCode: 0 };
   }
   const fitTint = (t?: string): string => {
     if (!t) return c.dim("?"); // unknown fit (no resource data) — never fabricated
@@ -948,7 +948,7 @@ function renderInfo(
   if (!r) {
     // caller already guards unknown ids (exit 2); this is defensive only.
     return {
-      text: c.red(`prom model info ${id}: not in the bundled open catalog`),
+      text: c.red(`prometheus model info ${id}: not in the bundled open catalog`),
       exitCode: 2,
     };
   }
@@ -1013,7 +1013,7 @@ function renderInfo(
         lines.push(`  ${c.cyan(s.technique.name)} — ${c.dim(s.rationale)}`);
       }
       if (v.suggestSmaller) {
-        lines.push(c.dim("  smaller model: prom model browse --free"));
+        lines.push(c.dim("  smaller model: prometheus model browse --free"));
       }
     }
   } else if (feas.kind === "no-resource") {
@@ -1065,7 +1065,7 @@ function renderCard(e: Record<string, unknown>, id: string, open: boolean): Comm
   const repo = r && typeof r.repo === "string" ? r.repo : "";
   if (!repo) {
     return {
-      text: `prom model card ${id}: ${c.dim("no HuggingFace repo on record for this id.")}`,
+      text: `prometheus model card ${id}: ${c.dim("no HuggingFace repo on record for this id.")}`,
       json: { ok: false, id, url: null },
       exitCode: 0,
     };

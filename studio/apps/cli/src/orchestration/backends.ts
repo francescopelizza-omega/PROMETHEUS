@@ -225,7 +225,7 @@ async function cliInvoke(
   const bin = candidates.find((c) => which(c));
   if (!bin)
     throw new Error(
-      `${service}: none of [${candidates.join(", ")}] found on PATH — install + log it in first (try \`prom chat --cli ${service} --open\`)`,
+      `${service}: none of [${candidates.join(", ")}] found on PATH — install + log it in first (try \`prometheus chat --cli ${service} --open\`)`,
     );
 
   // nemesis gate BEFORE the first spawn (the engine still gates any fetch/install the CLI does).

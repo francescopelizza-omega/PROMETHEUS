@@ -1,7 +1,7 @@
 /**
  * agent/index.ts — the universal REPL/GUI agent loop barrel (file 11 §3.2).
  *
- * The tunable agent both `prom chat` and the GUI agent pane drive — model + tool
+ * The tunable agent both `prometheus chat` and the GUI agent pane drive — model + tool
  * runner injected, the same 14-tool catalog, the same never-force + gate-first
  * invariants. PURE (no ink/react/node-only beyond the injected bridge interface).
  */
