@@ -2,16 +2,10 @@
  * shell/a11y.ts — accessibility primitives for the workbench (APP-100).
  *
  * The PURE half (id derivation, ARIA prop objects, index math for focus/arrow cycling) is
- * DOM-free so it unit-tests under plain node:test — the repo has no jsdom. The HOOK half
- * (`useFocusTrap`) does the real DOM work (capture + restore focus, trap Tab inside a dialog);
- * it's verified in the offscreen-Electron render, not in a jsdom test.
+ * DOM-free so it unit-tests under plain node:test — the repo has no jsdom. The DOM half is
+ * `useFocusTrap`, which now lives in @prometheus/ui and is re-exported at the bottom of this
+ * file; it is verified in the offscreen-Electron render, not in a jsdom test.
  */
-
-import { type RefObject, useEffect } from "react";
-
-/** The elements a focus trap may cycle through (ARIA APG). */
-export const FOCUSABLE_SELECTOR =
-  'a[href],button:not([disabled]),input:not([disabled]),select:not([disabled]),textarea:not([disabled]),[tabindex]:not([tabindex="-1"])';
 
 /** A stable option DOM id for a listbox row (aria-activedescendant target). */
 export function optionId(listboxId: string, index: number): string {
@@ -91,39 +85,18 @@ export function arrowMove(count: number, current: number, key: string): number |
 }
 
 /**
- * Focus trap for a dialog overlay: while `active`, remembers the element that had focus, and on
- * deactivate/unmount restores focus to it (if still in the document). Tab/Shift-Tab wrap within
- * the container's focusables — BUT a text input/textarea inside the container keeps its own Tab
- * handling (the command palette hijacks Tab to cycle its source tabs), so the trap defers to it.
+ * The workbench focus trap — re-exported, not reimplemented.
+ *
+ * This module used to carry its OWN `useFocusTrap`, subtly different from the one in
+ * @prometheus/ui: node-level listener instead of document-capture, no Escape, no initial
+ * focus. Whether Escape closed a surface therefore depended on which of the two its author
+ * happened to import. They are merged; the survivor lives in
+ * `packages/ui/src/components/primitives/overlay.ts` and took this one's two better
+ * behaviours with it (the `offsetParent` visibility filter, the `contains` guard on focus
+ * restore) plus this one's INPUT/TEXTAREA Tab deferral as the opt-in
+ * `deferTabToTextFields` — a palette needs it, a modal dialog must not have it.
+ *
+ * Re-exported here so the workbench keeps ONE a11y import surface.
  */
-export function useFocusTrap(ref: RefObject<HTMLElement | null>, active: boolean): void {
-  useEffect(() => {
-    if (!active) return;
-    const previouslyFocused = document.activeElement as HTMLElement | null;
-    const node = ref.current;
-
-    const onKeyDown = (e: KeyboardEvent): void => {
-      if (e.key !== "Tab" || !node) return;
-      // let a focused text field own Tab (e.g. the palette's tab-cycling input).
-      const ae = document.activeElement;
-      const tag = ae?.tagName;
-      if ((tag === "INPUT" || tag === "TEXTAREA") && node.contains(ae)) return;
-      const focusables = Array.from(node.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR)).filter(
-        (el) => el.offsetParent !== null || el === ae,
-      );
-      if (focusables.length === 0) return;
-      const idx = ae instanceof HTMLElement ? focusables.indexOf(ae) : -1;
-      e.preventDefault();
-      focusables[nextFocusIndex(focusables.length, idx < 0 ? 0 : idx, e.shiftKey)]?.focus();
-    };
-
-    node?.addEventListener("keydown", onKeyDown);
-    return () => {
-      node?.removeEventListener("keydown", onKeyDown);
-      // restore focus to the opener, if it's still attached.
-      if (previouslyFocused && document.contains(previouslyFocused)) {
-        previouslyFocused.focus();
-      }
-    };
-  }, [ref, active]);
-}
+export { useFocusTrap } from "@prometheus/ui";
+export type { FocusTrapOptions } from "@prometheus/ui";

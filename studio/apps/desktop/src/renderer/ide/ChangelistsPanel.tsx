@@ -63,7 +63,7 @@ export function ChangelistsPanel({
     <div
       style={{
         marginBottom: 8,
-        border: "1px solid var(--border-subtle, #2a2a33)",
+        border: "1px solid var(--border-subtle)",
         borderRadius: "var(--radius-sm, 3px)",
       }}
     >
@@ -73,12 +73,10 @@ export function ChangelistsPanel({
           alignItems: "center",
           justifyContent: "space-between",
           padding: "3px 6px",
-          borderBottom: "1px solid var(--border-subtle, #2a2a33)",
+          borderBottom: "1px solid var(--border-subtle)",
         }}
       >
-        <span style={{ fontSize: "0.72rem", color: "var(--text-secondary, #9a9aa3)" }}>
-          Changelists
-        </span>
+        <span style={{ fontSize: "0.72rem", color: "var(--text-secondary)" }}>Changelists</span>
         {creating === null ? (
           <Button size="sm" variant="ghost" onClick={() => setCreating("")}>
             + new list
@@ -99,9 +97,9 @@ export function ChangelistsPanel({
                 }
               }}
               style={{
-                background: "var(--bg-inset, #0b0b0f)",
-                color: "var(--text-primary, #e7e7ea)",
-                border: "1px solid var(--border-subtle, #2a2a33)",
+                background: "var(--bg-inset)",
+                color: "var(--text-primary)",
+                border: "1px solid var(--border-subtle)",
                 borderRadius: "var(--radius-sm, 3px)",
                 fontSize: "0.72rem",
                 padding: "1px 4px",
@@ -126,7 +124,7 @@ export function ChangelistsPanel({
         const isCollapsed = collapsed.has(list.id);
         const files = list.files;
         return (
-          <div key={list.id} style={{ borderTop: "1px solid var(--border-subtle, #2a2a33)" }}>
+          <div key={list.id} style={{ borderTop: "1px solid var(--border-subtle)" }}>
             <div style={{ display: "flex", alignItems: "center", gap: 4, padding: "2px 6px" }}>
               <button
                 type="button"
@@ -135,7 +133,7 @@ export function ChangelistsPanel({
                 style={{
                   background: "transparent",
                   border: "none",
-                  color: "var(--text-secondary, #9a9aa3)",
+                  color: "var(--text-secondary)",
                   cursor: "pointer",
                   fontSize: "0.7rem",
                   width: 14,
@@ -162,22 +160,20 @@ export function ChangelistsPanel({
                   }}
                   style={{
                     flex: 1,
-                    background: "var(--bg-inset, #0b0b0f)",
-                    color: "var(--text-primary, #e7e7ea)",
-                    border: "1px solid var(--border-subtle, #2a2a33)",
+                    background: "var(--bg-inset)",
+                    color: "var(--text-primary)",
+                    border: "1px solid var(--border-subtle)",
                     borderRadius: "var(--radius-sm, 3px)",
                     fontSize: "0.72rem",
                     padding: "1px 4px",
                   }}
                 />
               ) : (
-                <span
-                  style={{ flex: 1, fontSize: "0.72rem", color: "var(--text-primary, #e7e7ea)" }}
-                >
+                <span style={{ flex: 1, fontSize: "0.72rem", color: "var(--text-primary)" }}>
                   {list.name}
-                  <span style={{ color: "var(--text-secondary, #9a9aa3)" }}> ({files.length})</span>
+                  <span style={{ color: "var(--text-secondary)" }}> ({files.length})</span>
                   {list.isDefault && (
-                    <span style={{ color: "var(--text-secondary, #9a9aa3)" }}> · default</span>
+                    <span style={{ color: "var(--text-secondary)" }}> · default</span>
                   )}
                 </span>
               )}
@@ -230,7 +226,7 @@ export function ChangelistsPanel({
                       overflow: "hidden",
                       textOverflow: "ellipsis",
                       whiteSpace: "nowrap",
-                      color: "var(--text-primary, #e7e7ea)",
+                      color: "var(--text-primary)",
                       fontFamily: "var(--font-mono, monospace)",
                     }}
                     title={file}
@@ -244,9 +240,9 @@ export function ChangelistsPanel({
                       title="move to list"
                       onChange={(e) => store.move(root, e.target.value, [file])}
                       style={{
-                        background: "var(--bg-inset, #0b0b0f)",
-                        color: "var(--text-secondary, #9a9aa3)",
-                        border: "1px solid var(--border-subtle, #2a2a33)",
+                        background: "var(--bg-inset)",
+                        color: "var(--text-secondary)",
+                        border: "1px solid var(--border-subtle)",
                         borderRadius: "var(--radius-sm, 3px)",
                         fontSize: "0.66rem",
                         maxWidth: 110,
@@ -267,7 +263,7 @@ export function ChangelistsPanel({
                   margin: 0,
                   padding: "1px 6px 3px 24px",
                   fontSize: "0.68rem",
-                  color: "var(--text-secondary, #9a9aa3)",
+                  color: "var(--text-secondary)",
                 }}
               >
                 (empty)
@@ -283,7 +279,7 @@ export function ChangelistsPanel({
 const ICON_BTN = {
   background: "transparent",
   border: "none",
-  color: "var(--text-secondary, #9a9aa3)",
+  color: "var(--text-secondary)",
   cursor: "pointer",
   fontSize: "0.7rem",
 } as const;

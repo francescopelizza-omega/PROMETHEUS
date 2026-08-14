@@ -44,9 +44,33 @@ import { type SteeringFile, renderSteeringList } from "./steering.js";
 import type { ResolveResult } from "./working-set.js";
 
 type AgentTuning = agent.AgentTuning;
+type ToolDef = ReturnType<typeof agent.exposedTools>[number];
+type ToolFieldSpec = ToolDef["schema"][string];
 type EffortTier = ai.EffortTier;
 type EffortResolution = ai.EffortResolution;
 const { isEffortTier } = ai;
+
+/**
+ * One configured hook, resolved for display (CLI-102's `/hooks`): the event/matcher/command the
+ * user wrote, plus which settings LAYER it came from — `hooks-config.ts` merges global +
+ * workspace before this ever sees them, so this is the only place that still knows.
+ */
+export interface HookListing {
+  event: agent.HookEvent;
+  matcher?: string;
+  command: string;
+  source: "global" | "workspace";
+}
+
+/**
+ * One hook's outcome from a `/hooks test` dry run — the exact `HookOutcome` the real loop would
+ * have seen, plus the spec it came from so a user with three hooks on one event can tell them
+ * apart.
+ */
+export interface HookTestOutcome extends agent.HookOutcome {
+  matcher?: string;
+  command: string;
+}
 
 /**
  * The `/status` think line. Reports what the ACTIVE model will do with the stored tier, not
@@ -64,9 +88,137 @@ function describeThink(ctx: SlashCtx): string {
   return res.degraded ? `${label} → ${res.applied} (${res.degraded.message})` : label;
 }
 
-/** The full agent tool surface (for /tools list + name validation, CLI-018). */
-const AGENT_TOOL_DEFS = agent.exposedTools({ enabled: true, allow: [], deny: [] });
-const AGENT_TOOL_NAMES = AGENT_TOOL_DEFS.map((t) => t.name);
+/**
+ * The full agent tool surface (for /tools list + name validation, CLI-018).
+ *
+ * Computed from the LIVE tuning, not once at module load, because the host-local tools live in
+ * `tools.extra` — the system tools, the file mutators, apply_patch, web_search, spawn_agent and
+ * every connected MCP server's tools. A static catalog listed none of them, which meant
+ * `/tools list` under-reported what the agent could do AND `/tools off write_file` was refused
+ * as an unknown name: the user could not disarm precisely the tools that touch their machine.
+ *
+ * `deny` is deliberately EMPTY here — this is the surface, not the armed subset, so a
+ * disarmed tool still appears (and can be re-armed).
+ */
+function agentToolDefs(tuning: AgentTuning): ToolDef[] {
+  return agent.exposedTools({
+    enabled: true,
+    allow: [],
+    deny: [],
+    ...(tuning.tools.extra ? { extra: tuning.tools.extra } : {}),
+  });
+}
+
+/* ── /hooks test — synthesized payloads (diagnostic only; NEVER a real tool call) ─────────── */
+
+/**
+ * A plausible value for one schema field, keyed off the field NAME where a generic guess would
+ * read as obviously fake (a hook script that `grep`s its stdin for a path should see one).
+ * `spec.default` wins when the tool declared one — that is a truer "realistic" value than any
+ * guess this function could make.
+ */
+function sampleFieldValue(name: string, spec: ToolFieldSpec): unknown {
+  if (spec.default !== undefined) return spec.default;
+  switch (spec.type) {
+    case "string":
+      if (/path|file|dir/i.test(name)) return "hooks-test-probe.txt";
+      if (/content|body|text/i.test(name)) return "hello from /hooks test";
+      if (/command|cmd/i.test(name)) return "echo hooks-test";
+      if (/url/i.test(name)) return "https://example.com";
+      return "example";
+    case "boolean":
+      return false;
+    case "number":
+      return 0;
+    case "enum":
+      return spec.enum?.[0] ?? "";
+    case "array":
+      return [];
+    default:
+      return null;
+  }
+}
+
+/**
+ * Synthesize `{...args}` for a tool call, schema-driven off the LIVE tool surface (the same one
+ * `/tools list` reads) so `/hooks test PreToolUse write_file` sends the hook the shape a real
+ * `write_file` call actually has. An unrecognized name (an MCP tool not currently connected,
+ * say) still gets a plausible fallback rather than refusing the test outright.
+ */
+function synthesizeToolArgs(tool: string, defs: readonly ToolDef[]): Record<string, unknown> {
+  const def = defs.find((t) => t.name === tool);
+  if (!def) return { path: "hooks-test-probe.txt" };
+  const args: Record<string, unknown> = {};
+  for (const [name, spec] of Object.entries(def.schema)) args[name] = sampleFieldValue(name, spec);
+  return args;
+}
+
+/**
+ * The full synthesized stdin body for `/hooks test`, matching the EXACT shapes
+ * `runPreToolUseHooks` / `firePostToolUseHooks` / `runSessionStartHooks` (agent/hooks.ts) build
+ * for a real call — a test that showed the hook a different shape than production would be
+ * worse than no diagnostic at all.
+ */
+function synthesizeHookPayload(
+  event: agent.HookEvent,
+  tool: string | undefined,
+  defs: readonly ToolDef[],
+  cwd: string,
+): unknown {
+  if (event === "SessionStart") return { event: "SessionStart", cwd };
+  const args = synthesizeToolArgs(tool ?? "", defs);
+  if (event === "PreToolUse") return { tool, args };
+  return { tool, args, result: { ok: true, summary: `synthetic /hooks test result for ${tool}` } };
+}
+
+/** Render `/hooks` (no args): every effective hook, grouped by nothing — configuration order IS
+ *  the order hooks run in, and this list is meant to read the same way the settings file does. */
+export function renderHooksList(rows: readonly HookListing[]): string[] {
+  if (rows.length === 0) {
+    return [
+      c.dim(
+        "no hooks configured — add one under `hooks: [...]` in ~/.prometheus/config/settings.json " +
+          "or <repo>/.prometheus/settings.json",
+      ),
+    ];
+  }
+  const eventW = Math.max(...rows.map((r) => r.event.length));
+  const lines = [c.bold(`Hooks (${rows.length} configured)`)];
+  for (const r of rows) {
+    const matcher = r.matcher?.trim() || "*";
+    const src = r.source === "workspace" ? "workspace" : "global";
+    lines.push(`  ${c.cyan(r.event.padEnd(eventW))}  ${matcher.padEnd(10)}  ${c.dim(`[${src}]`)}`);
+    lines.push(`      ${c.dim(r.command)}`);
+  }
+  return lines;
+}
+
+/** Render `/hooks test <event> [tool]`'s results — one block per matching hook, in run order. */
+export function renderHooksTest(
+  event: agent.HookEvent,
+  tool: string | undefined,
+  rows: readonly HookTestOutcome[],
+): string[] {
+  const label = tool ? `${event} ${tool}` : event;
+  if (rows.length === 0) return [c.dim(`/hooks test: no hook matches ${label}`)];
+  const lines = [c.bold(`/hooks test ${label} — ${rows.length} matching hook(s)`)];
+  for (const r of rows) {
+    const status =
+      r.error !== undefined
+        ? c.red(`error: ${r.error}`)
+        : r.timedOut
+          ? c.yellow("timed out")
+          : r.exitCode === 0
+            ? c.green("exit 0")
+            : c.red(`exit ${r.exitCode}`);
+    const matcher = r.matcher?.trim() ? ` (matcher ${r.matcher})` : "";
+    lines.push(`  ${c.bold(r.command)}${c.dim(matcher)}`);
+    lines.push(`      ${status}`);
+    if (r.stdout.trim()) lines.push(`      stdout: ${r.stdout.trim()}`);
+    if (r.stderr.trim()) lines.push(`      stderr: ${r.stderr.trim()}`);
+  }
+  return lines;
+}
 
 /** The imperative capabilities the host hands every slash handler. */
 export interface SlashCtx {
@@ -95,6 +247,21 @@ export interface SlashCtx {
   getAuthLevel: () => number;
   /** set the 0–7 --authorisation level (persists as the next-session default). */
   setAuthLevel: (level: number) => void;
+  /**
+   * The coarse autonomy POSTURE (`default`/`acceptEdits`/`plan`/…), Shift-Tab's dial in the
+   * TUI. Optional so existing fake SlashCtx fixtures keep compiling; `/permission-mode`
+   * reports honestly that the surface has no mode dial when it is absent, rather than
+   * printing a success it cannot deliver.
+   */
+  getPermMode?: () => agent.PermissionModeId;
+  setPermMode?: (mode: agent.PermissionModeId) => void;
+  /**
+   * Run a prompt DETACHED, in the background-run table `prometheus agents` reads.
+   *
+   * Optional so existing fake SlashCtx fixtures keep compiling; `/background` says the surface
+   * cannot detach rather than pretending it started something.
+   */
+  startBackground?: (task: string) => string | undefined;
   /** session controls owned by the host. */
   control: (signal: "clear" | "new" | "quit") => void;
   /** change the working directory. */
@@ -186,6 +353,23 @@ export interface SlashCtx {
     edit: (target: string) => Promise<string>;
     /** scaffold a project AGENTS.md (confirm inside), then reload; returns a status line. */
     create: () => Promise<string>;
+  };
+  /**
+   * Lifecycle-hook diagnostics (CLI-102): `/hooks` lists what's configured, `/hooks test` runs
+   * the matching hook(s) FOR REAL with a synthesized payload — never through the live
+   * PreToolUse/PostToolUse/SessionStart seams, so a dry run can never gate or delay a real turn.
+   *
+   * Optional so existing fake SlashCtx fixtures keep compiling; `/hooks` reports "not available
+   * on this surface" rather than throwing when a host has not wired it.
+   */
+  hooks?: {
+    /** every effective hook (post global/workspace resolution), in configuration order. */
+    list: () => HookListing[];
+    /**
+     * Run every hook bound to `event` (and matching `tool`, when given) with `payload` as its
+     * stdin, returning each one's real exit code/stdout/stderr. `[]` when nothing matched.
+     */
+    test: (event: agent.HookEvent, payload: string, tool?: string) => Promise<HookTestOutcome[]>;
   };
 }
 
@@ -893,12 +1077,13 @@ export const SLASH_REGISTRY: readonly SlashCmd[] = Object.freeze([
       const verb = toks[0] ?? "list";
       const tuning = ctx.tuning();
       const deny = new Set(tuning.tools.deny ?? []);
-      const names = AGENT_TOOL_NAMES;
+      const defs = agentToolDefs(tuning);
+      const names = defs.map((t) => t.name);
       if (verb === "list") {
         ctx.write(
           c.dim(`agent tools — global ${tuning.tools.enabled ? c.green("on") : c.red("off")}:`),
         );
-        for (const t of AGENT_TOOL_DEFS) {
+        for (const t of defs) {
           const on = tuning.tools.enabled && !deny.has(t.name);
           ctx.write(
             `  ${on ? c.green("on ") : c.red("off")}  ${t.name}  ${c.dim(t.description.slice(0, 50))}`,
@@ -966,6 +1151,45 @@ export const SLASH_REGISTRY: readonly SlashCmd[] = Object.freeze([
       ctx.write(
         c.dim(`authorisation → ${m.level} ${m.name} — ${m.description} (saved as default)`),
       );
+    },
+  },
+  {
+    name: "permission-mode",
+    aliases: ["permission-modes", "permissions-mode", "permmode"],
+    group: "model",
+    summary: "Set the autonomy posture (default|acceptEdits|plan|bypassPermissions|yolo).",
+    args: "[mode]",
+    /**
+     * The REAL plan mode. `/plan` next to this is a prompt macro — it asks the model to outline
+     * first and nothing stops it writing a file halfway through the outline. This sets the
+     * posture the shared agent loop enforces, so `plan` is a hard read-only DENY on every
+     * surface rather than a request the model may decline to honour.
+     */
+    run: (rest, ctx) => {
+      const get = ctx.getPermMode;
+      const set = ctx.setPermMode;
+      if (!get || !set) {
+        ctx.write(c.dim("this surface has no permission-mode dial"));
+        return;
+      }
+      const legend = agent.PERMISSION_MODES.map((m) => m.id).join(" · ");
+      const arg = rest.trim();
+      if (!arg) {
+        const cur = agent.permissionModeMeta(get());
+        ctx.write(c.dim(`permission mode: ${cur.id} — ${cur.description}`));
+        ctx.write(c.dim(`modes: ${legend}`));
+        return;
+      }
+      // Case-insensitive match on the id, so `/permission-mode acceptedits` works from a
+      // terminal where nobody wants to hunt for the capital E.
+      const found = agent.PERMISSION_MODES.find((m) => m.id.toLowerCase() === arg.toLowerCase());
+      if (!found) {
+        ctx.write(c.dim(`unknown permission mode "${arg}"`));
+        ctx.write(c.dim(`modes: ${legend}`));
+        return;
+      }
+      set(found.id);
+      ctx.write(c.dim(`permission mode → ${found.id} — ${found.description}`));
     },
   },
   toggle("dry-run", "dryRun", "Toggle dry-run (preview mutations)."),
@@ -1089,6 +1313,34 @@ export const SLASH_REGISTRY: readonly SlashCmd[] = Object.freeze([
       `Plan the following before making changes — list the steps, files, and risks, then wait for my go-ahead:\n${r || "(describe the task)"}`,
     { args: "[task]" },
   ),
+  {
+    name: "background",
+    aliases: ["bg", "detach"],
+    group: "agents",
+    summary: "Run a prompt DETACHED — keeps going after the prompt returns; track with /agents.",
+    args: "<task>",
+    /**
+     * The trigger the `agents` surface never had.
+     *
+     * `RunRegistry`, `startBackgroundRun` and `prometheus agents list|attach|kill` all shipped
+     * complete and unit-tested with no production caller between them, so `agents list` was a
+     * correct renderer of a table nothing wrote to — it printed "no background agent runs in
+     * this process" no matter what you did. This is what writes to it.
+     */
+    run: (rest, ctx) => {
+      const task = rest.trim();
+      if (!task) {
+        ctx.write(c.dim("usage: /background <task>"));
+        return;
+      }
+      if (!ctx.startBackground) {
+        ctx.write(c.dim("this surface cannot run a detached agent"));
+        return;
+      }
+      const note = ctx.startBackground(task);
+      ctx.write(note ? c.dim(note) : c.red("could not start a background run"));
+    },
+  },
   macro(
     "orchestrate",
     "agents",
@@ -1459,6 +1711,51 @@ export const SLASH_REGISTRY: readonly SlashCmd[] = Object.freeze([
       for (const line of renderKeymap(res)) {
         ctx.write(/\buser \*/.test(line) ? c.cyan(line) : paint(line));
       }
+    },
+  },
+  {
+    // CLI-102: the only diagnostic a configured lifecycle hook had before this was a status
+    // line IF it errored mid-turn. `/hooks` lists what's resolved (global vs workspace, §7.1
+    // precedence); `/hooks test` runs the matching hook(s) FOR REAL with a synthesized payload —
+    // never through the live PreToolUse/PostToolUse/SessionStart seams, so it can never gate or
+    // delay an actual turn.
+    name: "hooks",
+    group: "config",
+    summary: "List configured lifecycle hooks, or dry-run one (test) without gating a real call.",
+    args: "[test <event> [tool]]",
+    run: async (rest, ctx) => {
+      if (!ctx.hooks) {
+        ctx.write(c.dim("this surface has no hooks diagnostic"));
+        return;
+      }
+      const [sub, ...args] = toks(rest);
+      if (!sub) {
+        for (const line of renderHooksList(ctx.hooks.list())) ctx.write(line);
+        return;
+      }
+      if (sub !== "test") {
+        ctx.write(c.red(`/hooks: unknown "${sub}" — use (no args) | test <event> [tool]`));
+        return;
+      }
+      const [eventArg, toolArg] = args;
+      const event = agent.HOOK_EVENTS.find(
+        (e) => e.toLowerCase() === (eventArg ?? "").toLowerCase(),
+      );
+      if (!event) {
+        ctx.write(
+          c.red(
+            `/hooks test: unknown event "${eventArg ?? ""}" — use ${agent.HOOK_EVENTS.join(" | ")}`,
+          ),
+        );
+        return;
+      }
+      if (event !== "SessionStart" && !toolArg) {
+        ctx.write(c.red(`/hooks test: ${event} needs a tool name — /hooks test ${event} <tool>`));
+        return;
+      }
+      const payload = synthesizeHookPayload(event, toolArg, agentToolDefs(ctx.tuning()), ctx.cwd());
+      const rows = await ctx.hooks.test(event, JSON.stringify(payload), toolArg);
+      for (const line of renderHooksTest(event, toolArg, rows)) ctx.write(line);
     },
   },
   {

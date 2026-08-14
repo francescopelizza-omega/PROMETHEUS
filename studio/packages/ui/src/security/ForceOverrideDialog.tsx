@@ -14,8 +14,10 @@
  * install via window.prometheus.*). All engine strings are inert text.
  */
 
-import { type ReactElement, useId, useState } from "react";
+import { type ReactElement, useId, useRef, useState } from "react";
 import { Button } from "../components/Button.js";
+import { useFocusTrap } from "../components/primitives/overlay.js";
+import { Z } from "../tokens/layers.js";
 import { FindingRow } from "./FindingRow.js";
 import type { SecFinding } from "./types.js";
 import { FORCE_TOKEN, inertText, matchesForceToken } from "./util.js";
@@ -47,6 +49,11 @@ export function ForceOverrideDialog({
   const [typed, setTyped] = useState("");
   const inputId = useId();
   const enabled = matchesForceToken(typed);
+  // §9 overlay contract: focus trap + focus restore + Escape. This is a MODAL asking for
+  // an irreversible decision — Tab must not walk out of it into the page behind, and
+  // Escape must always be a way out that means "no".
+  const panelRef = useRef<HTMLElement | null>(null);
+  useFocusTrap(panelRef, true, onCancel);
 
   return (
     <div
@@ -62,10 +69,12 @@ export function ForceOverrideDialog({
         justifyContent: "center",
         background: "color-mix(in srgb, var(--danger) 22%, rgba(0,0,0,0.6))",
         padding: "var(--space-12, 24px)",
-        zIndex: 1000,
+        zIndex: Z.modal,
       }}
     >
       <section
+        ref={panelRef}
+        tabIndex={-1}
         style={{
           width: "min(560px, 100%)",
           maxHeight: "100%",

@@ -9,8 +9,16 @@
  *
  * Renderer-SANDBOXED (C5): react + window.prometheus only.
  */
-import { type CSSProperties, type ReactElement, useCallback, useEffect, useState } from "react";
+import {
+  type CSSProperties,
+  type ReactElement,
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+} from "react";
 
+import { Z, useFocusTrap } from "@prometheus/ui";
 import type { IdeHistoryEntry } from "../../shared/ipc-contract.js";
 
 export interface HistoryPanelProps {
@@ -58,6 +66,10 @@ export function HistoryPanel({
   const [current, setCurrent] = useState<string>("");
   const [typed, setTyped] = useState("");
   const [notice, setNotice] = useState<string | null>(null);
+  // §9.2 overlay contract: it declares role="dialog" but had no focus trap and no Escape —
+  // Tab walked the editor behind it and the ✕ was the only way out.
+  const rootRef = useRef<HTMLDivElement | null>(null);
+  useFocusTrap(rootRef, true, onClose);
 
   const reload = useCallback(async () => {
     const api = ideApi();
@@ -103,10 +115,17 @@ export function HistoryPanel({
 
   return (
     <div
+      ref={rootRef}
       role="dialog"
+      aria-modal="true"
       aria-label={`Local history: ${name}`}
       style={{
-        position: "absolute",
+        // `fixed`, not `absolute` (§9.2): as `absolute` this resolved against whatever
+        // ancestor happened to be positioned — the editor route root is not — so the panel's
+        // "10% from the top, centred" was measured against an arbitrary box and moved when
+        // the layout around it changed. Fixed means the viewport, which is what the numbers
+        // below have always described.
+        position: "fixed",
         top: "8%",
         left: "50%",
         transform: "translateX(-50%)",
@@ -118,7 +137,10 @@ export function HistoryPanel({
         border: "1px solid var(--border-strong)",
         borderRadius: "var(--radius-md, 6px)",
         boxShadow: "var(--elevation-e3, 0 10px 40px rgba(0,0,0,0.4))",
-        zIndex: 60,
+        // Z.modal: it declares role="dialog" and is the only thing the user can interact
+        // with while it is up. On the `dropdown` rung (500) any menu opened behind it would
+        // have painted over it.
+        zIndex: Z.modal,
         fontFamily: "var(--font-ui)",
         color: "var(--text-primary)",
       }}

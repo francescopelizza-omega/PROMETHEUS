@@ -8,7 +8,16 @@ import test from "node:test";
 
 import { makeContext } from "../context.js";
 import { parseArgs } from "../parse.js";
-import { RUN_BUFFER_CAP_BYTES, RunRegistry, startBackgroundRun } from "../session/orchestrator.js";
+import type { RunRecord } from "../session/orchestrator.js";
+import {
+  RUN_BUFFER_CAP_BYTES,
+  RunRegistry,
+  detachedRunNote,
+  runRegistry,
+  setRunNotifyDeps,
+  startBackgroundRun,
+  startDetachedRun,
+} from "../session/orchestrator.js";
 import { type AgentsDeps, runAgentsCommand } from "./agents-cmd.js";
 
 const ctxFor = (argv: string[]) => makeContext(parseArgs(argv));
@@ -186,4 +195,165 @@ test("prometheus agents attach: unknown run → exit 2", async () => {
   const out: string[] = [];
   const res = await runAgentsCommand(ctxFor(["agents", "attach", "nope"]), agentsDeps(reg, out));
   assert.equal(res.exitCode, 2);
+});
+
+/* ── the TRIGGER: startDetachedRun writes to the table `agents` reads ─────────*/
+
+/**
+ * These pin the seam that did not exist.
+ *
+ * `RunRegistry`, `startBackgroundRun` and `runAgentsCommand` were all complete and covered by
+ * the tests above, and NOTHING called `startBackgroundRun` in production — so `prometheus
+ * agents list` was a correct renderer of a permanently empty table. Coverage over a function
+ * with no caller is exactly the failure this repo has hit before, so what is asserted here is
+ * the round trip: start a run, then read it back through the REAL command surface.
+ */
+
+test("startDetachedRun: a launched run is visible through the real `agents list` surface", async () => {
+  let released = false;
+  const { id, done } = startDetachedRun({
+    model: "qwen3",
+    provider: "ollama",
+    task: "say hello",
+    run: async (rc) => {
+      rc.append("thinking…");
+      released = true;
+      return { ok: true, summary: "hello" };
+    },
+  });
+  await done;
+  assert.equal(released, true, "the body actually ran");
+
+  // Read it back the way the user does — through runAgentsCommand over the SHARED registry,
+  // not over a fixture. A test that built its own registry would pass while production stayed
+  // empty, which is precisely the bug.
+  const out = await runAgentsCommand(
+    { args: { command: ["agents", "list"], positionals: [], flags: {} }, json: true } as never,
+    { registry: runRegistry, now: () => Date.now(), write: () => {} },
+  );
+  const runs = (out.json as { runs: RunRecord[] }).runs;
+  const mine = runs.find((r) => r.id === id);
+  assert.ok(mine, "the launched run must appear in `agents list`");
+  assert.equal(mine?.state, "done");
+  assert.equal(mine?.exitSummary, "hello");
+  assert.match(detachedRunNote(id), new RegExp(id));
+});
+
+test("detachedRunNote points at `agents list`, NOT the unrelated `/agents` slash command", () => {
+  // `/agents` sets the orchestrator's subagent COUNT. Naming it here would send every user who
+  // follows the hint to a surface that cannot show them their run.
+  const note = detachedRunNote("run-9");
+  assert.match(note, /agents list/);
+  assert.doesNotMatch(note, /\/agents\b/);
+});
+
+test("startDetachedRun: a THROWING body settles failed and still lands in the table", async () => {
+  const { id, done } = startDetachedRun({
+    model: "m",
+    provider: "ollama",
+    task: "boom",
+    run: async () => {
+      throw new Error("model unreachable");
+    },
+  });
+  await done;
+  const rec = runRegistry.get(id);
+  assert.equal(rec?.state, "failed");
+  assert.match(rec?.exitSummary ?? "", /model unreachable/);
+});
+
+/* ── the completion NOTIFICATION (the "walk away" half of /background) ────────*/
+
+/**
+ * Round-trip assertions, deliberately, for the same reason the ones above are: `run-notify.ts`
+ * tested in isolation would prove only that a pure function builds an argv. What matters is
+ * that starting a REAL detached run through the REAL registry actually reaches it — the
+ * "unit-tested but never wired" shape this repo keeps being bitten by.
+ */
+
+test("startDetachedRun: a completed run posts exactly ONE OS notification", async () => {
+  const calls: { bin: string; args: string[] }[] = [];
+  setRunNotifyDeps({
+    platform: "darwin",
+    env: {},
+    spawnImpl: (bin, args) => {
+      calls.push({ bin, args: [...args] });
+      return { unref: () => {}, on: () => {} };
+    },
+  });
+  try {
+    const { id, done } = startDetachedRun({
+      model: "qwen3",
+      provider: "ollama",
+      task: "notify me",
+      run: async () => ({ ok: true, summary: "all good" }),
+    });
+    await done;
+    assert.equal(calls.length, 1, "exactly one notification per settle, not one per poll");
+    assert.equal(calls[0]?.bin, "osascript");
+    assert.match(calls[0]?.args[1] ?? "", new RegExp(`${id}: all good`));
+    assert.match(calls[0]?.args[1] ?? "", /background run finished/);
+
+    // A SECOND terminal transition on the same run must not post again. `setState` has no
+    // idempotency guard of its own, so the latch in `startDetachedRun` is what holds this.
+    runRegistry.setState(id, "done", "all good again");
+    assert.equal(calls.length, 1, "a repeated settle must not duplicate the notification");
+  } finally {
+    setRunNotifyDeps({});
+  }
+});
+
+test("startDetachedRun: a FAILED run notifies too, with the failure title", async () => {
+  const calls: string[] = [];
+  setRunNotifyDeps({
+    platform: "darwin",
+    env: {},
+    spawnImpl: (_bin, args) => {
+      calls.push(args[1] ?? "");
+      return { unref: () => {}, on: () => {} };
+    },
+  });
+  try {
+    const { done } = startDetachedRun({
+      model: "m",
+      provider: "ollama",
+      task: "boom",
+      run: async () => {
+        throw new Error("model unreachable");
+      },
+    });
+    await done;
+    assert.equal(calls.length, 1);
+    assert.match(calls[0] ?? "", /FAILED/);
+    assert.match(calls[0] ?? "", /model unreachable/);
+  } finally {
+    setRunNotifyDeps({});
+  }
+});
+
+test("startDetachedRun: a notifier that throws does not break the run or its other subscribers", async () => {
+  // onSettle callbacks run synchronously in a `for` loop, so a throw would skip `agents
+  // attach`'s finish handler and hang a terminal on a run that had already completed.
+  const settled: string[] = [];
+  setRunNotifyDeps({
+    platform: "darwin",
+    env: {},
+    spawnImpl: () => {
+      throw new Error("EACCES");
+    },
+  });
+  try {
+    const { id, done } = startDetachedRun({
+      model: "m",
+      provider: "ollama",
+      task: "t",
+      run: async () => ({ ok: true, summary: "fine" }),
+    });
+    runRegistry.onSettle(id, (r) => settled.push(r.state));
+    await done;
+    assert.deepEqual(settled, ["done"], "a later subscriber must still have fired");
+    assert.equal(runRegistry.get(id)?.state, "done");
+  } finally {
+    setRunNotifyDeps({});
+  }
 });

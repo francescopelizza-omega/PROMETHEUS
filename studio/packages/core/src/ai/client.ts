@@ -18,8 +18,14 @@
  * node:http stub (no real model), per the env limits.
  */
 
+import { estimateTextTokens } from "../agent/compact.js";
 import { applyEffort, applyEffortToMessages } from "./effort/apply.js";
+import { runtimeFromBaseUrl } from "./effort/rules.js";
 import type { EffortResolution } from "./effort/types.js";
+import { applyPromptCache, cacheDialectFor } from "./prompt-cache.js";
+import { fetchModelWithRetry } from "./request.js";
+import { ContextOverflowError, preflightContext } from "./retry-policy.js";
+import { selectWire } from "./wire.js";
 
 /* ------------------------------------------------------------------------- *
  * Endpoint, policy, and message types (file 07 §7)
@@ -70,6 +76,14 @@ export interface ChatOpts {
    * which is what keeps a knobless model from taking a 400.
    */
   effort?: EffortResolution;
+  /**
+   * Ask the provider to cache the stable prefix of this conversation.
+   *
+   * Defaults ON where it costs nothing to request and is a no-op where the provider has no
+   * request side. See `ai/prompt-cache.ts` for why one boolean cannot mean the same thing to
+   * OpenAI, Anthropic and Gemini.
+   */
+  promptCache?: boolean;
 }
 
 /** A streamed chat delta. */
@@ -121,6 +135,14 @@ export type FetchLike = (
   statusText: string;
   body: ReadableStream<Uint8Array> | null;
   text(): Promise<string>;
+  /**
+   * The response headers, so `Retry-After` can be honoured.
+   *
+   * OPTIONAL because this seam predates the retry path and several test stubs implement the
+   * response by hand; a stub without headers simply yields no advice and the backoff curve
+   * stands. Making it required would break those stubs to gain nothing.
+   */
+  headers?: { get(name: string): string | null };
 }>;
 
 /** Resolve a keychain ref → the raw key. Injected; default refuses (no keychain). */
@@ -130,6 +152,17 @@ export type KeyResolver = (apiKeyRef: string) => Promise<string>;
 export interface AiClientDeps {
   fetch?: FetchLike;
   resolveKey?: KeyResolver;
+  /** injected sleeper so the backoff schedule is testable without real timers. */
+  sleep?: (ms: number) => Promise<void>;
+  /** injected RNG in [0,1) for jitter — tests pin it. */
+  rng?: () => number;
+  /**
+   * Fired before each retry, so a host can SAY it is retrying.
+   *
+   * A silent retry is nearly as bad as no retry: the user sees a turn that takes six seconds
+   * with no explanation, and has no way to know the provider rate-limited them.
+   */
+  onRetry?: (info: { attempt: number; delayMs: number; reason: string }) => void;
 }
 
 /* ------------------------------------------------------------------------- *
@@ -313,6 +346,14 @@ export function createAiClient(
       throw new Error(`no key resolver; cannot resolve apiKeyRef "${ref}"`);
     });
 
+  /**
+   * The protocol this endpoint speaks, chosen from the runtime its base URL implies.
+   *
+   * Everything unrecognised gets OpenAI, which is the correct default: all sixteen registered
+   * providers and every local runner speak it.
+   */
+  const wire = selectWire(runtimeFromBaseUrl(endpoint.baseUrl, endpoint.locality));
+
   /** Enforce the per-workspace cloud policy — throws BEFORE any request leaves. */
   function enforcePolicy(): void {
     if (policy.neverSendToCloud && endpoint.locality === "cloud") {
@@ -320,14 +361,16 @@ export function createAiClient(
     }
   }
 
-  /** Build the request headers, resolving the keychain ref to a Bearer if present. */
+  /**
+   * Build the request headers, resolving the keychain ref at request time.
+   *
+   * The FORMAT decides the credential header, not this function: a bearer token is an OpenAI
+   * convention, and sending one to Anthropic (which wants `x-api-key`) or Gemini (which wants
+   * `x-goog-api-key`) is a 401 no amount of retrying fixes.
+   */
   async function buildHeaders(): Promise<Record<string, string>> {
-    const headers: Record<string, string> = { "content-type": "application/json" };
-    if (endpoint.apiKeyRef) {
-      const key = await resolveKey(endpoint.apiKeyRef);
-      headers.authorization = `Bearer ${key}`;
-    }
-    return headers;
+    const key = endpoint.apiKeyRef ? await resolveKey(endpoint.apiKeyRef) : "";
+    return { "content-type": "application/json", ...wire.headers(key) };
   }
 
   /** POST the chat-completions request and yield streamed text deltas; usage → onUsage. */
@@ -342,41 +385,93 @@ export function createAiClient(
     // Tolerate a baseUrl that ALREADY ends in /v1 (the engine's `localai endpoints` returns
     // e.g. "http://localhost:11434/v1") — plain joinUrl would emit ".../v1/v1/chat/completions"
     // → the runner answers "404 page not found" and chat is dead. Dedupe the /v1 segment.
-    const cleanBase = endpoint.baseUrl.replace(/\/+$/, "");
-    const url = /\/v1$/.test(cleanBase)
-      ? `${cleanBase}/chat/completions`
-      : joinUrl(cleanBase, "/v1/chat/completions");
+    const url = wire.url(endpoint.baseUrl, endpoint.model ?? endpoint.id);
     // A prompt-shaped effort knob (gpt-oss's `Reasoning: high`) rewrites the messages; a
     // body-shaped one adds a field. `applyEffort` also enforces the side-constraints that
     // would otherwise 400 — dropping temperature where the model rejects it, raising a
     // max_tokens floor where reasoning and answer must share the budget.
     const effMessages = applyEffortToMessages(messages, opts.effort);
+    /**
+     * Actually ASK for the prompt cache this repo already measures.
+     *
+     * `usageFromPayload` has normalized three providers' cache counters from the start and
+     * `prometheus tokens report` prices the savings — but nothing ever requested caching, and
+     * `cache_control` appeared nowhere in the repo. On OpenAI-shaped endpoints this is a no-op
+     * by design (they cache automatically and offer no request field), so the marked-block form
+     * is emitted ONLY where it is understood.
+     */
+    const runtime = runtimeFromBaseUrl(endpoint.baseUrl, endpoint.locality);
+    const cacheMessages =
+      opts.promptCache === false
+        ? effMessages
+        : applyPromptCache(effMessages, cacheDialectFor(runtime));
+    /**
+     * The body, built by the selected FORMAT.
+     *
+     * Anthropic lifts the system prompt to a top-level field and requires `max_tokens`; Gemini
+     * renames the assistant role and wraps text in `parts[]`. Sending the OpenAI shape to
+     * either is a 400 at best — and against `api.anthropic.com` the URL itself 404s, because
+     * `/v1/chat/completions` does not exist there.
+     *
+     * `applyEffort` still runs last, so a reasoning knob is not undone by a field written
+     * above it. It is a no-op on a body whose fields it does not recognise.
+     */
     const body = JSON.stringify(
       applyEffort(
         {
-          model: endpoint.model ?? endpoint.id,
-          messages: effMessages,
-          stream: true,
-          // ask for a terminal usage frame (CLI-029). Most OpenAI-compatible servers honor
-          // this; older llama.cpp / a few gateways ignore it → the caller's chars/4 fallback.
-          stream_options: { include_usage: true },
-          ...(opts.temperature !== undefined ? { temperature: opts.temperature } : {}),
-          ...(opts.maxTokens !== undefined ? { max_tokens: opts.maxTokens } : {}),
+          ...wire.body(cacheMessages as never, {
+            model: endpoint.model ?? endpoint.id,
+            // Ask for a terminal usage frame, CLOUD ONLY. A strict local server (llama.cpp
+            // builds, older proxies) 400s on the unknown field, and a 400 here does not
+            // degrade to a missing token count — it kills the turn. Local tokens are free, so
+            // the estimate fallback costs nothing there.
+            includeUsage: endpoint.locality === "cloud",
+            ...(opts.temperature !== undefined ? { temperature: opts.temperature } : {}),
+            ...(opts.maxTokens !== undefined ? { maxTokens: opts.maxTokens } : {}),
+          }),
+          // Ollama extension, ignored elsewhere: keep the model resident so a multi-round
+          // agentic turn does not pay a cold reload between rounds. LOCAL only — a cloud
+          // endpoint never receives a non-standard field.
+          ...(endpoint.locality === "local" ? { keep_alive: "30m" } : {}),
         },
         opts.effort,
       ),
     );
 
-    const res = await doFetch(url, {
-      method: "POST",
-      headers,
-      body,
-      ...(opts.signal ? { signal: opts.signal } : {}),
+    /**
+     * Refuse an impossible request HERE, with a sentence, rather than paying for a 400.
+     *
+     * Estimated from the characters we are about to send — the same `chars/4` compaction
+     * budgets with — and deliberately generous (see PREFLIGHT_MARGIN), so this only catches the
+     * clearly-impossible. Anything borderline still goes to the endpoint, which is the
+     * authority on its own tokenizer.
+     */
+    const pre = preflightContext({
+      estimatedPromptTokens: estimateTextTokens(effMessages.map((m) => m.content)),
+      contextWindow: endpoint.contextWindow,
+      ...(opts.maxTokens !== undefined ? { maxTokens: opts.maxTokens } : {}),
     });
-    if (!res.ok) {
-      const detail = await safeText(res);
-      throw new Error(`AI endpoint ${endpoint.id} HTTP ${res.status} ${res.statusText}: ${detail}`);
-    }
+    if (!pre.ok) throw new ContextOverflowError(pre, endpoint.contextWindow);
+
+    /**
+     * The request, with bounded retries — and the retry stops HERE, before a single token has
+     * been yielded.
+     *
+     * That boundary is the whole design. Everything below is a stream the consumer is already
+     * reading; retrying after a delta has been emitted would replay text the user has seen,
+     * which is worse than the failure. `fetchModelWithRetry` is shared with the other three
+     * transports so this judgement is made in one place.
+     */
+    const res = await fetchModelWithRetry({
+      endpointId: endpoint.id,
+      url,
+      init: { method: "POST", headers, body },
+      doFetch,
+      ...(opts.signal ? { signalFor: () => opts.signal, userSignal: opts.signal } : {}),
+      ...(deps.sleep ? { sleep: deps.sleep } : {}),
+      ...(deps.rng ? { rng: deps.rng } : {}),
+      ...(deps.onRetry ? { onRetry: deps.onRetry } : {}),
+    });
     if (!res.body) throw new Error(`AI endpoint ${endpoint.id}: empty response body`);
 
     const decoder = new TextDecoder();
@@ -393,21 +488,21 @@ export function createAiClient(
         const { payloads, rest } = parseSseChunk(buf);
         buf = rest;
         for (const p of payloads) {
-          if (p === "[DONE]") return;
-          const u = usageFromPayload(p); // usage arrives on its own choice-less frame
-          if (u && onUsage) onUsage(u);
-          const delta = deltaFromPayload(p);
-          if (delta) yield delta;
+          // The FORMAT says what the bytes mean: OpenAI ends on `[DONE]`, Anthropic on a
+          // `message_stop` event, and each puts its text and its usage somewhere different.
+          const ev = wire.parse(p);
+          if (ev.done) return;
+          if (ev.usage && onUsage) onUsage(ev.usage);
+          if (ev.delta) yield ev.delta;
         }
       }
       // flush any trailing buffered frame (server closed without a final newline).
       const { payloads } = parseSseChunk(`${buf}\n`);
       for (const p of payloads) {
-        if (p === "[DONE]") return;
-        const u = usageFromPayload(p);
-        if (u && onUsage) onUsage(u);
-        const delta = deltaFromPayload(p);
-        if (delta) yield delta;
+        const ev = wire.parse(p);
+        if (ev.done) return;
+        if (ev.usage && onUsage) onUsage(ev.usage);
+        if (ev.delta) yield ev.delta;
       }
     } finally {
       await reader.cancel().catch(() => {});

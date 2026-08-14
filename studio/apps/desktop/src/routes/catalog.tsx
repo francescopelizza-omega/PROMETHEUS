@@ -30,14 +30,22 @@ import {
   Button,
   Panel,
   PurgeDialog,
+  type RoleToken,
   StatusMark,
+  StreamLog,
+  VerdictCard,
   VerdictSheet,
+  Z,
   gateToVerdict,
 } from "@prometheus/ui";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { type ReactElement, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { qk } from "../renderer/query/client.js";
+import { DecisionOverlay } from "../renderer/shell/DecisionOverlay.js";
+import { EngineGate } from "../renderer/shell/EngineGate.js";
+import { ForceGate, useForceGate } from "../renderer/shell/ForceGate.js";
+import { Segmented } from "../renderer/shell/Segmented.js";
 import type {
   CatalogAppLifecycleRequest,
   CatalogBrowseResult,
@@ -45,6 +53,21 @@ import type {
   CatalogInstallResult,
   RepoGateSummary,
 } from "../shared/ipc-contract.js";
+import {
+  CATALOG_FOOTER_NOTE,
+  CATALOG_KINDS,
+  CATALOG_VERDICT_CHIP,
+  type CatalogKindFilter,
+  type CatalogVerdict,
+  INSTALL_STEPS,
+  type InstallPhase,
+  catalogVerdictOf,
+  filterByKind,
+  filterBySearch,
+  installPhase,
+  kindGlyph,
+  stepStates,
+} from "./catalog-browse-view.js";
 import {
   type LifecycleMenuAction,
   appendLifecycleLog,
@@ -59,6 +82,14 @@ import {
   uninstallFailure,
   uninstallStep,
 } from "./catalog-uninstall-view.js";
+import ExtensionsRoute from "./extensions.js";
+import { type CatalogTab, onRouteTab, takeRouteTab } from "./route-tabs.js";
+
+/** Resolve a semantic role → its CSS var. Local, as elsewhere in the app: `roleVar` is not
+ *  exported from the @prometheus/ui barrel, and raw hex is a build failure (08 §6). */
+function roleVar(role: RoleToken): string {
+  return role === "text-secondary" ? "var(--text-secondary)" : `var(--${role})`;
+}
 
 /**
  * The rich catalog item the browser renders. It is the element of the PROJECTED
@@ -87,18 +118,21 @@ function useBrowse() {
   });
 }
 
-/* ── tabs ────────────────────────────────────────────────────────────────────*/
+/* ── segments (handoff_3 §1/§2) ──────────────────────────────────────────────*/
 
-const TABS = [
+/**
+ * The three segments §2 names. The route used to paint SEVEN hand-rolled underline tabs
+ * (plugins/apps/models/worldsim/skills/reach/documented) and never read the `catalog` tab
+ * latch, so `resolveActivity("extensions")` redirected here and then landed on Plugins — the
+ * segment it asked for was silently dropped, and `routes/extensions.tsx` (the MCP connector
+ * manager) had no import site at all. Four of the old seven are now a KIND FILTER inside
+ * Plugins; the Reach Matrix is a toggle on that island's header.
+ */
+const SEGMENTS: readonly { id: CatalogTab; label: string }[] = [
   { id: "plugins", label: "Plugins" },
-  { id: "apps", label: "Apps" },
-  { id: "models", label: "Model Tools" },
-  { id: "worldsim", label: "World-Sim" },
+  { id: "extensions", label: "Extensions" },
   { id: "skills", label: "Skills" },
-  { id: "reach", label: "Reach Matrix" },
-  { id: "documented", label: "Documented" },
-] as const;
-type CatalogTab = (typeof TABS)[number]["id"];
+];
 
 /* ── the route ───────────────────────────────────────────────────────────────*/
 
@@ -111,9 +145,28 @@ interface PendingGate {
 
 export function CatalogRoute(): ReactElement {
   const qc = useQueryClient();
-  const [tab, setTab] = useState<CatalogTab>("plugins");
+  // §9: the shared typed-confirm gate for deep-red overrides on this route.
+  const force = useForceGate();
+  // The segment is LATCHED, not local state, so a persisted `"extensions"` activity from
+  // before the §1 merge lands on Catalog/Extensions instead of Catalog's default. Read once
+  // in the initial state (the latch is a one-shot handoff) and subscribed to thereafter.
+  const [tab, setTab] = useState<CatalogTab>(
+    () => (takeRouteTab("catalog") as CatalogTab) ?? "plugins",
+  );
+  useEffect(() => onRouteTab("catalog", (t) => setTab(t as CatalogTab)), []);
+  const [kind, setKind] = useState<CatalogKindFilter>("all");
+  const [reachOpen, setReachOpen] = useState(false);
   const [search, setSearch] = useState("");
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  /**
+   * Per-item gate verdicts, keyed by item id.
+   *
+   * `CatalogItem` carries no verdict — there is no engine read that returns one for an item
+   * nobody has touched — so this map starts EMPTY and every row renders `◌ QUEUED` until an
+   * `audit` or an install dry-run actually produces a tier. Defaulting to ALLOW would paint
+   * the whole catalog green while contradicting the footer strip directly below it.
+   */
+  const [verdicts, setVerdicts] = useState<Record<string, CatalogVerdict>>({});
   const [pendingGate, setPendingGate] = useState<PendingGate | null>(null);
   const [banner, setBanner] = useState<{ name: string; reasons: string[] } | null>(null);
   const [installError, setInstallError] = useState<{ name: string; error: string } | null>(null);
@@ -158,27 +211,17 @@ export function CatalogRoute(): ReactElement {
     [browseQ.data],
   );
 
-  // split by tier/kind for the tabbed surface (browse now folds in the app/model-tool/
-  // worldsim registries alongside plugins — one grid per kind).
-  const documented = items.filter((i) => i.tier === "documented");
+  // The kind filter + search are PURE (catalog-browse-view.ts), so "documented never leaks
+  // into an installable bucket" and "every registry stays reachable after the merge" are
+  // pinned by node:test rather than by reading this expression.
   const plugins = items.filter((i) => i.kind === "plugin" && i.tier !== "documented");
-  const base =
-    tab === "documented"
-      ? documented
-      : tab === "apps"
-        ? items.filter((i) => i.kind === "app")
-        : tab === "models"
-          ? items.filter((i) => i.kind === "model-tool")
-          : tab === "worldsim"
-            ? items.filter((i) => i.kind === "worldsim")
-            : plugins;
-  const filtered = base.filter(
-    (i) =>
-      !search ||
-      i.title.toLowerCase().includes(search.toLowerCase()) ||
-      i.summary.toLowerCase().includes(search.toLowerCase()),
-  );
+  const filtered = filterBySearch(filterByKind(items, kind), search);
   const selected = items.find((i) => i.id === selectedId) ?? null;
+
+  /** Record the tier an audit / install envelope produced for an item (§2 row chip). */
+  const noteVerdict = useCallback((name: string, raw: string | null | undefined): void => {
+    setVerdicts((v) => ({ ...v, [name]: catalogVerdictOf(raw) }));
+  }, []);
 
   const refetchAll = useCallback((): void => {
     void qc.invalidateQueries({ queryKey: qk.catalog() });
@@ -191,38 +234,84 @@ export function CatalogRoute(): ReactElement {
    * - a force-installed BLOCK ⇒ render the persistent deep-red banner (§4.3).
    * JS never decides "safe" (C5).
    */
+  /**
+   * §9: ARM a streaming run — mint the correlation id, clear the pane, and set
+   * `activeRun` (which arms `activeRunIdRef`, the filter key the progress subscription
+   * closure reads). This must happen BEFORE `mutate()` so the very first stderr line
+   * already matches; arming after would drop the head of every stream.
+   */
+  const beginRun = useCallback((kind: string, tool: string, action: string): string => {
+    runSeq.current += 1;
+    const runId = lifecycleRunId(tool, runSeq.current, kind);
+    setLogLines([]);
+    setActiveRun({ runId, tool, action });
+    return runId;
+  }, []);
+  /** §9: CLOSE a run — the pane stops reading "running…" and the Clear button returns. */
+  const endRun = useCallback((): void => setActiveRun(null), []);
+  /**
+   * §2 stepper state. The five steps are derived from these two facts plus `activeRun` and
+   * `pendingGate` — see `installPhase`, which is node:test-pinned. Nothing here is a timer:
+   * `Fetch → Dry-run` turns over on the engine's FIRST streamed line, because a stepper that
+   * advances on a clock says "Dry-run" while a slow clone is still fetching.
+   */
+  const [installLeg, setInstallLeg] = useState<"dry" | "commit" | null>(null);
+  const [installDone, setInstallDone] = useState<string | null>(null);
+
+  /** Arm an INSTALL leg and return the mutate vars carrying its runId. */
+  const beginInstallRun = useCallback(
+    (name: string, leg: "dry" | "commit"): { name: string; runId: string } => {
+      setInstallLeg(leg);
+      setInstallDone(null);
+      return { name, runId: beginRun("install", name, "install") };
+    },
+    [beginRun],
+  );
+
   const install = useMutation({
-    mutationFn: (vars: { name: string; dryRun: boolean; force: boolean }) =>
+    mutationFn: (vars: { name: string; dryRun: boolean; force: boolean; runId?: string }) =>
       catalogApi().install({
         name: vars.name,
         dryRun: vars.dryRun,
         yes: !vars.dryRun,
         force: vars.force,
         confirmForce: vars.force, // the deep-red typed-confirm pairs the force flag
+        // §9: without a runId main omits `event.runId`, and appendLifecycleLog's strict
+        // filter drops every line — the single root cause of the dead install log.
+        ...(vars.runId ? { runId: vars.runId } : {}),
       }),
     onSuccess: (res: CatalogInstallResult, vars) => {
       if (res.forcedDanger && res.forcedDanger.length > 0) {
         const fd = res.forcedDanger[0];
         setBanner({ name: vars.name, reasons: fd?.blockingReasons ?? [] });
+        noteVerdict(vars.name, fd?.verdict ?? "block");
+        setInstallLeg(null);
+        endRun();
         refetchAll();
         return;
       }
       // a blocked preview rides back as ok:false — surface the verdict if present.
       const raw = (res.data ?? {}) as Record<string, unknown>;
       const verdict = (raw.verdict ?? raw.worst_verdict) as string | undefined;
+      noteVerdict(vars.name, verdict);
       if (!res.ok && verdict && verdict !== "allow") {
         setPendingGate({
           gate: gateFromEnvelope(raw),
           name: vars.name,
           target: vars.name,
         });
+        setInstallLeg(null);
+        endRun();
         return;
       }
       if (vars.dryRun && res.ok) {
-        // clean preview → commit for real (the engine re-gates).
-        install.mutate({ name: vars.name, dryRun: false, force: false });
+        // clean preview → commit for real (the engine re-gates). Deliberately NOT
+        // endRun(): the commit re-arms with its own run below, and closing here would
+        // blank the pane between the two legs.
+        install.mutate({ ...beginInstallRun(vars.name, "commit"), dryRun: false, force: false });
         return;
       }
+      if (res.ok) setInstallDone(vars.name);
       // a non-allow/non-forced FAILURE. Surface the REAL reason: the engine reports a
       // nemesis BLOCK via structured install_events (no top-level error/verdict) — e.g.
       // frontend-design flagged dangerous (21 HIGH findings). Without this the banner
@@ -251,6 +340,8 @@ export function CatalogRoute(): ReactElement {
         }
         setInstallError({ name: vars.name, error: msg ?? "install failed" });
       }
+      setInstallLeg(null);
+      endRun();
       refetchAll();
     },
     onError: (e, vars) => {
@@ -258,6 +349,8 @@ export function CatalogRoute(): ReactElement {
         name: vars.name,
         error: e instanceof Error ? e.message : "install failed",
       });
+      setInstallLeg(null);
+      endRun();
     },
   });
 
@@ -268,18 +361,25 @@ export function CatalogRoute(): ReactElement {
    * ok:false envelope surfaces inline and never refetches (no optimistic removal).
    */
   const uninstall = useMutation({
-    mutationFn: (vars: { name: string; dryRun: boolean }) =>
-      catalogApi().uninstall({ name: vars.name, dryRun: vars.dryRun, yes: !vars.dryRun }),
+    mutationFn: (vars: { name: string; dryRun: boolean; runId?: string }) =>
+      catalogApi().uninstall({
+        name: vars.name,
+        dryRun: vars.dryRun,
+        yes: !vars.dryRun,
+        ...(vars.runId ? { runId: vars.runId } : {}),
+      }),
     onSuccess: (res: CatalogInstallResult, vars) => {
       const step = uninstallStep(vars, res);
       setUninstallPending(step.pending);
       setUninstallError(step.error);
+      endRun();
       if (step.refetch) refetchAll();
     },
     onError: (e, vars) => {
       const step = uninstallFailure(vars.name, e);
       setUninstallPending(step.pending);
       setUninstallError(step.error);
+      endRun();
     },
   });
 
@@ -358,15 +458,22 @@ export function CatalogRoute(): ReactElement {
     [lifecycle],
   );
 
-  const onAudit = useCallback(async (name: string): Promise<void> => {
-    try {
-      const res = await catalogApi().audit(name);
-      const raw = (res.data ?? {}) as Record<string, unknown>;
-      setPendingGate({ gate: gateFromEnvelope(raw), name, target: name });
-    } catch {
-      /* audit IPC failed — surfaced via the global rejection handler; no stuck UI */
-    }
-  }, []);
+  const onAudit = useCallback(
+    async (name: string): Promise<void> => {
+      try {
+        const res = await catalogApi().audit(name);
+        const raw = (res.data ?? {}) as Record<string, unknown>;
+        const gate = gateFromEnvelope(raw);
+        // an audit is the ONE read that gives a never-installed row a real tier — record it
+        // so its §2 chip stops saying QUEUED.
+        noteVerdict(name, gate.verdict);
+        setPendingGate({ gate, name, target: name });
+      } catch {
+        /* audit IPC failed — surfaced via the global rejection handler; no stuck UI */
+      }
+    },
+    [noteVerdict],
+  );
 
   // Superscan ALL installed sources for threats (`catalog.superscan`) — built IPC with
   // no UI. Surfaces the engine report in the reader dialog.
@@ -395,6 +502,17 @@ export function CatalogRoute(): ReactElement {
   }, [superscanning]);
 
   const loading = browseQ.isPending;
+
+  /** What the install island is about: the armed run's tool, else the selected row. */
+  const installTarget = activeRun?.tool ?? selected?.id ?? null;
+  /** The §2 stepper phase, derived from the run's REAL signals (node:test-pinned). */
+  const phase = installPhase({
+    running: activeRun !== null,
+    leg: installLeg,
+    hasOutput: logLines.length > 0,
+    awaitingVerdict: pendingGate !== null,
+    completed: installDone !== null && installDone === installTarget,
+  });
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: "var(--space-8, 16px)" }}>
@@ -450,223 +568,534 @@ export function CatalogRoute(): ReactElement {
         </div>
       )}
 
-      <nav
+      {/* §2's header: title + the segmented control + search. The control lives here rather
+          than inside the browse island so it stays put across all three segments — moving it
+          would make the strip jump when you switch to Extensions, which paints its own body. */}
+      <header
         style={{
           display: "flex",
           flexWrap: "wrap",
           alignItems: "center",
-          gap: "var(--space-3, 6px)",
+          gap: "var(--space-4, 8px)",
+          minWidth: 0,
         }}
       >
-        {TABS.map((t) => (
-          <button
-            key={t.id}
-            type="button"
-            onClick={() => setTab(t.id)}
-            aria-current={tab === t.id ? "page" : undefined}
-            style={{
-              background: "transparent",
-              border: "none",
-              borderBottom: `2px solid ${tab === t.id ? "var(--accent, #6d5ef0)" : "transparent"}`,
-              color:
-                tab === t.id ? "var(--text-primary, #e7e7ea)" : "var(--text-secondary, #9a9aa3)",
-              cursor: "pointer",
-              fontSize: "0.9rem",
-              padding: "2px 4px 6px",
-              fontWeight: tab === t.id ? 700 : 400,
-            }}
-          >
-            {t.label}
-          </button>
-        ))}
-        <button
-          type="button"
-          onClick={() => void onSuperscan()}
-          disabled={superscanning}
-          title="Scan every installed source for threats"
+        <h2
           style={{
-            marginLeft: "auto",
-            background: "var(--bg-surface-2, #16161c)",
-            border: "1px solid var(--border-subtle, #2a2a33)",
-            borderRadius: 6,
-            color: "var(--text-primary, #e7e7ea)",
-            cursor: superscanning ? "default" : "pointer",
-            fontSize: "0.8rem",
-            padding: "2px 8px",
+            margin: 0,
+            fontSize: "0.95rem",
+            fontWeight: 700,
+            color: "var(--text-title)",
+            whiteSpace: "nowrap", // §7
           }}
         >
-          {superscanning ? "Scanning…" : "🛡 Superscan"}
-        </button>
-        <input
-          type="search"
-          placeholder="search…"
-          value={search}
-          onChange={(e) => setSearch(e.target.value)}
-          style={{
-            background: "var(--bg-surface-2, #16161c)",
-            border: "1px solid var(--border-subtle, #2a2a33)",
-            borderRadius: 6,
-            color: "var(--text-primary, #e7e7ea)",
-            padding: "4px 8px",
-            fontSize: "0.85rem",
-          }}
+          Catalog
+        </h2>
+        <Segmented
+          label="Catalog sections"
+          options={SEGMENTS}
+          value={tab}
+          onChange={(t: CatalogTab) => setTab(t)}
         />
-      </nav>
-
-      {tab === "reach" ? (
-        <ReachMatrix items={plugins} loading={loading} />
-      ) : tab === "skills" ? (
-        <SkillsPanel />
-      ) : (
         <div
           style={{
-            display: "grid",
-            // responsive: two columns when wide, STACK to one on a narrow window
-            // (the old fixed 1.4fr/1fr squeezed the detail pane to a sliver).
-            gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 300px), 1fr))",
-            gap: "var(--space-8, 16px)",
+            marginLeft: "auto",
+            display: "flex",
+            alignItems: "center",
+            gap: "var(--space-3, 6px)",
+            minWidth: 0,
           }}
         >
-          <Panel title={tab === "documented" ? "Documented (read-only)" : "Catalog"} elevation="e1">
-            {loading ? (
-              <p style={{ color: "var(--text-secondary, #9a9aa3)" }}>loading catalog…</p>
-            ) : filtered.length === 0 ? (
-              <p style={{ color: "var(--text-secondary, #9a9aa3)" }}>no items.</p>
-            ) : (
-              <ul
-                style={{
-                  listStyle: "none",
-                  margin: 0,
-                  padding: 0,
-                  display: "flex",
-                  flexDirection: "column",
-                  gap: 2,
-                }}
-              >
-                {filtered.map((i) => (
-                  <CatalogListRow
-                    key={i.id}
-                    item={i}
-                    selected={i.id === selectedId}
-                    onSelect={() => setSelectedId(i.id)}
-                  />
-                ))}
-              </ul>
-            )}
-          </Panel>
-          <Panel title="Details" elevation="e1">
-            {selected ? (
-              <ItemCard
-                item={selected}
-                installing={install.isPending}
-                uninstalling={uninstall.isPending}
-                uninstallError={uninstallError?.name === selected.id ? uninstallError.error : null}
-                lifecycleBusy={lifecycle.isPending}
-                lifecycleError={lifecycleError?.name === selected.id ? lifecycleError.error : null}
-                onLifecycle={(action) => {
-                  const surface = lifecycleSurfaceFor(selected.kind);
-                  if (surface) runLifecycle(surface, action, selected.id);
-                }}
-                onInstall={() => install.mutate({ name: selected.id, dryRun: true, force: false })}
-                onUninstall={() => {
-                  setUninstallError(null);
-                  uninstall.mutate({ name: selected.id, dryRun: true });
-                }}
-                onAudit={() => void onAudit(selected.id)}
-                onWhere={() =>
-                  void catalogApi()
-                    .where(selected.id)
-                    .then((r) => {
-                      // surface the result in the reader (was fired-and-discarded → the
-                      // "Where?" button looked like it did nothing).
-                      setTutorial({
-                        id: selected.id,
-                        text:
-                          r.ok && r.data
-                            ? `Install locations for "${selected.id}":\n\n${JSON.stringify(r.data, null, 2)}`
-                            : `No install-location info for "${selected.id}".${r.error ? `\n\n${r.error}` : ""}`,
-                      });
-                    })
-                    .catch(() =>
-                      setTutorial({
-                        id: selected.id,
-                        text: "Could not load install locations (engine unavailable).",
-                      }),
-                    )
-                }
-                onLearn={() =>
-                  void window.prometheus.spectacular
-                    .tutorial(selected.id)
-                    .then((r) => {
-                      // always surface the reader — empty/error states get a clear message
-                      // instead of a silently-missing dialog (no user feedback).
-                      setTutorial({
-                        id: selected.id,
-                        text:
-                          r.ok && r.text
-                            ? r.text
-                            : `No tutorial is available for "${selected.id}" yet.${
-                                r.error ? `\n\n${r.error}` : ""
-                              }`,
-                      });
-                    })
-                    .catch(() =>
-                      setTutorial({
-                        id: selected.id,
-                        text: "Could not load the tutorial (engine unavailable).",
-                      }),
-                    )
-                }
-              />
-            ) : (
-              <p style={{ color: "var(--text-secondary, #9a9aa3)" }}>select an item.</p>
-            )}
-            {/* APP-007: live lifecycle logs — the engine's stderr for the ACTIVE run only
-                (runId-filtered; foreign install/bundle lines never interleave). */}
-            {(activeRun !== null || logLines.length > 0) && (
-              <div style={{ marginTop: 10 }}>
-                <div
-                  style={{
-                    display: "flex",
-                    alignItems: "center",
-                    justifyContent: "space-between",
-                    color: "var(--text-secondary, #9a9aa3)",
-                    fontSize: "0.75rem",
-                    marginBottom: 4,
-                  }}
-                >
-                  <span>
-                    {activeRun
-                      ? `${activeRun.action} ${activeRun.tool} — running…`
-                      : "lifecycle log (finished)"}
-                  </span>
-                  {!activeRun && (
-                    <Button variant="ghost" onClick={() => setLogLines([])}>
-                      Clear
-                    </Button>
-                  )}
-                </div>
-                <pre
-                  style={{
-                    margin: 0,
-                    maxHeight: 180,
-                    overflow: "auto",
-                    background: "var(--bg-inset, #0c0c10)",
-                    border: "1px solid var(--border-subtle, #2a2a33)",
-                    borderRadius: 6,
-                    padding: "6px 8px",
-                    fontFamily: "var(--font-mono)",
-                    fontSize: "0.72rem",
-                    whiteSpace: "pre-wrap",
-                    wordBreak: "break-word",
-                  }}
-                >
-                  {logLines.length > 0 ? logLines.join("\n") : "waiting for engine output…"}
-                </pre>
-              </div>
-            )}
-          </Panel>
+          <button
+            type="button"
+            onClick={() => void onSuperscan()}
+            disabled={superscanning}
+            title="Scan every installed source for threats"
+            style={{
+              background: "var(--bg-surface-2)",
+              border: "1px solid var(--border-subtle)",
+              borderRadius: "var(--radius-md, 6px)",
+              color: "var(--text-primary)",
+              cursor: superscanning ? "default" : "pointer",
+              fontSize: "0.8rem",
+              padding: "3px 9px",
+              whiteSpace: "nowrap", // §7
+            }}
+          >
+            {superscanning ? "Scanning…" : "🛡 Superscan"}
+          </button>
+          {tab === "plugins" && (
+            <input
+              type="search"
+              aria-label="Search the catalog"
+              placeholder="search…"
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              style={{
+                background: "var(--bg-surface-2)",
+                border: "1px solid var(--border-subtle)",
+                borderRadius: "var(--radius-md, 6px)",
+                color: "var(--text-primary)",
+                padding: "4px 8px",
+                fontSize: "0.85rem",
+                minWidth: 0,
+                maxWidth: 200,
+              }}
+            />
+          )}
         </div>
+      </header>
+
+      {tab === "extensions" ? (
+        /* handoff_3 §1: Catalog absorbed Extensions. The MCP / ACP connector manager is
+           mounted UNCHANGED — every launch command it configures is still nemesis-gated
+           before it can connect. Until this line existed the file had no import site at
+           all: the rail had dropped Extensions and `resolveActivity` redirected here, so
+           the whole connector manager was unreachable from the GUI.
+
+           NOT wrapped in <EngineGate>: it reads the main-process McpHostManager, not the
+           engine, so an engine that is down has nothing to do with whether this works. */
+        <ExtensionsRoute />
+      ) : tab === "skills" ? (
+        // `skillsList` IS an engine read, so this one degrades (§6).
+        <EngineGate>
+          <SkillsPanel />
+        </EngineGate>
+      ) : (
+        // the browse + install islands ARE the engine's catalog, so §6's degraded wrapper
+        // belongs here rather than around the whole route (see App.tsx ENGINE_BACKED).
+        <EngineGate>
+          <div
+            style={{
+              display: "flex",
+              // §7: `flex-wrap` + a min-width on BOTH islands. The old layout was a grid whose
+              // auto-fit column crushed the list to a sliver on a narrow window.
+              flexWrap: "wrap",
+              alignItems: "flex-start",
+              gap: "var(--space-8, 16px)",
+            }}
+          >
+            {/* ── browse island (§2) ──────────────────────────────────────────────── */}
+            <section style={{ flex: "1.25 1 340px", minWidth: 340 }}>
+              <Panel
+                title={reachOpen ? "Reach Matrix" : "Browse"}
+                elevation="e1"
+                actions={
+                  <div
+                    style={{ display: "flex", alignItems: "center", gap: "var(--space-3, 6px)" }}
+                  >
+                    <button
+                      type="button"
+                      aria-pressed={reachOpen}
+                      onClick={() => setReachOpen((v) => !v)}
+                      style={{
+                        background: reachOpen ? "var(--bg-active)" : "transparent",
+                        border: `1px solid ${reachOpen ? "var(--border-strong)" : "var(--border-subtle)"}`,
+                        borderRadius: "var(--radius-md, 6px)",
+                        color: reachOpen ? "var(--text-title)" : "var(--text-secondary)",
+                        cursor: "pointer",
+                        fontSize: "0.78rem",
+                        padding: "2px 8px",
+                        whiteSpace: "nowrap", // §7
+                      }}
+                    >
+                      ⊞ Reach matrix
+                    </button>
+                  </div>
+                }
+              >
+                {reachOpen ? (
+                  <ReachMatrix items={plugins} loading={loading} />
+                ) : (
+                  <>
+                    {/* The four registries the §1 merge would otherwise have stranded — apps,
+                      model tools, world-sims and documented-only entries all arrive in the
+                      same browse() payload, so they are a filter here rather than four
+                      deleted rail nouns. */}
+                    <fieldset
+                      style={{
+                        display: "flex",
+                        flexWrap: "wrap",
+                        gap: 4,
+                        marginBottom: "var(--space-4, 8px)",
+                        // a fieldset (not a div+role=group) so the grouping is native; its
+                        // default border/padding would otherwise draw a box nobody asked for.
+                        border: "none",
+                        margin: 0,
+                        padding: 0,
+                        minInlineSize: 0,
+                      }}
+                    >
+                      <legend
+                        style={{
+                          position: "absolute",
+                          width: 1,
+                          height: 1,
+                          padding: 0,
+                          overflow: "hidden",
+                          clipPath: "inset(50%)",
+                          whiteSpace: "nowrap",
+                        }}
+                      >
+                        Filter by kind
+                      </legend>
+                      {CATALOG_KINDS.map((k) => {
+                        const on = kind === k.id;
+                        return (
+                          <button
+                            key={k.id}
+                            type="button"
+                            aria-pressed={on}
+                            onClick={() => setKind(k.id)}
+                            style={{
+                              background: on ? "var(--bg-active)" : "var(--bg-inset)",
+                              border: `1px solid ${on ? "var(--border-strong)" : "var(--border-chip)"}`,
+                              borderRadius: "var(--radius-md, 6px)",
+                              color: on ? "var(--text-title)" : "var(--text-secondary)",
+                              cursor: "pointer",
+                              fontSize: "0.75rem",
+                              fontWeight: on ? 600 : 500,
+                              padding: "2px 8px",
+                              whiteSpace: "nowrap", // §7
+                            }}
+                          >
+                            {k.label}
+                          </button>
+                        );
+                      })}
+                    </fieldset>
+
+                    {loading ? (
+                      <p style={{ color: "var(--text-secondary)" }}>loading catalog…</p>
+                    ) : filtered.length === 0 ? (
+                      <p style={{ color: "var(--text-secondary)" }}>no items.</p>
+                    ) : (
+                      <ul
+                        style={{
+                          listStyle: "none",
+                          margin: 0,
+                          padding: 0,
+                          display: "flex",
+                          flexDirection: "column",
+                          gap: 2,
+                        }}
+                      >
+                        {filtered.map((i) => (
+                          <BrowseRow
+                            key={i.id}
+                            item={i}
+                            verdict={verdicts[i.id] ?? "queued"}
+                            selected={i.id === selectedId}
+                            onSelect={() => setSelectedId(i.id)}
+                            onInstall={() => {
+                              setSelectedId(i.id);
+                              install.mutate({
+                                ...beginInstallRun(i.id, "dry"),
+                                dryRun: true,
+                                force: false,
+                              });
+                            }}
+                            onOpenDocs={() => {
+                              setSelectedId(i.id);
+                              void onAudit(i.id);
+                            }}
+                          />
+                        ))}
+                      </ul>
+                    )}
+                  </>
+                )}
+
+                {/* §2's footer strip — the promise the QUEUED chip above is the honest half of. */}
+                <p
+                  style={{
+                    margin: "var(--space-4, 8px) 0 0",
+                    paddingTop: "var(--space-3, 6px)",
+                    borderTop: "1px solid var(--border-subtle)",
+                    color: "var(--text-muted)",
+                    fontSize: "0.72rem",
+                    lineHeight: 1.45,
+                  }}
+                >
+                  {CATALOG_FOOTER_NOTE}
+                </p>
+              </Panel>
+            </section>
+
+            {/* ── install island (§2) ─────────────────────────────────────────────── */}
+            <section style={{ flex: "1 1 300px", minWidth: 300, maxWidth: 420 }}>
+              <Panel
+                elevation="e1"
+                title={
+                  <span
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      gap: 6,
+                      minWidth: 0, // §7: without this the mono name refuses to ellipsize
+                    }}
+                  >
+                    <span style={{ whiteSpace: "nowrap" }}>Install</span>
+                    {installTarget && (
+                      <code
+                        style={{
+                          fontFamily: "var(--font-mono)",
+                          fontSize: "0.78rem",
+                          color: "var(--text-secondary)",
+                          minWidth: 0,
+                          overflow: "hidden",
+                          textOverflow: "ellipsis",
+                          whiteSpace: "nowrap",
+                        }}
+                      >
+                        {installTarget}
+                      </code>
+                    )}
+                  </span>
+                }
+                actions={
+                  installTarget ? (
+                    <button
+                      type="button"
+                      aria-label="Close the install panel"
+                      onClick={() => {
+                        setSelectedId(null);
+                        setLogLines([]);
+                        setInstallDone(null);
+                      }}
+                      style={{
+                        background: "transparent",
+                        border: "none",
+                        color: "var(--text-muted)",
+                        cursor: "pointer",
+                        fontSize: "0.9rem",
+                        lineHeight: 1,
+                        padding: 2,
+                      }}
+                    >
+                      ✕
+                    </button>
+                  ) : null
+                }
+              >
+                <InstallStepper phase={phase} />
+
+                {/* the verdict mini-card: finding COUNT + the two actions. The full card and the
+                  typed-confirm still live in the §9 overlay — this is the always-visible
+                  summary, not a second decision surface. */}
+                {pendingGate && (
+                  <div
+                    style={{
+                      marginTop: "var(--space-4, 8px)",
+                      padding: "8px 10px",
+                      borderRadius: "var(--radius-md, 6px)",
+                      background: "color-mix(in srgb, var(--warn) 12%, transparent)",
+                      border: "1px solid color-mix(in srgb, var(--warn) 34%, transparent)",
+                    }}
+                  >
+                    <div
+                      style={{
+                        color: "var(--warn)",
+                        fontSize: "0.78rem",
+                        fontWeight: 700,
+                        letterSpacing: "0.03em",
+                      }}
+                    >
+                      {CATALOG_VERDICT_CHIP[catalogVerdictOf(pendingGate.gate.verdict)].label} ·{" "}
+                      {pendingGate.gate.reasons.length}{" "}
+                      {pendingGate.gate.reasons.length === 1 ? "finding" : "findings"}
+                    </div>
+                    <div
+                      style={{
+                        display: "flex",
+                        flexWrap: "wrap",
+                        gap: 6,
+                        marginTop: 8,
+                      }}
+                    >
+                      <Button
+                        variant="ghost"
+                        onClick={() => {
+                          const name = pendingGate.name;
+                          const blocking = pendingGate.gate.verdict === "block";
+                          setPendingGate(null);
+                          if (blocking) {
+                            // §9: a BLOCK override is NEVER one click — the typed confirm is
+                            // the only place the engine's own `install-dangerous` prompt can
+                            // exist, since the GUI reaches it with piped stdin + --yes.
+                            force.ask({
+                              target: name,
+                              blockingReasons: pendingGate.gate.reasons,
+                              onConfirm: () =>
+                                install.mutate({
+                                  ...beginInstallRun(name, "commit"),
+                                  dryRun: false,
+                                  force: true,
+                                }),
+                            });
+                          } else {
+                            install.mutate({
+                              ...beginInstallRun(name, "commit"),
+                              dryRun: false,
+                              force: false,
+                            });
+                          }
+                        }}
+                      >
+                        Install anyway…
+                      </Button>
+                      <Button variant="ghost" onClick={() => setPendingGate(null)}>
+                        Abort
+                      </Button>
+                    </div>
+                  </div>
+                )}
+
+                {selected ? (
+                  <div style={{ marginTop: "var(--space-4, 8px)" }}>
+                    <ItemCard
+                      item={selected}
+                      installing={install.isPending}
+                      uninstalling={uninstall.isPending}
+                      uninstallError={
+                        uninstallError?.name === selected.id ? uninstallError.error : null
+                      }
+                      lifecycleBusy={lifecycle.isPending}
+                      lifecycleError={
+                        lifecycleError?.name === selected.id ? lifecycleError.error : null
+                      }
+                      onLifecycle={(action) => {
+                        const surface = lifecycleSurfaceFor(selected.kind);
+                        if (surface) runLifecycle(surface, action, selected.id);
+                      }}
+                      onInstall={() =>
+                        install.mutate({
+                          ...beginInstallRun(selected.id, "dry"),
+                          dryRun: true,
+                          force: false,
+                        })
+                      }
+                      onUninstall={() => {
+                        setUninstallError(null);
+                        uninstall.mutate({
+                          name: selected.id,
+                          dryRun: true,
+                          runId: beginRun("uninstall", selected.id, "uninstall"),
+                        });
+                      }}
+                      onAudit={() => void onAudit(selected.id)}
+                      onWhere={() =>
+                        void catalogApi()
+                          .where(selected.id)
+                          .then((r) => {
+                            // surface the result in the reader (was fired-and-discarded → the
+                            // "Where?" button looked like it did nothing).
+                            setTutorial({
+                              id: selected.id,
+                              text:
+                                r.ok && r.data
+                                  ? `Install locations for "${selected.id}":\n\n${JSON.stringify(r.data, null, 2)}`
+                                  : `No install-location info for "${selected.id}".${r.error ? `\n\n${r.error}` : ""}`,
+                            });
+                          })
+                          .catch(() =>
+                            setTutorial({
+                              id: selected.id,
+                              text: "Could not load install locations (engine unavailable).",
+                            }),
+                          )
+                      }
+                      onLearn={() =>
+                        void window.prometheus.spectacular
+                          .tutorial(selected.id)
+                          .then((r) => {
+                            // always surface the reader — empty/error states get a clear message
+                            // instead of a silently-missing dialog (no user feedback).
+                            setTutorial({
+                              id: selected.id,
+                              text:
+                                r.ok && r.text
+                                  ? r.text
+                                  : `No tutorial is available for "${selected.id}" yet.${
+                                      r.error ? `\n\n${r.error}` : ""
+                                    }`,
+                            });
+                          })
+                          .catch(() =>
+                            setTutorial({
+                              id: selected.id,
+                              text: "Could not load the tutorial (engine unavailable).",
+                            }),
+                          )
+                      }
+                    />
+                  </div>
+                ) : (
+                  <p style={{ color: "var(--text-secondary)", marginTop: "var(--space-4, 8px)" }}>
+                    Select an item to install it.
+                  </p>
+                )}
+
+                {/* APP-007: live lifecycle logs — the engine's stderr for the ACTIVE run only
+                  (runId-filtered; foreign install/bundle lines never interleave). */}
+                {(activeRun !== null || logLines.length > 0) && (
+                  <div style={{ marginTop: 10 }}>
+                    <div
+                      style={{
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "space-between",
+                        gap: 8,
+                        color: "var(--text-secondary)",
+                        fontSize: "0.75rem",
+                        marginBottom: 4,
+                        minWidth: 0,
+                      }}
+                    >
+                      <span
+                        style={{
+                          minWidth: 0,
+                          overflow: "hidden",
+                          textOverflow: "ellipsis",
+                          whiteSpace: "nowrap",
+                        }}
+                      >
+                        {activeRun
+                          ? `${activeRun.action} ${activeRun.tool} — running…`
+                          : "lifecycle log (finished)"}
+                      </span>
+                      {!activeRun && (
+                        <Button variant="ghost" onClick={() => setLogLines([])}>
+                          Clear
+                        </Button>
+                      )}
+                    </div>
+                    {/* §9: the SHARED log component — the same one the Security console
+                      renders — instead of a hand-rolled <pre>. It brings auto-scroll,
+                      pin-detection, copy-as-text and inert() rendering for free. */}
+                    <StreamLog
+                      lines={
+                        logLines.length > 0
+                          ? logLines.map((text, i) => ({
+                              id: `${activeRun?.runId ?? "log"}:${i}`,
+                              text,
+                            }))
+                          : [
+                              {
+                                id: "waiting",
+                                text: "waiting for engine output…",
+                                level: "debug" as const,
+                              },
+                            ]
+                      }
+                      maxHeight="min(28vh, 320px)"
+                    />
+                  </div>
+                )}
+              </Panel>
+            </section>
+          </div>
+        </EngineGate>
       )}
 
       {/* APP-006: the typed-confirm gate for removal — the SAME deep-red dialog the
@@ -687,7 +1116,11 @@ export function CatalogRoute(): ReactElement {
           onConfirm={() => {
             const name = uninstallPending.name;
             setUninstallPending(null);
-            uninstall.mutate({ name, dryRun: false });
+            uninstall.mutate({
+              name,
+              dryRun: false,
+              runId: beginRun("uninstall", name, "uninstall"),
+            });
           }}
           onCancel={() => setUninstallPending(null)}
         />
@@ -707,14 +1140,14 @@ export function CatalogRoute(): ReactElement {
             alignItems: "center",
             justifyContent: "center",
             background: "color-mix(in srgb, var(--bg-app) 65%, transparent)",
-            zIndex: 60,
+            zIndex: Z.dropdown,
           }}
         >
           <section
             style={{
               width: "min(420px, 90%)",
-              background: "var(--bg-surface-2, #16161c)",
-              border: "1px solid var(--border-strong, #3a3a45)",
+              background: "var(--bg-surface-2)",
+              border: "1px solid var(--border-strong)",
               borderRadius: 10,
               padding: 16,
               display: "flex",
@@ -723,7 +1156,7 @@ export function CatalogRoute(): ReactElement {
             }}
           >
             <strong>Roll back {rollbackPick.tool}</strong>
-            <span style={{ color: "var(--text-secondary, #9a9aa3)", fontSize: "0.8rem" }}>
+            <span style={{ color: "var(--text-secondary)", fontSize: "0.8rem" }}>
               Pick the version to restore (as reported by the engine):
             </span>
             <div
@@ -789,40 +1222,76 @@ export function CatalogRoute(): ReactElement {
         // in-flow child appended below the catalog grid, inside <main overflow:auto> —
         // below the fold, so a block verdict + the force-override escape hatch were invisible
         // and Install/Audit looked like it did nothing.
-        <div
-          role="dialog"
-          aria-modal="true"
-          aria-label={`Security verdict: ${pendingGate.name}`}
-          style={{
-            position: "fixed",
-            inset: 0,
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            background: "color-mix(in srgb, var(--bg-app) 65%, transparent)",
-            padding: "var(--space-8, 16px)",
-            overflow: "auto",
-            zIndex: 70,
-          }}
+        // §9: the SHARED decision overlay — fixed, focus-trapped, Escape-dismissible,
+        // with a visible close. This route hand-rolled the wrapper first; promoting it
+        // means models/repos/environments get the same guarantees instead of three more
+        // near-copies that each forget a different part of the contract.
+        <DecisionOverlay
+          label={`Security verdict: ${pendingGate.name}`}
+          onDismiss={() => setPendingGate(null)}
         >
-          <div style={{ width: "min(680px, 100%)", maxHeight: "90vh", overflow: "auto" }}>
+          <div>
+            {/* handoff §4: the SAME verdict card Home, the security console and the chat
+                render, as this dialog's summary. Actions are OFF here — the VerdictSheet
+                below owns Proceed / Cancel / the typed-confirm force override, and two
+                competing button rows would be worse than one consistent header. */}
+            <div
+              style={{
+                borderRadius: "var(--radius-xl)",
+                background: "var(--bg-surface)",
+                border: "1px solid var(--border-subtle)",
+                marginBottom: "var(--space-4, 8px)",
+              }}
+            >
+              <VerdictCard
+                verdict={pendingGate.gate.verdict}
+                artifact={pendingGate.name}
+                sourceKind="catalog item"
+                riskScore={pendingGate.gate.score}
+                findings={pendingGate.gate.reasons.map((r, i) => ({
+                  rule: `R-${i + 1}`,
+                  description: r,
+                  severity: pendingGate.gate.verdict === "warn" ? "medium" : "high",
+                }))}
+                actions={false}
+              />
+            </div>
             <VerdictSheet
               verdict={gateToVerdict(pendingGate.gate, pendingGate.target)}
               onProceed={() => {
                 // proceed = commit the install (the engine still gates; warn ⇒ allowed via --yes).
-                install.mutate({ name: pendingGate.name, dryRun: false, force: false });
+                install.mutate({
+                  ...beginInstallRun(pendingGate.name, "commit"),
+                  dryRun: false,
+                  force: false,
+                });
                 setPendingGate(null);
               }}
               onCancel={() => setPendingGate(null)}
               onRequestForce={() => {
-                // the deep-red override re-runs the install with force + confirm (§8).
-                install.mutate({ name: pendingGate.name, dryRun: false, force: true });
+                // §9 (HIGH): a BLOCK override is NEVER one click. Raise the typed confirm
+                // first — the engine's own `install-dangerous` prompt is unreachable from
+                // the GUI (piped stdin + --yes), so this is the only place it can exist.
+                const name = pendingGate.name;
+                force.ask({
+                  target: pendingGate.target,
+                  blockingReasons: pendingGate.gate.reasons,
+                  onConfirm: () =>
+                    install.mutate({
+                      ...beginInstallRun(name, "commit"),
+                      dryRun: false,
+                      force: true,
+                    }),
+                });
                 setPendingGate(null);
               }}
             />
           </div>
-        </div>
+        </DecisionOverlay>
       )}
+
+      {/* §9: the typed confirm that gates every deep-red override on this route. */}
+      <ForceGate gate={force} />
 
       {/* "Learn more" — the deep tutorial (dossier) for the selected item. */}
       {tutorial && (
@@ -836,7 +1305,7 @@ export function CatalogRoute(): ReactElement {
             background: "var(--bg-app)",
             display: "flex",
             flexDirection: "column",
-            zIndex: 50,
+            zIndex: Z.dropdown,
           }}
         >
           <div
@@ -896,65 +1365,274 @@ function gateFromEnvelope(raw: Record<string, unknown>): RepoGateSummary {
   };
 }
 
-/* ── list row ────────────────────────────────────────────────────────────────*/
+/* ── the §2 verdict chip ─────────────────────────────────────────────────────*/
 
-function CatalogListRow(props: {
+/**
+ * `● ALLOW` / `◑ WARN` / `✕ BLOCK` / `◌ QUEUED`.
+ *
+ * §2 specifies the tint as `color+"1f"` on the background and `color+"55"` on the border.
+ * Raw hex is a build failure here (08 §6), so those alphas are expressed as the same
+ * fractions of the role token: 0x1f/0xff ≈ 12%, 0x55/0xff ≈ 33%. Same result, and it
+ * re-themes with the palette instead of being frozen to one scheme's colours.
+ */
+function VerdictChip({ verdict }: { verdict: CatalogVerdict }): ReactElement {
+  const chip = CATALOG_VERDICT_CHIP[verdict];
+  const color = roleVar(chip.role);
+  return (
+    <span
+      // the glyph carries the meaning without colour (08 §7) — a red/green-only chip is
+      // unreadable to ~8% of men, and this one gates an install.
+      aria-label={`nemesis verdict: ${chip.label.toLowerCase()}`}
+      style={{
+        display: "inline-flex",
+        alignItems: "center",
+        gap: 4,
+        flex: "none",
+        padding: "1px 6px",
+        borderRadius: "var(--radius-sm, 4px)",
+        background: `color-mix(in srgb, ${color} 12%, transparent)`,
+        border: `1px solid color-mix(in srgb, ${color} 33%, transparent)`,
+        color,
+        fontFamily: "var(--font-mono)",
+        fontSize: 10.5,
+        fontWeight: 700,
+        letterSpacing: "0.06em",
+        lineHeight: 1.5,
+        whiteSpace: "nowrap", // §7
+      }}
+    >
+      <span aria-hidden="true">{chip.glyph}</span>
+      {chip.label}
+    </span>
+  );
+}
+
+/* ── the §2 install stepper ──────────────────────────────────────────────────*/
+
+/** Fetch → Dry-run → Verdict → Confirm → Install, with hairline connectors. */
+function InstallStepper({ phase }: { phase: InstallPhase }): ReactElement {
+  const states = stepStates(phase);
+  return (
+    <ol
+      aria-label="Install progress"
+      style={{
+        display: "flex",
+        flexWrap: "wrap",
+        alignItems: "center",
+        gap: 0,
+        listStyle: "none",
+        margin: 0,
+        padding: 0,
+      }}
+    >
+      {INSTALL_STEPS.map((step, i) => {
+        const state = states[i] ?? "pending";
+        const color =
+          state === "done"
+            ? "var(--ok)"
+            : state === "active"
+              ? "var(--warn)"
+              : "var(--border-strong)";
+        return (
+          <li
+            key={step}
+            aria-current={state === "active" ? "step" : undefined}
+            style={{ display: "flex", alignItems: "center", gap: 5, minWidth: 0 }}
+          >
+            <span
+              aria-hidden="true"
+              style={{
+                width: 7,
+                height: 7,
+                flex: "none",
+                borderRadius: "50%",
+                background: color,
+                // the active dot pulses on the SHARED keyframe (tokens.css) — an inline
+                // style cannot declare @keyframes, and a second copy would drift.
+                animation: state === "active" ? "prom-pulse 1.4s ease-in-out infinite" : undefined,
+              }}
+            />
+            <span
+              style={{
+                fontSize: 10.5,
+                fontWeight: state === "pending" ? 500 : 700,
+                letterSpacing: "0.04em",
+                color:
+                  state === "pending"
+                    ? "var(--text-muted)"
+                    : state === "active"
+                      ? "var(--warn)"
+                      : "var(--text-secondary)",
+                whiteSpace: "nowrap", // §7
+              }}
+            >
+              {step}
+            </span>
+            {i < INSTALL_STEPS.length - 1 && (
+              <span
+                aria-hidden="true"
+                style={{
+                  width: 14,
+                  height: 1,
+                  flex: "none",
+                  margin: "0 5px",
+                  background: "var(--border-subtle)",
+                }}
+              />
+            )}
+          </li>
+        );
+      })}
+    </ol>
+  );
+}
+
+/* ── the §2 browse row ───────────────────────────────────────────────────────*/
+
+/**
+ * glyph chip · mono name + source · one-line description · verdict chip · action button.
+ *
+ * The row is a `<div>` with an inner select button rather than one big `<button>`: §2 puts an
+ * ACTION button inside the row, and a button inside a button is invalid HTML that browsers
+ * silently un-nest, which drops the inner click handler.
+ */
+function BrowseRow(props: {
   item: CatalogItem;
+  verdict: CatalogVerdict;
   selected: boolean;
   onSelect: () => void;
+  onInstall: () => void;
+  onOpenDocs: () => void;
 }): ReactElement {
-  const { item, selected, onSelect } = props;
-  const rank = item.recommendRank;
+  const { item, verdict, selected, onSelect, onInstall, onOpenDocs } = props;
+  const documented = item.tier === "documented";
+  const present =
+    (item.state?.presence ?? (item.state?.installed ? "present" : "absent")) === "present";
   return (
     <li>
-      <button
-        type="button"
-        onClick={onSelect}
+      <div
         style={{
-          width: "100%",
-          textAlign: "left",
-          background: selected ? "var(--bg-surface-2, #1d1d25)" : "transparent",
-          border: "none",
-          borderRadius: 6,
-          color: "var(--text-primary, #e7e7ea)",
-          cursor: "pointer",
-          padding: "6px 8px",
           display: "flex",
           alignItems: "center",
           gap: 8,
+          padding: "5px 6px",
+          borderRadius: "var(--radius-md, 6px)",
+          background: selected ? "var(--bg-active)" : "transparent",
+          minWidth: 0, // §7: the parent of an ellipsizing child MUST be able to shrink
         }}
       >
+        {/* the 30px tinted glyph chip */}
         <span
-          style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
+          aria-hidden="true"
+          style={{
+            display: "inline-flex",
+            alignItems: "center",
+            justifyContent: "center",
+            width: 30,
+            height: 30,
+            flex: "none",
+            borderRadius: "var(--radius-md, 6px)",
+            background: "color-mix(in srgb, var(--accent) 12%, transparent)",
+            border: "1px solid color-mix(in srgb, var(--accent) 26%, transparent)",
+            color: "var(--accent)",
+            fontSize: 13,
+          }}
         >
-          {item.tier === "official" ? "★ " : ""}
-          {item.title}
+          {kindGlyph(item.kind, item.tier)}
         </span>
-        {/* tri-state install status mark: green ✓ present · red ✗ absent · · unknown (same
-            source of truth as the CLI list + the /invoke picker — never a false ✗). */}
-        <StatusMark
-          presence={item.state?.presence ?? (item.state?.installed ? "present" : "absent")}
-          withLabel
-        />
-        {rank !== undefined && (
-          <span style={{ fontSize: "0.72rem", color: "var(--text-secondary, #9a9aa3)" }}>
-            #{rank}
-          </span>
-        )}
-        {item.tier === "documented" && (
+
+        <button
+          type="button"
+          onClick={onSelect}
+          aria-current={selected ? "true" : undefined}
+          style={{
+            flex: 1,
+            minWidth: 0, // §7
+            textAlign: "left",
+            background: "transparent",
+            border: "none",
+            color: "var(--text-primary)",
+            cursor: "pointer",
+            padding: 0,
+          }}
+        >
           <span
             style={{
-              fontSize: "0.68rem",
-              color: "var(--warn, #e0a458)",
-              border: "1px solid var(--warn, #e0a458)",
-              borderRadius: 4,
-              padding: "0 4px",
+              display: "flex",
+              alignItems: "baseline",
+              gap: 6,
+              minWidth: 0, // §7
             }}
           >
-            doc
+            <span
+              style={{
+                fontFamily: "var(--font-mono)",
+                fontSize: "0.82rem",
+                fontWeight: 600,
+                minWidth: 0,
+                overflow: "hidden",
+                textOverflow: "ellipsis",
+                whiteSpace: "nowrap",
+              }}
+            >
+              {item.tier === "official" ? "★ " : ""}
+              {item.title}
+            </span>
+            {item.repo && (
+              <span
+                style={{
+                  flex: "none",
+                  fontSize: "0.68rem",
+                  color: "var(--text-muted)",
+                  whiteSpace: "nowrap",
+                }}
+              >
+                {item.repo}
+              </span>
+            )}
           </span>
-        )}
-      </button>
+          <span
+            style={{
+              display: "block",
+              fontSize: "0.72rem",
+              color: "var(--text-secondary)",
+              overflow: "hidden",
+              textOverflow: "ellipsis",
+              whiteSpace: "nowrap",
+            }}
+          >
+            {item.summary}
+          </span>
+        </button>
+
+        {/* the tri-state install mark stays: it is a DIFFERENT fact from the verdict
+            (is it on disk) and the CLI list + /invoke picker read the same source. */}
+        <StatusMark
+          presence={item.state?.presence ?? (item.state?.installed ? "present" : "absent")}
+        />
+        <VerdictChip verdict={verdict} />
+
+        <button
+          type="button"
+          onClick={documented ? onOpenDocs : onInstall}
+          style={{
+            flex: "none",
+            // §2's primary variant. The spec names a deep-navy fill; expressed with the
+            // app's own tokens so it re-themes (raw hex is a build failure, 08 §6).
+            background: documented ? "transparent" : "var(--bg-active)",
+            border: `1px solid ${documented ? "var(--border-subtle)" : "var(--border-strong)"}`,
+            borderRadius: "var(--radius-md, 6px)",
+            color: documented ? "var(--text-secondary)" : "var(--text-title)",
+            cursor: "pointer",
+            fontSize: "0.74rem",
+            fontWeight: 600,
+            padding: "3px 9px",
+            whiteSpace: "nowrap", // §7
+          }}
+        >
+          {documented ? "Audit" : present ? "Reinstall" : "Install"}
+        </button>
+      </div>
     </li>
   );
 }
@@ -987,14 +1665,14 @@ function ItemCard(props: {
     <div style={{ display: "flex", flexDirection: "column", gap: 10, fontSize: "0.85rem" }}>
       <div>
         <div style={{ fontSize: "1rem", fontWeight: 700 }}>{item.title}</div>
-        <div style={{ color: "var(--text-secondary, #9a9aa3)" }}>
+        <div style={{ color: "var(--text-secondary)" }}>
           {item.tier}
           {item.bundle ? " · bundle" : ""}
           {item.scope ? ` · ${item.scope}` : ""}
         </div>
       </div>
       {item.repo && (
-        <div style={{ color: "var(--text-secondary, #9a9aa3)" }}>
+        <div style={{ color: "var(--text-secondary)" }}>
           {item.repo}
           {item.license ? ` · ${item.license}` : ""}
           {item.stars !== undefined ? ` · ★${item.stars}` : ""}
@@ -1003,22 +1681,22 @@ function ItemCard(props: {
       <p style={{ margin: 0 }}>{item.summary}</p>
       {reachEntries.length > 0 && (
         <div>
-          <div style={{ color: "var(--text-secondary, #9a9aa3)", marginBottom: 4 }}>Reach</div>
+          <div style={{ color: "var(--text-secondary)", marginBottom: 4 }}>Reach</div>
           <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
             {reachEntries.map(([agent, cell]) => (
               <span
                 key={agent}
                 style={{
                   fontSize: "0.72rem",
-                  border: "1px solid var(--border-subtle, #2a2a33)",
+                  border: "1px solid var(--border-subtle)",
                   borderRadius: 4,
                   padding: "0 5px",
                   color:
                     cell === "native"
-                      ? "var(--ok, #5fd38d)"
+                      ? "var(--ok)"
                       : cell === "sync"
-                        ? "var(--accent, #6d5ef0)"
-                        : "var(--text-secondary, #9a9aa3)",
+                        ? "var(--accent)"
+                        : "var(--text-secondary)",
                 }}
               >
                 {agent} {cell === "native" ? "✓" : cell === "sync" ? "↔" : "–"}
@@ -1028,21 +1706,21 @@ function ItemCard(props: {
         </div>
       )}
       {item.components && item.components.length > 0 && (
-        <div style={{ color: "var(--text-secondary, #9a9aa3)" }}>
+        <div style={{ color: "var(--text-secondary)" }}>
           Components: {item.components.map((c) => c.id).join(", ")}
         </div>
       )}
       {item.automation && <div>Automation: {item.automation}</div>}
       {item.securityNote && (
-        <div style={{ color: "var(--warn, #e0a458)" }}>Security: {item.securityNote}</div>
+        <div style={{ color: "var(--warn)" }}>Security: {item.securityNote}</div>
       )}
       {item.tier === "documented" ? (
         <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
           {item.whyExcluded && (
             <div
               style={{
-                color: "var(--warn, #e0a458)",
-                border: "1px solid var(--warn, #e0a458)",
+                color: "var(--warn)",
+                border: "1px solid var(--warn)",
                 borderRadius: 6,
                 padding: "6px 8px",
               }}
@@ -1055,7 +1733,7 @@ function ItemCard(props: {
               href={item.docUrl}
               target="_blank"
               rel="noreferrer"
-              style={{ color: "var(--accent, #6d5ef0)" }}
+              style={{ color: "var(--accent)" }}
             >
               Open docs ↗
             </a>
@@ -1144,12 +1822,12 @@ function ReachMatrix(props: { items: CatalogItem[]; loading: boolean }): ReactEl
   }, [items]);
   return (
     <Panel title="Reach Matrix" elevation="e1">
-      <p style={{ marginTop: 0, color: "var(--text-secondary, #9a9aa3)", fontSize: "0.82rem" }}>
+      <p style={{ marginTop: 0, color: "var(--text-secondary)", fontSize: "0.82rem" }}>
         ✓ native · ↔ via sync · – unavailable. Install from the catalog list; cross-agent sync then
         propagates it to ↔ agents.
       </p>
       {loading ? (
-        <p style={{ color: "var(--text-secondary, #9a9aa3)" }}>loading matrix…</p>
+        <p style={{ color: "var(--text-secondary)" }}>loading matrix…</p>
       ) : (
         <div style={{ overflowX: "auto" }}>
           <table style={{ borderCollapse: "collapse", fontSize: "0.8rem", width: "100%" }}>
@@ -1165,7 +1843,7 @@ function ReachMatrix(props: { items: CatalogItem[]; loading: boolean }): ReactEl
             </thead>
             <tbody>
               {items.map((i) => (
-                <tr key={i.id} style={{ borderTop: "1px solid var(--border-subtle, #2a2a33)" }}>
+                <tr key={i.id} style={{ borderTop: "1px solid var(--border-subtle)" }}>
                   <td style={{ padding: "4px 8px" }}>
                     {i.scope === "universal" ? "[U] " : "[C] "}
                     {i.title}
@@ -1180,10 +1858,10 @@ function ReachMatrix(props: { items: CatalogItem[]; loading: boolean }): ReactEl
                           padding: "4px 8px",
                           color:
                             cell === "native"
-                              ? "var(--ok, #5fd38d)"
+                              ? "var(--ok)"
                               : cell === "sync"
-                                ? "var(--accent, #6d5ef0)"
-                                : "var(--text-secondary, #9a9aa3)",
+                                ? "var(--accent)"
+                                : "var(--text-secondary)",
                         }}
                       >
                         {cell === "native" ? "✓" : cell === "sync" ? "↔" : "–"}
@@ -1315,10 +1993,10 @@ function SkillsPanel(): ReactElement {
           onChange={(e) => setNewName(e.target.value)}
           style={{
             flex: 1,
-            background: "var(--bg-surface-2, #16161c)",
-            border: "1px solid var(--border-subtle, #2a2a33)",
+            background: "var(--bg-surface-2)",
+            border: "1px solid var(--border-subtle)",
             borderRadius: 6,
-            color: "var(--text-primary, #e7e7ea)",
+            color: "var(--text-primary)",
             padding: "4px 8px",
           }}
         />
@@ -1327,13 +2005,13 @@ function SkillsPanel(): ReactElement {
         </Button>
       </form>
       {skillsQ.isPending ? (
-        <p style={{ color: "var(--text-secondary, #9a9aa3)" }}>loading skills…</p>
+        <p style={{ color: "var(--text-secondary)" }}>loading skills…</p>
       ) : rows.length === 0 ? (
-        <p style={{ color: "var(--text-secondary, #9a9aa3)" }}>no skills on disk.</p>
+        <p style={{ color: "var(--text-secondary)" }}>no skills on disk.</p>
       ) : (
         <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "0.82rem" }}>
           <thead>
-            <tr style={{ textAlign: "left", color: "var(--text-secondary, #9a9aa3)" }}>
+            <tr style={{ textAlign: "left", color: "var(--text-secondary)" }}>
               <th style={{ padding: "4px 8px" }}>name</th>
               <th style={{ padding: "4px 8px" }}>fires</th>
               <th style={{ padding: "4px 8px" }}>state</th>
@@ -1342,7 +2020,7 @@ function SkillsPanel(): ReactElement {
           </thead>
           <tbody>
             {rows.map((s) => (
-              <tr key={s.name} style={{ borderTop: "1px solid var(--border-subtle, #2a2a33)" }}>
+              <tr key={s.name} style={{ borderTop: "1px solid var(--border-subtle)" }}>
                 <td style={{ padding: "4px 8px" }}>{s.name}</td>
                 <td style={{ padding: "4px 8px" }}>{s.fires ?? "—"}</td>
                 <td style={{ padding: "4px 8px" }}>{s.state}</td>

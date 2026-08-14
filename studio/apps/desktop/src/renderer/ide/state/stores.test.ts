@@ -144,3 +144,48 @@ test("openSessionTab rejects an unsafe id and mints a safe one", () => {
   assert.notEqual(id, "../evil");
   assert.ok(id.length > 0);
 });
+
+/* ── §9 reasoning surfacing: thinking is LIVE, and it is EPHEMERAL ────────────── */
+
+test("thinking + status stream live but never enter the transcript", () => {
+  const store = useAiSessionStore.getState();
+  const sid = store.newSession();
+
+  useAiSessionStore.getState().appendThinking(sid, "let me ");
+  useAiSessionStore.getState().appendThinking(sid, "check the file");
+  useAiSessionStore.getState().setStatus(sid, "⏳ waiting for qwen");
+  useAiSessionStore.getState().appendStreaming(sid, "The answer is 42.");
+
+  const mid = useAiSessionStore.getState().sessions[sid];
+  assert.equal(mid?.thinking, "let me check the file");
+  assert.equal(mid?.status, "⏳ waiting for qwen");
+
+  // Committing the ANSWER must not carry the scratch work with it: a persisted chain of
+  // thought would replay as an answer after a reload AND be fed back to the model as
+  // prior context on the next turn.
+  useAiSessionStore.getState().commitStreaming(sid);
+  const after = useAiSessionStore.getState().sessions[sid];
+  assert.deepEqual(after?.turns, [{ role: "assistant", content: "The answer is 42." }]);
+  assert.equal(after?.thinking, "", "commitStreaming clears the ephemeral pair");
+  assert.equal(after?.status, "");
+});
+
+test("clearEphemeral drops thinking/status without touching the transcript", () => {
+  const sid = useAiSessionStore.getState().newSession();
+  useAiSessionStore.getState().pushTurn(sid, { role: "user", content: "hi" });
+  useAiSessionStore.getState().appendThinking(sid, "hmm");
+  useAiSessionStore.getState().setStatus(sid, "still generating…");
+
+  useAiSessionStore.getState().clearEphemeral(sid);
+  const s = useAiSessionStore.getState().sessions[sid];
+  assert.equal(s?.thinking, "");
+  assert.equal(s?.status, "");
+  assert.deepEqual(s?.turns, [{ role: "user", content: "hi" }]);
+});
+
+test("a new session starts with no thinking/status", () => {
+  const sid = useAiSessionStore.getState().newSession();
+  const s = useAiSessionStore.getState().sessions[sid];
+  assert.equal(s?.thinking, "");
+  assert.equal(s?.status, "");
+});

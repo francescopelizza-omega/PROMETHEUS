@@ -16,14 +16,19 @@
 
 import "./styles/global.css";
 
-// Bundled Montserrat (offline, self-hosted via @fontsource — no network/CSP fetch).
-// The full weight range so the brand surfaces can play medium → black for readability.
+// Bundled Space Grotesk — the BRAND face (handoff §1): the wordmark, the Home greeting
+// and every island/card title. Offline, self-hosted via @fontsource (no network/CSP
+// fetch). 500/600/700 cover title → wordmark; --font-brand-weight is 700.
+import "@fontsource/space-grotesk/400.css";
+import "@fontsource/space-grotesk/500.css";
+import "@fontsource/space-grotesk/600.css";
+import "@fontsource/space-grotesk/700.css";
+
+// Montserrat stays bundled for the legacy brand surfaces that still name it (the
+// onboarding hero); nothing new should reach for it — use --font-brand.
 import "@fontsource/montserrat/400.css";
-import "@fontsource/montserrat/500.css";
 import "@fontsource/montserrat/600.css";
 import "@fontsource/montserrat/700.css";
-import "@fontsource/montserrat/800.css";
-import "@fontsource/montserrat/900.css";
 
 // Bundled monospace families (offline, self-hosted via @fontsource) — the coding
 // fonts PyCharm/the JetBrains IDEs ship or list for the editor + terminal, so the
@@ -66,6 +71,8 @@ import { QueryClientProvider } from "@tanstack/react-query";
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 
+import { VisualHarness, visualHarnessRequested } from "./visual-harness.js";
+
 import App from "./App.js";
 import { createQueryClient } from "./query/client.js";
 import { ErrorBoundary } from "./shell/ErrorBoundary.js";
@@ -94,13 +101,21 @@ window.addEventListener("error", (e) => {
 // StrictMode double-invoke never spawns a second cache).
 const queryClient = createQueryClient();
 
+/**
+ * The §9 decision-card baseline surface, in place of the workbench.
+ *
+ * Swapped at the ROOT rather than routed inside App: the two cards need to be the only
+ * thing on screen for their screenshots, and reaching them through the workbench would
+ * make the baseline a picture of the workbench. It mounts only when the e2e spec has set
+ * the localStorage key — see visual-harness.tsx for why that is inert.
+ */
+const rootElement = visualHarnessRequested() ? <VisualHarness /> : <App />;
+
 createRoot(container).render(
   <StrictMode>
     <ThemeProvider>
       <QueryClientProvider client={queryClient}>
-        <ErrorBoundary label="app">
-          <App />
-        </ErrorBoundary>
+        <ErrorBoundary label="app">{rootElement}</ErrorBoundary>
       </QueryClientProvider>
     </ThemeProvider>
   </StrictMode>,

@@ -39,6 +39,67 @@ const MAP = {
     "agent",
     "session-store.ts",
   ),
+  // The HOST-side system tools (working-set scope guard, exec runner/gate, reaper).
+  //
+  // Missing from this map, `@prometheus/core/agent-system-host` fell through to node's own
+  // resolution → package.json `exports` → `dist/`. So every node:test run that touched it was
+  // exercising the last BUILT output rather than the source under edit: a change to
+  // `isPathAllowed` looked like it had no effect, and a stale dist could keep a suite green
+  // across a source regression. Any core subpath the CLI imports belongs here — see
+  // `dev-resolver.test.ts`, which now fails when one is added to `exports` and not to MAP.
+  "@prometheus/core/agent-system-host": resolvePath(
+    PKG_ROOT,
+    "core",
+    "src",
+    "agent",
+    "system",
+    "host",
+    "index.ts",
+  ),
+  "@prometheus/core/agent-system": resolvePath(
+    PKG_ROOT,
+    "core",
+    "src",
+    "agent",
+    "system",
+    "index.ts",
+  ),
+  "@prometheus/core/agent-protocol": resolvePath(
+    PKG_ROOT,
+    "core",
+    "src",
+    "agent",
+    "protocol",
+    "index.ts",
+  ),
+  "@prometheus/core/agent-loop": resolvePath(PKG_ROOT, "core", "src", "agent", "loop.ts"),
+  "@prometheus/core/agent-tools": resolvePath(PKG_ROOT, "core", "src", "agent", "tools.ts"),
+  "@prometheus/core/agent-patch": resolvePath(PKG_ROOT, "core", "src", "agent", "patch.ts"),
+  "@prometheus/core/agent-compact": resolvePath(PKG_ROOT, "core", "src", "agent", "compact.ts"),
+  "@prometheus/core/agent-todo": resolvePath(PKG_ROOT, "core", "src", "agent", "todo.ts"),
+  "@prometheus/core/agent-subagent": resolvePath(PKG_ROOT, "core", "src", "agent", "subagent.ts"),
+  "@prometheus/core/agent-question": resolvePath(PKG_ROOT, "core", "src", "agent", "question.ts"),
+  "@prometheus/core/agent-permissions": resolvePath(
+    PKG_ROOT,
+    "core",
+    "src",
+    "agent",
+    "permissions.ts",
+  ),
+  "@prometheus/core/ai-retry": resolvePath(PKG_ROOT, "core", "src", "ai", "retry-index.ts"),
+  "@prometheus/core/agent-events": resolvePath(PKG_ROOT, "core", "src", "agent", "events.ts"),
+  "@prometheus/core/agent-exec": resolvePath(PKG_ROOT, "core", "src", "agent", "exec", "index.ts"),
+  "@prometheus/core/agent-authorization": resolvePath(
+    PKG_ROOT,
+    "core",
+    "src",
+    "agent",
+    "authorization.ts",
+  ),
+  "@prometheus/core/ai-effort": resolvePath(PKG_ROOT, "core", "src", "ai", "effort", "index.ts"),
+  // Found by `dev-resolver.test.ts` the moment it was written — a second subpath the CLI
+  // imports that was silently resolving to dist/.
+  "@prometheus/core/mcp-node": resolvePath(PKG_ROOT, "core", "src", "mcp", "host", "node.ts"),
   // pure keymap subpath (APP-057) — presets + conflict detection + the user-override
   // layer; the sandboxed renderer container (SettingsPanel) reaches it WITHOUT the barrel.
   "@prometheus/core/keymap": resolvePath(PKG_ROOT, "core", "src", "settings", "keymap.ts"),
@@ -50,6 +111,19 @@ const MAP = {
   // ANSI-16 resolver). NEVER map the root "@prometheus/ui" here — its index pulls
   // React/JSX components Node's type-stripping can't transform.
   "@prometheus/ui/tokens": resolvePath(PKG_ROOT, "ui", "src", "tokens.ts"),
+  // pure git-worktree subpath (desktop parity, Task #5) — the dependency-injected git
+  // wrappers `git-helpers.ts` re-exports and the desktop worktree IPC calls directly.
+  "@prometheus/core/git-worktree": resolvePath(PKG_ROOT, "core", "src", "git", "worktree.ts"),
+  // pure agent-files subpath (desktop parity, Task #5) — `loadAgentFile` + `personaSystemPrompt`
+  // / `personaDeny`, which desktop's run-controller.ts imports directly (no CLI import today,
+  // mapped anyway so a future CLI import — or a desktop node:test run through this SAME
+  // resolver — never silently falls through to a stale `dist/`).
+  "@prometheus/core/agent-files": resolvePath(PKG_ROOT, "core", "src", "agent", "agent-files.ts"),
+  // pure command-loader/-gate subpaths (desktop parity, Task #5) — the markdown slash-command
+  // parser + trust policy the CLI's `command-files.ts` calls; desktop's renderer-side loader
+  // calls the exact same functions.
+  "@prometheus/core/command-loader": resolvePath(PKG_ROOT, "core", "src", "commands", "loader.ts"),
+  "@prometheus/core/command-gate": resolvePath(PKG_ROOT, "core", "src", "commands", "gate.ts"),
 };
 
 const tsResult = (absPath) => ({

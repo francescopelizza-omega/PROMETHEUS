@@ -1,0 +1,109 @@
+{
+  "name": "prometheus-vscode",
+  "displayName": "Prometheus",
+  "description": "Prometheus's agent as a sidebar chat panel, driving the real @prometheus/core agent loop over your open VS Code workspace.",
+  "version": "0.1.0",
+  "private": true,
+  "publisher": "prometheus-studio",
+  "license": "MIT",
+  "author": "Francesco Pelizza <red-beard-phoenix@users.noreply.gitlab.com>",
+  "repository": {
+    "type": "git",
+    "url": "https://gitlab.com/red-beard-phoenix/PROMETHEUS.git",
+    "directory": "studio/apps/vscode-extension"
+  },
+  "bugs": { "url": "https://gitlab.com/red-beard-phoenix/PROMETHEUS/-/issues" },
+  "homepage": "https://gitlab.com/red-beard-phoenix/PROMETHEUS",
+  "engines": {
+    "vscode": "^1.95.0",
+    "node": ">=22.6"
+  },
+  "categories": ["AI", "Chat", "Programming Languages"],
+  "//main": "The BUNDLED CommonJS entry, not src/. @prometheus/core is ESM-only ('type':'module') while the VS Code extension host loads extensions as CJS — esbuild.mjs bridges exactly that gap. See esbuild.mjs's header.",
+  "main": "./out/extension.cjs",
+  "//activationEvents": "onView keeps activation lazy (the sidebar view is the product), and onStartupFinished exists so the commands below are reachable without first opening the view.",
+  "activationEvents": ["onView:prometheus.chatView", "onStartupFinished"],
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "prometheus",
+          "title": "Prometheus",
+          "icon": "media/icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "prometheus": [
+        {
+          "id": "prometheus.chatView",
+          "name": "Chat",
+          "type": "webview",
+          "contextualTitle": "Prometheus"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "prometheus.focusChat",
+        "title": "Prometheus: Focus Chat"
+      },
+      {
+        "command": "prometheus.newSession",
+        "title": "Prometheus: New Chat Session"
+      },
+      {
+        "command": "prometheus.cancel",
+        "title": "Prometheus: Cancel Current Turn"
+      }
+    ],
+    "configuration": {
+      "title": "Prometheus",
+      "properties": {
+        "prometheus.model": {
+          "type": "string",
+          "default": "prometheus-local",
+          "description": "Model id passed to the agent loop's tuning."
+        },
+        "prometheus.authLevel": {
+          "type": "number",
+          "default": 1,
+          "minimum": 0,
+          "maximum": 1,
+          "description": "0 = confirm every tool call; 1 = read-only tools auto-approve. Destructive tools ALWAYS reach a human regardless."
+        },
+        "prometheus.baseUrl": {
+          "type": "string",
+          "default": "http://localhost:11434/v1",
+          "description": "OpenAI-compatible chat-completions base URL. A loopback address is treated as local; anything else is treated as cloud and is subject to the cloud policy."
+        },
+        "prometheus.contextWindow": {
+          "type": "number",
+          "default": 8192,
+          "description": "The model's context window, in tokens. Sizes the tool-preamble budget — too small a value drops tool descriptions from the listing."
+        },
+        "prometheus.apiKeyRef": {
+          "type": "string",
+          "default": "",
+          "description": "A key REFERENCE (env:NAME or keychain ref) for the endpoint. Never the raw key."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "build": "node esbuild.mjs",
+    "typecheck": "tsc -p tsconfig.json",
+    "lint": "biome check src",
+    "test:vscode": "node esbuild.mjs && node ./test/run-vscode-tests.mjs",
+    "package": "node esbuild.mjs && vsce package --no-dependencies --out prometheus-vscode-0.1.0.vsix"
+  },
+  "dependencies": {
+    "@prometheus/core": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.95.0",
+    "@vscode/test-electron": "^2.4.1",
+    "@vscode/vsce": "^3.2.1",
+    "esbuild": "^0.21.5"
+  }
+}

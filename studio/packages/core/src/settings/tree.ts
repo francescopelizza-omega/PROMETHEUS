@@ -210,6 +210,25 @@ export const SETTINGS_TREE: readonly SettingsNode[] = Object.freeze([
   }),
   node("ai-agents", "AI & Agents", "root", "11", "page", {
     searchTerms: ["model routing", "agent tuning", "gate mode", "privacy", "providers"],
+    children: [
+      node("ai-agents.hooks", "Lifecycle Hooks", "AI & Agents", "11", "page", {
+        // the persisted HookSpec[] (agent/hooks.ts). `schemaKey` makes the settings IPC
+        // accept get/set/reset for this key (findNodeBySchemaKey gate); the array is
+        // edited on the dedicated Settings ▸ Lifecycle Hooks page, not inline — the
+        // "All Settings" tree renders it read-only (non-editable control + JSON view),
+        // same convention as `editor.snippets` (templates.user) / `editor.todo` (todoPatterns).
+        schemaKey: "hooks",
+        searchTerms: [
+          "hook",
+          "pretooluse",
+          "posttooluse",
+          "sessionstart",
+          "lifecycle",
+          "shell command",
+          "matcher",
+        ],
+      }),
+    ],
   }),
   node("security", "Security (nemesis)", "root", "03", "select", {
     schemaKey: "gateStrict",

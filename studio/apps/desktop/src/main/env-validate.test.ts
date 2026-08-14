@@ -151,13 +151,14 @@ test("validatePkgInstall accepts a spec list + defaults confirm/force false", ()
   }
 });
 
-test("validatePkgInstall threads scope/confirm/force/runId", () => {
+test("validatePkgInstall threads scope/confirm/runId, and PAIRS force with confirmForce", () => {
   const r = validatePkgInstall({
     envId: "env_abc",
     spec: ["numpy"],
     scope: "global",
     confirm: true,
     force: true,
+    confirmForce: true,
     runId: "run-1",
   });
   assert.equal(r.ok, true);
@@ -167,6 +168,16 @@ test("validatePkgInstall threads scope/confirm/force/runId", () => {
     assert.equal(r.value.force, true);
     assert.equal(r.value.runId, "run-1");
   }
+});
+
+test("pkg:install DROPS a bare force with no typed confirm (§9a fail-safe)", () => {
+  // This test used to assert the opposite. `force` overrides a nemesis BLOCK on a GATED
+  // install, and these env seams honoured it without any proof the human typed the
+  // confirmation — so the typed-confirm dialog was friction, not a gate. It now travels
+  // as a PAIR, matching the catalog/repo/security seams.
+  const r = validatePkgInstall({ envId: "env_abc", spec: ["numpy"], confirm: true, force: true });
+  assert.equal(r.ok, true);
+  if (r.ok) assert.equal(r.value.force, false);
 });
 
 test("validatePkgInstall REJECTS an empty spec list (a fetch must name what it fetches)", () => {

@@ -17,7 +17,7 @@ Requires **Node ≥ 20**. The published package is a single self-contained bundl
 **zero runtime dependencies** — install is instant.
 
 ```sh
-npm install -g @prometheus/cli      # global: adds `prometheus` (and `prometheus`) to PATH
+npm install -g @prometheus/cli      # global: adds `prometheus` to PATH
 prometheus --version
 prometheus help
 

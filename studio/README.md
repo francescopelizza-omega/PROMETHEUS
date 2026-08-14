@@ -5,8 +5,8 @@ Python engine (`../prometheus.py` + `../nemesis`).
 
 > **The M1 walking skeleton is in place and passes.** `packages/engine-bridge` (the only JS→engine
 > gateway), `packages/core`, and the `prometheus` CLI are implemented + tested; `apps/desktop` and
-> `packages/ui` are source-only (the Electron runtime is not yet installed). The full design lives in
-> [`../MDS/the_real_prometheus/`](../MDS/the_real_prometheus/) (11 plan files).
+> `packages/ui` are source-only (the Electron runtime is not yet installed). The full design lives
+> in the maintainer's internal spec set (not part of this repo).
 >
 > **Start here:** [`ARCHITECTURE.md`](./ARCHITECTURE.md) — the living keystone (process model, system
 > diagram, file→responsibility table, IPC channels, implemented-vs-source-only) — and
@@ -38,8 +38,7 @@ studio/
 ## Golden rule
 
 **JS never reimplements security.** Every scan / install / lifecycle action routes through
-`nemesis` and `prometheus.py` via `packages/engine-bridge`. See
-[`../MDS/the_real_prometheus/03-security-core-nemesis-gui.md`](../MDS/the_real_prometheus/03-security-core-nemesis-gui.md).
+`nemesis` and `prometheus.py` via `packages/engine-bridge`.
 
 ## Getting started (once implemented)
 

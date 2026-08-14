@@ -237,6 +237,20 @@ export interface AiTaskCard {
   status: "pending" | "running" | "done" | "denied";
   output: string;
   exitCode?: number;
+  /**
+   * Phase 6: which of core's system tools this card approves, and its arguments.
+   *
+   * Absent means `run_command` — every card was one before the shared tool set landed, and
+   * defaulting keeps older persisted sessions rendering.
+   */
+  tool?: string;
+  args?: Record<string, unknown>;
+  /**
+   * What this card ASKS. A `question` card carries a prompt and takes free text instead of a
+   * Run/Deny pair — `command` holds the prompt so older persisted sessions still render it as
+   * text rather than as an empty panel.
+   */
+  kind?: "command" | "question";
 }
 
 /** One independent chat tab. */
@@ -246,6 +260,17 @@ export interface AiSession {
   turns: AiTurn[];
   /** the assistant text currently streaming for THIS session (token-by-token, §11). */
   streaming: string;
+  /**
+   * The model's THINKING for the turn in flight, plus the wrapper's latest status line.
+   *
+   * Deliberately EPHEMERAL — never appended to `turns`, never persisted, cleared when the
+   * turn settles. Reasoning tokens are the model's scratch work, not its answer; folding
+   * them into the transcript would make a reload replay a chain of thought as if the agent
+   * had said it, and would feed it back to the model as prior context on the next turn.
+   */
+  thinking: string;
+  /** the wrapper's latest status line (watchdog heartbeat, round counter); ephemeral. */
+  status: string;
   /** the confirm-gated task cards (§7.3) for this session. */
   taskCards: AiTaskCard[];
   /** the pending ChangeSet under review (§7.4) for this session, or null. */
@@ -291,8 +316,22 @@ export interface AiSessionStore {
 
   // per-session chat mutators (id-addressed).
   pushTurn(id: string, turn: AiTurn): void;
+  /**
+   * Replace a session's whole transcript.
+   *
+   * Used by auto-compaction, which folds the older turns into one summary. Deliberately a
+   * WHOLESALE replace rather than a splice: compaction rewrites the head and keeps the tail, and
+   * expressing that as a mutation would need the caller to know the store's internals.
+   */
+  replaceTurns(id: string, turns: AiTurn[]): void;
   appendStreaming(id: string, delta: string): void;
   commitStreaming(id: string): void;
+  /** append a THINKING delta (ephemeral — see AiSession.thinking). */
+  appendThinking(id: string, delta: string): void;
+  /** replace the wrapper status line (ephemeral). */
+  setStatus(id: string, text: string): void;
+  /** drop the ephemeral thinking + status (the turn settled). */
+  clearEphemeral(id: string): void;
   setBusy(id: string, busy: boolean): void;
   /** clear ONE session's transcript + in-flight streaming (per-tab "clear"). */
   clearTurns(id: string): void;
@@ -356,6 +395,8 @@ function emptySession(title: string): AiSession {
     title,
     turns: [],
     streaming: "",
+    thinking: "",
+    status: "",
     taskCards: [],
     changeSet: null,
     selection: {},
@@ -422,6 +463,8 @@ function loadAiSession(): LoadedAiState {
           title: typeof rs.title === "string" ? rs.title : "Chat",
           turns: validTurns(rs.turns),
           streaming: "",
+          thinking: "",
+          status: "",
           taskCards: Array.isArray(rs.taskCards) ? (rs.taskCards as AiTaskCard[]) : [],
           changeSet: null,
           selection: {},
@@ -501,12 +544,14 @@ export const useAiSessionStore = create<AiSessionStore>((set) => ({
     set((st) => {
       const base = st.sessions[sid];
       const session: AiSession = base
-        ? { ...base, title, turns, streaming: "", busy: false }
+        ? { ...base, title, turns, streaming: "", thinking: "", status: "", busy: false }
         : {
             id: sid,
             title,
             turns,
             streaming: "",
+            thinking: "",
+            status: "",
             taskCards: [],
             changeSet: null,
             selection: {},
@@ -555,8 +600,15 @@ export const useAiSessionStore = create<AiSessionStore>((set) => ({
         return { ...s, title: retitle, turns: [...s.turns, turn] };
       }),
     ),
+  replaceTurns: (id, turns): void =>
+    set((st) => patchSession(st, id, (s) => ({ ...s, turns: [...turns] }))),
   appendStreaming: (id, delta): void =>
     set((st) => patchSession(st, id, (s) => ({ ...s, streaming: s.streaming + delta }))),
+  appendThinking: (id, delta): void =>
+    set((st) => patchSession(st, id, (s) => ({ ...s, thinking: s.thinking + delta }))),
+  setStatus: (id, text): void => set((st) => patchSession(st, id, (s) => ({ ...s, status: text }))),
+  clearEphemeral: (id): void =>
+    set((st) => patchSession(st, id, (s) => ({ ...s, thinking: "", status: "" }))),
   commitStreaming: (id): void =>
     set((st) =>
       patchSession(st, id, (s) =>
@@ -566,12 +618,23 @@ export const useAiSessionStore = create<AiSessionStore>((set) => ({
               ...s,
               turns: [...s.turns, { role: "assistant", content: s.streaming }],
               streaming: "",
+              thinking: "",
+              status: "",
             },
       ),
     ),
   setBusy: (id, busy): void => set((st) => patchSession(st, id, (s) => ({ ...s, busy }))),
   clearTurns: (id): void =>
-    set((st) => patchSession(st, id, (s) => ({ ...s, turns: [], streaming: "", taskCards: [] }))),
+    set((st) =>
+      patchSession(st, id, (s) => ({
+        ...s,
+        turns: [],
+        streaming: "",
+        thinking: "",
+        status: "",
+        taskCards: [],
+      })),
+    ),
   addTaskCard: (id, card): void =>
     set((st) => patchSession(st, id, (s) => ({ ...s, taskCards: [...s.taskCards, card] }))),
   updateTaskCard: (id, cardId, patch): void =>
@@ -594,6 +657,8 @@ export const useAiSessionStore = create<AiSessionStore>((set) => ({
         ...s,
         turns: s.turns.slice(0, Math.max(0, keepCount)),
         streaming: "",
+        thinking: "",
+        status: "",
         // any pending cards / review from the reverted turns are abandoned.
         taskCards: [],
       })),

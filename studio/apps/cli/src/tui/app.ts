@@ -288,6 +288,10 @@ export async function launchTui(parsed: ParsedArgs, deps: TuiDeps = {}): Promise
       if (typeof stdin.setRawMode === "function") stdin.setRawMode(false);
       stdin.pause();
       stdin.off("data", onData);
+      stdin.off("end", onHangup);
+      stdin.off("close", onHangup);
+      stdin.off("error", onHangup);
+      stdout.off("error", onHangup);
       stdout.off("resize", onResize);
     } catch {
       /* best-effort restore — never throw out of cleanup */
@@ -302,6 +306,21 @@ export async function launchTui(parsed: ParsedArgs, deps: TuiDeps = {}): Promise
   function onSignal(): void {
     finish(130);
   }
+  /**
+   * THE TERMINAL GOING AWAY IS AN EXIT CONDITION.
+   *
+   * Only `data` used to be handled, so when the tty died under us — window closed, ssh
+   * dropped, parent shell killed — stdin's `end`/`error` (EIO on a dead pty) went nowhere:
+   * the TUI stayed alive, reparented to launchd, spinning a full core on reads of a dead
+   * fd. Measured on this machine: PPID 1, state R, 99.9% CPU, 109 MB RSS, climbing until
+   * killed by hand. SIGHUP is not reliably delivered in that situation, so these stream
+   * events — not the signal — are what tells us the terminal is gone.
+   *
+   * 129 = 128 + SIGHUP, the conventional status for exactly this.
+   */
+  function onHangup(): void {
+    finish(129);
+  }
   // A crash (uncaughtException / unhandledRejection) must not merely restore the
   // terminal and return — that leaves the exit promise UNRESOLVED and the host hung.
   // finish(1) restores AND resolves with a non-zero code so the caller exits cleanly.
@@ -313,6 +332,10 @@ export async function launchTui(parsed: ParsedArgs, deps: TuiDeps = {}): Promise
     renderer.clear();
     restore();
     stdout.write("\n");
+    // Release the session's MCP transports. Fire-and-forget: the terminal is already restored
+    // and the user is leaving — a connector that is slow to die must not hold the exit — but
+    // WITHOUT this the connector subprocesses simply outlive the session.
+    void session.dispose().catch(() => {});
     const r = resolveExit;
     resolveExit = null;
     r(code);
@@ -680,6 +703,10 @@ export async function launchTui(parsed: ParsedArgs, deps: TuiDeps = {}): Promise
     // force a pure-black background for best Pelly-color contrast (skipped under NO_COLOR).
     if (caps !== "none") stdout.write(BG_BLACK);
     stdin.on("data", onData);
+    stdin.on("end", onHangup);
+    stdin.on("close", onHangup);
+    stdin.on("error", onHangup);
+    stdout.on("error", onHangup); // the write half can die first (EPIPE on a closed pty)
     stdout.on("resize", onResize);
     // restore the terminal on EVERY exit path — normal, signal, or crash. (bin.ts's
     // process-level guards still log; these just un-raw the tty so it's never stuck.)

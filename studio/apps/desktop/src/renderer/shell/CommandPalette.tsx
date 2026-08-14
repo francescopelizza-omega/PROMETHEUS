@@ -18,6 +18,7 @@ import {
   type PaletteItem,
   VerdictBadge,
   type VerdictTier,
+  Z,
   filterPalette,
 } from "@prometheus/ui";
 import { type ReactElement, useEffect, useMemo, useRef, useState } from "react";
@@ -80,7 +81,10 @@ export function CommandPalette({
   const ranked = useMemo(() => filterPalette(items, query), [items, query]);
   // APP-100: this aria-modal dialog needs the same focus trap + restore the ide palette has —
   // else Esc drops focus to <body> instead of the opener, and Tab escapes behind the modal.
-  useFocusTrap(dialogRef, open);
+  useFocusTrap(dialogRef, open, onClose, {
+    deferTabToTextFields: true,
+    skipInitialFocus: true,
+  });
 
   // focus the input + reset state on open.
   useEffect(() => {
@@ -140,7 +144,7 @@ export function CommandPalette({
         alignItems: "flex-start",
         paddingTop: "12vh",
         background: "rgba(0,0,0,.45)",
-        zIndex: 1000,
+        zIndex: Z.modal,
       }}
       onClick={(e) => {
         if (e.target === e.currentTarget) onClose();

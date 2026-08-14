@@ -11,7 +11,7 @@
  * Hub). Imports only react + this package.
  */
 
-import type { ReactElement } from "react";
+import type { ReactElement, ReactNode } from "react";
 import type { EnvRowData } from "./types.js";
 import {
   allowsDestructive,
@@ -41,6 +41,21 @@ export interface EnvPickerProps {
   onDelete?(id: string): void;
   /** open the create-env wizard. */
   onCreate?(): void;
+  /**
+   * handoff_3 §5: extra cells rendered INSIDE each row — the detail line ("python 3.12 · 84
+   * packages") and the coloured status text.
+   *
+   * Injected rather than computed here on purpose. The rules for "what counts as broken" and
+   * "which action does this row offer" are pinned by node:test in the app
+   * (routes/workspace-view.ts); a second implementation inside this component would be a
+   * second answer to the same question, free to drift from the tested one.
+   */
+  renderRowExtra?(env: EnvRowData): ReactNode;
+  /** handoff_3 §5: the per-row action (Activate / Inspect / Recreate). */
+  rowAction?: {
+    label(env: EnvRowData): string;
+    onAct(id: string): void;
+  };
   className?: string;
 }
 
@@ -61,7 +76,7 @@ function Chip({
         paddingInline: "var(--space-3, 6px)",
         paddingBlock: "var(--space-1, 2px)",
         borderRadius: "var(--radius-full, 9999px)",
-        border: "1px solid var(--border-subtle, #232329)",
+        border: "1px solid var(--border-subtle)",
         color: roleHint ? roleVar(roleHint) : "var(--text-secondary)",
         fontSize: "var(--text-small-size, 0.8125rem)",
         whiteSpace: "nowrap",
@@ -89,6 +104,8 @@ export function EnvPicker({
   onExport,
   onDelete,
   onCreate,
+  renderRowExtra,
+  rowAction,
   className,
 }: EnvPickerProps): ReactElement {
   const selected = envs.find((e) => e.id === selectedId) ?? null;
@@ -126,7 +143,7 @@ export function EnvPicker({
             disabled={!onCreate}
             style={{
               background: "transparent",
-              border: "1px solid var(--border-subtle, #232329)",
+              border: "1px solid var(--border-subtle)",
               borderRadius: "var(--radius-md, 6px)",
               color: "var(--text-primary)",
               cursor: onCreate ? "pointer" : "default",
@@ -140,7 +157,7 @@ export function EnvPicker({
           {envs.map((e) => {
             const isSel = e.id === selectedId;
             return (
-              <li key={e.id}>
+              <li key={e.id} style={{ display: "flex", alignItems: "center", minWidth: 0 }}>
                 <button
                   type="button"
                   onClick={() => onSelect(e.id)}
@@ -154,8 +171,8 @@ export function EnvPicker({
                     padding: "var(--space-3, 6px) var(--space-4, 8px)",
                     borderRadius: "var(--radius-md, 6px)",
                     border: "1px solid",
-                    borderColor: isSel ? "var(--border-strong, #3a3a44)" : "transparent",
-                    background: isSel ? "var(--bg-surface-2, #16161b)" : "transparent",
+                    borderColor: isSel ? "var(--border-strong)" : "transparent",
+                    background: isSel ? "var(--bg-surface-2)" : "transparent",
                     color: "var(--text-primary)",
                     cursor: "pointer",
                     fontFamily: "var(--font-ui)",
@@ -174,13 +191,42 @@ export function EnvPicker({
                   >
                     {inert(e.name)}
                   </span>
-                  <span
-                    aria-hidden="true"
-                    style={{ color: "var(--text-secondary)", fontSize: "0.78rem" }}
-                  >
-                    {kindGlyph(e.kind)} {inert(e.kind)}
-                  </span>
+                  {renderRowExtra ? (
+                    renderRowExtra(e)
+                  ) : (
+                    <span
+                      aria-hidden="true"
+                      style={{ color: "var(--text-secondary)", fontSize: "0.78rem" }}
+                    >
+                      {kindGlyph(e.kind)} {inert(e.kind)}
+                    </span>
+                  )}
                 </button>
+                {rowAction && (
+                  // OUTSIDE the select button: a button inside a button is invalid HTML that
+                  // browsers silently un-nest, dropping the inner handler.
+                  <button
+                    type="button"
+                    onClick={() => rowAction.onAct(e.id)}
+                    style={{
+                      flex: "none",
+                      marginInlineStart: "var(--space-3, 6px)",
+                      background: "var(--bg-inset)",
+                      border: "1px solid var(--border-chip)",
+                      borderRadius: "var(--radius-md, 6px)",
+                      color: "var(--text-secondary)",
+                      cursor: "pointer",
+                      fontFamily: "var(--font-ui)",
+                      fontSize: "0.72rem",
+                      fontWeight: 600,
+                      paddingBlock: "var(--space-1, 2px)",
+                      paddingInline: "var(--space-3, 6px)",
+                      whiteSpace: "nowrap",
+                    }}
+                  >
+                    {rowAction.label(e)}
+                  </button>
+                )}
               </li>
             );
           })}
@@ -256,7 +302,7 @@ export function EnvPicker({
                 gap: "var(--space-3, 6px)",
                 flexWrap: "wrap",
                 padding: "var(--space-3, 6px)",
-                border: "1px solid var(--border-subtle, #232329)",
+                border: "1px solid var(--border-subtle)",
                 borderRadius: "var(--radius-md, 6px)",
               }}
             >
@@ -314,7 +360,7 @@ function ActionButton({
       title={title}
       style={{
         background: "transparent",
-        border: "1px solid var(--border-subtle, #232329)",
+        border: "1px solid var(--border-subtle)",
         borderRadius: "var(--radius-md, 6px)",
         color: danger ? "var(--danger)" : "var(--text-primary)",
         cursor: disabled || !onClick ? "default" : "pointer",

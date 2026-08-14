@@ -13,12 +13,17 @@ import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 
 import { mcpHost } from "@prometheus/core";
+import * as agentProtocol from "@prometheus/core/agent-protocol";
 import type { EngineConfig } from "@prometheus/engine-bridge";
 import { ipcMain } from "electron";
 
 import {
+  type AgentSystemToolResult,
   IPC,
   type McpAddRequest,
+  type McpAgentCallRequest,
+  type McpAgentServer,
+  type McpAgentToolsResult,
   type McpConnectorView,
   type McpImportResult,
   type McpListResult,
@@ -222,6 +227,63 @@ export function registerMcpIpcHandlers(opts: McpIpcOptions): () => void {
     return { ok: true, imported, servers: listViews() };
   });
 
+  /* ── the agent pane as an MCP CLIENT ──────────────────────────────────────*/
+  /**
+   * `mcp:agent-tools` — the live tool DESCRIPTORS, which never used to cross.
+   *
+   * `McpConnectorView` carries a `toolCount` and nothing else, so the renderer knew how many
+   * tools a connected server published and not one thing about them. That is precisely why the
+   * pane could call none of them: it could not build a single `ToolDef`. A `ToolDef` cannot
+   * cross IPC (it holds a function), so the descriptors cross as plain JSON and the renderer
+   * builds the defs with core's own `allMcpToolDefs` — the same function the CLI uses, so a
+   * server's tools look identical on both surfaces.
+   */
+  ipcMain.handle(IPC.mcpAgentTools, async (): Promise<McpAgentToolsResult> => {
+    try {
+      const servers: McpAgentServer[] = manager.list().map((cfg) => ({
+        id: cfg.id,
+        label: cfg.label,
+        enabled: cfg.enabled,
+        health: manager.isConnected(cfg.id) ? "ready" : cfg.health,
+        ...(cfg.gate ? { verdict: cfg.gate.verdict } : {}),
+        tools: (cfg.capabilities?.tools ?? []) as unknown as Record<string, unknown>[],
+      }));
+      return { ok: true, servers };
+    } catch (e) {
+      return { ok: false, servers: [], error: errString(e) };
+    }
+  });
+
+  /**
+   * `mcp:agent-call` — run one tool on one connected server.
+   *
+   * `confirm: async () => true` is deliberate and is the same decision the CLI session makes:
+   * the human was ALREADY asked about this exact call, upstream, by the agent loop's broker,
+   * using the same annotations this manager would consult. Asking again here would mean two
+   * prompts for one call, and the second one — a bare tool name with no context — is the worse
+   * of the two. The manager's own auto-approve list still governs the CLI's non-agent paths.
+   */
+  ipcMain.handle(IPC.mcpAgentCall, async (_e, arg: unknown): Promise<AgentSystemToolResult> => {
+    const req = (arg ?? {}) as Partial<McpAgentCallRequest>;
+    if (typeof req.serverId !== "string" || typeof req.tool !== "string") {
+      return { ok: false, summary: "mcp:agent-call: malformed request" };
+    }
+    try {
+      const res = await manager.callTool(req.serverId, req.tool, req.args ?? {}, {
+        confirm: async () => true,
+      });
+      const out = agentProtocol.mcpOutcome(req.serverId, req.tool, res);
+      return {
+        ok: out.ok,
+        summary: out.summary,
+        ...(out.data ? { data: { content: out.data } } : {}),
+      };
+    } catch (e) {
+      // Fail-closed and NAMED: a dead transport must not read like a tool that returned nothing.
+      return { ok: false, summary: `${req.tool} on ${req.serverId} failed: ${errString(e)}` };
+    }
+  });
+
   return () => {
     for (const ch of [
       IPC.mcpList,
@@ -231,6 +293,8 @@ export function registerMcpIpcHandlers(opts: McpIpcOptions): () => void {
       IPC.mcpRemove,
       IPC.mcpSetEnabled,
       IPC.mcpImport,
+      IPC.mcpAgentTools,
+      IPC.mcpAgentCall,
     ]) {
       ipcMain.removeHandler(ch);
     }

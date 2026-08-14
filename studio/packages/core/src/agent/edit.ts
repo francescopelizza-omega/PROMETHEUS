@@ -51,6 +51,69 @@ function normalizeWork(raw: string): { work: string; map: number[] } {
 }
 
 /**
+ * Say WHY an `old` block did not match, in terms the model can act on.
+ *
+ * "old text not found" is true and useless. Watching a live model receive it, the next three
+ * rounds are guesses: maybe the indentation, maybe the newlines, maybe re-read the file. Every
+ * one of those costs a round trip and can end in the model giving up and using a blunter tool.
+ *
+ * The failure is nearly always one of four things, and all four are cheap to test for. The
+ * message NEVER claims to have applied anything and never invents a location — it reports what
+ * is checkable and stops.
+ */
+export function diagnoseHunkMiss(content: string, old: string): string {
+  const file = content.replace(/\r\n/g, "\n");
+  const want = old.replace(/\r\n/g, "\n");
+  const wantLines = want.split("\n").filter((l) => l.trim() !== "");
+  if (wantLines.length === 0) return "";
+
+  // 1. A line-number gutter copied out of read_file's output. The single most likely cause,
+  //    because read_file is how the model got the text in the first place.
+  if (wantLines.every((l) => /^\s*\d+\s\s/.test(l))) {
+    return " — every line of `old` starts with a number, so this looks like read_file's line-number gutter; `old` must be the file's own text without it";
+  }
+
+  // 2. Present, but the indentation differs — the model retyped the line instead of copying it.
+  const squash = (s: string): string =>
+    s
+      .split("\n")
+      .map((l) => l.trim())
+      .filter((l) => l !== "")
+      .join("\n");
+  if (squash(file).includes(squash(want))) {
+    return " — the same lines ARE in the file but the leading whitespace differs; copy `old` verbatim, indentation included";
+  }
+
+  // 3. It starts right and then diverges. Report WHERE, by finding the longest prefix of `old`
+  //    that occurs in the file (monotone: if a prefix occurs, every shorter one does, so a
+  //    binary search is exact). This is the case that actually bites — a model rebuilding text
+  //    from a numbered listing drops the line break between two lines and the resulting `old`
+  //    has no matching first line at all, so a line-by-line check finds nothing to say.
+  let lo = 0;
+  let hi = want.length;
+  while (lo < hi) {
+    const mid = Math.ceil((lo + hi) / 2);
+    if (file.includes(want.slice(0, mid))) lo = mid;
+    else hi = mid - 1;
+  }
+  const MIN_USEFUL_PREFIX = 12;
+  if (lo >= MIN_USEFUL_PREFIX) {
+    const at = file.slice(0, file.indexOf(want.slice(0, lo))).split("\n").length;
+    const fileNext = file[file.indexOf(want.slice(0, lo)) + lo];
+    const wantNext = want[lo];
+    // The specific, common case: the file breaks the line here and `old` does not.
+    const newlineHint =
+      fileNext === "\n" && wantNext !== "\n"
+        ? " — the file has a LINE BREAK there and `old` does not (blank lines count as lines)"
+        : "";
+    return ` — \`old\` matches from line ${at} for its first ${lo} characters and then diverges${newlineHint}; re-read that region and copy it exactly`;
+  }
+
+  // 4. Simply not there.
+  return " — no part of `old` appears in the file; re-read it, the file may have changed";
+}
+
+/**
  * Apply hunks to `content`, returning the new content or a typed error. Never throws.
  * Hunks apply in order against the running RAW string (so overlapping edits are rejected
  * as no-match once the first consumes the shared text). Matching runs on a normalized LF
@@ -86,8 +149,8 @@ export function applyProposedEdit(
     if (!r.ok) {
       const message =
         r.code === "ambiguous"
-          ? `hunk ${i}: old text matches more than one location`
-          : `hunk ${i}: old text not found`;
+          ? `hunk ${i}: old text matches more than one location — extend it with surrounding lines until it is unique`
+          : `hunk ${i}: old text not found${diagnoseHunkMiss(work, oldN)}`;
       return { ok: false, code: r.code, message, hunk: i };
     }
     const rawStart = map[r.start] as number;
@@ -181,7 +244,14 @@ export const PROPOSE_EDIT_TOOL: ToolDef = {
     "exact unique pre-image and `new` the replacement. Requires human approval; never auto-applies.",
   schema: {
     path: { type: "string", required: true, description: "file path within the working set" },
-    hunks: { type: "string", required: true, description: "array of {old,new} hunks" },
+    hunks: {
+      type: "array",
+      required: true,
+      description:
+        "the edits to apply, each {old, new}: `old` is an exact, unique, verbatim span of " +
+        "the current file (include a little surrounding context so it matches ONE place)",
+      items: { type: "object", shape: "{old,new}" },
+    },
   },
   // DESTRUCTIVE ⇒ the broker always routes to confirm (never auto, even under tuning.yes).
   annotations: { destructiveHint: true },

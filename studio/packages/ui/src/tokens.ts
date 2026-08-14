@@ -172,15 +172,43 @@ export type RampName = keyof typeof ramps;
 
 export interface SemanticColors {
   "bg-app": string;
+  /** the warm upper-left node of the app-root radial wash (08 §2 / handoff §2). */
+  "bg-app-glow": string;
   "bg-surface": string;
   "bg-surface-2": string;
   "bg-inset": string;
+  /** chip / pill fill in the chrome (TopBar pills, composer chips). */
+  "bg-chip": string;
+  /** the "this row/icon is active-or-hovered" tint (rail, tabs, list rows). */
+  "bg-active": string;
+  /** secondary-button fill (Details / Run doctor / This session). */
+  "bg-elevated": string;
   "border-subtle": string;
+  /** list-row separator — one step quieter than border-subtle (handoff §1). */
+  "border-row": string;
+  /** panel-header separator — between border-row and border-subtle (handoff §1). */
+  "border-header": string;
+  /** chip / pill outline in the chrome. */
+  "border-chip": string;
   "border-strong": string;
+  /** the hover outline for an interactive island/chip (handoff §1). */
+  "border-hover": string;
   "text-primary": string;
+  /** the loudest text — greeting/hero only. */
+  "text-strong": string;
+  /** card + island titles (handoff §1 `text-title`). */
+  "text-title": string;
+  /** body copy tint inside cards (handoff §1 `text-body`). */
+  "text-body": string;
   "text-secondary": string;
+  /** faint metadata — timestamps, sublabels (handoff §1 `text-muted`). */
+  "text-muted": string;
   "text-disabled": string;
   brand: string;
+  /** the second stop of the primary-CTA gradient (handoff §1 `brand-2`). */
+  "brand-2": string;
+  /** the light brand tint used in the wordmark gradient + legend swatches. */
+  "brand-3": string;
   "brand-fg": string;
   accent: string;
   "focus-ring": string;
@@ -188,44 +216,76 @@ export interface SemanticColors {
   ok: string;
   warn: string;
   danger: string;
+  /** danger TEXT on dark — a lighter tint than `danger` so copy stays legible. */
+  "danger-fg": string;
   info: string;
   selection: string;
 }
 
-/** Dark theme — the default (08 §2.1). This IS "Prometheus Dark" (scheme #1). */
+/** Dark theme — the default (08 §2.1, restyled to the handoff §1 navy ground).
+ *  This IS "Prometheus Dark" (scheme #1). Raw hex is legal here ONLY (§6). */
 export const darkSemantic: SemanticColors = {
-  "bg-app": neutral[950], //       #0b0d10
-  "bg-surface": neutral[900], //   #121519
-  "bg-surface-2": slate[900], //   #171b21  (raised: modals, popovers)
-  "bg-inset": "#07090b", //        editor gutter, terminal (neutral-1000)
-  "border-subtle": neutral[800], // #232932
-  "border-strong": neutral[700], // #313844
-  "text-primary": neutral[50], //  #f7f8fa
-  "text-secondary": neutral[400], // #9aa4b2
-  "text-disabled": neutral[600], // #5b6675
-  brand: violet[500], //           #a855f7
-  "brand-fg": neutral[50], //      text on brand
-  accent: cyan[400], //            #22d3ee
-  "focus-ring": cyan[400], //      accent, 2px outline 2px offset
-  ok: green[500], //               #22c55e
-  warn: amber[500], //             #f59e0b
-  danger: red[500], //             #ef4444
-  info: cyan[500], //              #06b6d4
-  selection: cyan[900], //         translucent-ish selection base
+  "bg-app": "#070d18", //          navy ground; the root gets the radial wash (§2)
+  "bg-app-glow": "#0d1930", //     the wash's upper-right node
+  "bg-surface": "#0c1728", //      island fill
+  "bg-surface-2": "#0f1e35", //    raised: hover, popovers, ask-bar top
+  "bg-inset": "#0a1322", //        editor / terminal ground
+  "bg-chip": "#0e1a2e", //         TopBar + composer pill fill
+  "bg-active": "#13253f", //       active rail icon / active tab / row hover
+  "bg-elevated": "#152a47", //     secondary button fill
+  "border-subtle": "#172a47", //   island borders
+  "border-row": "#101d31", //      row separators
+  "border-header": "#142438", //   header separators
+  "border-chip": "#1a2c48", //     chip / pill outline
+  "border-strong": "#244168",
+  "border-hover": "#2a4570",
+  "text-primary": "#e8f2ff",
+  "text-strong": "#eef5ff", //     greeting / hero
+  "text-title": "#c9dcf4", //      card titles
+  "text-body": "#b7cbe6", //       body copy in cards
+  "text-secondary": "#9db4d4",
+  "text-muted": "#7d97bd", //      faint metadata
+  "text-disabled": "#5f7899",
+  brand: violet[500], //           #a855f7 (kept — the Prometheus violet)
+  "brand-2": "#e879f9", //         CTA gradient end
+  "brand-3": "#c084fc", //         wordmark gradient start / legend swatch
+  "brand-fg": "#ffffff", //        text on the brand gradient
+  accent: "#35c7ee",
+  "focus-ring": "#35c7ee",
+  ok: "#8be04a",
+  warn: "#f5c944",
+  danger: "#ff5566",
+  "danger-fg": "#ff8093",
+  info: "#35c7ee",
+  selection: "#16325a",
 };
 
 /** Light theme — the same identity inverted (08 §2.1 light override). */
 export const lightSemantic: SemanticColors = {
   "bg-app": neutral[50],
+  "bg-app-glow": "#ffffff",
   "bg-surface": "#ffffff",
   "bg-surface-2": neutral[50],
   "bg-inset": neutral[100],
+  "bg-chip": neutral[100],
+  "bg-active": "#e4ecf7",
+  "bg-elevated": neutral[100],
   "border-subtle": neutral[200],
+  "border-row": neutral[100],
+  "border-header": neutral[200],
+  "border-chip": neutral[200],
   "border-strong": neutral[300],
+  "border-hover": slate[300],
   "text-primary": neutral[950],
+  "text-strong": "#0a0f18",
+  "text-title": neutral[900],
+  "text-body": slate[500],
   "text-secondary": neutral[600],
+  "text-muted": slate[400],
   "text-disabled": neutral[400],
   brand: violet[600],
+  "brand-2": "#c026d3",
+  "brand-3": violet[500],
   "brand-fg": neutral[50],
   accent: cyan[600],
   "focus-ring": cyan[600],
@@ -234,6 +294,7 @@ export const lightSemantic: SemanticColors = {
   // tint only reaches ~2.8:1 at 600 — 700 clears the §7 ≥3:1 UI target (tokens.test).
   warn: amber[700],
   danger: red[600],
+  "danger-fg": red[700],
   info: cyan[600],
   selection: cyan[100],
 };
@@ -241,21 +302,36 @@ export const lightSemantic: SemanticColors = {
 /** High-contrast theme — AAA targets, pure black/white + saturated cues (08 §7). */
 export const highContrastSemantic: SemanticColors = {
   "bg-app": "#000000",
+  "bg-app-glow": "#000000",
   "bg-surface": "#000000",
   "bg-surface-2": "#0a0a0a",
   "bg-inset": "#000000",
+  "bg-chip": "#0a0a0a",
+  "bg-active": "#1a1a1a",
+  "bg-elevated": "#141414",
   "border-subtle": "#ffffff",
+  "border-row": "#ffffff",
+  "border-header": "#ffffff",
+  "border-chip": "#ffffff",
   "border-strong": "#ffffff",
+  "border-hover": "#ffffff",
   "text-primary": "#ffffff",
+  "text-strong": "#ffffff",
+  "text-title": "#ffffff",
+  "text-body": "#f2f2f2",
   "text-secondary": "#e6e6e6",
+  "text-muted": "#d4d4d4",
   "text-disabled": "#bdbdbd",
   brand: violet[300],
+  "brand-2": violet[200],
+  "brand-3": violet[200],
   "brand-fg": "#000000",
   accent: cyan[300],
   "focus-ring": cyan[300],
   ok: green[300],
   warn: amber[300],
   danger: red[300],
+  "danger-fg": red[200],
   info: cyan[300],
   selection: cyan[800],
 };
@@ -348,17 +424,25 @@ export const SEVERITY_GLYPH: Record<Severity, string> = {
 export const typography = {
   fontUi: `"Inter var", -apple-system, "Segoe UI", Roboto, sans-serif`,
   fontMono: `"JetBrains Mono", "SF Mono", "Cascadia Code", ui-monospace, monospace`,
-  fontBrand: `"Inter var", -apple-system, "Segoe UI", Roboto, sans-serif`,
+  // the brand face (handoff §1): bundled Space Grotesk at weight 700 — the wordmark,
+  // the greeting, and every island/card title read in it.
+  fontBrand: `"Space Grotesk", "Inter var", -apple-system, "Segoe UI", Roboto, sans-serif`,
   brandLetterSpacing: "-0.01em",
-  weight: { regular: 400, medium: 500, semibold: 600 },
-  /** rem size / unitless line-height (08 §2.3). */
+  weight: { regular: 400, medium: 500, semibold: 600, bold: 700 },
+  /** The brand wordmark weight (handoff §1: 700, not the old 600). */
+  brandWeight: 700,
+  /**
+   * rem size / unitless line-height (08 §2.3, re-based by the handoff §1 density
+   * decision): the root is a plain 16px (the 112.5% scale is GONE), and dense UI text
+   * is authored at 13px / 12.5px — ONE scale, applied everywhere.
+   */
   scale: {
-    display: { size: "1.75rem", line: "2.1" },
-    h1: { size: "1.375rem", line: "1.7" },
-    h2: { size: "1.125rem", line: "1.6" },
-    body: { size: "0.9375rem", line: "1.5" }, // 15px default
-    small: { size: "0.8125rem", line: "1.4" },
-    code: { size: "0.875rem", line: "1.5" },
+    display: { size: "1.5rem", line: "1.25" }, //   24px — the Home greeting
+    h1: { size: "1.125rem", line: "1.35" }, //      18px
+    h2: { size: "0.9375rem", line: "1.4" }, //      15px — island titles
+    body: { size: "0.8125rem", line: "1.5" }, //    13px — the density decision
+    small: { size: "0.78125rem", line: "1.45" }, // 12.5px — dense rows / chat
+    code: { size: "0.75rem", line: "1.6" }, //      12px mono
   },
 } as const;
 
@@ -383,12 +467,13 @@ export const space = {
   32: "64px",
 } as const;
 
-/** Corner radii (08 §2.4). */
+/** Corner radii (08 §2.4 + the handoff §2 island scale). */
 export const radius = {
   sm: "4px",
   md: "6px", // default control
   lg: "10px", // cards
-  xl: "14px", // modals
+  island: "12px", // workbench islands (editor / tree / terminal / chat rail)
+  xl: "14px", // modals + the Home islands & ask bar
   full: "9999px", // pills, badges
 } as const;
 

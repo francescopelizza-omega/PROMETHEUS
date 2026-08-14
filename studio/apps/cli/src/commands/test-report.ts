@@ -43,7 +43,6 @@ const isSkip = (s: string): boolean => s === "skip";
 function stripIllegalXmlChars(s: string): string {
   return (
     s
-      // biome-ignore lint/suspicious/noControlCharactersInRegex: intentionally removing XML-illegal control chars
       .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\uFFFE\uFFFF]/g, "")
       // lone high surrogate (not followed by a low) or lone low surrogate (not preceded by a high)
       .replace(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g, "")

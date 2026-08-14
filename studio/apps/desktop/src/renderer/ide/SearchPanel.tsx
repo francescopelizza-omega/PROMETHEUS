@@ -355,7 +355,7 @@ function SearchView({ root }: { root: string }): ReactElement {
             display: "flex",
             gap: 8,
             fontSize: "0.72rem",
-            color: "var(--text-secondary, #9a9aa3)",
+            color: "var(--text-secondary)",
           }}
         >
           <Toggle label=".*" on={isRegex} onChange={setIsRegex} />
@@ -373,7 +373,7 @@ function SearchView({ root }: { root: string }): ReactElement {
         <output
           style={{
             display: "block",
-            color: "var(--text-secondary, #9a9aa3)",
+            color: "var(--text-secondary)",
             fontSize: "0.72rem",
           }}
         >
@@ -381,12 +381,12 @@ function SearchView({ root }: { root: string }): ReactElement {
         </output>
       )}
       {results.length > 0 && (
-        <p style={{ color: "var(--text-secondary, #9a9aa3)", fontSize: "0.72rem" }}>
+        <p style={{ color: "var(--text-secondary)", fontSize: "0.72rem" }}>
           {matches} result{matches === 1 ? "" : "s"} in {files} file{files === 1 ? "" : "s"}
         </p>
       )}
       {searched && !busy && results.length === 0 && (
-        <p style={{ color: "var(--text-secondary, #9a9aa3)", fontSize: "0.72rem" }}>No results.</p>
+        <p style={{ color: "var(--text-secondary)", fontSize: "0.72rem" }}>No results.</p>
       )}
 
       {results.map((fm) => (
@@ -493,18 +493,18 @@ const rowApplyBtn: CSSProperties = {
   fontSize: "0.62rem",
   cursor: "pointer",
   background: "transparent",
-  border: "1px solid var(--border-subtle, #232329)",
+  border: "1px solid var(--border-subtle)",
   borderRadius: 4,
-  color: "var(--text-secondary, #9a9aa3)",
+  color: "var(--text-secondary)",
   padding: "0 4px",
 };
 
 const inputStyle: React.CSSProperties = {
   padding: "5px 7px",
   borderRadius: 4,
-  border: "1px solid var(--border-subtle, #232329)",
-  background: "var(--bg-surface-2, #16161b)",
-  color: "var(--text-primary, #e7e7ea)",
+  border: "1px solid var(--border-subtle)",
+  background: "var(--bg-surface-2)",
+  color: "var(--text-primary)",
   fontFamily: "var(--font-mono, monospace)",
   fontSize: "0.75rem",
 };
@@ -568,10 +568,10 @@ function UsagesView({ root }: { root: string }): ReactElement {
       aria-label="find usages"
     >
       <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 6 }}>
-        <span style={{ flex: 1, minWidth: 0, color: "var(--text-primary, #e7e7ea)" }}>
+        <span style={{ flex: 1, minWidth: 0, color: "var(--text-primary)" }}>
           Usages of <code style={{ fontFamily: "var(--font-mono, monospace)" }}>{symbol}</code>
           {!loading && (
-            <span style={{ color: "var(--text-secondary, #9a9aa3)", fontSize: "0.72rem" }}>
+            <span style={{ color: "var(--text-secondary)", fontSize: "0.72rem" }}>
               {" "}
               — {usages} in {files} file{files === 1 ? "" : "s"}
             </span>
@@ -594,13 +594,9 @@ function UsagesView({ root }: { root: string }): ReactElement {
         </button>
       </div>
 
-      {loading && (
-        <p style={{ color: "var(--text-secondary, #9a9aa3)", fontSize: "0.72rem" }}>Searching…</p>
-      )}
+      {loading && <p style={{ color: "var(--text-secondary)", fontSize: "0.72rem" }}>Searching…</p>}
       {!loading && groups.length === 0 && (
-        <p style={{ color: "var(--text-secondary, #9a9aa3)", fontSize: "0.72rem" }}>
-          No usages found.
-        </p>
+        <p style={{ color: "var(--text-secondary)", fontSize: "0.72rem" }}>No usages found.</p>
       )}
 
       {groups.map((g) => {
@@ -629,7 +625,7 @@ function UsagesView({ root }: { root: string }): ReactElement {
                       style={rowBtn}
                       title={`${rel(u.uri)}:${u.line}:${u.column}`}
                     >
-                      <span style={{ color: "var(--text-secondary, #9a9aa3)" }}>L{u.line}</span>{" "}
+                      <span style={{ color: "var(--text-secondary)" }}>L{u.line}</span>{" "}
                       {(u.excerpt ?? "").trim().slice(0, 100)}
                     </button>
                   </li>
@@ -646,7 +642,7 @@ function UsagesView({ root }: { root: string }): ReactElement {
 const closeBtn: CSSProperties = {
   background: "transparent",
   border: "none",
-  color: "var(--text-secondary, #9a9aa3)",
+  color: "var(--text-secondary)",
   cursor: "pointer",
   fontSize: "0.85rem",
   padding: "0 4px",
@@ -655,7 +651,7 @@ const closeBtn: CSSProperties = {
 const fileToggle: CSSProperties = {
   background: "transparent",
   border: "none",
-  color: "var(--text-secondary, #9a9aa3)",
+  color: "var(--text-secondary)",
   cursor: "pointer",
   fontSize: "0.68rem",
   padding: "0 0 2px",
@@ -686,8 +682,8 @@ function badge(source: Usage["source"]): CSSProperties {
     fontFamily: "var(--font-mono, monospace)",
     padding: "0 3px",
     borderRadius: "var(--radius-sm, 4px)",
-    border: "1px solid var(--border-subtle, #232329)",
-    color: source === "lsp" ? "var(--accent, #6d5ef0)" : "var(--text-secondary, #9a9aa3)",
+    border: "1px solid var(--border-subtle)",
+    color: source === "lsp" ? "var(--accent)" : "var(--text-secondary)",
     flexShrink: 0,
   };
 }

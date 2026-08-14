@@ -57,5 +57,12 @@ test("AI panel — composer renders (visual baseline) and the no-backend path is
   await expect(composer).toBeVisible();
   await page.waitForTimeout(400); // let the rail open-transition settle before the pixel shot
   // the ONE visual-regression baseline — a pixel change to the composer chrome fails the run.
+  // Playwright auto-suffixes snapshots per platform (-darwin/-linux/-win32); only -darwin is
+  // committed today (see e2e/__screenshots__/smoke.spec.ts-snapshots/ — ubuntu is meant to be
+  // the CI snapshot authority per ci.yml, but nobody has committed `-linux` back yet either).
+  // Skip on win32 until a real Windows CI run records `ai-composer-win32.png` via
+  // `e2e:update` — asserting against a baseline that has never existed would fail every run,
+  // not catch a regression.
+  test.skip(process.platform === "win32", "no ai-composer-win32.png baseline recorded yet");
   await expect(composer).toHaveScreenshot("ai-composer.png");
 });

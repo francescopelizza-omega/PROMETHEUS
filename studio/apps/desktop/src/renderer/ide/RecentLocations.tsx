@@ -11,6 +11,7 @@
 
 import { type ReactElement, useEffect, useMemo, useRef, useState } from "react";
 
+import { Z } from "@prometheus/ui";
 import { detectLanguage } from "./state/lang-detect.js";
 import { type NavLoc, useNavStore } from "./state/nav-history.js";
 import { useTabsStore } from "./state/stores.js";
@@ -88,7 +89,7 @@ export function RecentLocations({
         position: "fixed",
         inset: 0,
         background: "rgba(0,0,0,0.4)",
-        zIndex: 1100,
+        zIndex: Z.palette,
         display: "flex",
         justifyContent: "center",
         alignItems: "flex-start",
@@ -101,8 +102,8 @@ export function RecentLocations({
         aria-label="recent locations"
         style={{
           width: "min(820px, 94vw)",
-          background: "var(--bg-surface-2, #16161b)",
-          border: "1px solid var(--border-subtle, #232329)",
+          background: "var(--bg-surface-2)",
+          border: "1px solid var(--border-subtle)",
           borderRadius: "var(--radius-md, 8px)",
           boxShadow: "0 12px 48px rgba(0,0,0,0.5)",
           overflow: "hidden",
@@ -136,8 +137,8 @@ export function RecentLocations({
             padding: "10px 12px",
             background: "transparent",
             border: "none",
-            borderBottom: "1px solid var(--border-subtle, #232329)",
-            color: "var(--text-primary, #e7e7ea)",
+            borderBottom: "1px solid var(--border-subtle)",
+            color: "var(--text-primary)",
             fontSize: "0.9rem",
             outline: "none",
           }}
@@ -149,14 +150,14 @@ export function RecentLocations({
               minWidth: 240,
               maxHeight: 360,
               overflow: "auto",
-              borderRight: "1px solid var(--border-subtle, #232329)",
+              borderRight: "1px solid var(--border-subtle)",
             }}
           >
             {rows.length === 0 && (
               <p
                 style={{
                   padding: 12,
-                  color: "var(--text-secondary, #9a9aa3)",
+                  color: "var(--text-secondary)",
                   fontSize: "0.82rem",
                 }}
               >
@@ -177,20 +178,20 @@ export function RecentLocations({
                   border: "none",
                   padding: "6px 12px",
                   cursor: "pointer",
-                  background: i === active ? "var(--bg-surface-2, #1d1d24)" : "transparent",
+                  background: i === active ? "var(--bg-surface-2)" : "transparent",
                   display: "flex",
                   flexDirection: "column",
                   font: "inherit",
                 }}
               >
-                <span style={{ fontSize: "0.85rem", color: "var(--text-primary, #e7e7ea)" }}>
+                <span style={{ fontSize: "0.85rem", color: "var(--text-primary)" }}>
                   {basename(loc.uri)}
-                  <span style={{ color: "var(--text-secondary, #9a9aa3)" }}> :{loc.line}</span>
+                  <span style={{ color: "var(--text-secondary)" }}> :{loc.line}</span>
                 </span>
                 <span
                   style={{
                     fontSize: "0.72rem",
-                    color: "var(--text-secondary, #9a9aa3)",
+                    color: "var(--text-secondary)",
                     overflow: "hidden",
                     textOverflow: "ellipsis",
                     whiteSpace: "nowrap",
@@ -252,8 +253,8 @@ function RecentPreview({ loc, root }: { loc: NavLoc | undefined; root: string })
         fontFamily: "var(--font-mono, monospace)",
         fontSize: "0.75rem",
         lineHeight: 1.5,
-        color: "var(--text-primary, #e7e7ea)",
-        background: "var(--bg-surface-1, #101014)",
+        color: "var(--text-primary)",
+        background: "var(--bg-surface-1)",
       }}
     >
       {children}
@@ -268,9 +269,9 @@ function RecentPreview({ loc, root }: { loc: NavLoc | undefined; root: string })
     <>
       <div
         style={{
-          color: "var(--text-secondary, #9a9aa3)",
+          color: "var(--text-secondary)",
           padding: "0 8px 6px",
-          borderBottom: "1px solid var(--border-subtle, #232329)",
+          borderBottom: "1px solid var(--border-subtle)",
           marginBottom: 4,
           overflow: "hidden",
           textOverflow: "ellipsis",
@@ -289,13 +290,13 @@ function RecentPreview({ loc, root }: { loc: NavLoc | undefined; root: string })
               display: "flex",
               gap: 8,
               padding: "0 8px",
-              background: isTarget ? "var(--bg-inset, #0c0c10)" : "transparent",
-              borderLeft: isTarget ? "2px solid var(--accent, #6d5ef0)" : "2px solid transparent",
+              background: isTarget ? "var(--bg-inset)" : "transparent",
+              borderLeft: isTarget ? "2px solid var(--accent)" : "2px solid transparent",
             }}
           >
             <span
               style={{
-                color: "var(--text-tertiary, #6a6a73)",
+                color: "var(--text-tertiary)",
                 width: 34,
                 textAlign: "right",
                 flexShrink: 0,

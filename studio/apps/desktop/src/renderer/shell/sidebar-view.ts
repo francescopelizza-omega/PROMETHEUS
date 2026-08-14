@@ -17,7 +17,9 @@ import type { IdeGitChange, IdeGitStatus } from "../../shared/ipc-contract.js";
 
 /** Activities with a registered shell-sidebar body (single source — the JSX
  *  registry in renderer/sidebar-bodies.tsx is typed against this exact tuple). */
-export const SIDEBAR_BODY_ACTIVITIES = ["home", "editor", "repos"] as const;
+// handoff_3 §1: the contextual sidebar follows the ROUTE, and Repos is now a Workspace
+// segment — so the repo tree belongs to `workspace`.
+export const SIDEBAR_BODY_ACTIVITIES = ["home", "editor", "workspace"] as const;
 export type SidebarBodyActivity = (typeof SIDEBAR_BODY_ACTIVITIES)[number];
 
 const BODY_SET: ReadonlySet<string> = new Set(SIDEBAR_BODY_ACTIVITIES);

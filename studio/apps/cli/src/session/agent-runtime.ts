@@ -59,7 +59,17 @@ import { dirname, isAbsolute, join, resolve } from "node:path";
 // and `mcpServer` NAMESPACES of @prometheus/core (see core/index.ts: `export * as
 // agent` / `export * as mcpServer`). The provider-agnostic AI client stays FLAT at
 // top-level (`createAiClient` + its types). We alias the namespace types we touch.
-import { agent, ai, costOf, createAiClient, type mcpServer } from "@prometheus/core";
+import {
+  agent,
+  ai,
+  costOf,
+  createAiClient,
+  type mcpServer,
+  usageFromPayload,
+} from "@prometheus/core";
+// The shared model-request path: one retrying POST, one failure classification. Every
+// transport in this repo made a single attempt before this.
+const { AiHttpError, describeAiFailure, fetchModelWithRetry } = ai;
 import type {
   AiClient,
   AiClientDeps,
@@ -83,8 +93,21 @@ import { CODE_STATE, detectLanguage, highlightLine, isHighlightable } from "../t
 import { type ColorCaps, type Role, paint } from "../tui/palette.js";
 // pure display-width helper (ANSI + wide-char aware); no TUI/presentation deps.
 import { wrapLine } from "../tui/width.js";
-import { type AccountingRecord, appendAccounting, readAccounting } from "./history-store.js";
 // fail-closed read-scope guard for the session working set (CLI-004).
+import { makeStreamSink } from "./exec-stream.js";
+import {
+  type AccountingRecord,
+  appendAccounting,
+  readAccounting,
+  readAccountingSince,
+} from "./history-store.js";
+import {
+  type SystemToolDeps,
+  execVarsFromEnv,
+  runEngineVerb,
+  runSystemTool,
+  runWebTool,
+} from "./system-tools.js";
 import { isPathAllowed, pathArgsOf } from "./working-set.js";
 
 const {
@@ -96,6 +119,7 @@ const {
   restorePlan,
 } = agent;
 const { compact, shouldCompact, estimateTokens } = agent;
+const { withRememberedGrants } = agent;
 type Checkpoint = agent.Checkpoint;
 type CheckpointStore = agent.CheckpointStore;
 type SessionTurn = agent.SessionTurn;
@@ -116,6 +140,11 @@ type ToolCall = agent.ToolCall;
 type ConfirmResult = agent.ConfirmResult;
 type ToolOutcome = agent.ToolOutcome;
 type ToolRunner = agent.ToolRunner;
+type ToolCapabilityState = agent.protocol.ToolCapabilityState;
+type ScopedPermissionStore = agent.ScopedPermissionStore;
+type GrantScope = agent.GrantScope;
+type PermissionRule = agent.PermissionRule;
+type TodoStore = agent.TodoStore;
 type ToolDef = mcpServer.ToolDef;
 type EffortCapability = ai.EffortCapability;
 type EffortResolution = ai.EffortResolution;
@@ -161,9 +190,26 @@ export function terseDirective(): string {
   );
 }
 
-/** Which providers natively support prompt caching (input billed at a discount). */
+/**
+ * Which providers natively support prompt caching (input billed at a discount).
+ *
+ * Delegates to core, which keys off the RUNTIME derived from the base URL. This function used
+ * to compare a "provider" string against `["anthropic","openai","google","gemini"]` — while
+ * every provider catalogue in this repo names those rows `claude`, `chatgpt` and `gemini`. So
+ * even once it had a caller, the id it would naturally have been handed could never have
+ * matched. It is kept as a thin adapter because `prometheus tokens` reports against it.
+ */
 export function providerSupportsPromptCaching(provider: string): boolean {
-  return ["anthropic", "openai", "google", "gemini"].includes(provider.toLowerCase());
+  const p = provider.toLowerCase();
+  const runtime =
+    p === "anthropic" || p === "claude"
+      ? "anthropic"
+      : p === "openai" || p === "chatgpt"
+        ? "openai"
+        : p === "google" || p === "gemini"
+          ? "gemini"
+          : "none-of-them";
+  return ai.promptCachingSupported(runtime as never);
 }
 
 /** Should the request set the prompt-caching flag? Only when the toggle is on AND the active
@@ -267,6 +313,89 @@ export function sessionUsage(
   };
 }
 
+/** Provider-reported usage for one session, rolled up from its `<id>.acct.jsonl`. */
+export interface MeasuredUsage {
+  /** model round-trips recorded — NOT user turns; one prompt with a tool loop bills several. */
+  roundTrips: number;
+  /** Σ promptTokens: the BILLED input, which is far larger than the transcript. */
+  inputTokens: number;
+  outputTokens: number;
+  /** the last record's promptTokens — the true tokenized size of the most recent request. */
+  lastPromptTokens: number;
+  /** true when every record came from a provider usage frame rather than a chars/4 fallback. */
+  exact: boolean;
+}
+
+/**
+ * Roll up a session's accounting records. `[]` ⇒ null — never a fabricated zero.
+ *
+ * `/stats` and `/context` were computed from the text transcript by `sessionUsage` above, while
+ * the provider's REAL counts were written to `<id>.acct.jsonl` every round and read by nobody
+ * except the separate `prometheus tokens report` command. That is worse than a stale label:
+ * `sessionUsage` counts each message ONCE, and every turn re-sends the whole thread, so on an
+ * N-turn session the billed input is undercounted by roughly a factor of N. The number was not
+ * "an estimate", it was structurally wrong, and it is the number a user checks before deciding
+ * whether they can afford to keep going.
+ */
+export function rollupMeasured(records: readonly AccountingRecord[]): MeasuredUsage | null {
+  if (records.length === 0) return null;
+  let inputTokens = 0;
+  let outputTokens = 0;
+  let estimated = 0;
+  for (const r of records) {
+    inputTokens += r.promptTokens;
+    outputTokens += r.completionTokens;
+    if (r.estimated) estimated += 1;
+  }
+  return {
+    roundTrips: records.length,
+    inputTokens,
+    outputTokens,
+    lastPromptTokens: (records[records.length - 1] as AccountingRecord).promptTokens,
+    exact: estimated === 0,
+  };
+}
+
+/**
+ * A session's usage, MEASURED where the provider reported it and estimated only where it did not.
+ *
+ * Fail-soft by design: `readAccounting` throws on an unreadable store because the budget gate
+ * fails closed on it, but a read-only display must not take the session down — an unreadable
+ * store degrades to the estimate, which is exactly what it was before.
+ */
+export function measuredSessionUsage(
+  home: string,
+  sessionId: string,
+  fallback: UsageStats,
+  modelId: string,
+  isLocal: boolean,
+  pricing: Pricing,
+  read: (h: string, id: string) => AccountingRecord[] = readAccounting,
+): UsageStats {
+  let m: MeasuredUsage | null = null;
+  try {
+    m = rollupMeasured(read(home, sessionId));
+  } catch {
+    return fallback;
+  }
+  if (!m) return fallback;
+  const cost = costOf(
+    { inputTokens: m.inputTokens, outputTokens: m.outputTokens },
+    modelId,
+    pricing,
+    isLocal,
+  );
+  return {
+    ...fallback,
+    inputTokens: m.inputTokens,
+    outputTokens: m.outputTokens,
+    estTokens: m.inputTokens + m.outputTokens,
+    estimated: !m.exact,
+    cost,
+    estCostUsd: cost ?? 0,
+  };
+}
+
 /* ------------------------------------------------------------------------- *
  * SessionCtx — the minimal shared shape every session/* unit threads.
  *
@@ -282,8 +411,29 @@ export interface SessionCtx {
   client: EngineClient;
   /** the live agent tuning (model/tools/gate/dryRun/yes) the session edits. */
   tuning: AgentTuning;
+  /** PROMETHEUS_HOME — where the Phase-3 exec audit line lands. Omitted ⇒ no audit. */
+  home?: string;
+  /**
+   * The endpoint's LEARNED tool-transport capability, owned by the host so it survives the
+   * per-message client. A getter, because the host updates it through `onCapability`.
+   */
+  capability?: () => ToolCapabilityState;
+  /** fired when the observation changes, so the host can keep it for the next message. */
+  onCapability?: (state: ToolCapabilityState) => void;
+  /** the A0–A7 level in force, recorded on every exec audit line. */
+  authLevel?: number;
   /** the selected AI endpoint (from the Model Hub), or undefined when offline. */
   endpoint?: AiEndpoint;
+  /**
+   * Resolve `endpoint.apiKeyRef` → the raw key, LAZILY (the secret is read per request and
+   * never stored in JS state).
+   *
+   * The connectors already return this beside the endpoint they build
+   * (`ai/connectors/apiKey.ts`, `oauthBridge.ts`) — it simply had nowhere to go, so no
+   * cloud endpoint's key ever reached the request. Omitted ⇒ local endpoints work exactly as
+   * before and a cloud endpoint says so plainly instead of taking an opaque 401.
+   */
+  resolveKey?: (apiKeyRef: string) => Promise<string>;
   /** the per-workspace privacy policy (cloud refusal). Defaults to permissive. */
   policy?: WorkspacePolicy;
   /** --json mode: machine envelope to stdout, human text to stderr (host-owned). */
@@ -291,6 +441,50 @@ export interface SessionCtx {
   /** asked before a non-auto-approvable tool runs; DEFAULT = deny (never-force). A
    * rejection may carry a reason (propose_edit, CLI-010) → surfaced as a tool_result. */
   confirm?: (call: ToolCall) => ConfirmResult | Promise<ConfirmResult>;
+  /**
+   * Remembered "don't ask again" grants. Absent ⇒ every gated call asks, every time (the
+   * behaviour before this existed). The host owns the lifetime: `clearOnce` after each
+   * decision, `clearSession` at session end, and it serializes `all()` for project/user scope.
+   */
+  grants?: ScopedPermissionStore;
+  /** override the delegation budget (depth / total spawns) for this turn. */
+  subagentBudget?: Partial<agent.SubagentBudget>;
+  /**
+   * Ask the human a free-text question mid-turn (the `question` tool).
+   *
+   * Separate from `confirm`, which answers yes/no about a specific call. Absent ⇒ the tool
+   * reports honestly that nobody can answer and tells the model to proceed on a stated
+   * assumption — it must never hang waiting for a user who is not there.
+   */
+  ask?: (prompt: string) => Promise<string>;
+  /**
+   * Sub-agent personas loaded from markdown, already CLAMPED by scope.
+   *
+   * A persona may narrow the child further and add persona text; it can never widen what
+   * `childTuning` produced. Absent ⇒ only the three built-in roles exist.
+   */
+  agentFiles?: readonly agent.LoadedAgent[];
+  /** the session's task list (todowrite/todoread). Agent memory — never a file. */
+  todos?: TodoStore;
+  /** fired after a todo write so the host can render a one-line status. */
+  onTodos?: (items: readonly agent.TodoItem[]) => void;
+  /**
+   * Dispatch an `mcp__<server>__<tool>` call to a connected MCP server.
+   *
+   * The host owns the `McpHostManager`; injecting the call keeps the MCP transports (and the
+   * SDK behind them) out of this module's dependency graph.
+   */
+  callMcpTool?: (
+    serverId: string,
+    tool: string,
+    args: Record<string, unknown>,
+  ) => Promise<{ ok: boolean; summary: string; data?: unknown }>;
+  /** base permission rules from config; scoped grants merge AROUND these, never into them. */
+  permissionRules?: readonly PermissionRule[];
+  /** a grant was stored — the host persists it and can say so in the transcript. */
+  onRemember?: (subject: string, scope: GrantScope) => void;
+  /** a remembered grant skipped a prompt — worth one honest transcript line. */
+  onAutoApprove?: (subject: string, reason: string) => void;
   /** the host's render sink — receives ONE complete line WITHOUT a trailing newline
    * (the sink adds the break: writeLine/printAbove); tests capture it. */
   write: (text: string) => void;
@@ -322,6 +516,26 @@ export interface SessionCtx {
    * block to inject as a dedicated system-context block, or null/"" when none loaded. A getter so
    * `/memory edit`→reload re-assembles it for the NEXT turn without reconstructing the SessionCtx. */
   steering?: () => string | null;
+  /**
+   * Durable cross-session project memory: a getter returning the `memory_write`-authored index
+   * as a system-context block, or null when this project has never had an entry written. Unlike
+   * `steering` this is agent-AUTHORED rather than human-maintained (see
+   * `@prometheus/core/agent-system-host`'s `loadMemoryIndexBlock`) — but the injection mechanics
+   * are deliberately identical: a getter, re-read every turn, so a `memory_write` earlier in the
+   * SAME session is visible on the next one without restarting.
+   */
+  memory?: () => string | null;
+  /**
+   * SessionStart HOOK output (`agent/hooks.ts`): a getter returning the combined stdout of the
+   * user's `SessionStart` hooks as a system-context block, or null when none are configured or
+   * none printed anything.
+   *
+   * Deliberately the SAME mechanics as `steering`/`memory` — a getter injected as a
+   * `{role:"system"}` block — so a hook that prints "current sprint: CLI-090" is context the
+   * model reads exactly the way a `PROMETHEUS.md` line is. Unlike those two the value is
+   * captured ONCE, at session start (that is what the event means); the getter just replays it.
+   */
+  sessionStartHooks?: () => string | null;
   /** CLI-088: the token-economy toggles ({ [id]: boolean }) read ONCE at session start — `terse-output`
    *  injects a terse system block, `prompt-caching` sets the request flag on a capable provider. */
   tokenToggles?: Record<string, boolean>;
@@ -367,20 +581,50 @@ export interface BudgetGateResult {
  * an unreadable accounting store) BLOCKS unless `--force-budget`. A `locality:"local"` turn —
  * or no budget config — bypasses ENTIRELY (never reads the store, so a corrupt store never
  * blocks a free turn). Warns exactly once per window (latched in `ctx.budget.warned`).
+ *
+ * The fail-closed half is real only because `readAccounting` now THROWS on an unreadable file
+ * rather than swallowing the error and returning `[]`. It used to do the latter, which meant a
+ * deleted or chmod-000 store read as "$0 spent" and the cap silently stopped enforcing — the
+ * documented guarantee inverted into a one-command bypass. A file that was never written is
+ * still `[]`, because that is the normal first run.
  */
 export function checkBudgetGate(
   ctx: SessionCtx,
   nowIso: string,
   readRecords: (home: string, sessionId: string) => AccountingRecord[] = readAccounting,
+  readDay: (home: string, sinceMs: number) => AccountingRecord[] = readAccountingSince,
 ): BudgetGateResult {
   const b = ctx.budget;
+  // A local turn, or no configured cap, bypasses ENTIRELY — the store is never even read, so a
+  // corrupt accounting file can never block a turn that could not have cost anything.
   if (!b || !ctx.accounting || !ctx.endpoint || ctx.endpoint.locality === "local") {
     return { action: "ok" };
   }
-  let decision: ai.BudgetDecision;
+  const { home, sessionId } = ctx.accounting;
+  /**
+   * The READING is this host's half; the DECISION is `ai.decideBudget`, shared with the
+   * desktop. It used to be inlined here, which is precisely why the desktop had no cap at
+   * all — there was nothing to reuse without dragging `node:fs` into a sandboxed renderer.
+   *
+   * The readers are called INSIDE the try that `decideBudget` also guards, because a throw
+   * from `readAccounting` (an unreadable/chmod-000 store) is the fail-closed case: it must
+   * BLOCK, not read as "$0 spent". Passing already-read arrays in would move that throw
+   * outside the guard and lose the property.
+   */
+  const warned = b.warned;
   try {
-    const records = readRecords(ctx.accounting.home, ctx.accounting.sessionId);
-    decision = ai.evaluateBudgets(records, b.config, nowIso, b.priceFor);
+    const sessionRecords = readRecords(home, sessionId);
+    const dayRecords =
+      b.config.dailyUsd !== undefined ? readDay(home, ai.startOfLocalDayMs(nowIso)) : undefined;
+    return ai.decideBudget({
+      sessionRecords,
+      ...(dayRecords ? { dayRecords } : {}),
+      config: b.config,
+      nowIso,
+      priceFor: b.priceFor,
+      warned,
+      ...(b.forceBudget !== undefined ? { forceBudget: b.forceBudget } : {}),
+    });
   } catch (e) {
     if (b.forceBudget) return { action: "ok" };
     return {
@@ -388,25 +632,6 @@ export function checkBudgetGate(
       message: `budget check failed (fail-closed block): ${(e as Error).message}. Use --force-budget to override.`,
     };
   }
-  if (decision.action === "block") {
-    if (b.forceBudget) {
-      return {
-        action: "ok",
-        message: `⚠ over ${decision.window} budget ($${decision.spentUsd.toFixed(2)}/$${decision.capUsd.toFixed(2)}) — proceeding (--force-budget)`,
-      };
-    }
-    return {
-      action: "block",
-      message: `budget hard-stop — ${decision.reason}. Use --force-budget to override this run.`,
-    };
-  }
-  if (decision.action === "warn") {
-    const key = decision.window ?? "session";
-    if (b.warned.has(key)) return { action: "ok" };
-    b.warned.add(key);
-    return { action: "warn", message: `⚠ ${decision.reason}` };
-  }
-  return { action: "ok" };
 }
 
 /* ------------------------------------------------------------------------- *
@@ -458,6 +683,14 @@ export function rebuildThread(
   turns: readonly Record<string, unknown>[],
   opts: { maxTokens?: number } = {},
 ): RebuiltThread {
+  /**
+   * The restore budget, from the MODEL — 6000 was a hard-coded floor for every endpoint.
+   *
+   * It truncated every resumed session to roughly 24k characters whether the model held 8k
+   * tokens or a million, so resuming a long session on Claude threw away 97% of it and told
+   * the user only that some turns were "elided for context". The caller passes the real
+   * budget; the old constant survives solely as the no-information fallback.
+   */
   const maxTokens = opts.maxTokens ?? 6000;
   const messages: ThreadMessage[] = [];
   const painted: RestoredLine[] = [];
@@ -542,7 +775,62 @@ export function extractiveSummary(older: readonly SessionTurn[], maxChars = 2000
   return s.length > maxChars ? `${s.slice(0, maxChars)}…` : s;
 }
 
-/** Rebuild the model's ThreadMessage history from (possibly compacted) turns. */
+/**
+ * Regroup persisted transcript RECORDS back into `SessionTurn`s.
+ *
+ * A restore used to set `history` and leave `session` untouched — a fresh, empty Session. The
+ * two are supposed to be views of the same conversation, and compaction rebuilds `history` from
+ * `session.turns`, so the FIRST compaction after a `/resume` or `--continue` replaced the whole
+ * restored conversation with `turnsToHistory([])` — nothing. The user resumed a long session,
+ * worked in it, and then watched the agent silently forget all of it at the moment the session
+ * grew long enough to compact. `/condense` did the same thing immediately.
+ *
+ * `appendTurnEvents` writes one JSON record per line: `{role:"user",text}` opens a turn and the
+ * `AgentEvent`s that follow belong to it, which is exactly the grouping `SessionTurn` wants.
+ */
+export function turnsFromRecords(records: readonly Record<string, unknown>[]): SessionTurn[] {
+  const turns: SessionTurn[] = [];
+  for (const r of records) {
+    if (r.role === "user") {
+      turns.push({
+        id: `restored-${turns.length}`,
+        turnNumber: turns.length + 1,
+        prompt: String(r.text ?? ""),
+        events: [],
+        createdAt: typeof r.ts === "string" ? r.ts : new Date(0).toISOString(),
+      });
+      continue;
+    }
+    // An event before any user record (a truncated or hand-edited transcript) gets a turn to
+    // live in rather than being dropped — losing it would be the silent half of this defect.
+    if (turns.length === 0) {
+      turns.push({
+        id: "restored-0",
+        turnNumber: 1,
+        prompt: "",
+        events: [],
+        createdAt: typeof r.ts === "string" ? r.ts : new Date(0).toISOString(),
+      });
+    }
+    (turns[turns.length - 1] as SessionTurn).events.push(r as unknown as AgentEvent);
+  }
+  return turns;
+}
+
+/**
+ * Rebuild the model's ThreadMessage history from (possibly compacted) turns.
+ *
+ * TOOL RESULTS ARE INCLUDED. They used to be dropped here exactly as the two hosts dropped them
+ * live, so the two paths agreed — and were wrong in the same direction, which is why neither
+ * looked suspicious. The consequence was sharper here than in the live path: a compaction, or a
+ * `/resume`, replaced a thread that contained the agent's work with one that contained only its
+ * prose about the work, so the agent's memory of every file it had read vanished at exactly the
+ * moment the session got long enough to need it.
+ *
+ * The result is reconstructed from the stored `tool_result` events' summaries rather than from a
+ * second store: the events are what the transcript already persists, and `summary` is the same
+ * text the model was shown at the time.
+ */
 export function turnsToHistory(turns: readonly SessionTurn[]): ThreadMessage[] {
   const out: ThreadMessage[] = [];
   for (const t of turns) {
@@ -554,6 +842,17 @@ export function turnsToHistory(turns: readonly SessionTurn[]): ThreadMessage[] {
     }
     out.push({ role: "user", content: t.prompt });
     if (asst) out.push({ role: "assistant", content: asst });
+    for (const e of t.events) {
+      if (e.kind !== "tool_result") continue;
+      const r = e as { call: { name: string }; ok: boolean; summary: string };
+      // Named, so the model can tell WHICH tool produced it; the pairing ids are deliberately
+      // not reconstructed — a `tool_call_id` with no matching announced call is a provider
+      // error, and the content has been self-describing since the text protocol was written.
+      out.push({
+        role: "user",
+        content: `[tool_result ${r.call.name}${r.ok ? "" : " (failed)"}] ${r.summary}`,
+      });
+    }
   }
   return out;
 }
@@ -570,7 +869,10 @@ export function makeSummarizer(
   const llm =
     deps.llm ??
     (ctx.endpoint
-      ? makeLlmClient(ctx.endpoint, ctx.policy ? { policy: ctx.policy } : {})
+      ? makeLlmClient(ctx.endpoint, {
+          ...(ctx.policy ? { policy: ctx.policy } : {}),
+          ...(ctx.resolveKey ? { resolveKey: ctx.resolveKey } : {}),
+        })
       : undefined);
   if (!llm) {
     return {
@@ -669,6 +971,14 @@ export interface EditRecord {
 
 /** Construction seams for the AI client (injected in tests; defaults use global fetch). */
 export interface LlmClientDeps extends AiClientDeps {
+  /**
+   * Sub-agent personas to advertise in `spawn_agent`'s description.
+   *
+   * Carried on the CLIENT deps rather than read from a session context because this is where
+   * the preamble is rendered — and the description has to be folded in before the tool list is
+   * serialized, not after.
+   */
+  personas?: readonly agent.LoadedAgent[];
   /** the per-workspace privacy policy; defaults to permissive (local-first). */
   policy?: WorkspacePolicy;
   /** abort the in-flight SSE request + stop yielding deltas (Ctrl-C, CLI-002). */
@@ -681,6 +991,16 @@ export interface LlmClientDeps extends AiClientDeps {
   effortCapability?: EffortCapability;
   /** clock for the accounting timestamp (injected in tests). */
   now?: () => string;
+  /**
+   * What this endpoint has already been observed to do about tool calls.
+   *
+   * Passed in so a host that keeps one capability record per endpoint does not re-learn
+   * "this model cannot do native tool calls" on every `/model` round-trip — each relearn
+   * costs the user a wasted turn.
+   */
+  capability?: ToolCapabilityState;
+  /** fired whenever the observation changes, so the host can persist it. */
+  onCapability?: (state: ToolCapabilityState) => void;
 }
 
 /** An aborted `fetch` rejects with a DOMException `name === "AbortError"` (code 20). */
@@ -688,39 +1008,174 @@ function isAbortError(err: unknown): boolean {
   return err instanceof Error && err.name === "AbortError";
 }
 
+/**
+ * Build the OpenAI message array for the NATIVE transport, pairing results to their calls.
+ *
+ * A `tool` message is only sent as `role:"tool"` when it has a `tool_call_id` AND the
+ * assistant message that made that call is present with its `tool_calls`. Anything less is
+ * flattened to `user`, because a HALF-paired transcript is worse than an honestly unpaired
+ * one: OpenAI rejects a `tool` message whose id matches no preceding call, and that rejection
+ * takes the whole turn with it.
+ */
+function toNativeMessages(messages: readonly ThreadMsg[]): Record<string, unknown>[] {
+  const announced = new Set<string>();
+  for (const m of messages) {
+    if (m.role === "assistant" && m.toolCalls) for (const c of m.toolCalls) announced.add(c.id);
+  }
+  return messages.map((m) => {
+    if (m.role === "assistant" && m.toolCalls && m.toolCalls.length > 0) {
+      return {
+        role: "assistant",
+        content: m.content,
+        tool_calls: m.toolCalls.map((c) => ({
+          id: c.id,
+          type: "function",
+          function: { name: c.name, arguments: JSON.stringify(c.args) },
+        })),
+      };
+    }
+    if (m.role === "tool") {
+      if (m.toolCallId && announced.has(m.toolCallId)) {
+        return { role: "tool", tool_call_id: m.toolCallId, content: m.content };
+      }
+      return { role: "user", content: m.content };
+    }
+    return { role: m.role, content: m.content };
+  });
+}
+
+/**
+ * Map the loop's thread to the NEUTRAL wire shape, keeping the call pairing intact.
+ *
+ * The OpenAI-shaped `toNativeMessages` above cannot serve here: Anthropic has no `tool` role
+ * at all (a result is a `tool_result` block on the next user turn) and Gemini issues no call
+ * ids (a result is paired by the function's NAME). Emitting one provider's shape and hoping
+ * the others tolerate it is what made those two unreachable in the first place, so the shape
+ * that goes to `wire.body` is provider-neutral and each format renders its own dialect.
+ *
+ * `toolName` is recovered from the assistant turn that made the call, because the thread
+ * records the id on the result and the name on the call — Gemini needs the name.
+ */
+function toWireMessages(messages: readonly ThreadMsg[]): ai.WireMessage[] {
+  const nameById = new Map<string, string>();
+  for (const m of messages) {
+    if (m.role === "assistant") for (const c of m.toolCalls ?? []) nameById.set(c.id, c.name);
+  }
+  return messages.map((m): ai.WireMessage => {
+    if (m.role === "assistant" && m.toolCalls && m.toolCalls.length > 0) {
+      return {
+        role: "assistant",
+        content: m.content,
+        toolCalls: m.toolCalls.map((c) => ({
+          id: c.id,
+          name: c.name,
+          argsJson: JSON.stringify(c.args),
+        })),
+      };
+    }
+    if (m.role === "tool") {
+      const name = m.toolCallId ? nameById.get(m.toolCallId) : undefined;
+      // An UNPAIRED result degrades to plain user context rather than being dropped — the
+      // same choice `flattenToolRoles` documents, for the same reason.
+      if (m.toolCallId && name) {
+        return { role: "tool", content: m.content, toolCallId: m.toolCallId, toolName: name };
+      }
+      return { role: "user", content: m.content };
+    }
+    return { role: m.role, content: m.content };
+  });
+}
+
+/**
+ * Reasoning text, which no format models because it is not standard.
+ *
+ * Reasoning models stream their thinking here while `content` stays empty. Ollama spells the
+ * field `reasoning` and other OpenAI-compatible servers `reasoning_content`; neither is in
+ * the OpenAI spec, so it stays out of `WireEvent` and is read alongside it.
+ */
+function reasoningFromPayload(payload: string): string | undefined {
+  if (!payload.includes("reasoning")) return undefined;
+  try {
+    const o = JSON.parse(payload) as {
+      choices?: Array<{ delta?: { reasoning?: string | null; reasoning_content?: string | null } }>;
+    };
+    const d = o.choices?.[0]?.delta;
+    return d?.reasoning ?? d?.reasoning_content ?? undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** The exposed tools in the neutral wire shape, via the ONE schema mapping. */
+function toWireTools(tools: readonly ToolDef[]): ai.WireTool[] {
+  // Reuses `toOpenAiTools` rather than re-deriving the schema: that mapping already gets enum
+  // and default right and already filters `force`, which the loop hard-blocks. A second
+  // derivation here is exactly the drift this repo has paid for before.
+  return toOpenAiTools(tools).map((t) => ({
+    name: t.function.name,
+    description: t.function.description,
+    parameters: t.function.parameters as unknown as Record<string, unknown>,
+  }));
+}
+
 /* ------------------------------------------------------------------------- *
  * makeLlmClient — adapt the SSE text stream → the agent loop's LLMClient
  * ------------------------------------------------------------------------- */
 
-/** Map an agent `Thread` (system|user|assistant|tool) to the AI client's `Msg[]`. */
-function threadToMessages(thread: Thread): Msg[] {
-  return thread.messages.map((m: ThreadMessage): Msg => ({ role: m.role, content: m.content }));
+/** A wire message that may still carry the loop's native call pairing. */
+type ThreadMsg = Msg & {
+  toolCalls?: readonly { id: string; name: string; args: Record<string, unknown> }[];
+  toolCallId?: string;
+};
+
+/**
+ * Map an agent `Thread` to wire messages, KEEPING the `tool` role and the call pairing.
+ *
+ * Each transport then decides: the native one rebuilds `assistant.tool_calls` +
+ * `{role:"tool", tool_call_id}`, and the text one flattens (see `flattenToolRoles`).
+ */
+function threadToMessages(thread: Thread): ThreadMsg[] {
+  return thread.messages.map(
+    (m: ThreadMessage): ThreadMsg => ({
+      role: m.role,
+      content: m.content,
+      ...(m.toolCalls ? { toolCalls: m.toolCalls } : {}),
+      ...(m.toolCallId ? { toolCallId: m.toolCallId } : {}),
+    }),
+  );
 }
 
-/** Map the agent's `ToolDef`s → OpenAI function-tool schemas so a tool-capable local model
- *  (ollama/lmstudio) can emit NATIVE tool_calls. `ToolSchema` is Record<field, FieldSpec>. */
-function toOpenAiTools(tools: ToolDef[]): unknown[] {
-  return tools.map((t) => {
-    const properties: Record<string, unknown> = {};
-    const required: string[] = [];
-    for (const [field, spec] of Object.entries(t.schema)) {
-      const s = spec as { type?: string; required?: boolean; description?: string };
-      properties[field] = {
-        type: s.type ?? "string",
-        ...(s.description ? { description: s.description } : {}),
-      };
-      if (s.required) required.push(field);
-    }
-    return {
-      type: "function",
-      function: {
-        name: t.name,
-        description: t.description,
-        parameters: { type: "object", properties, required },
-      },
-    };
-  });
+/**
+ * Flatten `tool` messages to `user` for a transport with no call ids.
+ *
+ * The text protocol has no `tool_call_id` — there is no call to pair a result with — so an
+ * OpenAI `role:"tool"` message is UNPAIRED, and unpaired is exactly what endpoints disagree
+ * about: a strict one rejects the request, and a lenient one (Ollama, with a template that
+ * has no `.ToolResults` branch) silently renders NOTHING for it. That second case is the bad
+ * one, and it is invisible: the transcript shows the result, the thread contains the result,
+ * and the model never saw it. Pointed at a real gemma4:12b, it called `list_dir` four times
+ * in a row because as far as it could tell its first call had produced no output at all.
+ *
+ * The content is already self-describing (`[tool_result …]`), so nothing is lost by the
+ * flattening except the structure the endpoint could not have used anyway.
+ */
+function flattenToolRoles(messages: readonly ThreadMsg[]): Msg[] {
+  return messages.map((m) => ({
+    role: m.role === "tool" ? "user" : m.role,
+    content: m.content,
+  }));
 }
+
+/**
+ * Map the agent's `ToolDef`s → OpenAI function-tool schemas.
+ *
+ * This was a local copy that emitted the FieldSpec type verbatim, so `{type:"enum"}` — not a
+ * JSON Schema type — went on the wire with the enum's values dropped, and `default` was
+ * dropped too. The renderer had a second copy that got enum right and default wrong. Both are
+ * gone: `agent.protocol.toOpenAiTools` is the one mapping, and it also filters `force`, which
+ * the loop hard-blocks and which neither copy knew to hide.
+ */
+const toOpenAiTools = agent.protocol.toOpenAiTools;
 
 /**
  * Fire-and-forget: pre-load a LOCAL model into memory at session start so the FIRST real
@@ -752,6 +1207,15 @@ export function warmupLocalModel(endpoint: AiEndpoint | undefined): void {
 interface ToolCallAccum {
   name: string;
   args: string;
+  /**
+   * The provider's own call id.
+   *
+   * It was not captured — not even present in the delta type — so there was nothing to pair a
+   * result back to, and every follow-up round had to flatten `role:"tool"` down to a plain
+   * `user` message. That works, but it is off-distribution for exactly the cloud models that
+   * were trained on the paired form, and it is the shape a strict endpoint rejects outright.
+   */
+  id?: string;
 }
 
 /** The tool-call-capable transport (CLI-*): send the agent's tools and STREAM the
@@ -762,7 +1226,7 @@ interface ToolCallAccum {
  *  applies it — so `propose_edit`/`write_file` land on disk ONLY after the human approves. */
 async function* toolTurn(
   endpoint: AiEndpoint,
-  messages: Msg[],
+  messages: ThreadMsg[],
   tools: ToolDef[],
   policy: WorkspacePolicy,
   signal?: AbortSignal,
@@ -770,69 +1234,235 @@ async function* toolTurn(
   // The injected fetch seam `createAiClient` already honors. Without it this transport —
   // the one nearly every agentic turn takes — could not be intercepted by a test at all.
   doFetch: FetchLike = fetch,
+  // Written in place so the caller can fold this turn into the endpoint's capability state.
+  observed: { nativeCalls: number; textCalls: number; rejectedForTools: boolean } = {
+    nativeCalls: 0,
+    textCalls: 0,
+    rejectedForTools: false,
+  },
+  /**
+   * Resolve `endpoint.apiKeyRef` → the raw key, and receive the turn's token usage.
+   *
+   * Both exist because this transport was written for local runners and never revisited: it
+   * hard-coded `Authorization: Bearer local`, so every CLOUD endpoint with tools enabled
+   * (which is all of them — `connectors/apiKey.ts` and `oauthBridge.ts` both set
+   * `supportsTools: true`) authenticated as the literal string "local" and took a 401. Cloud
+   * models could use tools only by failing over to the text protocol.
+   */
+  aux: {
+    resolveKey?: (ref: string) => Promise<string>;
+    onUsage?: (u: SseTokenUsage) => void;
+  } = {},
 ): AsyncIterable<LlmTurn> {
   if (policy.neverSendToCloud && endpoint.locality === "cloud") {
     yield { kind: "text", text: "cloud endpoint refused (workspace never-send-to-cloud is on)" };
     yield { kind: "final" };
     return;
   }
-  const base = endpoint.baseUrl.replace(/\/+$/, "");
-  const url = /\/v1$/.test(base) ? `${base}/chat/completions` : `${base}/v1/chat/completions`;
   const model = endpoint.model ?? endpoint.id;
+  /**
+   * The FORMAT this endpoint speaks. Every part of the request comes from it.
+   *
+   * This transport used to hard-code the OpenAI URL, the OpenAI bearer header, the OpenAI
+   * body and an inline OpenAI SSE parser — a fifth copy of a transport that had already
+   * drifted four ways. That is why Anthropic and Gemini could not run tools natively: not a
+   * missing capability, just a hand-rolled request that only one provider understood.
+   */
+  const wire = ai.selectWire(ai.runtimeFromBaseUrl(endpoint.baseUrl, endpoint.locality));
+  const url = wire.url(endpoint.baseUrl, model);
   // accumulate tool-call fragments by their stream index (args arrive in pieces).
   const calls = new Map<number, ToolCallAccum>();
+  // …and a text scanner for the same turn, because a model with a native channel may still
+  // answer in prose (see where `delta.content` is consumed).
+  const textScanner = new agent.protocol.ToolCallScanner();
+  const textCalls: agent.protocol.TextToolCall[] = [];
   // progress watchdog: a large local model can take 30–90s to START (cold prefill/reload).
   // Without a heartbeat the user can't tell a slow MODEL from a hung WRAPPER — so we emit a
   // status every FIRST_TOKEN_TICK until the first byte, and hard-abort after HARD_TIMEOUT.
   const FIRST_TOKEN_TICK_MS = 8_000;
   const STREAM_IDLE_TICK_MS = 15_000;
   const HARD_TIMEOUT_MS = 180_000;
-  // our own controller so a HARD TIMEOUT (or the user's Ctrl-C) cancels the fetch + reader.
-  const ac = new AbortController();
+  /**
+   * Our own controller so a HARD TIMEOUT (or the user's Ctrl-C) cancels the fetch + reader —
+   * RE-ARMED per attempt, which is the part a retry loop makes load-bearing.
+   *
+   * An `AbortController` is single-use: once aborted it stays aborted. A retry that reused one
+   * would have its second attempt abort before it began, and a retry that reused the timer
+   * would let three attempts share one 180-second budget and then blame the model. So each
+   * attempt gets a fresh controller and a fresh deadline; `ac` is a `let` and the user's abort
+   * handler is registered ONCE, closing over whichever controller is current.
+   */
+  let ac = new AbortController();
   const onUserAbort = (): void => ac.abort();
   if (signal) {
     if (signal.aborted) ac.abort();
     else signal.addEventListener("abort", onUserAbort, { once: true });
   }
   const startMs = Date.now();
-  const hardTimer = setTimeout(() => ac.abort(), HARD_TIMEOUT_MS);
+  let hardTimer: ReturnType<typeof setTimeout> = setTimeout(() => ac.abort(), HARD_TIMEOUT_MS);
+  const armAttempt = (): AbortSignal => {
+    clearTimeout(hardTimer);
+    ac = new AbortController();
+    if (signal?.aborted) ac.abort();
+    hardTimer = setTimeout(() => ac.abort(), HARD_TIMEOUT_MS);
+    return ac.signal;
+  };
   try {
     yield { kind: "status", text: `→ ${model}: sending request…` };
-    const res = await doFetch(url, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: "Bearer local",
-        Accept: "text/event-stream",
-      },
-      body: JSON.stringify(
-        applyEffort(
-          {
-            model,
-            // Our tool results are already human-readable (`[tool_result …]`) and carry no
-            // OpenAI `tool_call_id` linkage; send them as plain `user` context so a strict
-            // endpoint never rejects an unpaired `role:"tool"` message on the follow-up round.
-            messages: applyEffortToMessages(messages, effort).map((m) => ({
-              role: m.role === "tool" ? "user" : m.role,
-              content: m.content,
-            })),
-            tools: toOpenAiTools(tools),
-            tool_choice: "auto",
-            stream: true,
-            // Ollama extension (ignored by other endpoints): keep the model resident 30m so a
-            // second prompt doesn't pay the multi-second cold RELOAD. Only for LOCAL runners —
-            // never send a non-standard field to a cloud endpoint.
-            ...(endpoint.locality === "local" ? { keep_alive: "30m" } : {}),
-          },
-          // Same discipline as `keep_alive` above: a field goes on the wire only when THIS
-          // model is known to accept it. A knobless model gets nothing rather than a 400.
-          effort,
-        ),
+    const headers: Record<string, string> = {
+      "Content-Type": "application/json",
+      Accept: "text/event-stream",
+    };
+    let key = "";
+    if (endpoint.apiKeyRef) {
+      // Same keychain seam `createAiClient` uses — the RAW key never lives in JS state.
+      if (!aux.resolveKey) {
+        yield {
+          kind: "text",
+          text: `model error: ${endpoint.id} needs an API key but no key resolver was provided`,
+        };
+        yield { kind: "final" };
+        return;
+      }
+      key = await aux.resolveKey(endpoint.apiKeyRef);
+    } else if (endpoint.locality === "local") {
+      // Local runners ignore the value but some shims insist on the header being present.
+      // A keyless CLOUD endpoint gets NO header at all: sending a bogus bearer turns a
+      // "you forgot to configure a key" into an opaque 401.
+      key = "local";
+    }
+    // The format owns the credential's SHAPE: a bearer for OpenAI, `x-api-key` plus the
+    // mandatory `anthropic-version` for Anthropic, `x-goog-api-key` for Gemini. Hard-coding
+    // the bearer here is what authenticated every Anthropic request incorrectly.
+    Object.assign(headers, wire.headers(key));
+    const requestBody = JSON.stringify(
+      applyEffort(
+        {
+          ...wire.body(
+            // The PAIRED form when the provider gave us call ids, flattened otherwise.
+            // This used to flatten unconditionally, with a comment saying our results "carry
+            // no OpenAI tool_call_id linkage" — which was true only because the streamed
+            // `tool_calls[].id` was being thrown away. Cloud models are trained on the paired
+            // shape, and it is the shape a strict endpoint expects.
+            // Ask for the prompt cache this repo has measured all along. Applied BEFORE the
+            // body is built, because the cache breakpoint goes on the stable system prefix
+            // and the format decides where that prefix ends up. A no-op on every provider
+            // that caches on its own (or not at all) — see `ai/prompt-cache.ts`.
+            ai.applyPromptCache(
+              toWireMessages(applyEffortToMessages(messages, effort)),
+              ai.cacheDialectFor(ai.runtimeFromBaseUrl(endpoint.baseUrl, endpoint.locality)),
+            ) as ai.WireMessage[],
+            {
+              model,
+              tools: toWireTools(tools),
+              // Ask for a terminal usage frame so an AGENTIC turn is accounted like a chat
+              // one. Gated to cloud for the same reason the GUI gates it: a strict local
+              // server (llama.cpp, older proxies) 400s on the unknown field — and local
+              // tokens are free, so the estimate costs nothing there.
+              includeUsage: endpoint.locality === "cloud",
+            },
+          ),
+          // Ollama extension (ignored by other endpoints): keep the model resident 30m so a
+          // second prompt doesn't pay the multi-second cold RELOAD. Only for LOCAL runners —
+          // never send a non-standard field to a cloud endpoint.
+          ...(endpoint.locality === "local" ? { keep_alive: "30m" } : {}),
+        },
+        // Same discipline as `keep_alive` above: a field goes on the wire only when THIS
+        // model is known to accept it. A knobless model gets nothing rather than a 400.
+        effort,
       ),
-      signal: ac.signal,
+    );
+
+    /**
+     * The request, with bounded retries (CLI-1xx).
+     *
+     * This is the path nearly every agentic CLI turn takes, and it made exactly one attempt: a
+     * 429 became the text `model error: HTTP 429 Too Many Requests` and the turn was over. The
+     * loop, the classification and the `Retry-After` handling are core's, shared with the other
+     * three transports.
+     *
+     * The retry notes are QUEUED rather than yielded, because a generator cannot yield from
+     * inside an awaited callback. They are flushed the moment the request settles, so a user
+     * who waited eleven seconds is told why — after the fact, but told.
+     */
+    /**
+     * Refuse an impossible request before paying for it.
+     *
+     * Overflow used to arrive as a provider 400 and end the turn. `looksLikeToolsRejection`
+     * deliberately does not match it, so it did not even demote the transport — it just read
+     * as a bug in Prometheus.
+     */
+    const pre = ai.preflightContext({
+      estimatedPromptTokens: agent.estimateTextTokens(messages.map((m) => m.content)),
+      contextWindow: endpoint.contextWindow,
     });
-    if (!res.ok || !res.body) {
-      yield { kind: "text", text: `model error: HTTP ${res.status} ${res.statusText}` };
+    if (!pre.ok) {
+      yield { kind: "text", text: `model error: ${pre.reason}` };
+      yield { kind: "final" };
+      return;
+    }
+
+    /**
+     * A format that genuinely cannot carry tools still degrades to the TEXT protocol here.
+     *
+     * All three formats carry tools now, so this is a backstop rather than the routine path
+     * it used to be — but it stays, because it is the honest behaviour for any format added
+     * later that cannot, and because `negotiateTransport` consults the same flag when picking
+     * the opening move. Reusing `rejectedForTools` routes the next turn through core's
+     * client, which speaks the right wire.
+     */
+    if (!wire.supportsTools) {
+      observed.rejectedForTools = true;
+      yield {
+        kind: "status",
+        text: `${model} speaks a protocol without native tool calls — using the text protocol`,
+      };
+      yield { kind: "final" };
+      return;
+    }
+
+    const retryNotes: string[] = [];
+    let res: Awaited<ReturnType<typeof doFetch>>;
+    try {
+      res = await fetchModelWithRetry({
+        endpointId: endpoint.id,
+        url,
+        init: { method: "POST", headers, body: requestBody },
+        doFetch,
+        signalFor: armAttempt,
+        ...(signal ? { userSignal: signal } : {}),
+        onRetry: (info: { attempt: number; delayMs: number; reason: string }) =>
+          retryNotes.push(
+            `${model}: ${info.reason} — retrying in ${Math.round(info.delayMs / 1000)}s`,
+          ),
+      });
+    } catch (err) {
+      for (const n of retryNotes) yield { kind: "status", text: n };
+      if (err instanceof AiHttpError) {
+        // Was the request refused BECAUSE it carried tools? If so the caller demotes this
+        // endpoint to the text protocol permanently, and the next turn works. A generic 4xx
+        // (context overflow, bad key) must not demote it — that would strand a perfectly
+        // capable model on the weaker transport for the rest of the session.
+        if (agent.protocol.looksLikeToolsRejection(err.status, err.detail)) {
+          observed.rejectedForTools = true;
+          yield {
+            kind: "status",
+            text: `${model} rejected native tool calls — retrying in text protocol`,
+          };
+          yield { kind: "final" };
+          return;
+        }
+        // The body is included now. It used to be read and discarded, so a 400 that said
+        // exactly what was wrong reached the user as a bare status number.
+        yield { kind: "text", text: `model error: ${describeAiFailure(err)}` };
+        yield { kind: "final" };
+        return;
+      }
+      throw err;
+    }
+    for (const n of retryNotes) yield { kind: "status", text: n };
+    if (!res.body) {
+      yield { kind: "text", text: `model error: ${endpoint.id} returned an empty response body` };
       yield { kind: "final" };
       return;
     }
@@ -877,55 +1507,91 @@ async function* toolTurn(
         nl = buf.indexOf("\n");
         if (!line.startsWith("data:")) continue;
         const payload = line.slice(5).trim();
-        if (payload === "[DONE]") {
+        // The usage frame arrives on its own choice-less event, so it must be read BEFORE
+        // any early return below. `usageFromPayload` already normalizes all three providers.
+        const u = usageFromPayload(payload);
+        if (u) aux.onUsage?.(u);
+        /**
+         * The FORMAT decodes the frame — this used to be an inline OpenAI parser.
+         *
+         * Reasoning is read separately because it is an OpenAI-family extension with two
+         * spellings (`reasoning` on Ollama, `reasoning_content` elsewhere) and no equivalent
+         * in the neutral event; a format that does not emit it simply never matches.
+         */
+        const ev = wire.parse(payload);
+        /**
+         * A mid-stream provider failure ENDS the turn, loudly.
+         *
+         * The status was 200 and the bytes kept flowing, so nothing downstream would ever
+         * have noticed: the stream simply stopped producing text and the turn returned an
+         * empty answer. An Anthropic `overloaded_error` and a Gemini SAFETY stop both looked
+         * exactly like the model declining to speak.
+         */
+        if (ev.error) {
+          yield { kind: "text", text: `model error: ${ev.error}` };
           done = true;
           break;
         }
-        let chunk: {
-          choices?: Array<{
-            delta?: {
-              content?: string | null;
-              // reasoning models stream thinking here (content stays empty meanwhile);
-              // Ollama uses `reasoning`, some servers `reasoning_content`.
-              reasoning?: string | null;
-              reasoning_content?: string | null;
-              tool_calls?: Array<{
-                index?: number;
-                function?: { name?: string; arguments?: string };
-              }>;
-            };
-          }>;
-        };
-        try {
-          chunk = JSON.parse(payload);
-        } catch {
-          continue; // a partial/keepalive frame — skip
+        if (ev.done) {
+          done = true;
+          break;
         }
-        const delta = chunk.choices?.[0]?.delta;
-        if (!delta) continue;
-        const reasoning = delta.reasoning ?? delta.reasoning_content;
+        const reasoning = reasoningFromPayload(payload);
         if (reasoning) yield { kind: "reasoning", text: reasoning };
-        if (delta.content) yield { kind: "text", text: delta.content };
-        for (const tc of delta.tool_calls ?? []) {
-          const idx = tc.index ?? 0;
+        if (ev.delta) {
+          // Scanned even here. A small model handed a working native channel very often
+          // answers with `<tool_call>` prose anyway; dropping those reads to the user as the
+          // model refusing to act, and the scanner also keeps the markup out of the transcript.
+          yield* pumpText(textScanner.push(ev.delta), textCalls);
+        }
+        if (ev.toolCall) {
+          const idx = ev.toolCall.index;
           const acc = calls.get(idx) ?? { name: "", args: "" };
-          if (tc.function?.name) acc.name = tc.function.name;
-          if (tc.function?.arguments) acc.args += tc.function.arguments;
+          if (ev.toolCall.id) acc.id = ev.toolCall.id;
+          if (ev.toolCall.name) acc.name = ev.toolCall.name;
+          if (ev.toolCall.argsFragment) acc.args += ev.toolCall.argsFragment;
           calls.set(idx, acc);
         }
       }
       pendingRead = reader.read(); // queue the next chunk
     }
+    yield* pumpText(textScanner.end(), textCalls);
     // emit each fully-reassembled tool call (ordered by stream index).
     for (const [, acc] of [...calls.entries()].sort((a, b) => a[0] - b[0])) {
       if (!acc.name) continue;
       let args: Record<string, unknown> = {};
+      let broken: string | undefined;
       try {
         args = JSON.parse(acc.args || "{}") as Record<string, unknown>;
       } catch {
-        args = {};
+        // Substituting `{}` here ran the tool with no arguments and told the model nothing,
+        // so it had no way to know its own output was unparseable — and repeated it.
+        broken = "the streamed arguments were not valid JSON";
       }
-      yield { kind: "tool_call", call: { name: acc.name as agent.ToolCall["name"], args } };
+      if (broken) {
+        yield {
+          kind: "tool_call",
+          call: { name: MALFORMED_CALL_TOOL, args: { reason: broken, wrote: acc.args } },
+        };
+        continue;
+      }
+      observed.nativeCalls += 1;
+      yield {
+        kind: "tool_call",
+        call: {
+          name: acc.name as agent.ToolCall["name"],
+          args,
+          ...(acc.id ? { id: acc.id } : {}),
+        },
+      };
+    }
+    // Native calls win: when both arrived, the prose was almost certainly the model narrating
+    // the call it also made properly, and running it twice would double every side effect.
+    if (observed.nativeCalls === 0) {
+      observed.textCalls = textCalls.length;
+      for (const call of textCalls) {
+        yield { kind: "tool_call", call: { name: call.name, args: call.args } };
+      }
     }
   } catch (err) {
     // our HARD TIMEOUT aborted the fetch (ac aborted but NOT via the user's Ctrl-C).
@@ -945,7 +1611,25 @@ async function* toolTurn(
     clearTimeout(hardTimer);
     if (signal) signal.removeEventListener("abort", onUserAbort);
   }
-  yield { kind: "final" };
+  // `final` ONLY when nothing was called. This yielded unconditionally, which — combined with
+  // the loop's old `if (sawFinal || …) break` — meant every native tool turn was single-round:
+  // the tool ran, its result was discarded, and the model was never shown what it returned.
+  if (observed.nativeCalls === 0 && observed.textCalls === 0) yield { kind: "final" };
+}
+
+/** Stream scanned prose, collecting any tool calls found in it. Shared by both transports. */
+function* pumpText(
+  events: agent.protocol.ScanEvent[],
+  sink: agent.protocol.TextToolCall[],
+): Generator<LlmTurn> {
+  for (const ev of events) {
+    if (ev.kind === "text") {
+      if (ev.text) yield { kind: "text", text: ev.text };
+    } else if (ev.kind === "call") sink.push(ev.call);
+    // A malformed call on the NATIVE path is left as prose: the model has a working structured
+    // channel, so half-written markup is far more likely to be it talking about a call than
+    // attempting one.
+  }
 }
 
 /**
@@ -957,16 +1641,66 @@ async function* toolTurn(
  * the machine; we surface a refusal as an honest text turn rather than a throw,
  * so a single bad endpoint never crashes the session.
  *
- * Tool calls: the OpenAI SSE the core client parses is TEXT-ONLY (it extracts
- * `choices[].delta.content`), so this adapter cannot synthesise a structured tool
- * call from it. We therefore stay text-only regardless — and when the host wants
- * tools it must supply a tool-call-capable transport. `endpoint.supportsTools`
- * gates *whether tools are even offered*; this adapter never fabricates one.
+ * Tool calls reach the model by ONE of two transports, chosen per turn by
+ * `negotiateTransport` and corrected by what the endpoint actually does:
+ *
+ *   - NATIVE (`toolTurn`): send `tools:[…]`, read `delta.tool_calls` off the SSE.
+ *   - TEXT: send no `tools`, teach the call syntax in the preamble, and read the
+ *     calls back out of the model's prose with core's `ToolCallScanner`.
+ *
+ * The text transport is what makes this work at all on the endpoints Prometheus is
+ * most often pointed at. `endpoint.supportsTools` is a GUESS — `connectors/
+ * localServe.ts` defaults it true for every local runner, `orchestration/
+ * backends.ts` hard-codes it false for own-key cloud — and it used to be a cliff:
+ * false meant the model got an empty tool list and could only ever describe the
+ * work. Now it only decides the opening move.
+ *
+ * Text calls are scanned for on BOTH paths. A small local model handed a perfectly
+ * good native channel very often answers with `<tool_call>` prose anyway, and
+ * dropping those is indistinguishable, to the user, from the model refusing to act.
  */
 export function makeLlmClient(endpoint: AiEndpoint, deps: LlmClientDeps = {}): LLMClient {
   const policy: WorkspacePolicy = deps.policy ?? { neverSendToCloud: false };
   const { policy: _omit, signal, ...aiDeps } = deps;
   const client: AiClient = createAiClient(endpoint, policy, aiDeps);
+  // What this endpoint has been observed to actually do, accumulated across the session.
+  // Owned per-client so a `/model` switch starts a fresh hypothesis.
+  let capabilityState: ToolCapabilityState = deps.capability ?? agent.protocol.initialCapability();
+
+  /**
+   * CLI-029 accounting, shared by both transports.
+   *
+   * Extracted because the native branch `return`ed before the inline copy ever ran, so the
+   * expensive turns — the agentic ones — were the only turns that cost nothing on the budget
+   * report. SSE usage is exact; otherwise chars/4 over the EXACT text sent + received, flagged
+   * estimated (a spend FLOOR for budget math, never a ceiling).
+   */
+  function recordUsage(usage: SseTokenUsage | undefined, sent: Msg[], received: string): void {
+    if (!deps.onUsage) return;
+    const nowIso = (deps.now ?? (() => new Date().toISOString()))();
+    const rec: AccountingRecord = usage
+      ? {
+          model: endpoint.model ?? endpoint.id,
+          endpointId: endpoint.id,
+          promptTokens: usage.inputTokens,
+          completionTokens: usage.outputTokens,
+          estimated: false,
+          atIso: nowIso,
+          // prompt-cache counters (CLI-090) — only when the provider reported them (undefined
+          // ⇒ omitted ⇒ report shows "not available for this provider", not a misleading 0).
+          ...(usage.cacheRead !== undefined ? { cacheRead: usage.cacheRead } : {}),
+          ...(usage.cacheCreate !== undefined ? { cacheCreate: usage.cacheCreate } : {}),
+        }
+      : {
+          model: endpoint.model ?? endpoint.id,
+          endpointId: endpoint.id,
+          promptTokens: approxTokens(sent.map((m) => m.content).join("\n")),
+          completionTokens: approxTokens(received),
+          estimated: true,
+          atIso: nowIso,
+        };
+    deps.onUsage(rec);
+  }
 
   // The model's effort capability is a property of the endpoint, so resolve it once here and
   // only the TIER varies per turn. `deps.effortCapability` lets the host pass a probe-backed
@@ -981,26 +1715,133 @@ export function makeLlmClient(endpoint: AiEndpoint, deps: LlmClientDeps = {}): L
 
   return {
     async *turn(thread: Thread, tuning: AgentTuning, tools: ToolDef[]): AsyncIterable<LlmTurn> {
-      const messages = threadToMessages(thread);
       // The `/think` tier finally reaches the wire (it was stored and discarded here before).
       // `resolveEffort` returns null-applied for a model with no knob, and `applyEffort`
       // then adds nothing — so an unsupported model is a no-op, never a 400.
       const effort = tuning.effort ? resolveEffort(tuning.effort, capability) : undefined;
-      // Tool-capable transport: when the agent offers tools AND the model supports them, use a
-      // non-streaming request so a capable local model returns native tool_calls (which the
-      // text-only SSE below never carries). This is what lets Prometheus ACT — create/edit
-      // files, run gated verbs — instead of only describing.
-      if (tools.length > 0 && endpoint.supportsTools) {
-        yield* toolTurn(endpoint, messages, tools, policy, signal, effort, deps.fetch);
+      /**
+       * The WIRE's tool capability is part of the opening guess, not a discovery.
+       *
+       * `endpoint.supportsTools` is set to `true` for every own-key cloud endpoint
+       * (`ai/cloud-endpoints.ts`), including Anthropic and Gemini — whose wire formats in
+       * `ai/wire.ts` declare `supportsTools: false`. Opening in `native` on those meant
+       * `toolTurn` got as far as building the request, noticed the mismatch, emitted a status
+       * line and `final`, and RETURNED WITH NO ANSWER. The demotion was recorded in the
+       * `finally`, so the SECOND prompt worked — the user's first one was simply eaten, which
+       * reads exactly like the model ignoring them.
+       *
+       * This is knowable before the request, so it belongs in the opening guess. `observed`
+       * still overrides it in both directions, so a wire that later grows tool support is not
+       * pinned to the text protocol.
+       */
+      const wireCarriesTools = ai.selectWire(
+        ai.runtimeFromBaseUrl(endpoint.baseUrl, endpoint.locality),
+      ).supportsTools;
+      const transport = agent.protocol.negotiateTransport({
+        toolCount: tools.length,
+        declaredNative: endpoint.supportsTools && wireCarriesTools,
+        observed: capabilityState,
+      });
+      /**
+       * TRIM BEFORE SENDING, rather than refusing at the door.
+       *
+       * Compaction only ever ran BETWEEN turns, from the host — so it could not help where a
+       * session actually overflows, which is inside a long agentic turn. Rounds three through
+       * thirty append tool output to the thread with nothing watching, and the first thing
+       * that noticed was `preflightContext`, whose only move is to refuse. The result was a
+       * turn that failed halfway through real work, after the user had committed to it, with
+       * "the request does not fit" — while the mechanism for making it fit sat one layer up,
+       * waiting for the turn to end.
+       *
+       * So the thread is budgeted here, every round, against the model's REAL window. This is
+       * the one place that always runs and always knows the window; putting it behind an
+       * optional dep on the loop would have made it the codebase's signature defect — a
+       * complete implementation nothing calls.
+       *
+       * `carryForward` drops whole rounds and elides old tool output, never splitting a
+       * call/result pair, so what is sent is always a request the provider will accept.
+       */
+      const budget = agent.carryBudgetFor(endpoint.contextWindow);
+      const body = threadToMessages(thread);
+      const trimmed = agent.carryForward(body, { budgetTokens: budget }) as ThreadMsg[];
+      if (trimmed.length < body.length) {
+        yield {
+          kind: "status",
+          text: `⎿ context trimmed to fit ${endpoint.model ?? endpoint.id}: ${body.length - trimmed.length} older message(s) dropped from this turn`,
+        };
+      }
+      // The preamble is merged into the OUTGOING system message only — never into the
+      // persisted thread. It is derived state (it changes with the transport and with the
+      // exposed tool set), so storing it would pin one turn's answer into the transcript.
+      const messages = withPreamble(
+        [...body.filter((m) => m.role === "system"), ...trimmed],
+        tools,
+        transport,
+        endpoint.contextWindow,
+      );
+
+      if (transport === "native") {
+        const observed = { nativeCalls: 0, textCalls: 0, rejectedForTools: false };
+        let toolUsage: SseTokenUsage | undefined;
+        // `finally`, NOT straight-line code after the `yield*`.
+        //
+        // `runAgentTurn` BREAKS its `for await` the moment it sees `final`, which invokes
+        // this generator's `.return()` — so anything written after the delegation simply
+        // never runs on a turn that ended with `final`, i.e. every turn that produced an
+        // answer rather than a tool call. The accounting and the capability observation were
+        // both being dropped on exactly those turns, and no unit test could see it because a
+        // test that drains the iterator directly never breaks early. A live cloud round-trip
+        // reported two rounds served and one usage record, which is how this surfaced.
+        try {
+          yield* toolTurn(endpoint, messages, tools, policy, signal, effort, deps.fetch, observed, {
+            ...(deps.resolveKey ? { resolveKey: deps.resolveKey } : {}),
+            onUsage: (u) => {
+              toolUsage = u;
+            },
+          });
+        } finally {
+          capabilityState = agent.protocol.observeTurn(capabilityState, {
+            transport,
+            nativeCalls: observed.nativeCalls,
+            textCalls: observed.textCalls,
+            rejectedForTools: observed.rejectedForTools,
+          });
+          deps.onCapability?.(capabilityState);
+          recordUsage(toolUsage, messages, "");
+        }
         return;
       }
+
+      // ── the TEXT transport (and the plain no-tools chat path) ──────────────────
+      // One scanner for the whole turn: a call routinely spans several SSE deltas, so the
+      // hold-back has to live across them.
+      const scanner = transport === "text" ? new agent.protocol.ToolCallScanner() : undefined;
+      const calls: agent.protocol.TextToolCall[] = [];
+      const malformed: agent.protocol.MalformedToolCall[] = [];
+      /** Route one scanned event: prose streams live, calls are held until the turn ends. */
+      // Tracked separately from `received`, which still counts bytes the scanner consumed as
+      // protocol. A turn whose ENTIRE output was a stray `</tool_call>` has a non-empty
+      // `received` and nothing to show the user — see the empty-turn handling below.
+      let shownText = "";
+      const pump = function* (events: agent.protocol.ScanEvent[]): Generator<LlmTurn> {
+        for (const ev of events) {
+          if (ev.kind === "text") {
+            if (ev.text) {
+              shownText += ev.text;
+              yield { kind: "text", text: ev.text };
+            }
+          } else if (ev.kind === "call") calls.push(ev.call);
+          else malformed.push(ev.error);
+        }
+      };
+
       let any = false;
       let usage: SseTokenUsage | undefined;
       let received = "";
       try {
         // thread the signal so fetch() aborts AND the SSE reader is cancelled — a bare
         // fetch abort still lets the parser drain buffered bytes (post-abort deltas).
-        for await (const chunk of client.chat(messages, {
+        for await (const chunk of client.chat(flattenToolRoles(messages), {
           ...(signal ? { signal } : {}),
           ...(effort ? { effort } : {}),
         })) {
@@ -1008,11 +1849,15 @@ export function makeLlmClient(endpoint: AiEndpoint, deps: LlmClientDeps = {}): L
           if (chunk.delta) {
             any = true;
             received += chunk.delta;
-            yield { kind: "text", text: chunk.delta };
+            // With no tools exposed there is nothing to scan for, so the delta streams
+            // straight through and the transcript is byte-identical to before.
+            if (scanner) yield* pump(scanner.push(chunk.delta));
+            else yield { kind: "text", text: chunk.delta };
           }
           if (chunk.usage) usage = chunk.usage;
           if (chunk.done) break;
         }
+        if (scanner) yield* pump(scanner.end());
       } catch (err) {
         // abort is NOT an error: swallow it into the interrupted path (never retry —
         // an AbortError counting toward resilience would silently re-request).
@@ -1024,70 +1869,114 @@ export function makeLlmClient(endpoint: AiEndpoint, deps: LlmClientDeps = {}): L
           if (!any) yield { kind: "text", text: `model error: ${message}` };
         }
       }
-      // CLI-029 accounting: SSE usage is exact; otherwise chars/4 over the EXACT text
-      // actually sent + received, flagged estimated (a spend floor for budget math).
-      if (deps.onUsage) {
-        const nowIso = (deps.now ?? (() => new Date().toISOString()))();
-        const rec: AccountingRecord = usage
-          ? {
-              model: endpoint.model ?? endpoint.id,
-              endpointId: endpoint.id,
-              promptTokens: usage.inputTokens,
-              completionTokens: usage.outputTokens,
-              estimated: false,
-              atIso: nowIso,
-              // prompt-cache counters (CLI-090) — only when the provider reported them (undefined
-              // ⇒ omitted ⇒ report shows "not available for this provider", not a misleading 0).
-              ...(usage.cacheRead !== undefined ? { cacheRead: usage.cacheRead } : {}),
-              ...(usage.cacheCreate !== undefined ? { cacheCreate: usage.cacheCreate } : {}),
-            }
-          : {
-              model: endpoint.model ?? endpoint.id,
-              endpointId: endpoint.id,
-              promptTokens: approxTokens(messages.map((m) => m.content).join("\n")),
-              completionTokens: approxTokens(received),
-              estimated: true,
-              atIso: nowIso,
-            };
-        deps.onUsage(rec);
+      recordUsage(usage, messages, received);
+
+      // An EMPTY turn: no prose, no call, nothing malformed. A real gemma4:12b does this by
+      // opening a turn with a stray `</tool_call>` and stopping — the scanner correctly
+      // discards the residue, and what is left is a turn that answered nothing. Ending there
+      // hands the user a blank reply and calls it done. Feeding it back as a correction costs
+      // one round (bounded by maxRounds) and usually recovers, for the same reason a
+      // malformed call does: the model cannot fix what it is never told about.
+      if (
+        transport === "text" &&
+        calls.length === 0 &&
+        malformed.length === 0 &&
+        shownText.trim() === "" &&
+        !signal?.aborted
+      ) {
+        malformed.push({
+          raw: received.slice(0, 200),
+          dialect: "tool_call_tag",
+          reason: "you replied with nothing usable — call a tool, or answer the question",
+        });
       }
-      yield { kind: "final" };
+
+      // A call the model MEANT but wrote wrongly is surfaced as an unexposed-tool call, so it
+      // comes back through the loop as a `[tool_result]` the model can correct on the next
+      // round. Silently dropping it is what makes a small model repeat the same broken syntax
+      // until the round cap: it never learns that anything went wrong.
+      for (const bad of malformed) {
+        yield {
+          kind: "tool_call",
+          call: { name: MALFORMED_CALL_TOOL, args: { reason: bad.reason, wrote: bad.raw } },
+        };
+      }
+      for (const call of calls) {
+        yield { kind: "tool_call", call: { name: call.name, args: call.args } };
+      }
+      capabilityState = agent.protocol.observeTurn(capabilityState, {
+        transport,
+        nativeCalls: 0,
+        textCalls: calls.length,
+      });
+      deps.onCapability?.(capabilityState);
+      // `final` ONLY when nothing was called. Emitting it alongside calls is what made the
+      // native path single-round — the loop now folds results regardless, but a transport
+      // that says "I am done" while asking for a tool is lying about its own state.
+      if (calls.length === 0 && malformed.length === 0) yield { kind: "final" };
     },
   };
+}
+
+/**
+ * The reserved name an unreadable call is reported under.
+ *
+ * Core owns it (`agent/protocol/feedback.ts`) because the LOOP is what must recognise it: an
+ * earlier version defined it here and let it fall through the loop's "tool is not exposed"
+ * branch, which replaced the diagnosis with a message about a tool that was never called.
+ */
+const MALFORMED_CALL_TOOL = agent.protocol.PROTOCOL_FEEDBACK_TOOL;
+
+/**
+ * Merge the tool preamble into the outgoing system message.
+ *
+ * The host's prompt is kept first and whole (it carries the persona and any `/system`
+ * override), and a session with no system message gets one rather than going out with the
+ * tool list buried in the user's turn.
+ */
+/**
+ * Fold the loaded personas into `spawn_agent`'s description.
+ *
+ * A persona nobody told the model about is a persona nobody uses. The names go in the tool's
+ * own description rather than a separate prompt block so they travel with the tool through the
+ * preamble's degrade ladder — and disappear with it when the budget is tight, instead of
+ * outliving the tool they belong to.
+ */
+export function withPersonas(tools: ToolDef[], personas: readonly agent.LoadedAgent[]): ToolDef[] {
+  if (personas.length === 0) return tools;
+  const list = personas.map((p) => `${p.name} (${p.description})`).join("; ");
+  return tools.map((t) =>
+    t.name === "spawn_agent"
+      ? { ...t, description: `${t.description} Custom roles available: ${list}.` }
+      : t,
+  );
+}
+
+function withPreamble(
+  messages: ThreadMsg[],
+  tools: ToolDef[],
+  transport: agent.protocol.ToolTransport,
+  contextWindow?: number,
+): ThreadMsg[] {
+  if (transport === "none" || tools.length === 0) return messages;
+  const mode = agent.protocol.preambleModeFor(transport);
+  // The MEASURED window sizes the budget. Without it every model got the budget sized for an
+  // 8192 window, and with 45 tools that forces the degrade ladder down to bare signatures — so
+  // the model never sees a single tool DESCRIPTION, which is the part that says which tool to
+  // reach for. `probeContextWindow` measures the real number; this is what spends it.
+  const opts = { mode, ...(contextWindow ? { contextWindow } : {}) };
+  const at = messages.findIndex((m) => m.role === "system");
+  if (at === -1) {
+    const { text } = agent.protocol.renderToolPreamble(tools, opts);
+    return [{ role: "system", content: text }, ...messages];
+  }
+  const { prompt } = agent.protocol.withToolPreamble(messages[at]?.content ?? "", tools, opts);
+  return messages.map((m, i) => (i === at ? { ...m, content: prompt } : m));
 }
 
 /* ------------------------------------------------------------------------- *
  * makeToolRunner — run a broker-approved ToolDef through the engine bridge
  * ------------------------------------------------------------------------- */
-
-/** Coerce the engine envelope's verdict tier (if any) into the loop's shape. */
-function verdictFromEnvelope(env: Record<string, unknown>): ToolOutcome["verdict"] {
-  // forced_danger present ⇒ a nemesis BLOCK/error was overridden (ok:false too).
-  const forced = env.forced_danger;
-  if (Array.isArray(forced) && forced.length > 0) {
-    const tier = (forced[0] as { verdict?: string }).verdict;
-    const v: GateVerdictTier = tier === "error" ? "error" : "block";
-    const risk = (forced[0] as { risk_score?: number }).risk_score;
-    return typeof risk === "number" ? { verdict: v, riskScore: risk } : { verdict: v };
-  }
-  // a verdict envelope (gate/scan path) carries its own tier + risk_score.
-  const verdict = env.verdict;
-  if (verdict && typeof verdict === "object") {
-    const tier = (verdict as { verdict?: string }).verdict;
-    if (tier === "allow" || tier === "warn" || tier === "block" || tier === "error") {
-      const risk = (verdict as { risk_score?: number }).risk_score;
-      return typeof risk === "number" ? { verdict: tier, riskScore: risk } : { verdict: tier };
-    }
-  }
-  return undefined;
-}
-
-/** A short, human one-liner summarising an engine envelope outcome. */
-function summarizeEnvelope(name: string, env: Record<string, unknown>): string {
-  if (typeof env.error === "string" && env.error) return env.error;
-  const command = typeof env.command === "string" ? env.command : name;
-  return env.ok === false ? `${command}: failed` : `${command}: ok`;
-}
 
 /**
  * Build the agent loop's `ToolRunner` over the engine bridge.
@@ -1317,6 +2206,110 @@ function applyWriteFile(
   };
 }
 
+/**
+ * `apply_patch` — resolve every hunk in every file, then write, or write nothing.
+ *
+ * The path guard runs over ALL files before any resolution, so a patch that reaches outside
+ * the working set is refused whole rather than applying its in-scope half.
+ */
+function applyMultiFilePatch(
+  args: Record<string, unknown>,
+  roots: string[] | undefined,
+  cwd: string,
+  approvedOutside?: ReadonlySet<string>,
+): { outcome: ToolOutcome; records: EditRecord[] } {
+  const files = agent.parsePatchFiles(args.edits);
+  if (files.length === 0) {
+    return {
+      outcome: { ok: false, summary: "apply_patch: edits must be [{path, hunks:[{old,new}]}]" },
+      records: [],
+    };
+  }
+  // Resolve every path FIRST — a refusal must not leave earlier files already written.
+  const abs = new Map<string, string>();
+  for (const f of files) {
+    const r = resolveMutatePath("apply_patch", f.path, roots, cwd, approvedOutside);
+    if (!r.ok) return { outcome: { ok: false, summary: r.summary }, records: [] };
+    abs.set(f.path, r.abs);
+  }
+  const preImages = new Map<string, string>();
+  const result = agent.resolvePatch(files, (p) => {
+    try {
+      const text = readFileSync(abs.get(p) as string, "utf8");
+      preImages.set(p, text);
+      return text;
+    } catch {
+      return null;
+    }
+  });
+  if (!result.ok) {
+    // `result.message` already carries its own `hunk N:` label (0-based, from the edit ladder).
+    // Prefixing a second, 1-BASED one produced "src/math.ts hunk 1: hunk 0: old text not found"
+    // — two labels and two different numbers for one hunk, which is worse than no label at all.
+    return {
+      outcome: {
+        ok: false,
+        summary: `apply_patch: nothing was written — ${result.path}: ${result.message}`,
+      },
+      records: [],
+    };
+  }
+  const records: EditRecord[] = [];
+  for (const f of result.files) {
+    const target = abs.get(f.path) as string;
+    try {
+      atomicWrite(target, f.next);
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err);
+      // A mid-write failure is the one case the two-phase design cannot fully prevent (the
+      // disk can still refuse). Report exactly how far it got so the user can /revert.
+      return {
+        outcome: {
+          ok: false,
+          summary: `apply_patch: wrote ${records.length} of ${result.files.length} files, then ${f.path} failed: ${detail} — use /revert`,
+        },
+        records,
+      };
+    }
+    records.push({ path: target, preImage: preImages.get(f.path) ?? "" });
+  }
+  return {
+    outcome: { ok: true, summary: agent.describePatch(result.files, result.totalHunks) },
+    records,
+  };
+}
+
+/* ── Tier W: the file mutators (delete / move / mkdir) ──────────────────────── */
+
+/**
+ * Resolve a Tier-W path argument and enforce the working-set boundary.
+ *
+ * The SAME rule `applyWriteFile` uses, and for the same reason: these tools have no scope
+ * guard of their own — the human confirm IS their authorization — so an out-of-scope target
+ * must have been approved for THIS exact path, or it is refused. `mkdir` is included: a
+ * directory created outside the working set is how a subsequent write gets a home there.
+ */
+function resolveMutatePath(
+  tool: string,
+  raw: unknown,
+  roots: string[] | undefined,
+  cwd: string,
+  approvedOutside?: ReadonlySet<string>,
+): { ok: true; abs: string; raw: string } | { ok: false; summary: string } {
+  const rawPath = typeof raw === "string" ? raw : "";
+  if (!rawPath || rawPath.startsWith("-")) {
+    return { ok: false, summary: `${tool}: refusing invalid path: ${rawPath}` };
+  }
+  const abs = isAbsolute(rawPath) ? rawPath : resolve(cwd, rawPath);
+  if (roots && roots.length > 0 && !isPathAllowed(abs, roots) && !approvedOutside?.has(abs)) {
+    return {
+      ok: false,
+      summary: `${tool}: path outside the working set (not approved): ${rawPath}`,
+    };
+  }
+  return { ok: true, abs, raw: rawPath };
+}
+
 /** Restore a kept pre-image (revertLastEdit). Returns true on success. */
 export function revertEdit(record: EditRecord): boolean {
   try {
@@ -1422,94 +2415,93 @@ export function restoreCheckpoint(
 /** The URL-fetch seam (default = engine-bridge safeFetch); injected in tests. CLI-011. */
 export type FetchImpl = (url: string, opts: SafeFetchOptions) => Promise<SafeFetchResult>;
 
-const WEB_FETCH_MAX_BYTES = 200 * 1024; // ~200 KiB
-const WEB_FETCH_TIMEOUT_SEC = 20;
-
-/** Cap a string to `maxBytes` UTF-8 bytes on a codepoint boundary (no  tail). */
-function capUtf8(s: string, maxBytes: number): { text: string; truncated: boolean } {
-  if (Buffer.byteLength(s, "utf8") <= maxBytes) return { text: s, truncated: false };
-  const sliced = Buffer.from(s, "utf8").subarray(0, maxBytes);
-  let text = new TextDecoder("utf-8", { fatal: false }).decode(sliced);
-  if (text.endsWith("�")) text = text.slice(0, -1); // drop a half-cut codepoint
-  return { text, truncated: true };
-}
-
-/**
- * Dispatch `web_fetch` through the fail-closed safeFetch L6 proxy (CLI-011). NEVER
- * touches global fetch. Fail-closed: a throw, a blocked/`verdict:"block"` result, or a
- * data-less envelope → refusal with NO content. `warn` returns content WITH the warning
- * riding along. Content is framed as UNTRUSTED DATA to blunt prompt injection (C5 —
- * the verdict is rendered verbatim, never re-scored in TS).
- */
-async function fetchWebLocally(
-  args: Record<string, unknown>,
-  fetchImpl: FetchImpl,
-): Promise<ToolOutcome> {
-  const url = typeof args.url === "string" ? args.url.trim() : "";
-  if (!url) return { ok: false, summary: "web_fetch: no url given" };
-  let res: SafeFetchResult;
-  try {
-    res = await fetchImpl(url, {
-      maxBytes: WEB_FETCH_MAX_BYTES,
-      timeoutSec: WEB_FETCH_TIMEOUT_SEC,
-    });
-  } catch (err) {
-    // a wedged/throwing sidecar spawn fails closed — the turn continues.
-    return { ok: false, summary: `web_fetch blocked (fail-closed): ${errMsg(err)}` };
-  }
-  // fail-closed order: blocked OR verdict=block OR missing/unparseable data → refuse.
-  if (!res || res.blocked === true || res.verdict === "block" || typeof res.data !== "string") {
-    const reason = (res && (res.reason ?? res.error)) || "blocked (fail-closed)";
-    return {
-      ok: false,
-      summary: `web_fetch blocked: ${reason}`,
-      verdict: { verdict: "block" },
-    };
-  }
-  const { text, truncated } = capUtf8(res.data, WEB_FETCH_MAX_BYTES);
-  const note = truncated ? `\n[truncated at ${WEB_FETCH_MAX_BYTES} bytes]` : "";
-  // `warn` is NOT a block — return content but surface the warning to the model.
-  const warn =
-    res.verdict === "warn" ? `\n[warning: ${res.reason ?? "flagged as suspicious"}]` : "";
-  // The redirect target is attacker-controlled (a hostile server sets Location); strip the chars
-  // that could break OUT of the `source="…"` frame (`" < > \r \n`), else the untrusted web data
-  // could inject a forged `<<trusted>>`-style delimiter into the model's view. URLs never need them.
-  const src = (res.final_url || url).replace(/[<>"\r\n]/g, "");
-  const framed = `<<untrusted-web-data source="${src}">>\n${text}${note}\n<<end untrusted-web-data>>${warn}`;
-  return {
-    ok: true,
-    summary: framed,
-    data: {
-      url,
-      final_url: res.final_url,
-      verdict: res.verdict,
-      provenance: res.provenance,
-      datamark: true,
-    },
-    ...(res.verdict === "warn" ? { verdict: { verdict: "warn" as const } } : {}),
-  };
-}
-
+/** Stringify a thrown value for a tool summary. */
 function errMsg(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
-/** Tools whose only authorization is the confirm prompt itself → the prompt MUST name the target. */
-const PATH_CONFIRM_TOOLS = new Set(["write_file", "propose_edit"]);
+/**
+ * How to DESCRIBE one consequential tool call to the human who must approve it.
+ *
+ * A table rather than a chain of per-tool branches, and rather than the previous
+ * `PATH_CONFIRM_TOOLS` set which covered `write_file` and `propose_edit` and nothing else.
+ * Everything not listed here fell through to the literal string `run tool <name>?` — so the
+ * human approving `run_command` was shown the WORDS "run tool run_command?" and never the
+ * command line, which is the one thing that decides whether approving is safe. `rm -rf ~` and
+ * `ls` presented identically. `delete_file`, `move_file` and `apply_patch` were the same:
+ * approved by name, with no path, no destination and no file list.
+ *
+ * Each entry returns the prompt BODY; the caller adds the working-set warning and the "?".
+ * `paths` names the absolute paths the call touches, so the escape check covers every tool
+ * rather than only the two that used to be listed.
+ */
+const CONFIRM_DESCRIBERS: Record<
+  string,
+  (args: Record<string, unknown>, abs: (p: string) => string) => { body: string; paths: string[] }
+> = {
+  write_file: (a, abs) => {
+    const p = abs(String(a.path ?? ""));
+    return { body: `write file ${p}`, paths: [p] };
+  },
+  propose_edit: (a, abs) => {
+    const p = abs(String(a.path ?? ""));
+    return { body: `edit file ${p}`, paths: [p] };
+  },
+  run_command: (a) => {
+    const cmd = String(a.command ?? "").trim();
+    const where = typeof a.cwd === "string" && a.cwd ? ` (in ${a.cwd})` : "";
+    const bg = a.mode === "background" ? " in the BACKGROUND" : "";
+    // The command line itself, verbatim and untruncated. A shortened command line is a
+    // command line the human did not actually read.
+    return { body: `run${bg}${where}: ${cmd}`, paths: [] };
+  },
+  delete_file: (a, abs) => {
+    const p = abs(String(a.path ?? ""));
+    // A recursive delete is the one file operation with no undo — say so where it is decided.
+    return {
+      body: a.recursive
+        ? `DELETE the directory ${p} and everything inside it (cannot be undone)`
+        : `delete file ${p}`,
+      paths: [p],
+    };
+  },
+  move_file: (a, abs) => {
+    const from = abs(String(a.from ?? ""));
+    const to = abs(String(a.to ?? ""));
+    const clobber = a.overwrite ? ", REPLACING the destination" : "";
+    return { body: `move ${from} → ${to}${clobber}`, paths: [from, to] };
+  },
+  apply_patch: (a, abs) => {
+    const edits = Array.isArray(a.edits) ? a.edits : [];
+    const paths = edits
+      .map((e) => (e && typeof e === "object" ? String((e as { path?: unknown }).path ?? "") : ""))
+      .filter(Boolean)
+      .map(abs);
+    const list = paths.length > 0 ? `:\n  ${paths.join("\n  ")}` : "";
+    return { body: `apply a patch to ${paths.length} file(s)${list}`, paths };
+  },
+};
 
 /**
- * The human-facing confirm prompt for ONE tool call (the plain-host seam). For a file writer it
- * resolves and shows the EXACT absolute path, and flags a target that escapes the working set —
- * "run tool write_file?" is uninformed consent for the one call that can create/overwrite any
- * file. PURE (path resolution + an isPathAllowed scope test); every other tool keeps the terse form.
+ * The human-facing confirm prompt for ONE tool call (the plain-host seam).
+ *
+ * Consent is only consent if it is informed: the prompt names the exact command, the exact
+ * absolute paths, and whether any of them escape the working set. PURE — path resolution and
+ * an `isPathAllowed` scope test; a tool with nothing consequential to say keeps the terse form.
  */
 export function confirmPrompt(call: ToolCall, cwd: string, roots?: string[]): string {
-  const raw = typeof call.args?.path === "string" ? call.args.path : "";
-  if (!PATH_CONFIRM_TOOLS.has(call.name) || !raw) return `run tool ${call.name}?`;
-  const abs = isAbsolute(raw) ? raw : resolve(cwd, raw);
-  const verb = call.name === "write_file" ? "write file" : "edit file";
-  const outside = roots && roots.length > 0 && !isPathAllowed(abs, roots);
-  return outside ? `${verb} OUTSIDE the working set: ${abs}?` : `${verb} ${abs}?`;
+  const describe = CONFIRM_DESCRIBERS[call.name];
+  if (!describe) return `run tool ${call.name}?`;
+  const abs = (p: string): string => (p && isAbsolute(p) ? p : p ? resolve(cwd, p) : p);
+  const { body, paths } = describe(call.args ?? {}, abs);
+  // A describer with nothing to describe (a malformed call) must not produce a prompt that
+  // reads as though it named a target.
+  if (!body.trim() || /(?::|\s)$/.test(body)) return `run tool ${call.name}?`;
+  const escapes = roots && roots.length > 0 && paths.some((p) => p && !isPathAllowed(p, roots));
+  // The warning LEADS. It used to be spliced mid-sentence ("write file OUTSIDE the working
+  // set: /x?"), which reads as part of the description rather than as an alarm, and which
+  // has no sensible position at all for a tool with two paths like `move_file`.
+  return escapes ? `OUTSIDE the working set — ${body}?` : `${body}?`;
 }
 
 export function makeToolRunner(
@@ -1523,14 +2515,114 @@ export function makeToolRunner(
     /** absolute paths a confirm seam approved for an OUT-OF-working-set `write_file` this turn
      *  (populated by runMessageTurn's confirm wrapper). Unset ⇒ out-of-scope writes are refused. */
     approvedWrites?: ReadonlySet<string>;
+    /** test seam: replace the shell-free capture the Tier-R tools probe the machine with. */
+    execImpl?: SystemToolDeps["exec"];
+    /** test seam: replace the pipeline spawn `run_command` uses. */
+    spawnImpl?: SystemToolDeps["spawnImpl"];
+    /** test seam: replace the nemesis scan `run_command` gates on. */
+    gateImpl?: SystemToolDeps["gateImpl"];
+    /** the gate posture (`enforce` | `warn` | `off`) — mirrors tuning.gateMode. */
+    gateMode?: SystemToolDeps["gateMode"];
+    /** PROMETHEUS_HOME, for the exec audit line. */
+    home?: string;
+    /**
+     * Dispatch an `mcp__<server>__<tool>` call to a connected MCP server.
+     *
+     * Injected rather than imported so this module never pulls the MCP transports (and the
+     * SDK behind them) into the CLI's dependency graph. The host owns the manager; this only
+     * needs "run that tool, give me text back".
+     */
+    /** run a delegated sub-agent turn. Absent ⇒ `spawn_agent` reports itself unavailable. */
+    spawnSubagent?: (args: Record<string, unknown>) => Promise<ToolOutcome>;
+    /** ask the human a free-text question. Absent ⇒ `question` refuses honestly. */
+    askUser?: (args: Record<string, unknown>) => Promise<ToolOutcome>;
+    /** which search provider `web_search` uses; absent ⇒ the keyless default. */
+    searchProvider?: string;
+    /** the session's task list (todowrite/todoread). Absent ⇒ those tools report unavailable. */
+    todos?: TodoStore;
+    /** fired after a write so the host can render the list as a status line. */
+    onTodos?: (items: readonly agent.TodoItem[]) => void;
+    callMcpTool?: (
+      serverId: string,
+      tool: string,
+      args: Record<string, unknown>,
+    ) => Promise<{ ok: boolean; summary: string; data?: unknown }>;
+    /** the authorization level in force, recorded in the audit. */
+    authLevel?: number;
+    /** live output sink for `run_command` mode:"stream" — the host's terminal writer. */
+    onProgress?: SystemToolDeps["onProgress"];
   } = {},
 ): ToolRunner {
   const roots = opts.roots;
   return async (tool: ToolDef, args: Record<string, unknown>): Promise<ToolOutcome> => {
+    // Tier R (full_wrapper_compose Phase 1): the read-only view of the machine — files, git,
+    // hardware. Dispatched HERE, never through the engine (their `toArgv` throws). They are
+    // `readOnlyHint`, so `classifyAuth` puts them in the `read` category and A1 auto-approves
+    // them: reading `git diff` is not a riskier act than reading a file, which A1 already
+    // allows. Returns null for anything that is not a system tool, so the chain falls through.
+    {
+      const sys = await runSystemTool(tool.name, args, {
+        cwd: opts.cwd ?? process.cwd?.() ?? ".",
+        // The SAME allowlist the confirm seam parsed with. If these two disagreed, a command
+        // could be approved in one form and executed in another — the exact substitution the
+        // parser exists to prevent, reintroduced by the host.
+        vars: execVarsFromEnv(),
+        // Phase 3: the runner is the LAST gate before a spawn, so it scans too. The confirm
+        // seam has usually latched the verdict already, making this a cache hit rather than
+        // a second subprocess — but a host that skipped the confirm still cannot reach a
+        // spawn unscanned.
+        ...(opts.gateMode ? { gateMode: opts.gateMode } : {}),
+        ...(opts.home ? { home: opts.home } : {}),
+        ...(opts.authLevel !== undefined ? { authLevel: opts.authLevel } : {}),
+        ...(roots && roots.length > 0 ? { roots } : {}),
+        ...(opts.onProgress ? { onProgress: opts.onProgress } : {}),
+        ...(opts.execImpl ? { exec: opts.execImpl } : {}),
+        ...(opts.spawnImpl ? { spawnImpl: opts.spawnImpl } : {}),
+        ...(opts.gateImpl ? { gateImpl: opts.gateImpl } : {}),
+        ...(opts.approvedWrites ? { approvedOutside: opts.approvedWrites } : {}),
+        /**
+         * Tier-W pre-image capture rides the SAME dispatch.
+         *
+         * The mutators moved into core so the desktop could reach them, which means this call
+         * now answers `delete_file` before any host-local arm below could — so the capture has
+         * to happen here or `/revert` silently stops working for deletes. Found by the test
+         * that pins exactly that.
+         */
+        onPreImage: (rec) => {
+          if (opts.editHistory) opts.editHistory.push(rec);
+          if (opts.checkpoint) captureIntoCheckpoint(opts.checkpoint, rec.path, rec.preImage);
+        },
+      });
+      if (sys) return sys;
+    }
     // web_fetch (CLI-011): the ONLY network path — the fail-closed safeFetch L6 proxy,
     // never global fetch. Reaches here only AFTER human confirm (openWorldHint).
-    if (tool.name === "web_fetch") {
-      return fetchWebLocally(args, opts.fetchImpl ?? safeFetch);
+    // spawn_agent: re-enter the SAME loop with a child thread, a narrower policy and a
+    // budget. Guarded in the runner (not the loop) because the loop deliberately holds no
+    // state — which is exactly why an unguarded spawn would recurse forever.
+    if (tool.name === "spawn_agent") {
+      if (!opts.spawnSubagent) {
+        return { ok: false, summary: "spawn_agent is not available in this session" };
+      }
+      return opts.spawnSubagent(args);
+    }
+    // `question`: the one tool whose whole job is to stop and ask. Dispatched here rather than
+    // through the confirm seam because confirm answers yes/no about a CALL — a question needs
+    // free text back, and overloading the rejection `reason` for it would make a refusal and an
+    // answer indistinguishable.
+    if (tool.name === "question") {
+      if (!opts.askUser) return { ok: false, summary: agent.NO_ASKER_MESSAGE };
+      return opts.askUser(args);
+    }
+    // web_search / web_fetch (CLI-011): the ONLY network path — the fail-closed safeFetch L6
+    // proxy, never global fetch. Implemented in CORE so the desktop gets them too; this passes
+    // the real proxy and the process env the keyed providers resolve from.
+    {
+      const web = runWebTool(tool.name, args, (opts.fetchImpl ?? safeFetch) as never, {
+        ...(opts.searchProvider ? { providerId: opts.searchProvider } : {}),
+        env: process.env,
+      });
+      if (web) return web;
     }
     // propose_edit (CLI-010) is applied LOCALLY, not via the engine — path-guarded,
     // atomic, pre-image kept for revert. Reaches here only AFTER human confirm.
@@ -1558,6 +2650,63 @@ export function makeToolRunner(
       }
       return outcome;
     }
+    // apply_patch: N files, all-or-nothing. Every hunk in every file is resolved against the
+    // CURRENT bytes before a single byte is written, so a half-migrated tree is impossible.
+    if (tool.name === "apply_patch") {
+      const { outcome, records } = applyMultiFilePatch(
+        args,
+        roots,
+        opts.cwd ?? process.cwd?.() ?? ".",
+        opts.approvedWrites,
+      );
+      for (const record of records) {
+        if (opts.editHistory) opts.editHistory.push(record);
+        // Every pre-image goes into the SAME turn checkpoint, so one /revert undoes the whole
+        // patch rather than leaving the user to undo it file by file.
+        if (opts.checkpoint) captureIntoCheckpoint(opts.checkpoint, record.path, record.preImage);
+      }
+      return outcome;
+    }
+
+    // The task list: agent memory, never the filesystem. Auto-approved (readOnlyHint) because
+    // there is nothing to approve — requiring a click for the model to write down its own
+    // plan would make the feature unusable.
+    if (opts.todos) {
+      const todo = agent.runTodoTool(tool.name, args, opts.todos);
+      if (todo) {
+        opts.onTodos?.(opts.todos.list());
+        return todo;
+      }
+    }
+
+    // An external MCP server's tool. Routed on the NAME PREFIX alone, which is the other
+    // half of why the names are namespaced: a server cannot publish a `write_file` that
+    // reaches this arm, and this arm cannot accidentally swallow a built-in.
+    const mcpRef = agent.protocol.parseMcpToolName(tool.name);
+    if (mcpRef) {
+      if (!opts.callMcpTool) {
+        return {
+          ok: false,
+          summary: `MCP server "${mcpRef.serverId}" is not reachable from this session`,
+        };
+      }
+      try {
+        return await opts.callMcpTool(mcpRef.serverId, mcpRef.tool, args);
+      } catch (err) {
+        // A server that is down, blocked, or refused the call is a tool_result the model can
+        // re-plan on — never a crashed turn.
+        const detail = err instanceof Error ? err.message : String(err);
+        return { ok: false, summary: `${tool.name} failed: ${detail}` };
+      }
+    }
+
+    // Tier W (delete / move / mkdir): applied LOCALLY like propose_edit and write_file, with
+    // the same working-set guard and the same pre-image capture, so a deleted file lands in
+    // the checkpoint and `/revert` can bring it back. Reaches here only AFTER human confirm
+    // (delete_file and move_file are destructiveHint ⇒ the broker always asks).
+    // NOTE: delete_file / move_file / mkdir are dispatched ABOVE, by core's `runSystemTool`.
+    // They used to have host-local arms here; once the implementation moved into core those
+    // arms became unreachable, and the pre-image capture moved up with the dispatch.
     // fail-closed read scope (CLI-004): when a working set is configured, any path
     // argument outside [cwd, ...added dirs] is denied BEFORE it reaches the engine.
     // (Only PATH SCOPE widens — nemesis gating for exec-flavored tools is untouched;
@@ -1569,23 +2718,21 @@ export function makeToolRunner(
         }
       }
     }
-    const argv = tool.toArgv(args);
-    try {
-      const env = (await client.runPrometheus(argv)) as unknown as Record<string, unknown>;
-      const verdict = verdictFromEnvelope(env);
-      return {
-        ok: env.ok !== false,
-        summary: summarizeEnvelope(tool.name, env),
-        data: env,
-        ...(verdict ? { verdict } : {}),
-      };
-    } catch (err) {
-      // engine/transport failure → fail-closed outcome (never throws into the loop).
-      return {
-        ok: false,
-        summary: err instanceof Error ? err.message : String(err),
-      };
-    }
+    // The engine verbs, through core's shared runner — the same one the desktop pane reaches
+    // over IPC, so the envelope's nemesis verdict is lifted in exactly one place. It also
+    // VALIDATES the args first, which this call site did not: `toArgv(args)` skipped the
+    // schema, so `prometheus_install`'s `dryRun: true` default never applied and an agent
+    // asking to install something got a real install where the schema promised a rehearsal.
+    const engine = runEngineVerb(
+      tool.name,
+      args,
+      (argv: string[]) => client.runPrometheus(argv) as unknown as Promise<Record<string, unknown>>,
+      // The CLI holds the ToolDef the loop dispatched, so a host-declared engine tool outside
+      // the shipped catalogue still runs here — this is the terminal arm, as it always was.
+      { tool },
+    );
+    if (engine) return engine;
+    return { ok: false, summary: `tool "${tool.name}" has no implementation on this host` };
   };
 }
 
@@ -1933,6 +3080,25 @@ export async function runMessageTurn(
     // ctx.endpoint is defined here (the offline branch above returned otherwise).
     makeLlmClient(ctx.endpoint as AiEndpoint, {
       ...(ctx.policy ? { policy: ctx.policy } : {}),
+      // The loaded personas travel to the client because that is where the tool list is
+      // rendered — `spawn_agent`'s description has to name them before it is serialized.
+      ...(ctx.agentFiles && ctx.agentFiles.length > 0 ? { personas: ctx.agentFiles } : {}),
+      // Without this a CLOUD endpoint's key never reaches the request — the transport
+      // resolves the ref, but nothing ever handed it a resolver.
+      ...(ctx.resolveKey ? { resolveKey: ctx.resolveKey } : {}),
+      /**
+       * Carry the endpoint's LEARNED tool capability across turns.
+       *
+       * A fresh `makeLlmClient` is built for every user message, and the capability state it
+       * accumulates — "this endpoint answered a tools request with prose twice, stop offering
+       * native tools" — lives inside that client. So it was discarded the moment the turn
+       * ended, and `negotiateTransport`'s two-observation threshold could never be reached:
+       * a model that cannot function-call was re-probed natively on every single message,
+       * wasting the first round of each one, forever. Both `capability` and `onCapability`
+       * are optional, which is why nothing ever noticed.
+       */
+      ...(ctx.capability ? { capability: ctx.capability() } : {}),
+      ...(ctx.onCapability ? { onCapability: ctx.onCapability } : {}),
       ...(deps.signal ? { signal: deps.signal } : {}),
       ...(ctx.accounting
         ? {
@@ -1950,13 +3116,121 @@ export async function runMessageTurn(
   // auto-approvable in the broker), so recording on approval is complete; applyWriteFile refuses
   // any out-of-scope target that isn't in here.
   const approvedWrites = new Set<string>();
-  const runTool =
+  // One budget per USER TURN, shared by the whole delegation tree. Per-parent counting would
+  // let ten sequential spawns each start fresh, which is the same runaway with extra steps.
+  const spawnBudget = agent.initialBudget(ctx.subagentBudget ?? {});
+  // One asking budget per USER TURN, for the same reason: a per-call cap is not a cap, because
+  // the loop just makes another call. Three funds a genuine multi-part ambiguity and does not
+  // fund holding a conversation instead of working.
+  const questionBudget = agent.initialQuestionBudget();
+  /**
+   * Ask the human a question and hand the answer back to the model.
+   *
+   * The budget refusal is phrased as an INSTRUCTION ("choose the most reasonable
+   * interpretation, say which one, continue") rather than a bare denial: a model told only
+   * "no" tends to ask again in different words, which spends the rest of the turn.
+   */
+  const askUser = async (args: Record<string, unknown>): Promise<ToolOutcome> => {
+    const decision = agent.canAsk(questionBudget);
+    if (!decision.allowed) return { ok: false, summary: decision.reason };
+    const prompt = agent.renderQuestion(args);
+    if (!prompt) return { ok: false, summary: "question: `question` is required" };
+    if (!ctx.ask) return { ok: false, summary: agent.NO_ASKER_MESSAGE };
+    questionBudget.asked += 1;
+    ctx.write(`  ? ${prompt}`);
+    try {
+      const answer = await ctx.ask(prompt);
+      return { ok: true, summary: agent.renderAnswer(answer) };
+    } catch (err) {
+      // A closed stdin / cancelled prompt is not an answer. Say so and let the model proceed.
+      return { ok: false, summary: `${agent.NO_ASKER_MESSAGE} (${errMsg(err)})` };
+    }
+  };
+  /**
+   * Run a delegated sub-agent.
+   *
+   * Declared here so the child re-enters the SAME `runAgentTurn` with the SAME runner and the
+   * SAME confirm — its tools are gated exactly as the parent's are. Delegation must not become
+   * a way to reach a tool the parent was denied.
+   */
+  const spawnSubagent = async (args: Record<string, unknown>): Promise<ToolOutcome> => {
+    const decision = agent.canSpawn(spawnBudget);
+    if (!decision.allowed) return { ok: false, summary: decision.reason };
+    const task = typeof args.task === "string" ? args.task.trim() : "";
+    if (!task) return { ok: false, summary: "spawn_agent: `task` is required" };
+    /**
+     * The role may be a BUILT-IN name or a loaded persona.
+     *
+     * Resolved here rather than through the tool's JSON-Schema enum, deliberately: that enum is
+     * advisory (nothing on this path validates against it), `SUBAGENT_ROLES` is frozen so a new
+     * role cannot be registered into it, and mutating `SPAWN_AGENT_TOOL.schema` in place would
+     * leak across every session in the process. `isSubagentRole` is the real gate and stays so.
+     */
+    const requested = typeof args.role === "string" ? args.role : "";
+    const persona = agent.isSubagentRole(requested)
+      ? undefined
+      : (ctx.agentFiles ?? []).find((a) => a.name === requested);
+    const role = agent.isSubagentRole(requested) ? requested : (persona?.base ?? "explore");
+    spawnBudget.spawned += 1;
+    const exposed = agent.exposedTools(ctx.tuning.tools);
+    const base = agent.childTuning(
+      ctx.tuning,
+      role,
+      task,
+      exposed,
+      typeof args.maxRounds === "number" ? args.maxRounds : undefined,
+    );
+    // A persona layers on top of the child tuning the ROLE already produced — it can add denies
+    // and add prompt text, and it cannot undo either. `childTuning` has already applied the
+    // parent's deny list, the read-only narrowing and the `yes` rule before this runs.
+    const childTune = persona
+      ? {
+          ...base,
+          systemPrompt: agent.personaSystemPrompt(persona, task),
+          tools: {
+            ...base.tools,
+            deny: [...new Set([...base.tools.deny, ...agent.personaDeny(persona, exposed)])],
+          },
+        }
+      : base;
+    const label = persona ? `${persona.name} (${persona.scope})` : role;
+    ctx.write(`  ⤷ ${label} sub-agent: ${task.slice(0, 80)}${task.length > 80 ? "…" : ""}`);
+    try {
+      const out = await agent.runSubagent(
+        (thread, tuning, d) => runAgentTurn(thread, tuning, d),
+        childTune,
+        task,
+        { llm, runTool, confirm },
+      );
+      ctx.write(`  ⤶ sub-agent done (${out.toolCalls} tool call${out.toolCalls === 1 ? "" : "s"})`);
+      // ONLY the final text crosses back. Forwarding the child's transcript would defeat the
+      // entire reason for delegating: keeping its intermediate work out of the parent.
+      return { ok: out.ok, summary: out.text };
+    } catch (err) {
+      return { ok: false, summary: `sub-agent failed: ${errMsg(err)}` };
+    }
+  };
+  const runTool: ToolRunner =
     deps.runTool ??
     makeToolRunner(ctx.client, {
+      spawnSubagent,
+      askUser,
       approvedWrites,
+      // Phase 3: the gate posture + the audit destination travel with the runner, so a
+      // `run_command` is scanned and recorded under the SAME tuning the rest of the turn
+      // uses rather than a default of its own.
+      gateMode: ctx.tuning.gateMode,
+      // `mode:"stream"` writes here as output arrives. The agent loop cannot carry mid-flight
+      // output (a ToolRunner resolves once), so the host's own sink is the only live channel.
+      onProgress: makeStreamSink((line) => ctx.write(`  ⎿ ${line}`)),
+      ...(ctx.home ? { home: ctx.home } : {}),
+      ...(ctx.authLevel !== undefined ? { authLevel: ctx.authLevel } : {}),
       ...(ctx.workingSet ? { roots: ctx.workingSet } : {}),
       ...(ctx.cwd ? { cwd: ctx.cwd } : {}),
       ...(ctx.editHistory ? { editHistory: ctx.editHistory } : {}),
+      ...(ctx.todos ? { todos: ctx.todos } : {}),
+      ...(ctx.onTodos ? { onTodos: ctx.onTodos } : {}),
+      ...(ctx.callMcpTool ? { callMcpTool: ctx.callMcpTool } : {}),
       ...(ctx.checkpoint
         ? {
             checkpoint: {
@@ -1970,7 +3244,45 @@ export async function runMessageTurn(
         : {}),
     });
   // never-force: confirm DEFAULTS TO DENY — a human must type the confirmation.
-  const rawConfirm = ctx.confirm ?? (() => false);
+  const hostConfirm = ctx.confirm ?? (() => false);
+  // REMEMBERED GRANTS. `ScopedPermissionStore` and the whole pure permission engine existed,
+  // tested, with no production caller — so every destructive call re-prompted forever, in
+  // this session and every session after it. This is the seam that consults them: a grant may
+  // only ever REMOVE a question (a decisive allow), never manufacture an approval the engine
+  // would not have given, and deny always wins. Absent a store the behaviour is unchanged.
+  /**
+   * The engine runs when there are RULES OR grants — it used to require grants.
+   *
+   * `ctx.grants ? … : hostConfirm` meant the headless run, which has no grant store because
+   * nobody is there to remember anything for, could never see a user rule even once rules
+   * existed. That is precisely the surface where a `deny` matters most: unattended, with no
+   * human to catch the call. A rules-only session gets a throwaway store so the one seam still
+   * applies; nothing is ever written to it.
+   */
+  const permissionRules = ctx.permissionRules ?? [];
+  /**
+   * The permission ENGINE always runs — it used to be skipped whenever a surface had no
+   * remembered-grant store.
+   *
+   * `withRememberedGrants` is the only production caller of `evaluatePermission`, and that is
+   * where the engine's SAFE DEFAULTS live: the `.env` hard deny, the external-directory ask,
+   * and the user's remembered denies. Gating it on `ctx.grants` meant the headless run — which
+   * has no grant store because nobody is there to remember an answer for — skipped all of
+   * them. The consequence was not theoretical: `guardSecretPath` is applied on the READ side
+   * only, never in `applyWriteFile`, so `prometheus -p "…" --allow-writes` would auto-approve
+   * `write_file {path:".env"}` and overwrite the user's credentials, while both interactive
+   * hosts refuse it before a human is even asked.
+   *
+   * An empty store changes nothing for a surface that has one; it simply means the engine is
+   * never absent. Nothing is ever written to a throwaway store.
+   */
+  const grantStore = ctx.grants ?? new agent.ScopedPermissionStore();
+  const rawConfirm = withRememberedGrants(hostConfirm, grantStore, {
+    workspaceRoot: ctx.cwd ?? process.cwd?.() ?? ".",
+    ...(permissionRules.length > 0 ? { baseRules: permissionRules } : {}),
+    ...(ctx.onRemember ? { onRemember: ctx.onRemember } : {}),
+    ...(ctx.onAutoApprove ? { onAutoApprove: ctx.onAutoApprove } : {}),
+  });
   // …wrapped so an APPROVED write_file records its resolved absolute path: that approval is what
   // authorizes a target outside the working set (see applyWriteFile). Approval-only — a decline
   // records nothing, and the path is resolved exactly as the applier resolves it.
@@ -1990,6 +3302,12 @@ export async function runMessageTurn(
   // CLI-061: inject assembled AGENTS.md/CLAUDE.md/PROMETHEUS.md steering as a system block; the
   // getter re-reads after `/memory edit`→reload so edited steering affects the NEXT turn (no restart).
   const steeringBlock = ctx.steering?.();
+  // Durable cross-session memory (`memory_write`): the index only, re-read every turn so a
+  // write earlier in this same session is visible on the next one without a restart.
+  const memoryBlock = ctx.memory?.();
+  // SessionStart hooks: whatever the user's session-open scripts printed, folded in as a system
+  // block on the SAME channel as steering/memory (captured once at session start; replayed here).
+  const sessionStartBlock = ctx.sessionStartHooks?.();
   // CLI-072 resume: continue the SAME non-system thread (its tail already ends on the last
   // round's tool results — a valid user-terminal state) with NO new user message. Otherwise the
   // normal path: prior history + this user message. System context is (re)assembled fresh either way.
@@ -2000,6 +3318,8 @@ export async function runMessageTurn(
     messages: [
       { role: "system", content: ctx.tuning.systemPrompt },
       ...(steeringBlock ? [{ role: "system" as const, content: steeringBlock }] : []),
+      ...(memoryBlock ? [{ role: "system" as const, content: memoryBlock }] : []),
+      ...(sessionStartBlock ? [{ role: "system" as const, content: sessionStartBlock }] : []),
       ...(repoMapBlock ? [{ role: "system" as const, content: repoMapBlock }] : []),
       // CLI-088: token-economy system blocks (terse-output → the terse directive), when enabled.
       ...tokenSystemBlocks(ctx.tokenToggles).map((b) => ({ role: "system" as const, content: b })),

@@ -15,15 +15,43 @@ import { type KeyboardEvent, type RefObject, useEffect } from "react";
 const FOCUSABLE =
   'a[href],button:not([disabled]),textarea:not([disabled]),input:not([disabled]),select:not([disabled]),[tabindex]:not([tabindex="-1"])';
 
+/** Options for `useFocusTrap`. */
+export interface FocusTrapOptions {
+  /**
+   * Let a focused INPUT/TEXTAREA inside the trap own Tab instead of the trap.
+   *
+   * The command palettes use Tab INSIDE their query field (tab-cycling completions), so
+   * for them the trap stealing Tab is the bug. For a modal DIALOG the opposite is true —
+   * Tab must not walk out of it — which is why this is opt-in and defaults to off.
+   */
+  deferTabToTextFields?: boolean;
+  /**
+   * Skip moving focus into the container on activate. For a surface that focuses a
+   * specific element itself (not merely the first in DOM order).
+   */
+  skipInitialFocus?: boolean;
+}
+
 /**
  * Trap Tab focus inside `containerRef` while `active`, and call `onClose` on Escape.
  * Restores focus to the previously-focused element on unmount/deactivate (08 §7).
+ *
+ * This is the ONE focus trap. `renderer/shell/a11y.ts` used to carry a second, subtly
+ * different one — node-level listener, no Escape, no initial focus — so whether Escape
+ * closed a surface depended on which trap its author happened to import. The two were
+ * merged here: this keeps the document-capture listener, Escape, initial focus and focus
+ * restore, and gained a11y.ts's two genuinely better behaviours — the visibility filter
+ * (never hand focus to a display:none control) and the `contains` guard on restore (never
+ * focus a node that has since been unmounted). a11y.ts's INPUT/TEXTAREA Tab deferral
+ * survives as `deferTabToTextFields`, opt-in rather than universal.
  */
 export function useFocusTrap(
   containerRef: RefObject<HTMLElement | null>,
   active: boolean,
   onClose: () => void,
+  options: FocusTrapOptions = {},
 ): void {
+  const { deferTabToTextFields = false, skipInitialFocus = false } = options;
   useEffect(() => {
     if (!active) return;
     const container = containerRef.current;
@@ -31,9 +59,18 @@ export function useFocusTrap(
     if (!container || !doc) return;
 
     const previouslyFocused = doc.activeElement as HTMLElement | null;
+    /**
+     * Focusables that are actually REACHABLE. `offsetParent === null` means the element
+     * is display:none (or in a display:none subtree) — a collapsed section's buttons still
+     * match the selector, and focusing one silently moves focus nowhere.
+     */
+    const reachable = (): HTMLElement[] =>
+      Array.from(container.querySelectorAll<HTMLElement>(FOCUSABLE)).filter(
+        (el) => el.offsetParent !== null || el === doc.activeElement,
+      );
+
     // Move focus into the dialog (first focusable, else the container itself).
-    const focusables = Array.from(container.querySelectorAll<HTMLElement>(FOCUSABLE));
-    (focusables[0] ?? container).focus?.();
+    if (!skipInitialFocus) (reachable()[0] ?? container).focus?.();
 
     function onKeyDown(e: globalThis.KeyboardEvent): void {
       if (e.key === "Escape") {
@@ -42,14 +79,19 @@ export function useFocusTrap(
         return;
       }
       if (e.key !== "Tab") return;
-      const items = Array.from(container!.querySelectorAll<HTMLElement>(FOCUSABLE));
+      const activeEl = doc!.activeElement;
+      if (deferTabToTextFields) {
+        // let a focused text field own Tab (e.g. the palette's tab-cycling input).
+        const tag = activeEl?.tagName;
+        if ((tag === "INPUT" || tag === "TEXTAREA") && container!.contains(activeEl)) return;
+      }
+      const items = reachable();
       if (items.length === 0) {
         e.preventDefault();
         return;
       }
       const first = items[0]!;
       const last = items[items.length - 1]!;
-      const activeEl = doc!.activeElement;
       if (e.shiftKey && activeEl === first) {
         e.preventDefault();
         last.focus();
@@ -62,9 +104,46 @@ export function useFocusTrap(
     doc.addEventListener("keydown", onKeyDown, true);
     return () => {
       doc.removeEventListener("keydown", onKeyDown, true);
-      previouslyFocused?.focus?.();
+      // Only if it is still IN the document — restoring focus to a node that unmounted
+      // while the overlay was open throws focus to <body> and loses the user's place.
+      if (previouslyFocused && doc.contains(previouslyFocused)) previouslyFocused.focus?.();
     };
-  }, [active, containerRef, onClose]);
+  }, [active, containerRef, onClose, deferTabToTextFields, skipInitialFocus]);
+}
+
+/**
+ * Keep a floating layer inside the viewport (08 §3.1).
+ *
+ * Four hand-rolled copies of this maths existed — with three different SSR fallbacks
+ * (none, `1024×768`, `9999`), three different paddings (`4`, `8`, none) and two of them
+ * missing the lower bound entirely, so a right-click near the top-left could place a menu
+ * at a negative offset and a right-click near the bottom could push a destructive item
+ * (`Delete`, `Reset (hard)`) off-window where it was unreachable. One implementation, one
+ * behaviour.
+ *
+ * `w`/`h` are the layer's EXPECTED size. Nothing here measures the DOM: the clamp has to
+ * run before paint (it decides where to paint), and an estimate that is slightly large
+ * simply keeps the layer a little further from the edge — which is the safe direction.
+ *
+ * Returns integer CSS pixels. Under SSR (no `window`) the input is returned clamped only
+ * by `pad`, since there is no viewport to clamp against.
+ */
+export function clampToViewport(
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+  pad = 8,
+): { x: number; y: number } {
+  const hasWindow = typeof window !== "undefined";
+  const vw = hasWindow ? window.innerWidth : Number.POSITIVE_INFINITY;
+  const vh = hasWindow ? window.innerHeight : Number.POSITIVE_INFINITY;
+  // Math.max LAST so that on a viewport smaller than the layer the top-left edge wins:
+  // a clipped bottom is recoverable (scroll/resize), a negative offset is not.
+  return {
+    x: Math.round(Math.max(pad, Math.min(x, vw - w - pad))),
+    y: Math.round(Math.max(pad, Math.min(y, vh - h - pad))),
+  };
 }
 
 /**

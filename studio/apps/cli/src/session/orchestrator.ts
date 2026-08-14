@@ -9,6 +9,9 @@
  * host announces the decision; the actual pane fan-out is the tmux multiplexer's job.
  */
 
+import { KeyedSemaphore, defaultProviderLimit } from "../orchestration/concurrency.js";
+import { type NotifyDeps, notifyRunSettled } from "./run-notify.js";
+
 /** The default subagent count when orchestrator mode is on (tmux active). */
 export const DEFAULT_SUBAGENTS = 3;
 
@@ -272,4 +275,107 @@ export function startBackgroundRun(
     }
   });
   return { id, done };
+}
+
+/* ── the TRIGGER: what actually puts a run in the table (Task #1 item 3) ────── */
+
+/**
+ * The process-wide per-provider bulkhead for background runs.
+ *
+ * Built here rather than passed in because `runRegistry` is already a module singleton and a
+ * semaphore with a different lifetime than the table it protects is not a bulkhead — two
+ * callers with two semaphores would each get the full limit.
+ */
+const backgroundSemaphore = new KeyedSemaphore(defaultProviderLimit);
+
+/** What a host supplies to run one detached turn. */
+export interface DetachedRunRequest {
+  /** the model label shown in `prometheus agents list`. */
+  model: string;
+  /** the bulkhead key — the provider whose rate limit this run shares. */
+  provider: string;
+  /** the prompt, for the run's opening line. */
+  task: string;
+  /**
+   * Run the turn. `append` is the run's output sink (it feeds `agents attach`), and `signal`
+   * fires when `agents kill` aborts the run.
+   */
+  run: (ctx: BackgroundRunCtx) => Promise<{ ok: boolean; summary?: string }>;
+}
+
+/**
+ * Start ONE detached agent run and register it, so `prometheus agents list/attach/kill` has
+ * something to show.
+ *
+ * WHY THIS EXISTS. `startBackgroundRun`, `RunRegistry` and the whole `agents` command surface
+ * shipped complete and fully unit-tested with ZERO production callers between them — so
+ * `prometheus agents list` was a correct renderer of a table nothing ever wrote to, and it
+ * printed "no background agent runs in this process" unconditionally, forever. This is the
+ * missing seam: the one function a host calls to make a run real.
+ *
+ * NOT awaited by design — that is what "detached" means. The returned `done` promise is for a
+ * caller that wants to wait (a test, or a host draining at exit); the interactive hosts drop
+ * it and let the run outlive the prompt.
+ */
+export function startDetachedRun(req: DetachedRunRequest): { id: string; done: Promise<void> } {
+  const handle = startBackgroundRun(
+    runRegistry,
+    (provider, fn) => backgroundSemaphore.run(provider, fn),
+    { model: req.model, provider: req.provider },
+    async (ctx) => {
+      ctx.append(`▶ ${req.task}`);
+      const out = await req.run(ctx);
+      return out;
+    },
+  );
+  /**
+   * Tell the HUMAN when it finishes.
+   *
+   * Subscribed HERE rather than in the host, so every present and future caller of
+   * `startDetachedRun` gets it — the TUI does not implement `startBackground` today, and a
+   * notification that only worked on the readline host would be the same per-surface drift
+   * plan mode and hooks were both moved out of the hosts to avoid.
+   *
+   * Fires on the SETTLE edge, not on a poll: `RunRegistry.setState` invokes `onSettle` exactly
+   * once, when a run reaches done/failed/killed. `notified` latches on top of that, because
+   * `setState` itself has no idempotency guard — a future second terminal transition would
+   * otherwise post a duplicate notification for the same run.
+   *
+   * `notifyRunSettled` cannot throw (see its header). That matters here specifically: onSettle
+   * callbacks run synchronously in a `for` loop, so a throw would skip every later subscriber,
+   * including `agents attach`'s own finish handler.
+   */
+  let notified = false;
+  const off = runRegistry.onSettle(handle.id, (rec) => {
+    if (notified) return;
+    notified = true;
+    notifyRunSettled(rec, notifyDeps);
+    off();
+  });
+  return handle;
+}
+
+/**
+ * Test seam: override how (and whether) notifications are posted.
+ *
+ * A module-level singleton because `runRegistry` is one and the subscription is made inside
+ * `startDetachedRun`, which takes no deps — threading an extra argument through every host
+ * call site to serve one test is the worse trade.
+ */
+let notifyDeps: NotifyDeps = {};
+export function setRunNotifyDeps(deps: NotifyDeps): void {
+  notifyDeps = deps;
+}
+
+/**
+ * A one-line note for the host to print when a run is launched.
+ *
+ * Names the id, because the id is the ONLY handle the user has for `agents attach <id>` — a
+ * launch message without it makes the rest of the surface undiscoverable.
+ */
+export function detachedRunNote(id: string): string {
+  // `agents list`, NOT `/agents` — the slash command of that name sets the orchestrator's
+  // subagent COUNT and has nothing to do with this table. Naming the wrong one here would
+  // send every user who follows the hint to a surface that cannot show them their run.
+  return `⇥ started background run ${id} — \`agents list\` to track · \`agents attach ${id}\` to follow`;
 }

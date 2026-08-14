@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Francesco Pelizza
 """
 ================================================================================
  prometheus.py  —  Universal AI-agent plugin installer
@@ -13584,6 +13586,19 @@ def _dossier_for(idd: str, entry: object) -> Optional[Path]:
     return hits[0] if hits else None
 
 
+def _no_dossier_message(idd: str) -> str:
+    """The dossier catalog (AI_SKILLS_WONDERLAND/) is the maintainer's own curated content and
+    is not part of this repo — every id will hit this path on a fresh clone. Say THAT, rather
+    than a per-id "not found" that reads like a typo or a missing single file."""
+    if not DOSSIER_DIR.exists():
+        return (
+            f"no tutorial/dossier for '{idd}' — the dossier catalog isn't part of this "
+            "checkout (it's maintained separately), so no id has one here. `describe`, "
+            "`list` and installs all still work without it."
+        )
+    return f"no tutorial/dossier found for '{idd}'."
+
+
 def _entry_field(entry: object, *names: str) -> str:
     for n in names:
         v = entry.get(n) if isinstance(entry, dict) else getattr(entry, n, None)
@@ -13651,8 +13666,8 @@ def cmd_tutorial(args, osi: OSInfo) -> int:
     path = _dossier_for(idd, entry) if entry is not None else _dossier_for(idd, {})
     if not path:
         if JSON_OUT:
-            return emit_json({"command": "tutorial", "ok": False, "error": f"no dossier for '{idd}'", "_exit": 2})
-        Log.err(f"no tutorial/dossier found for '{idd}'."); return 2
+            return emit_json({"command": "tutorial", "ok": False, "error": _no_dossier_message(idd), "_exit": 2})
+        Log.err(_no_dossier_message(idd)); return 2
     text = path.read_text()
     if JSON_OUT:
         return emit_json({"command": "tutorial", "ok": True, "id": idd, "text": text})
@@ -13672,8 +13687,8 @@ def cmd_methods(args, osi: OSInfo) -> int:
     path = _dossier_for(idd, entry) if entry is not None else _dossier_for(idd, {})
     if not path:
         if JSON_OUT:
-            return emit_json({"command": "methods", "ok": False, "error": f"no dossier for '{idd}'", "_exit": 2})
-        Log.err(f"no dossier for '{idd}' — try `describe {idd}`."); return 2
+            return emit_json({"command": "methods", "ok": False, "error": _no_dossier_message(idd), "_exit": 2})
+        Log.err(_no_dossier_message(idd)); return 2
     text = path.read_text()
     # slice the "## Install" section up to the next top-level "## "
     lines = text.splitlines()

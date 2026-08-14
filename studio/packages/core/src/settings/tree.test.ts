@@ -35,6 +35,33 @@ test("findNodeBySchemaKey: locates by persisted key, distinct from id", () => {
   assert.equal(findNodeBySchemaKey("no-such-key"), undefined);
 });
 
+test("findNodeBySchemaKey: 'hooks' resolves to the Lifecycle Hooks node under AI & Agents", () => {
+  const n = findNodeBySchemaKey("hooks");
+  assert.equal(n?.id, "ai-agents.hooks");
+  assert.equal(n?.title, "Lifecycle Hooks");
+  assert.equal(n?.category, "AI & Agents");
+  // structured (array) value ⇒ edited on its own page, not a generic scalar control —
+  // same convention as templates.user / todoPatterns.
+  assert.equal(n?.control, "page");
+});
+
+test("hooks: settings:get/settings:set round-trip through setInLayer/resolveProvenance", () => {
+  const hooks = [{ event: "PreToolUse", matcher: "write_file", command: "./guard.sh" }];
+  // set: a pure layer write, mirroring what the settings:set IPC handler does.
+  const global = setInLayer({}, "hooks", hooks);
+  assert.deepEqual(global.hooks, hooks);
+  // get: resolved through the SAME provenance path settings:get uses.
+  const effective = { hooks };
+  const row = resolveProvenance("hooks", effective, { global });
+  assert.deepEqual(row.value, hooks);
+  assert.equal(row.layer, "global");
+  // reset: falls back to unset once no layer sets the key.
+  const cleared = resetInLayer(global, "hooks");
+  assert.equal("hooks" in cleared, false);
+  const clearedRow = resolveProvenance("hooks", {}, { global: cleared });
+  assert.equal(clearedRow.layer, "unset");
+});
+
 test("nodePath: root-to-node breadcrumb", () => {
   const path = nodePath("editor.font");
   assert.deepEqual(

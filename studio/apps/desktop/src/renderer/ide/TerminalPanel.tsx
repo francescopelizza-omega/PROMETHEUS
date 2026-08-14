@@ -22,6 +22,7 @@ import {
   useState,
 } from "react";
 
+import { Z } from "@prometheus/ui";
 import type { IdeEvent, IdeTerminalEnv, IdeTerminalMenuItem } from "../../shared/ipc-contract.js";
 import { ResizeHandle, useResizable } from "../shell/Resizable.js";
 import { useTheme } from "../shell/ThemeProvider.js";
@@ -190,6 +191,15 @@ export function TerminalPanel({ cwd }: { cwd: string }): ReactElement {
     };
   }, [cwd]);
 
+  /**
+   * handoff §2.4: the terminal island's "✳ Claude Code" tab. Selecting that tab dispatches
+   * `ide:terminal-preset` with a menu-item id; we resolve it through the SAME launcher the
+   * `+ ▾` menu uses, so a missing binary still lands on the install path rather than a
+   * silently dead tab. Fires once per selection — `launchedPresets` keeps a repeat click
+   * from stacking sessions.
+   */
+  const launchedPresets = useRef<Set<string>>(new Set());
+
   /** Resolve a menu item via core (in MAIN) then open the matching session in `paneId`. */
   const launchItem = useCallback(
     async (item: IdeTerminalMenuItem, paneId: string): Promise<void> => {
@@ -224,6 +234,22 @@ export function TerminalPanel({ cwd }: { cwd: string }): ReactElement {
     },
     [cwd, installed, create],
   );
+
+  // handoff §2.4: the "✳ Claude Code" tab. `launchedPresets` makes re-selecting the tab a
+  // no-op instead of stacking a new session each time; the tab itself keeps showing the
+  // same TerminalPanel, so the pty survives tab switches exactly like Terminal does.
+  useEffect(() => {
+    const onPreset = (e: Event): void => {
+      const id = (e as CustomEvent<string>).detail;
+      if (typeof id !== "string" || launchedPresets.current.has(id)) return;
+      const item = menu.find((m) => m.id === id);
+      if (!item) return;
+      launchedPresets.current.add(id);
+      void launchItem(item, layout.focusedPaneId);
+    };
+    window.addEventListener("ide:terminal-preset", onPreset);
+    return () => window.removeEventListener("ide:terminal-preset", onPreset);
+  }, [menu, launchItem, layout.focusedPaneId]);
 
   // Open ONE session on first mount (only when the restored layout is empty).
   useEffect(() => {
@@ -376,9 +402,7 @@ export function TerminalPanel({ cwd }: { cwd: string }): ReactElement {
                   : { height: rz.size, flex: "0 0 auto" }
                 : { flex: 1 }),
               outline:
-                multi && pane.id === layout.focusedPaneId
-                  ? "1px solid var(--accent, #6d5ef0)"
-                  : "none",
+                multi && pane.id === layout.focusedPaneId ? "1px solid var(--accent)" : "none",
               outlineOffset: -1,
             }}
           >
@@ -427,7 +451,7 @@ export function TerminalPanel({ cwd }: { cwd: string }): ReactElement {
                     alignItems: "center",
                     justifyContent: "center",
                     height: "100%",
-                    color: "var(--text-secondary, #9a9aa3)",
+                    color: "var(--text-secondary)",
                     fontSize: "0.8rem",
                   }}
                 >
@@ -520,8 +544,8 @@ function PaneStrip({
         display: "flex",
         alignItems: "stretch",
         gap: 2,
-        borderBottom: "1px solid var(--border-subtle, #232329)",
-        background: "var(--bg-surface, #101015)",
+        borderBottom: "1px solid var(--border-subtle)",
+        background: "var(--bg-surface)",
         // NO overflowX:auto — it coerces overflow-y to clip too, hiding the "+ ▾" launcher
         // menu (position:absolute; top:100%). Wrap tabs to a second line instead so both the
         // tabs AND the dropdown stay fully visible.
@@ -542,9 +566,9 @@ function PaneStrip({
               fontSize: "0.74rem",
               whiteSpace: "nowrap",
               cursor: "pointer",
-              color: isActive ? "var(--text-primary, #e7e7ea)" : "var(--text-secondary, #9a9aa3)",
-              borderTop: `2px solid ${isActive ? "var(--accent, #6d5ef0)" : "transparent"}`,
-              background: isActive ? "var(--bg-inset, #0b0b0e)" : "transparent",
+              color: isActive ? "var(--text-primary)" : "var(--text-secondary)",
+              borderTop: `2px solid ${isActive ? "var(--accent)" : "transparent"}`,
+              background: isActive ? "var(--bg-inset)" : "transparent",
             }}
           >
             {editingId === sess.id ? (
@@ -561,9 +585,9 @@ function PaneStrip({
                 aria-label="rename terminal"
                 style={{
                   width: 90,
-                  background: "var(--bg-surface-2, #16161b)",
-                  color: "var(--text-primary, #e7e7ea)",
-                  border: "1px solid var(--border-subtle, #232329)",
+                  background: "var(--bg-surface-2)",
+                  color: "var(--text-primary)",
+                  border: "1px solid var(--border-subtle)",
                   borderRadius: 3,
                   font: "inherit",
                 }}
@@ -608,7 +632,7 @@ function PaneStrip({
           aria-haspopup="menu"
           aria-expanded={menuOpen}
           onClick={onToggleMenu}
-          style={{ ...tabBtn(), padding: "3px 8px", color: "var(--text-secondary, #9a9aa3)" }}
+          style={{ ...tabBtn(), padding: "3px 8px", color: "var(--text-secondary)" }}
         >
           + ▾
         </button>
@@ -617,7 +641,7 @@ function PaneStrip({
           aria-label="split right"
           title="Split right"
           onClick={onSplitRight}
-          style={{ ...tabBtn(), padding: "3px 4px", color: "var(--text-secondary, #9a9aa3)" }}
+          style={{ ...tabBtn(), padding: "3px 4px", color: "var(--text-secondary)" }}
         >
           ⬌
         </button>
@@ -626,7 +650,7 @@ function PaneStrip({
           aria-label="split down"
           title="Split down"
           onClick={onSplitDown}
-          style={{ ...tabBtn(), padding: "3px 4px", color: "var(--text-secondary, #9a9aa3)" }}
+          style={{ ...tabBtn(), padding: "3px 4px", color: "var(--text-secondary)" }}
         >
           ⬍
         </button>
@@ -636,7 +660,7 @@ function PaneStrip({
             aria-label="close pane"
             title="Close pane"
             onClick={onClosePane}
-            style={{ ...tabBtn(), padding: "3px 4px", color: "var(--text-secondary, #9a9aa3)" }}
+            style={{ ...tabBtn(), padding: "3px 4px", color: "var(--text-secondary)" }}
           >
             ⊗
           </button>
@@ -653,7 +677,7 @@ function PaneStrip({
                 background: "transparent",
                 border: "none",
                 cursor: "default",
-                zIndex: 30,
+                zIndex: Z.raise,
               }}
             />
             <div
@@ -666,12 +690,12 @@ function PaneStrip({
                 right: 0,
                 marginTop: 2,
                 minWidth: 230,
-                background: "var(--bg-surface-2, #16161b)",
-                border: "1px solid var(--border-strong, #313139)",
+                background: "var(--bg-surface-2)",
+                border: "1px solid var(--border-strong)",
                 borderRadius: "var(--radius-md, 6px)",
                 boxShadow: "var(--elevation-e3)",
                 padding: 4,
-                zIndex: 31,
+                zIndex: Z.raise,
                 fontSize: "0.78rem",
               }}
             >
@@ -686,14 +710,14 @@ function PaneStrip({
                     <div
                       style={{
                         height: 1,
-                        background: "var(--border-subtle, #232329)",
+                        background: "var(--border-subtle)",
                         margin: "4px 2px",
                       }}
                     />
                     <div
                       style={{
                         padding: "2px 8px",
-                        color: "var(--text-secondary, #9a9aa3)",
+                        color: "var(--text-secondary)",
                         fontSize: "0.7rem",
                       }}
                     >
@@ -718,11 +742,11 @@ function PaneStrip({
                           <span aria-hidden="true">{glyph}</span> {item.title}
                           {item.kind === "ai-preset" && item.detectBin ? (
                             ok ? (
-                              <span style={{ marginLeft: "auto", color: "var(--ok, #57c78a)" }}>
+                              <span style={{ marginLeft: "auto", color: "var(--ok)" }}>
                                 installed
                               </span>
                             ) : canInstall ? (
-                              <span style={{ marginLeft: "auto", color: "var(--warn, #d9a441)" }}>
+                              <span style={{ marginLeft: "auto", color: "var(--warn)" }}>
                                 install
                               </span>
                             ) : null
@@ -762,7 +786,7 @@ function menuItem(): CSSProperties {
     textAlign: "left",
     background: "transparent",
     border: "none",
-    color: "var(--text-primary, #e7e7ea)",
+    color: "var(--text-primary)",
     cursor: "pointer",
     padding: "4px 8px",
     borderRadius: "var(--radius-sm, 4px)",

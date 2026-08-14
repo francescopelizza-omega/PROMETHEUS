@@ -19,6 +19,7 @@
 import type { ActivityId } from "@prometheus/ui";
 
 import { requestDocsTab } from "../../routes/docs-view.js";
+import { requestRouteTab } from "../../routes/route-tabs.js";
 import type { BottomTab } from "../shell/BottomPanel.js";
 
 /** Which OS modifier glyphs/keys to use (⌘ on macOS, Ctrl elsewhere). */
@@ -197,8 +198,9 @@ export const SHELL_COMMANDS: readonly Command[] = [
     title: "Help: Open Docs",
     category: "Help",
     run: (c) => {
+      requestRouteTab("workspace", "docs");
       requestDocsTab("engine");
-      c.navigate("docs");
+      c.navigate("workspace");
     },
   },
   {
@@ -206,8 +208,9 @@ export const SHELL_COMMANDS: readonly Command[] = [
     title: "Help: Keyboard Cheat-Sheet",
     category: "Help",
     run: (c) => {
+      requestRouteTab("workspace", "docs");
       requestDocsTab("cheatsheet");
-      c.navigate("docs");
+      c.navigate("workspace");
     },
   },
   // APP-098 — documentation surfaces. Quick Doc's ⌘J chord is bound on the focused editor
@@ -276,6 +279,15 @@ export const SHELL_COMMANDS: readonly Command[] = [
     title: "Git: Commit",
     category: "Git",
     run: (c) => c.runEditorCommand("git.commit"),
+  },
+  {
+    // Task #5 (desktop parity): create/list/switch/remove git worktrees for parallel
+    // sessions — the SAME `@prometheus/core/git-worktree` functions the CLI's `/worktree`
+    // slash calls (CLI-054). Opens the Git activity's Worktrees section.
+    id: "git.worktrees",
+    title: "Git: Worktrees",
+    category: "Git",
+    run: (c) => c.runEditorCommand("git.worktrees"),
   },
   {
     id: "debug.start",

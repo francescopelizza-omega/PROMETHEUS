@@ -31,11 +31,7 @@ export function meterTone(usedPct: number): MeterTone {
 
 /** The design-token color var for a tone (bar fill / dot). */
 export function toneVar(tone: MeterTone): string {
-  return tone === "danger"
-    ? "var(--danger, #ef5a5a)"
-    : tone === "warn"
-      ? "var(--warn, #e0a63a)"
-      : "var(--ok, #36c46a)";
+  return tone === "danger" ? "var(--danger)" : tone === "warn" ? "var(--warn)" : "var(--ok)";
 }
 
 /** "used / total" label, e.g. "12.4 GB / 32 GB" (omits total when unknown). */

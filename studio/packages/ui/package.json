@@ -1,6 +1,6 @@
 {
   "name": "@prometheus/ui",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "private": true,
   "type": "module",
   "description": "Prometheus Studio design system — React components (shadcn/Radix + Tailwind), the hybrid Cursor + LM Studio + Odysseus look.",

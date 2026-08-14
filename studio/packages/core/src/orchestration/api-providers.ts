@@ -30,6 +30,31 @@ export interface ApiProvider {
   defaultModel: string;
   /** a few coding-relevant model ids the provider serves. */
   models: readonly string[];
+  /**
+   * The context window of this provider's listed models, in tokens.
+   *
+   * Every cloud endpoint was built with the 8192-token FLOOR from `ai/context-window.ts`,
+   * because that module's job is measuring a LOCAL runner (`/api/show`) and there is nothing
+   * safe to probe on a cloud provider. The floor was harmless while it only sized the
+   * compaction budget; once `preflightContext` began refusing requests that do not fit, it
+   * started rejecting ordinary prompts on 200k- and 1M-token models before they were sent.
+   *
+   * These are the vendors' documented figures for the models listed above, so they are as
+   * measured as a static registry can be. Where a provider's models genuinely disagree, the
+   * SMALLEST is used: under-using a large window costs a compaction, while over-stating a
+   * small one costs a provider 400 in the middle of a turn. Omitted ⇒ the floor, unchanged.
+   */
+  contextWindow?: number;
+  /**
+   * The path, relative to `baseUrl`, that lists models — used to VERIFY a key without billing.
+   *
+   * Defaults to `/models`, which is right for every OpenAI-compatible provider. The two
+   * first-party vendors are not: Anthropic serves `/v1/models` and Gemini `/v1beta/models`,
+   * because their `baseUrl` here is the API ROOT rather than a versioned chat path. Pinging
+   * the wrong path 404s, and `provider connect` reads that as "your key is invalid" and
+   * refuses to store it — so a correct Anthropic or Gemini key could not be saved at all.
+   */
+  verifyPath?: string;
   /** own-key automation stance. */
   automation: ApiAutomation;
   /** "known" = endpoint+stance from public docs; "verify" = confirm exact surface at setup. */
@@ -48,6 +73,49 @@ export interface ApiProvider {
  * two named gateways + deployment hosts are "verify-at-setup" until the exact base path is set.
  */
 export const API_PROVIDERS: readonly ApiProvider[] = Object.freeze([
+  /**
+   * --- the two first-party vendors that do NOT speak OpenAI's wire ---
+   *
+   * They were absent from this registry entirely, so nothing could resolve a key for them and
+   * an interactive session had no way to reach either. The other catalogue
+   * (`ai/providers/providers.config.json`) lists `claude` and `gemini` with tier and pricing
+   * but no base URL, and its connector builders have no production callers — so between the
+   * two catalogues, the two largest model vendors were unreachable.
+   *
+   * `ai/wire.ts` is what makes these usable: a request built for OpenAI hits
+   * `/v1/chat/completions` on `api.anthropic.com`, which does not exist, and 404s.
+   */
+  {
+    id: "anthropic",
+    label: "Anthropic (Claude)",
+    // The wire format appends `/v1/messages` — this is the API ROOT, not a chat path.
+    baseUrl: "https://api.anthropic.com",
+    apiKeyEnv: ["ANTHROPIC_API_KEY"],
+    defaultModel: "claude-sonnet-4-6",
+    models: ["claude-opus-4-8", "claude-sonnet-4-6", "claude-haiku-4-5"],
+    contextWindow: 200_000,
+    verifyPath: "/v1/models",
+    automation: "allowed",
+    confidence: "known",
+    tosUrl: "https://www.anthropic.com/legal/commercial-terms",
+    note: "First-party Anthropic API. Speaks the Messages protocol, not OpenAI chat/completions — see ai/wire.ts, which carries tool calling for it natively (tool_use blocks, input_json_delta fragments, tool_result on the next user turn).",
+    dataRegion: "US",
+  },
+  {
+    id: "gemini",
+    label: "Google Gemini",
+    baseUrl: "https://generativelanguage.googleapis.com",
+    apiKeyEnv: ["GEMINI_API_KEY", "GOOGLE_API_KEY"],
+    defaultModel: "gemini-2.5-pro",
+    models: ["gemini-2.5-pro", "gemini-2.5-flash"],
+    contextWindow: 1_048_576,
+    verifyPath: "/v1beta/models",
+    automation: "allowed",
+    confidence: "known",
+    tosUrl: "https://ai.google.dev/gemini-api/terms",
+    note: "First-party Google API. Speaks generateContent with an SSE alt, not OpenAI chat/completions — see ai/wire.ts, which carries tool calling for it natively (functionDeclarations over Gemini's OpenAPI schema subset; results pair by name).",
+    dataRegion: "US",
+  },
   // --- the two user-named services ---
   {
     id: "nexos",
@@ -87,6 +155,7 @@ export const API_PROVIDERS: readonly ApiProvider[] = Object.freeze([
       "qwen/qwen-2.5-coder-32b-instruct",
       "anthropic/claude-3.5-sonnet",
     ],
+    contextWindow: 64_000,
     automation: "allowed",
     confidence: "known",
     tosUrl: "https://openrouter.ai/terms",
@@ -104,6 +173,7 @@ export const API_PROVIDERS: readonly ApiProvider[] = Object.freeze([
       "deepseek-ai/DeepSeek-V3",
       "meta-llama/Llama-3.3-70B-Instruct-Turbo",
     ],
+    contextWindow: 32_768,
     automation: "allowed",
     confidence: "known",
     tosUrl: "https://www.together.ai/terms-of-service",
@@ -121,6 +191,7 @@ export const API_PROVIDERS: readonly ApiProvider[] = Object.freeze([
       "accounts/fireworks/models/deepseek-v3",
       "accounts/fireworks/models/llama-v3p3-70b-instruct",
     ],
+    contextWindow: 32_768,
     automation: "allowed",
     confidence: "known",
     tosUrl: "https://fireworks.ai/terms-of-service",
@@ -134,6 +205,7 @@ export const API_PROVIDERS: readonly ApiProvider[] = Object.freeze([
     apiKeyEnv: ["GROQ_API_KEY"],
     defaultModel: "llama-3.3-70b-versatile",
     models: ["llama-3.3-70b-versatile", "qwen-2.5-coder-32b", "deepseek-r1-distill-llama-70b"],
+    contextWindow: 131_072,
     automation: "allowed",
     confidence: "known",
     tosUrl: "https://groq.com/terms-of-use/",
@@ -151,6 +223,7 @@ export const API_PROVIDERS: readonly ApiProvider[] = Object.freeze([
       "deepseek-ai/DeepSeek-V3",
       "meta-llama/Llama-3.3-70B-Instruct",
     ],
+    contextWindow: 32_768,
     automation: "allowed",
     confidence: "known",
     tosUrl: "https://deepinfra.com/terms",
@@ -168,6 +241,7 @@ export const API_PROVIDERS: readonly ApiProvider[] = Object.freeze([
       "deepseek-ai/DeepSeek-V3",
       "meta-llama/Llama-3.3-70B-Instruct",
     ],
+    contextWindow: 32_768,
     automation: "allowed",
     confidence: "known",
     tosUrl: "https://hyperbolic.xyz/terms",
@@ -185,6 +259,7 @@ export const API_PROVIDERS: readonly ApiProvider[] = Object.freeze([
       "deepseek/deepseek-v3",
       "meta-llama/llama-3.3-70b-instruct",
     ],
+    contextWindow: 32_768,
     automation: "allowed",
     confidence: "known",
     tosUrl: "https://novita.ai/legal/terms-of-service",
@@ -202,6 +277,7 @@ export const API_PROVIDERS: readonly ApiProvider[] = Object.freeze([
       "deepseek-ai/DeepSeek-V3",
       "meta-llama/Llama-3.3-70B-Instruct",
     ],
+    contextWindow: 32_768,
     automation: "allowed",
     confidence: "known",
     tosUrl: "https://nebius.com/legal/aistudio-terms-of-service",
@@ -215,6 +291,7 @@ export const API_PROVIDERS: readonly ApiProvider[] = Object.freeze([
     apiKeyEnv: ["MISTRAL_API_KEY"],
     defaultModel: "codestral-latest",
     models: ["codestral-latest", "mistral-large-latest", "devstral-medium-latest"],
+    contextWindow: 256_000,
     automation: "allowed",
     confidence: "known",
     tosUrl: "https://mistral.ai/terms/",
@@ -228,6 +305,7 @@ export const API_PROVIDERS: readonly ApiProvider[] = Object.freeze([
     apiKeyEnv: ["DEEPSEEK_API_KEY"],
     defaultModel: "deepseek-chat",
     models: ["deepseek-chat", "deepseek-reasoner"],
+    contextWindow: 65_536,
     automation: "allowed",
     confidence: "known",
     tosUrl:
@@ -242,6 +320,7 @@ export const API_PROVIDERS: readonly ApiProvider[] = Object.freeze([
     apiKeyEnv: ["CEREBRAS_API_KEY"],
     defaultModel: "llama-3.3-70b",
     models: ["llama-3.3-70b", "qwen-3-coder-480b", "qwen-3-235b-a22b-instruct"],
+    contextWindow: 65_536,
     automation: "allowed",
     confidence: "known",
     tosUrl: "https://www.cerebras.ai/terms-of-service",
@@ -255,6 +334,7 @@ export const API_PROVIDERS: readonly ApiProvider[] = Object.freeze([
     apiKeyEnv: ["SAMBANOVA_API_KEY"],
     defaultModel: "Meta-Llama-3.3-70B-Instruct",
     models: ["Meta-Llama-3.3-70B-Instruct", "Qwen2.5-Coder-32B-Instruct", "DeepSeek-V3-0324"],
+    contextWindow: 131_072,
     automation: "allowed",
     confidence: "known",
     tosUrl: "https://sambanova.ai/terms-and-conditions",
@@ -268,6 +348,7 @@ export const API_PROVIDERS: readonly ApiProvider[] = Object.freeze([
     apiKeyEnv: ["BASETEN_API_KEY"],
     defaultModel: "deepseek-ai/DeepSeek-V3-0324",
     models: ["deepseek-ai/DeepSeek-V3-0324", "Qwen/Qwen2.5-Coder-32B-Instruct"],
+    contextWindow: 65_536,
     automation: "verify-at-setup",
     confidence: "verify",
     tosUrl: "https://www.baseten.co/terms-and-conditions/",
@@ -281,6 +362,7 @@ export const API_PROVIDERS: readonly ApiProvider[] = Object.freeze([
     apiKeyEnv: ["MOONSHOT_API_KEY"],
     defaultModel: "kimi-k2-0711-preview",
     models: ["kimi-k2-0711-preview", "moonshot-v1-128k"],
+    contextWindow: 131_072,
     automation: "verify-at-setup",
     confidence: "verify",
     tosUrl: "https://platform.moonshot.ai/docs/agreement/modeluse",

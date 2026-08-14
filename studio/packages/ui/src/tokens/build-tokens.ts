@@ -6,7 +6,7 @@
  *   - tokens.css  : the CSS variables for [data-theme] (dark/light/high-contrast) and
  *                   [data-density] (comfortable/compact) — the runtime contract every
  *                   component (Tailwind utility OR plain CSS var) consumes.
- * Run: node --import ../../apps/cli/dev-register.mjs packages/ui/src/tokens/build-tokens.ts
+ * Run (from the studio root): node --import ./apps/cli/dev-register.mjs packages/ui/src/tokens/build-tokens.ts
  */
 import { writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -22,6 +22,7 @@ import {
   space,
   typography,
 } from "../tokens.js";
+import { Z } from "./layers.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 
@@ -48,6 +49,21 @@ for (const [name, sem] of Object.entries(themes)) {
   const sel = name === "dark" ? `:root,\n[data-theme="dark"]` : `[data-theme="${name}"]`;
   css += `${sel} {\n`;
   for (const [k, v] of Object.entries(sem)) css += `  --${k}: ${v};\n`;
+  // Derived paints (handoff §1/§2) — expressed in terms of the theme's OWN tokens so a
+  // scheme swap re-derives them for free and app code never hand-rolls a gradient:
+  //   --gradient-brand : the primary-CTA / active-indicator gradient (brand → brand-2),
+  //   --gradient-wordmark : the logo text gradient (brand-3 → accent),
+  //   --gradient-app : the app-root radial wash the islands float on.
+  css += "  --gradient-brand: linear-gradient(90deg, var(--brand), var(--brand-2));\n";
+  css += "  --gradient-brand-v: linear-gradient(180deg, var(--brand), var(--accent));\n";
+  css += "  --gradient-wordmark: linear-gradient(90deg, var(--brand-3), var(--accent));\n";
+  // pre-wrapped to biome's 100-col CSS width — this file is committed and lint-gated, so
+  // emitting a long line would make `biome check` fail on a GENERATED artifact.
+  css += "  --gradient-app: radial-gradient(\n";
+  css += "    1200px 700px at 70% -10%,\n";
+  css += "    var(--bg-app-glow) 0%,\n";
+  css += "    var(--bg-app) 55%\n";
+  css += "  );\n";
   css += "}\n\n";
 }
 for (const [name, d] of Object.entries(density)) {
@@ -66,8 +82,8 @@ for (const [k, val] of Object.entries(elevation)) css += `  --elevation-${k}: ${
 css += `  --font-ui: ${typography.fontUi};\n`;
 css += `  --font-mono: ${typography.fontMono};\n`;
 css += `  --font-brand: ${typography.fontBrand};\n`;
-// The brand wordmark treatment (08 §2.3: ui weight 600, -0.01em tracking, lowercase).
-css += `  --font-brand-weight: ${typography.weight.semibold};\n`;
+// The brand wordmark treatment (handoff §1: Space Grotesk 700, -0.01em tracking).
+css += `  --font-brand-weight: ${typography.brandWeight};\n`;
 css += `  --font-brand-tracking: ${typography.brandLetterSpacing};\n`;
 // The weight scale (08 §2.3: 400 body · 500 labels/headers · 600 titles/active-nav/CTA).
 for (const [k, v] of Object.entries(typography.weight)) css += `  --font-weight-${k}: ${v};\n`;
@@ -75,18 +91,42 @@ for (const [k, s] of Object.entries(typography.scale)) {
   css += `  --text-${k}-size: ${s.size};\n`;
   css += `  --text-${k}-line: ${s.line};\n`;
 }
+// §9's one z-index ladder, so a stylesheet can reach the same rungs as the TS constant.
+for (const [k, v] of Object.entries(Z)) css += `  --z-${k}: ${v};\n`;
 css += `  --motion-hover: ${motion.hover};\n`;
 css += `  --motion-panel: ${motion.panel};\n`;
 css += `  --motion-route: ${motion.route};\n`;
 css += `  --motion-easing: ${motion.easing};\n`;
 css += "}\n\n";
 
-// The brand wordmark utility (08 §2.3: lowercase "prometheus", weight 600, -0.01em).
+// The brand wordmark utility (handoff §2.1: Space Grotesk 700, +.02em tracking, painted
+// with the brand→accent text gradient). No text-transform — "Prometheus" reads as a name.
 css += ".prom-wordmark {\n";
 css += "  font-family: var(--font-brand);\n";
 css += "  font-weight: var(--font-brand-weight);\n";
-css += "  letter-spacing: var(--font-brand-tracking);\n";
-css += "  text-transform: lowercase;\n}\n\n";
+css += "  letter-spacing: 0.02em;\n";
+css += "  background: var(--gradient-wordmark);\n";
+css += "  -webkit-background-clip: text;\n";
+css += "  background-clip: text;\n";
+css += "  color: transparent;\n}\n\n";
+
+// The scrollbars the islands sit behind (handoff prototype): thin, token-tinted, and
+// inset from the ground so they read as part of the chrome, not the content.
+css += "::-webkit-scrollbar {\n  width: 9px;\n  height: 9px;\n}\n\n";
+css += "::-webkit-scrollbar-thumb {\n";
+css += "  background: var(--border-strong);\n";
+css += "  border-radius: 8px;\n";
+css += "  border: 2px solid var(--bg-app);\n}\n\n";
+css += "::-webkit-scrollbar-track {\n  background: transparent;\n}\n\n";
+
+// The two chrome animations the shell references by name (engine-down dot pulse, the
+// terminal caret blink). Collapsed by the reduced-motion reset emitted below.
+css += "@keyframes prom-pulse {\n";
+css += "  0%,\n  100% {\n    opacity: 1;\n  }\n";
+css += "  50% {\n    opacity: 0.35;\n  }\n}\n\n";
+css += "@keyframes prom-blink {\n";
+css += "  0%,\n  100% {\n    opacity: 1;\n  }\n";
+css += "  50% {\n    opacity: 0;\n  }\n}\n\n";
 
 // Component animations the primitives reference by class (Skeleton shimmer, the
 // indeterminate Progress sweep) + the §7 reduced-motion reset (collapse to 0ms).

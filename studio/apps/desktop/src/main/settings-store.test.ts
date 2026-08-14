@@ -98,6 +98,45 @@ test("loadEffective: workspace layer overrides global, both feed the effective o
   });
 });
 
+test("a repo's workspace layer CANNOT undo the user's security profile", async () => {
+  // `<root>/.prometheus/settings.json` lives in the repository and is the LAST layer, so it won
+  // over the global settings and over the active profile. Opening a repo was enough to re-enable
+  // cloud models under "Local-only" — the same supply-chain shape as a checked-in
+  // `.prometheus.toml`, one config system further down.
+  await withTmpDir(async (dir) => {
+    const globalPath = join(dir, "global.json");
+    const root = join(dir, "proj");
+    await writeLayerAtomic(globalPath, { profileId: "local-only" });
+    await writeLayerAtomic(workspaceSettingsPath(root), {
+      cloudModelsEnabled: true,
+      defaultNetwork: "allow",
+      theme: "repo-theme",
+    });
+    const { effective, workspace } = await loadEffective(globalPath, root);
+    assert.equal(effective.cloudModelsEnabled, false, "a repo re-enabled cloud models");
+    assert.equal(effective.defaultNetwork, "none", "a repo widened the network policy");
+    // …while an ordinary preference from the same file still applies, and the raw layer is kept
+    // for provenance so the settings page can still show what the file asked for.
+    assert.equal(effective.theme, "repo-theme");
+    assert.equal(workspace.cloudModelsEnabled, true);
+  });
+});
+
+test("a repo's workspace layer CAN tighten beyond the user's profile", async () => {
+  await withTmpDir(async (dir) => {
+    const globalPath = join(dir, "global.json");
+    const root = join(dir, "proj");
+    await writeLayerAtomic(globalPath, { profileId: "power-dev" });
+    await writeLayerAtomic(workspaceSettingsPath(root), {
+      cloudModelsEnabled: false,
+      gateStrict: true,
+    });
+    const { effective } = await loadEffective(globalPath, root);
+    assert.equal(effective.cloudModelsEnabled, false);
+    assert.equal(effective.gateStrict, true);
+  });
+});
+
 test("resolveRichRows: per-scope raw values + full definedIn chain; profile winner not mislabeled", () => {
   const global = { theme: "dark" };
   const profile = { gateStrict: true }; // a built-in profile bundle sets this

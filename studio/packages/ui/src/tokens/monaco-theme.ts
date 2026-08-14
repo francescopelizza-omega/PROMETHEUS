@@ -6,6 +6,7 @@
  */
 import type { SyntaxStyle, ThemeTokens } from "../theme.js";
 import { type SemanticColors, darkSemantic } from "../tokens.js";
+import { PELLY_EDITOR_COLORS, PELLY_MONACO_SYNTAX, type PellySynStyle } from "./pelly-syntax.js";
 
 export interface MonacoTokenRule {
   token: string;
@@ -51,6 +52,58 @@ export function monacoThemeFromSemantic(
       focusBorder: s["focus-ring"],
     },
   };
+}
+
+/**
+ * The PELLY editor scheme (handoff §1 "Editor scheme") over a given chrome palette.
+ *
+ * The CHROME (background, selection, cursor, focus ring) still comes from the active
+ * semantic tokens, so the editor island keeps matching the shell; only the SYNTAX rules
+ * and the three gutter/current-line colors are Pelly's. That split is deliberate: the
+ * operator's syntax palette is the constant, the chrome follows whichever scheme is
+ * selected.
+ *
+ * NOTE for the caller: Monaco's bracket-pair colorization paints bracket CHARACTERS by
+ * NESTING DEPTH and overrides the tokenizer, so it must be OFF for the per-character
+ * brace/bracket colors below to appear (EditorPane disables it).
+ */
+export function pellyMonacoTheme(
+  s: SemanticColors,
+  base: MonacoThemeData["base"] = "vs-dark",
+): MonacoThemeData {
+  const rules: MonacoTokenRule[] = Object.entries(PELLY_MONACO_SYNTAX).map(([token, style]) => {
+    const fontStyle = pellyFontStyle(style);
+    return fontStyle === undefined
+      ? { token, foreground: bare(style.fg) }
+      : { token, foreground: bare(style.fg), fontStyle };
+  });
+  return {
+    base,
+    inherit: true,
+    rules,
+    colors: {
+      // chrome: from the active scheme (tokens.test pins editor.background === bg-inset)
+      "editor.background": s["bg-inset"],
+      "editor.selectionBackground": s.selection,
+      "editorCursor.foreground": s.accent,
+      "editorError.foreground": s.danger,
+      "editorWarning.foreground": s.warn,
+      "editorInfo.foreground": s.info,
+      focusBorder: s["focus-ring"],
+      // syntax-adjacent: from Pelly
+      "editor.foreground": PELLY_EDITOR_COLORS.foreground,
+      "editorLineNumber.foreground": PELLY_EDITOR_COLORS.lineNumber,
+      "editorLineNumber.activeForeground": PELLY_EDITOR_COLORS.lineNumberActive,
+      "editor.lineHighlightBackground": PELLY_EDITOR_COLORS.currentLine,
+      "editor.lineHighlightBorder": PELLY_EDITOR_COLORS.currentLineBorder,
+    },
+  };
+}
+
+/** Compose a Monaco fontStyle string from a Pelly style's bold/italic. */
+function pellyFontStyle(style: PellySynStyle): string | undefined {
+  const parts = [style.bold && "bold", style.italic && "italic"].filter(Boolean).join(" ");
+  return parts.length > 0 ? parts : undefined;
 }
 
 /** Compose a Monaco fontStyle string from a SyntaxStyle's bold/italic/underline. */

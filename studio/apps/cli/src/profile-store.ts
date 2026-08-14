@@ -142,10 +142,25 @@ export function loadEffectiveStartupProfile(parsed: {
   profile?: string;
   cwd?: string;
 }): cliProfiles.CliProfile {
+  return loadEffectiveStartupProfileWithNotes(parsed).profile;
+}
+
+/**
+ * The same resolution, plus everything the project `.prometheus.toml` was REFUSED.
+ *
+ * The project layer is tighten-only on the security keys (`cliProfiles.sanitizeProjectLayer`),
+ * because it arrives with the code — walking up from the working directory means cloning a repo
+ * is enough to apply it. A refusal has to be visible: someone wrote that line expecting it to
+ * work, and a setting that is silently dropped teaches them it did.
+ */
+export function loadEffectiveStartupProfileWithNotes(parsed: {
+  profile?: string;
+  cwd?: string;
+}): { profile: cliProfiles.CliProfile; rejected: cliProfiles.ProjectLayerRejection[] } {
   const builtin = cliProfiles.getCliProfile(
     cliProfiles.DEFAULT_PROFILE_NAME,
   ) as cliProfiles.CliProfile;
   const user = loadProfile(resolveActiveProfileName(parsed.profile)) ?? builtin;
   const project = loadProjectProfile(parsed.cwd ?? process.cwd())?.profile;
-  return cliProfiles.resolveEffectiveProfile({ builtin, user, project });
+  return cliProfiles.resolveEffectiveProfileWithNotes({ builtin, user, project });
 }

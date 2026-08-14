@@ -95,7 +95,7 @@ export function BlameView({ root }: { root: string }): ReactElement {
         <span
           style={{
             flex: 1,
-            color: "var(--text-secondary, #9a9aa3)",
+            color: "var(--text-secondary)",
             fontFamily: "var(--font-mono, monospace)",
             overflow: "hidden",
             textOverflow: "ellipsis",
@@ -128,19 +128,17 @@ export function BlameView({ root }: { root: string }): ReactElement {
           style={{
             marginBottom: 6,
             padding: 8,
-            background: "var(--bg-surface-2, #16161b)",
-            border: "1px solid var(--border-subtle, #2a2a33)",
+            background: "var(--bg-surface-2)",
+            border: "1px solid var(--border-subtle)",
             borderRadius: 4,
             fontSize: "0.72rem",
           }}
         >
           <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-            <span
-              style={{ color: "var(--accent, #22d3ee)", fontFamily: "var(--font-mono, monospace)" }}
-            >
+            <span style={{ color: "var(--accent)", fontFamily: "var(--font-mono, monospace)" }}>
               {detail.sha.slice(0, 8)}
             </span>
-            <span style={{ flex: 1, color: "var(--text-primary, #e7e7ea)" }}>{detail.summary}</span>
+            <span style={{ flex: 1, color: "var(--text-primary)" }}>{detail.summary}</span>
             <button
               type="button"
               aria-label="close commit detail"
@@ -148,14 +146,14 @@ export function BlameView({ root }: { root: string }): ReactElement {
               style={{
                 background: "transparent",
                 border: "none",
-                color: "var(--text-secondary, #9a9aa3)",
+                color: "var(--text-secondary)",
                 cursor: "pointer",
               }}
             >
               ✕
             </button>
           </div>
-          <div style={{ color: "var(--text-secondary, #9a9aa3)", marginTop: 2 }}>
+          <div style={{ color: "var(--text-secondary)", marginTop: 2 }}>
             {detail.author} {detail.email ? `<${detail.email}>` : ""} · {detail.date}
           </div>
           {detail.body && (
@@ -166,7 +164,7 @@ export function BlameView({ root }: { root: string }): ReactElement {
                 overflow: "auto",
                 whiteSpace: "pre-wrap",
                 fontFamily: "var(--font-mono, monospace)",
-                color: "var(--text-secondary, #9a9aa3)",
+                color: "var(--text-secondary)",
               }}
             >
               {detail.body}
@@ -176,12 +174,12 @@ export function BlameView({ root }: { root: string }): ReactElement {
       )}
 
       {status === "none" && (
-        <p style={{ color: "var(--text-secondary, #9a9aa3)", fontSize: "0.72rem" }}>
+        <p style={{ color: "var(--text-secondary)", fontSize: "0.72rem" }}>
           Open a tracked file to see its blame.
         </p>
       )}
       {status === "empty" && (
-        <p style={{ color: "var(--text-secondary, #9a9aa3)", fontSize: "0.72rem" }}>
+        <p style={{ color: "var(--text-secondary)", fontSize: "0.72rem" }}>
           No blame (untracked, outside the repo, or not committed).
         </p>
       )}
@@ -210,12 +208,10 @@ export function BlameView({ root }: { root: string }): ReactElement {
               padding: "1px 0",
               fontSize: "0.7rem",
               fontFamily: "var(--font-mono, monospace)",
-              color: "var(--text-primary, #e7e7ea)",
+              color: "var(--text-primary)",
             }}
           >
-            <span
-              style={{ color: "var(--text-secondary, #9a9aa3)", width: 40, textAlign: "right" }}
-            >
+            <span style={{ color: "var(--text-secondary)", width: 40, textAlign: "right" }}>
               L{e.line}
             </span>
             <span
@@ -224,7 +220,7 @@ export function BlameView({ root }: { root: string }): ReactElement {
                 overflow: "hidden",
                 textOverflow: "ellipsis",
                 whiteSpace: "nowrap",
-                color: sameCommit ? "transparent" : "var(--accent, #22d3ee)",
+                color: sameCommit ? "transparent" : "var(--accent)",
               }}
             >
               {sameCommit ? "" : `${e.author} · ${e.date}`}
@@ -235,7 +231,7 @@ export function BlameView({ root }: { root: string }): ReactElement {
                 overflow: "hidden",
                 textOverflow: "ellipsis",
                 whiteSpace: "nowrap",
-                color: "var(--text-secondary, #9a9aa3)",
+                color: "var(--text-secondary)",
               }}
             >
               {sameCommit ? "" : e.summary}

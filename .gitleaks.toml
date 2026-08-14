@@ -1,0 +1,47 @@
+# .gitleaks.toml — secret-scanning config for this repository.
+#
+# Run it over the WHOLE history, not just the working tree, and fail the build on any hit:
+#
+#   gitleaks git --log-opts="--all" --redact -v
+#
+# This project ships its own secret detectors (`isSecretLike`, `redactSecretEnv`,
+# nemesis' credential rules), and their tests necessarily contain secret-SHAPED strings.
+# Those are the only accepted findings, and they are allowlisted BY VALUE rather than by
+# file: a real credential pasted into the same test file is still caught. Never widen one
+# of these to a bare path — an allowlisted file is a blind spot, and a blind spot in the
+# repo of a security tool is the one place it cannot afford to have one.
+#
+# Adding a new fixture? Prefer a value that is already public and unmistakably fake —
+# AWS's documented `AKIAIOSFODNN7EXAMPLE`, or an all-zero/sequential filler — then add it
+# here with a comment saying which test needs it and why.
+
+[extend]
+useDefault = true
+
+# ── synthetic GitHub PAT: asserts isSecretLike() catches a token-shaped line ──
+# studio/apps/cli/src/tui/input-history.test.ts — sequential hex filler, not a real PAT.
+[[allowlists]]
+description = "synthetic GitHub PAT fixture (sequential hex) in the isSecretLike test"
+regexTarget = "match"
+regexes = ['''ghp_0123456789abcdef0123456789abcdef0123''']
+
+# ── synthetic provider keys: assert redactSecretEnv() masks them ─────────────
+# studio/packages/core/src/secrets/keychain.test.ts — "sk-live-1234567890", "sk-ant-xyz",
+# "sk-abc", "tok_secret". Obvious placeholders; none resolve to a real account.
+[[allowlists]]
+description = "synthetic provider-key fixtures in the keychain/redaction tests"
+regexTarget = "match"
+regexes = [
+  '''sk-live-1234567890''',
+  '''sk-ant-xyz''',
+  '''sk-abc[0-9a-z]*''',
+  '''tok_secret''',
+]
+
+# ── false positive: the tmux `send-keys` verb ────────────────────────────────
+# studio/apps/cli/src/orchestration/tmux-driver.test.ts — the generic-api-key rule fires on
+# the literal words "send-keys," in a doc comment. No value of any kind is present.
+[[allowlists]]
+description = "tmux send-keys verb misread as a generic api key"
+regexTarget = "match"
+regexes = ['''send-keys,\s*''']

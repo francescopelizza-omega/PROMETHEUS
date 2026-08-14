@@ -36,14 +36,32 @@ import {
   type EngineConfig,
   type SidecarEnvelope,
   type SqlClient,
+  createEngineClient,
   createSqlClient,
   runSidecar as runSidecarScript,
+  safeFetch,
 } from "@prometheus/engine-bridge";
+
+import { agent as coreAgent, settings as coreSettings } from "@prometheus/core";
+import { isHostDispatchTool } from "@prometheus/core/agent-system";
+import {
+  prometheusHome,
+  readGrants,
+  runBrowserTool,
+  runEngineVerb,
+  runSystemTool,
+  runWebTool,
+  saveGrants,
+} from "@prometheus/core/agent-system-host";
+
+import { browserToolHostDeps } from "./browser-tool-host.js";
 
 import {
   IPC,
   IPC_EVENTS,
   type IdeAckResult,
+  type IdeAgentFilesListResult,
+  type IdeCommandFilesListResult,
   type IdeCoverageReport,
   type IdeCoverageResult,
   type IdeDapDetectAdapterResult,
@@ -112,7 +130,18 @@ import {
   type IdeTestRunResult,
   type IdeTreeNode,
   type IdeWorkspaceIndexResult,
+  type IdeWorktreeListResult,
+  type IdeWorktreeOpResult,
   type SystemTelemetry,
+} from "../shared/ipc-contract.js";
+import type {
+  AgentEngineToolRequest,
+  AgentGrant,
+  AgentGrantsResult,
+  AgentHookRunRequest,
+  AgentHookRunResult,
+  AgentSystemToolRequest,
+  AgentSystemToolResult,
 } from "../shared/ipc-contract.js";
 import {
   type FileSearchQuery,
@@ -120,6 +149,8 @@ import {
   type TaskResponse,
   runTask,
 } from "../worker/tasks.js";
+import { listHooks, runConfiguredHook } from "./agent-hooks.js";
+import { getSecurityPosture } from "./ai-ipc.js";
 import {
   validateCoverageImport,
   validateCoverageRun,
@@ -157,6 +188,8 @@ import {
   validateGitRoot,
   validateGitStash,
   validateGitStashRef,
+  validateGitWorktreeCreate,
+  validateGitWorktreeRemove,
   validateKernelDataframe,
   validateKernelExecute,
   validateKernelSession,
@@ -187,8 +220,11 @@ import {
   validateTerminalResolve,
   validateTestRun,
 } from "./ide-validate.js";
+import { loadAgentFiles } from "./ide/agent-files-host.js";
+import { loadCommandFiles } from "./ide/command-files-host.js";
 import type { DapHost, DapLaunchOptions, DapLaunchPlan } from "./ide/dap-host.js";
 import { type ExecRunner, defaultExecRunner } from "./ide/exec-host.js";
+
 import { screenCommand } from "./ide/exec-screen.js";
 import {
   type FsWatchHost,
@@ -207,13 +243,26 @@ import type { GitHost } from "./ide/git-host.js";
 import type { LocalHistoryManager } from "./ide/history-store.js";
 import { KernelHost, type KernelSpawner } from "./ide/kernel-host.js";
 import type { LspHost } from "./ide/lsp-host.js";
-import { assertNotSensitivePath, uriToFsPath } from "./ide/path-guard.js";
+import {
+  approveOutsideWorkingSet,
+  assertInsideWorkingSet,
+  assertNotSensitivePath,
+  clearOutsideApprovals,
+  isInsideWorkingSet,
+  setWorkingSetRoots,
+  uriToFsPath,
+} from "./ide/path-guard.js";
 import type { PtyHost } from "./ide/pty-host.js";
 import { type RefactorRunner, runRefactorVerb } from "./ide/refactor-host.js";
 import { type RunHost, startGatedRun } from "./ide/run-host.js";
 import { SqlHost } from "./ide/sql-host.js";
 import { buildTerminalMenuItems, resolveTerminalItem } from "./ide/terminal-menu.js";
 import { type TestRunSpawn, runTestVerb } from "./ide/test-run-host.js";
+import {
+  createWorktreeChecked,
+  listWorktreesChecked,
+  removeWorktreeChecked,
+} from "./ide/worktree-host.js";
 import type { PrGateway } from "./pr-gateway.js";
 import { runSidecar } from "./sidecar.js";
 import { readTelemetry } from "./telemetry.js";
@@ -577,11 +626,44 @@ export function registerIdeIpcHandlers(wiring: IdeIpcWiring): () => void {
       return { ok: false, error: errString(e) };
     }
   });
+  // handoff §3: the working-set declaration + the per-path out-of-scope approval. These
+  // are the ONLY two ways the main-process scope guard's answer can change.
+  ipcMain.handle(IPC.ideSetWorkingSet, (_e, arg: unknown): IdeOkResult => {
+    const o = arg as { roots?: unknown } | null;
+    const roots = Array.isArray(o?.roots)
+      ? o.roots.filter((r): r is string => typeof r === "string")
+      : [];
+    try {
+      setWorkingSetRoots(roots);
+      return { ok: true };
+    } catch (e) {
+      return { ok: false, error: errString(e) };
+    }
+  });
+  ipcMain.handle(IPC.ideApproveOutside, (_e, arg: unknown): IdeOkResult => {
+    const o = arg as { path?: unknown; scope?: unknown } | null;
+    try {
+      if (o?.scope === "clear") {
+        clearOutsideApprovals();
+        return { ok: true };
+      }
+      if (typeof o?.path !== "string" || !o.path) return { ok: false, error: "path required" };
+      // a path already inside the set needs no approval — recording it would only grow
+      // the exception list with entries that mean nothing.
+      if (!isInsideWorkingSet(o.path)) approveOutsideWorkingSet(o.path);
+      return { ok: true };
+    } catch (e) {
+      return { ok: false, error: errString(e) };
+    }
+  });
   ipcMain.handle(IPC.ideFsWrite, async (_e, arg: unknown): Promise<IdeOkResult> => {
     const v = validateFsWrite(arg);
     if (!v.ok) return { ok: false, error: v.error.message };
     try {
       const path = assertNotSensitivePath(v.value.uri); // normalize + deny sensitive targets
+      // handoff §3: the applier's scope guard, in MAIN, ON REGARDLESS of what the
+      // renderer's permission card did or did not show.
+      assertInsideWorkingSet(path);
       // APP-063: snapshot the PRE-write on-disk content BEFORE writing, so revert-by-one lands
       // on the previous state (not the incoming buffer). A brand-new file (ENOENT) has nothing
       // to snapshot → skip; capture never blocks or fails the save (fail-soft).
@@ -634,7 +716,7 @@ export function registerIdeIpcHandlers(wiring: IdeIpcWiring): () => void {
     const v = validateFsPath(arg);
     if (!v.ok) return { ok: false, error: v.error.message };
     try {
-      await fsCreateFile(assertNotSensitivePath(v.value.path));
+      await fsCreateFile(assertInsideWorkingSet(assertNotSensitivePath(v.value.path)));
       return { ok: true };
     } catch (e) {
       return { ok: false, error: errString(e) };
@@ -644,7 +726,7 @@ export function registerIdeIpcHandlers(wiring: IdeIpcWiring): () => void {
     const v = validateFsPath(arg);
     if (!v.ok) return { ok: false, error: v.error.message };
     try {
-      await fsMkdir(assertNotSensitivePath(v.value.path));
+      await fsMkdir(assertInsideWorkingSet(assertNotSensitivePath(v.value.path)));
       return { ok: true };
     } catch (e) {
       return { ok: false, error: errString(e) };
@@ -655,7 +737,10 @@ export function registerIdeIpcHandlers(wiring: IdeIpcWiring): () => void {
     if (!v.ok) return { ok: false, error: v.error.message };
     try {
       // guard BOTH endpoints — a rename can move a file INTO a sensitive location too.
-      await fsRename(assertNotSensitivePath(v.value.src), assertNotSensitivePath(v.value.dest));
+      await fsRename(
+        assertInsideWorkingSet(assertNotSensitivePath(v.value.src)),
+        assertInsideWorkingSet(assertNotSensitivePath(v.value.dest)),
+      );
       return { ok: true };
     } catch (e) {
       return { ok: false, error: errString(e) };
@@ -665,7 +750,7 @@ export function registerIdeIpcHandlers(wiring: IdeIpcWiring): () => void {
     const v = validateFsPath(arg);
     if (!v.ok) return { ok: false, error: v.error.message };
     try {
-      await fsDelete(assertNotSensitivePath(v.value.path));
+      await fsDelete(assertInsideWorkingSet(assertNotSensitivePath(v.value.path)));
       return { ok: true };
     } catch (e) {
       return { ok: false, error: errString(e) };
@@ -1227,6 +1312,65 @@ export function registerIdeIpcHandlers(wiring: IdeIpcWiring): () => void {
     return prGateway.setToken(v.value.root, v.value.token);
   });
 
+  /* ── worktrees (Task #5, desktop parity) — the SAME `@prometheus/core/git-worktree`
+   * functions the CLI's `/worktree` slash calls (CLI-054); "switch" has no handler of its
+   * own — the renderer repoints the workspace root client-side against a `list()` row. */
+  ipcMain.handle(IPC.ideWorktreeList, async (_e, arg: unknown): Promise<IdeWorktreeListResult> => {
+    const v = validateGitRoot(arg);
+    if (!v.ok) return { ok: false, worktrees: [], error: v.error.message };
+    return listWorktreesChecked(v.value.root);
+  });
+  ipcMain.handle(IPC.ideWorktreeCreate, async (_e, arg: unknown): Promise<IdeWorktreeOpResult> => {
+    const v = validateGitWorktreeCreate(arg);
+    if (!v.ok) return { ok: false, message: v.error.message };
+    return createWorktreeChecked(v.value.root, v.value.branch, v.value.path);
+  });
+  ipcMain.handle(IPC.ideWorktreeRemove, async (_e, arg: unknown): Promise<IdeWorktreeOpResult> => {
+    const v = validateGitWorktreeRemove(arg);
+    if (!v.ok) return { ok: false, message: v.error.message };
+    return removeWorktreeChecked(v.value.root, v.value.path);
+  });
+
+  /* ── sub-agent personas (Task #5, desktop parity) — the SAME `@prometheus/core/agent-files`
+   * `loadAgentFile` clamping the CLI's `spawn_agent` applies; already scoped/clamped here in
+   * MAIN before the list crosses IPC. */
+  ipcMain.handle(
+    IPC.ideAgentFilesList,
+    async (_e, arg: unknown): Promise<IdeAgentFilesListResult> => {
+      const v = validateGitRoot(arg);
+      if (!v.ok) return { ok: false, personas: [], error: v.error.message };
+      try {
+        return { ok: true, personas: loadAgentFiles(v.value.root) };
+      } catch (err) {
+        return {
+          ok: false,
+          personas: [],
+          error: err instanceof Error ? err.message : String(err),
+        };
+      }
+    },
+  );
+
+  /* ── custom slash commands (Task #5, desktop parity) — the SAME
+   * `@prometheus/core/command-loader`/`command-gate` the CLI's `/command` loader uses; the
+   * renderer expands the returned templates client-side (both are node-free subpaths). */
+  ipcMain.handle(
+    IPC.ideCommandFilesList,
+    async (_e, arg: unknown): Promise<IdeCommandFilesListResult> => {
+      const v = validateGitRoot(arg);
+      if (!v.ok) return { ok: false, commands: [], error: v.error.message };
+      try {
+        return { ok: true, commands: loadCommandFiles(v.value.root) };
+      } catch (err) {
+        return {
+          ok: false,
+          commands: [],
+          error: err instanceof Error ? err.message : String(err),
+        };
+      }
+    },
+  );
+
   /* ── the RUN-GATE (§5.2/§9) — REAL engine-bridge gate; fail-closed ─────────*/
   ipcMain.handle(IPC.ideGate, async (evt: unknown, arg: unknown): Promise<IdeGateResult> => {
     const v = validateGate(arg);
@@ -1312,6 +1456,249 @@ export function registerIdeIpcHandlers(wiring: IdeIpcWiring): () => void {
       return await execRunner(v.value.command, cwd, EXEC_TIMEOUT_MS);
     } catch (e) {
       return { ok: false, exitCode: 1, stdout: "", stderr: "", error: errString(e) };
+    }
+  });
+
+  /* ── the shared system tools (Phase 6) — the SAME path the CLI runs ───────*/
+  /**
+   * `agent:systemTool` — Studio's replacement for its own executor.
+   *
+   * What this channel removed: `ide:exec` spawns `shell -c <command>` and the only thing
+   * standing in front of it is an 11-pattern regex denylist plus a human click. That
+   * denylist blocks `sudo`; it does not block `${IFS}sudo`, `$(echo c3Vkbw== | base64 -d)`
+   * or `eval "$X"`. Meanwhile the CLI had six structural layers and no shell at all. Two
+   * surfaces of one product, and the weaker one was the GUI most people use.
+   *
+   * `runSystemTool` is that CLI path, imported rather than re-implemented — which is the
+   * only way the two stay identical, since every previous attempt at "keep them in sync by
+   * being careful" is what produced the split.
+   */
+  ipcMain.handle(IPC.agentSystemTool, async (_e, arg: unknown): Promise<AgentSystemToolResult> => {
+    const req = arg as AgentSystemToolRequest | null;
+    if (!req || typeof req.name !== "string" || typeof req.cwd !== "string") {
+      return { ok: false, summary: "agent:systemTool: malformed request" };
+    }
+    // The renderer may not invent a tool name. `HOST_DISPATCH_TOOLS` is the single list this
+    // guard and the renderer's own pre-flight check BOTH consult — they were two hand-kept
+    // copies, and they diverged the first time one was widened: main learned the Tier-W
+    // mutators and the renderer did not, so `delete_file` was offered to the model, approved
+    // by the human, and then refused client-side as "not available in the editor".
+    if (!isHostDispatchTool(req.name)) {
+      return { ok: false, summary: `agent:systemTool: unknown tool "${req.name}"` };
+    }
+    try {
+      const cwd = assertNotSensitivePath(req.cwd);
+      // web_fetch / web_search — the only tools here that leave the machine, so the network
+      // policy is applied before the request is built. `defaultNetwork` was declared, shown in
+      // Settings and read by nothing but the model endpoint; this is its first real consumer
+      // for the web, and "mcp-only" (the shipped default) means these two refuse and SAY why.
+      const web = runWebTool(req.name, req.args ?? {}, safeFetch, {
+        env: process.env,
+        egress: () => coreSettings.egressAllowed("web", getSecurityPosture()),
+      });
+      if (web) {
+        const out = await web;
+        return {
+          ok: out.ok,
+          summary: out.summary ?? "",
+          ...(out.data ? { data: out.data as Record<string, unknown> } : {}),
+          ...(out.verdict ? { verdict: out.verdict as AgentSystemToolResult["verdict"] } : {}),
+        };
+      }
+      // browser_navigate / browser_screenshot / browser_extract_text — a scoped MVP (drive a
+      // dedicated, isolated tab to a URL; look at it; read it — no click/type). `navigate`
+      // gets the SAME network-policy gate as web_fetch/web_search, for the same reason: it is
+      // the one of the three that actually leaves the machine.
+      const browser = runBrowserTool(req.name, req.args ?? {}, browserToolHostDeps, safeFetch, {
+        env: process.env,
+        egress: () => coreSettings.egressAllowed("web", getSecurityPosture()),
+      });
+      if (browser) {
+        const out = await browser;
+        return {
+          ok: out.ok,
+          summary: out.summary ?? "",
+          ...(out.data ? { data: out.data as Record<string, unknown> } : {}),
+          ...(out.verdict ? { verdict: out.verdict as AgentSystemToolResult["verdict"] } : {}),
+        };
+      }
+      const out = await runSystemTool(req.name, req.args ?? {}, {
+        cwd,
+        roots: [cwd],
+        home: prometheusHome(),
+        // The gate posture is passed EXPLICITLY rather than left to core's default, and it is
+        // resolved through the security profile's floor: `gateStrict` means "never weaker than
+        // enforce". Relying on the default happened to be correct, which is a different thing
+        // from being enforced — the moment a caller passed a mode, the floor would not have
+        // applied.
+        gateMode: coreSettings.effectiveGateMode("enforce", getSecurityPosture()),
+        // The operator's A0–A7 level, CLAMPED — see AgentSystemToolRequest.authLevel. It is
+        // what `run_command`'s OS sandbox consults to decide whether this call may reach the
+        // network, and it is what the exec audit records. Absent ⇒ core's safe default.
+        ...(typeof req.authLevel === "number"
+          ? { authLevel: Math.max(0, Math.min(Math.trunc(req.authLevel), 7)) }
+          : {}),
+      });
+      if (!out)
+        return { ok: false, summary: `agent:systemTool: "${req.name}" is not a system tool` };
+      return {
+        ok: out.ok,
+        summary: out.summary ?? "",
+        ...(out.data ? { data: out.data as Record<string, unknown> } : {}),
+        ...(out.verdict ? { verdict: out.verdict as AgentSystemToolResult["verdict"] } : {}),
+      };
+    } catch (e) {
+      return { ok: false, summary: errString(e) };
+    }
+  });
+
+  /* ── remembered grants — "don't ask again", finally meaning it ────────────*/
+  /**
+   * `agent:grants.list` / `agent:grants.add` — the persisted permission grants.
+   *
+   * `ScopedPermissionStore` has had `project` and `user` scopes from the start, the grants file
+   * has persisted them, and `withRememberedGrants` has consulted them on every call. NO host on
+   * ANY surface ever returned `remember`, so the entire mechanism was reachable only by
+   * hand-editing the file. This is main's half of fixing that.
+   *
+   * The file is `<config>/grants.json` — the SAME one the CLI reads. A grant is a security
+   * decision the user makes once, and keeping a separate copy per surface would mean answering
+   * "always" twice for the same tool and reasonably concluding it had not been recorded.
+   *
+   * Adding goes through the store's own `add()`, never around it: that is what refuses an
+   * over-broad subject, and this is a plain JSON file a hostile process could write to.
+   */
+  ipcMain.handle(IPC.agentGrantsList, async (): Promise<AgentGrantsResult> => {
+    try {
+      return { ok: true, grants: readGrants() as AgentGrant[] };
+    } catch (e) {
+      return { ok: false, grants: [], error: errString(e) };
+    }
+  });
+
+  ipcMain.handle(IPC.agentGrantsAdd, async (_e, arg: unknown): Promise<AgentGrantsResult> => {
+    const g = arg as AgentGrant | null;
+    if (!g || typeof g.subject !== "string" || (g.scope !== "project" && g.scope !== "user")) {
+      return { ok: false, grants: [], error: "agent:grants.add: malformed grant" };
+    }
+    try {
+      // Read → add → save, rather than appending to the file: `add()` is the door that refuses
+      // an over-broad subject, and a live grant and a rehydrated one must pass the same one.
+      const store = new coreAgent.ScopedPermissionStore();
+      for (const prior of readGrants()) store.add(prior);
+      const added = store.add({
+        subject: g.subject,
+        decision: g.decision === "deny" ? "deny" : "allow",
+        scope: g.scope,
+        ...(g.root ? { root: g.root } : {}),
+        ...(g.paths ? { paths: g.paths } : {}),
+      });
+      // `add()` returns `{ok, reason}`, not a boolean — an object is always truthy, so a plain
+      // falsiness check here would report an over-broad grant as saved.
+      if (!added.ok) {
+        return {
+          ok: false,
+          grants: readGrants() as AgentGrant[],
+          error: added.reason ?? "that grant is too broad to remember",
+        };
+      }
+      saveGrants(store);
+      return { ok: true, grants: readGrants() as AgentGrant[] };
+    } catch (e) {
+      return { ok: false, grants: [], error: errString(e) };
+    }
+  });
+
+  /* ── the engine verbs — the product's own surface, reachable from the pane ─*/
+  /**
+   * `agent:engineTool` — run one `prometheus_*` verb through prometheus.py.
+   *
+   * The pane's allow-list used to exclude all 14 with a comment saying the pane had no seam to
+   * the engine. That was true and it was a large hole: the GUI could not scan a machine, list
+   * what was installed, or install anything — the things the product exists to do — while the
+   * CLI agent could do all of them. A user had to open a terminal to ask for the product's own
+   * feature.
+   *
+   * The dispatch, the arg validation and the VERDICT extraction all live in core's
+   * `runEngineVerb`, shared with the CLI. The verdict is the part that must not be
+   * re-implemented: `forced_danger` on the envelope means nemesis said block and the engine was
+   * forced through anyway, and the loop aborts the round on it. A host that forgot to lift it
+   * would not fail loudly — the gate would simply stop firing here.
+   *
+   * NO cwd, deliberately. These verbs are machine-global (they rewrite other agent CLIs'
+   * configs), so a workspace root would be a scope that reads as a guarantee and is not one.
+   */
+  /**
+   * `agent:hookRun` — list, or run, ONE of the user's configured lifecycle hooks.
+   *
+   * The spawn lives here and only here: the renderer is C5-sandboxed and could not run a shell
+   * command if it tried, and "which shell lines may execute" must not be a decision made by the
+   * surface that renders model output. `runConfiguredHook` refuses any command that is not
+   * verbatim one the user configured for that same event, so this channel cannot be turned into
+   * a general-purpose exec.
+   *
+   * Never rejects. Every failure comes back as `{ok:false}` or as an `outcome.error`, which
+   * core's `runPreToolUseHooks` reads as "no hook fired" rather than as a deny — a broken hook
+   * must not become an invisible veto over every tool call.
+   */
+  ipcMain.handle(IPC.agentHookRun, async (_e, arg: unknown): Promise<AgentHookRunResult> => {
+    const req = arg as AgentHookRunRequest | null;
+    if (!req || (req.op !== "list" && req.op !== "run")) {
+      return { ok: false, error: "agent:hookRun: malformed request" };
+    }
+    if (req.op === "list") return { ok: true, hooks: listHooks() };
+    const event = req.event;
+    if (event !== "PreToolUse" && event !== "PostToolUse" && event !== "SessionStart") {
+      return { ok: false, error: "agent:hookRun: unknown event" };
+    }
+    if (typeof req.command !== "string" || req.command.length === 0) {
+      return { ok: false, error: "agent:hookRun: command is required" };
+    }
+    let cwd: string | undefined;
+    try {
+      cwd = typeof req.cwd === "string" && req.cwd ? assertNotSensitivePath(req.cwd) : undefined;
+    } catch (e) {
+      return { ok: false, error: errString(e) };
+    }
+    const outcome = await runConfiguredHook(
+      {
+        event,
+        command: req.command,
+        ...(typeof req.stdin === "string" ? { stdin: req.stdin } : {}),
+        ...(typeof req.timeoutMs === "number" ? { timeoutMs: req.timeoutMs } : {}),
+      },
+      { ...(cwd ? { cwd } : {}) },
+    );
+    return { ok: true, outcome };
+  });
+
+  ipcMain.handle(IPC.agentEngineTool, async (_e, arg: unknown): Promise<AgentSystemToolResult> => {
+    const req = arg as AgentEngineToolRequest | null;
+    if (!req || typeof req.name !== "string") {
+      return { ok: false, summary: "agent:engineTool: malformed request" };
+    }
+    // The client is built per call from the same EngineConfig the run-gate uses. Building it
+    // here rather than holding one keeps this handler honest when the config is absent: it
+    // resolves (and fails) exactly like every other engine call in the app.
+    const out = runEngineVerb(
+      req.name,
+      req.args ?? {},
+      (argv) =>
+        createEngineClient(config).runPrometheus(argv) as unknown as Promise<
+          Record<string, unknown>
+        >,
+    );
+    if (!out) return { ok: false, summary: `agent:engineTool: unknown verb "${req.name}"` };
+    try {
+      const r = await out;
+      return {
+        ok: r.ok,
+        summary: r.summary ?? "",
+        ...(r.data ? { data: r.data as Record<string, unknown> } : {}),
+        ...(r.verdict ? { verdict: r.verdict as AgentSystemToolResult["verdict"] } : {}),
+      };
+    } catch (e) {
+      return { ok: false, summary: errString(e) };
     }
   });
 
@@ -1994,9 +2381,17 @@ export function registerIdeIpcHandlers(wiring: IdeIpcWiring): () => void {
   });
 
   // ── disposer: remove handlers + detach host listeners ─────────────────────
+  // Task #10: an audit found 25 of the ~108 `ipcMain.handle(...)` channels above were
+  // NEVER added here (missing since their own PRs) — a SECOND registerIdeIpcHandlers()
+  // (window reload/recreation) would throw "Attempted to register a second handler"
+  // for any of them. This list is now exhaustive; see ide-ipc.test.ts's
+  // register→dispose→register round-trip, which enumerates every channel so a future
+  // handler added without a matching disposer entry fails that test, not a live reload.
   return () => {
     for (const channel of [
       IPC.ideFsRead,
+      IPC.ideSetWorkingSet,
+      IPC.ideApproveOutside,
       IPC.ideFsWrite,
       IPC.ideFsTree,
       IPC.ideFsWatch,
@@ -2045,14 +2440,37 @@ export function registerIdeIpcHandlers(wiring: IdeIpcWiring): () => void {
       IPC.ideGitPush,
       IPC.ideGitPull,
       IPC.ideGitFetch,
+      IPC.ideGitRebaseTodo,
+      IPC.ideGitRebaseRun,
+      IPC.ideGitRebaseState,
+      IPC.ideGitRebaseContinue,
+      IPC.ideGitRebaseAbort,
+      IPC.ideGitShow,
+      IPC.ideGitApplyPatch,
+      IPC.ideGitPrStatus,
+      IPC.ideGitPrList,
+      IPC.ideGitPrGet,
+      IPC.ideGitPrComment,
+      IPC.ideGitPrSetToken,
+      IPC.ideWorktreeList,
+      IPC.ideWorktreeCreate,
+      IPC.ideWorktreeRemove,
+      IPC.ideAgentFilesList,
+      IPC.ideCommandFilesList,
       IPC.ideGate,
       IPC.ideExec,
+      IPC.agentSystemTool,
+      IPC.agentGrantsList,
+      IPC.agentGrantsAdd,
+      IPC.agentEngineTool,
       IPC.ideDetectBins,
       IPC.ideSearch,
       IPC.ideSearchCancel,
       IPC.ideWorkspaceIndex,
       IPC.ideStructSearch,
       IPC.ideTestDiscover,
+      IPC.ideCoverageRun,
+      IPC.ideCoverageImport,
       IPC.ideTestRun,
       IPC.ideSqlConnect,
       IPC.ideSqlQuery,
@@ -2078,6 +2496,7 @@ export function registerIdeIpcHandlers(wiring: IdeIpcWiring): () => void {
       IPC.ideHistoryRead,
       IPC.ideHistoryRevert,
       IPC.ideFsWalk,
+      IPC.agentHookRun,
     ]) {
       ipcMain.removeHandler(channel);
     }

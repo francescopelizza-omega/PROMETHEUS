@@ -8,6 +8,7 @@ import {
   type CostLight,
   type Provider,
   type SecretsStore,
+  ai,
   classifyTier,
   costLight,
   loadProviders,
@@ -291,9 +292,20 @@ interface PingResult {
 }
 
 /**
- * Verify a key against `{baseUrl}/models` (auth-checked, bills ZERO completion tokens).
- * Time-boxed (8s) so a wrong base URL can't hang. On failure the response body is
- * redacted (a gateway may echo the bearer back) before it is surfaced.
+ * Verify a key against the provider's model-list path (auth-checked, bills ZERO tokens).
+ *
+ * Both halves of this request used to be OpenAI's and only OpenAI's: the path `/models` and
+ * an `Authorization: Bearer` header. Anthropic serves `/v1/models` and authenticates with
+ * `x-api-key` plus a mandatory `anthropic-version`; Gemini serves `/v1beta/models` and takes
+ * `x-goog-api-key`. So the ping 404'd for both, `connect` read that as an invalid key and
+ * refused to store it — a correct Anthropic or Gemini key could not be saved at all, and
+ * `--keep-unverified` still exited non-zero.
+ *
+ * The path comes from the registry and the headers from `ai/wire.ts`, which is the same
+ * module the transports use — so a provider can never be verified one way and called another.
+ *
+ * Time-boxed (8s) so a wrong base URL can't hang. On failure the response body is redacted
+ * (a gateway may echo the credential back) before it is surfaced.
  */
 async function verifyPing(
   provider: orchestration.ApiProvider,
@@ -303,8 +315,10 @@ async function verifyPing(
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 8000);
   try {
-    const res = await doFetch(`${provider.baseUrl.replace(/\/$/, "")}/models`, {
-      headers: { Authorization: `Bearer ${key}`, Accept: "application/json" },
+    const base = provider.baseUrl.replace(/\/$/, "");
+    const wire = ai.selectWire(ai.runtimeFromBaseUrl(provider.baseUrl, "cloud"));
+    const res = await doFetch(`${base}${provider.verifyPath ?? "/models"}`, {
+      headers: { ...wire.headers(key), Accept: "application/json" },
       signal: controller.signal,
     });
     if (!res.ok) {

@@ -12,7 +12,7 @@
  * truth wins.)
  */
 import { readFileSync } from "node:fs";
-import { basename, join } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 
 import { rules } from "@prometheus/core";
 
@@ -74,16 +74,70 @@ function toFile(path: string, scope: RuleScope, name: string, read: ReadSeam): S
 }
 
 /**
- * Discover steering files (project cwd + global ~/.prometheus) in precedence order. Every candidate
- * is returned (loaded OR missing) so `/memory` can list + offer to create the missing ones.
+ * The directories to look in, from the REPOSITORY ROOT down to `cwd`.
+ *
+ * Discovery used to read `cwd` and nothing else, so working in `packages/core/` of a monorepo
+ * silently lost the root `AGENTS.md` — the file that carries the conventions for the whole
+ * repository, and the one the user most expects to be in force. Nothing said it had been
+ * skipped; the agent simply did not know the rules.
+ *
+ * The walk stops at a `.git` directory (the repository IS the boundary), and at `$HOME` or the
+ * filesystem root otherwise — reading steering out of a user's parent directories would pick
+ * up files from unrelated projects. Nearest-last, so a deeper file's instructions come after
+ * and therefore win: a subdirectory that says something different is being specific on purpose.
+ */
+export function steeringDirs(
+  cwd: string,
+  home: string,
+  exists: (p: string) => boolean = (p) => defaultRead(p) !== null,
+): string[] {
+  const dirs: string[] = [];
+  let dir = resolve(cwd);
+  for (let depth = 0; depth < 64; depth++) {
+    dirs.push(dir);
+    // The repo root is the boundary: a `.git` here means everything above belongs to someone
+    // else's project, or to no project at all.
+    if (exists(join(dir, ".git"))) break;
+    const parent = dirname(dir);
+    if (parent === dir || dir === home) break;
+    dir = parent;
+  }
+  return dirs.reverse(); // root-first, so the NEAREST file is applied last and wins
+}
+
+/**
+ * Discover steering files (project tree + global ~/.prometheus) in precedence order. Every
+ * candidate is returned (loaded OR missing) so `/memory` can list + offer to create them.
+ *
+ * The project layer walks from the repository root down to `cwd` — see `steeringDirs`.
  */
 export function discoverSteering(
   cwd: string,
   home: string = prometheusHome(),
   read: ReadSeam = defaultRead,
+  exists?: (p: string) => boolean,
 ): SteeringFile[] {
   const out: SteeringFile[] = [];
-  for (const name of PROJECT_NAMES) out.push(toFile(join(cwd, name), "project", name, read));
+  const seen = new Set<string>();
+  const dirs = steeringDirs(cwd, home, exists);
+  const here = resolve(cwd);
+  for (const dir of dirs) {
+    for (const name of PROJECT_NAMES) {
+      const path = join(dir, name);
+      if (seen.has(path)) continue;
+      seen.add(path);
+      const file = toFile(path, "project", name, read);
+      /**
+       * An ANCESTOR contributes only files that actually exist.
+       *
+       * `cwd` still contributes every candidate whether or not it is there, because `/memory`
+       * offers to CREATE the missing ones — but doing that for every ancestor would list a
+       * phantom `AGENTS.md` for each directory between here and the repository root, and
+       * `/memory create` would then be ambiguous about where it was writing.
+       */
+      if (dir === here || file.loaded) out.push(file);
+    }
+  }
   for (const name of GLOBAL_NAMES) out.push(toFile(join(home, name), "global", name, read));
   return out;
 }

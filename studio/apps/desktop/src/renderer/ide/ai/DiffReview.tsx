@@ -13,8 +13,18 @@
  * window.prometheus only.
  */
 
-import { Button, Panel } from "@prometheus/ui";
+import { Button, Panel, PermissionCard } from "@prometheus/ui";
 import { type ReactElement, useMemo, useState } from "react";
+
+import { authLevelVar, useAuthorisationStore } from "../../stores/authorisation.js";
+import { useTabsStore } from "../state/stores.js";
+import {
+  type PendingWrite,
+  grant,
+  isInsideRoots,
+  needsPermission,
+  toPath,
+} from "./permission-gate.js";
 
 import {
   type DiffSelection,
@@ -64,7 +74,7 @@ function FileNode({ file, locked }: { file: ReviewFile; locked: boolean }): Reac
           fontWeight: 600,
           fontSize: "0.8rem",
           cursor: file.hunks.length > 0 && !locked ? "pointer" : "default",
-          color: "var(--text-primary, #e7e7ea)",
+          color: "var(--text-primary)",
         }}
       >
         <input
@@ -81,12 +91,10 @@ function FileNode({ file, locked }: { file: ReviewFile; locked: boolean }): Reac
           aria-label={`accept all hunks in ${basename(file.uri)}`}
         />
         <span style={{ fontFamily: "var(--font-mono, monospace)" }}>{basename(file.uri)}</span>
-        {file.isNew && <span style={{ color: "var(--ok, #36c46a)" }}>new</span>}
-        {file.isDelete && <span style={{ color: "var(--danger, #ef5a5a)" }}>delete</span>}
+        {file.isNew && <span style={{ color: "var(--ok)" }}>new</span>}
+        {file.isDelete && <span style={{ color: "var(--danger)" }}>delete</span>}
         {file.hunks.length === 0 && (
-          <span style={{ color: "var(--text-secondary, #9a9aa3)", fontWeight: 400 }}>
-            no changes
-          </span>
+          <span style={{ color: "var(--text-secondary)", fontWeight: 400 }}>no changes</span>
         )}
       </label>
       {file.hunks.map((h) => {
@@ -100,7 +108,7 @@ function FileNode({ file, locked }: { file: ReviewFile; locked: boolean }): Reac
               marginTop: 4,
               cursor: locked ? "default" : "pointer",
               opacity: on ? 1 : 0.5,
-              borderLeft: `2px solid ${on ? "var(--accent, #6d5ef0)" : "var(--border-subtle, #232329)"}`,
+              borderLeft: `2px solid ${on ? "var(--accent)" : "var(--border-subtle)"}`,
               paddingLeft: 6,
             }}
           >
@@ -121,13 +129,13 @@ function FileNode({ file, locked }: { file: ReviewFile; locked: boolean }): Reac
             >
               {h.oldLines.map((l, i) => (
                 // biome-ignore lint/suspicious/noArrayIndexKey: diff lines are positionally stable
-                <div key={`o${i}`} style={{ color: "var(--danger, #ef5a5a)" }}>
+                <div key={`o${i}`} style={{ color: "var(--danger)" }}>
                   {`- ${l}`}
                 </div>
               ))}
               {h.newLines.map((l, i) => (
                 // biome-ignore lint/suspicious/noArrayIndexKey: diff lines are positionally stable
-                <div key={`n${i}`} style={{ color: "var(--ok, #36c46a)" }}>
+                <div key={`n${i}`} style={{ color: "var(--ok)" }}>
                   {`+ ${l}`}
                 </div>
               ))}
@@ -212,6 +220,34 @@ async function applyChangeSet(
 }
 
 /** The DiffReview pane: header controls + the file→hunk tree + Apply. */
+/** Describe every file the plan would touch, for the §3 permission queue. */
+function pendingWrites(
+  cs: ReviewChangeSet,
+  selection: Record<string, string[]>,
+  roots: readonly string[],
+): PendingWrite[] {
+  const plan = buildApplyPlan(cs, selection);
+  if (plan.empty) return [];
+  const out: PendingWrite[] = [];
+  for (const f of plan.files) {
+    const edit = cs.edits.find((e) => e.uri === f.uri);
+    if (!edit) continue;
+    const path = toPath(f.uri);
+    const fullDelete =
+      edit.isDelete === true &&
+      edit.hunks.length > 0 &&
+      f.acceptedHunkIds.length === edit.hunks.length;
+    out.push({
+      uri: f.uri,
+      path,
+      insideWorkingSet: isInsideRoots(path, roots),
+      change: fullDelete ? "delete" : edit.isNew ? "new file" : "modify",
+      magnitude: `${f.acceptedHunkIds.length} hunk${f.acceptedHunkIds.length === 1 ? "" : "s"}`,
+    });
+  }
+  return out;
+}
+
 export function DiffReview(): ReactElement | null {
   const activeId = useAiSessionStore((s) => s.activeId);
   const cs = useAiSessionStore((s) => s.sessions[s.activeId]?.changeSet ?? null);
@@ -223,6 +259,13 @@ export function DiffReview(): ReactElement | null {
   // so a flat boolean would let tab A's in-flight apply disable tab B's controls and
   // paint A's error under B's changeset.
   const [applyingBy, setApplyingBy] = useState<Record<string, boolean>>({});
+  // §3: the permission QUEUE — the writes still awaiting a human. Apply does not touch
+  // disk while this is non-empty; the card at the head of the queue is what the user
+  // answers, one exact path at a time.
+  const [pending, setPending] = useState<PendingWrite[]>([]);
+  const authLevel = useAuthorisationStore((st) => st.level);
+  const workspaceRoot = useTabsStore((st) => st.workspaceRoot);
+  const roots = useMemo(() => (workspaceRoot ? [workspaceRoot] : []), [workspaceRoot]);
   const [errorBy, setErrorBy] = useState<Record<string, string | null>>({});
   const applying = applyingBy[activeId] === true;
   const applyError = errorBy[activeId] ?? null;
@@ -238,7 +281,8 @@ export function DiffReview(): ReactElement | null {
   // session id + changeset snapshot are captured at CLICK time: the user may switch
   // tabs (or the agent may re-dispatch) while fsWrite is in flight, and the
   // continuation must never clear or re-select whatever is live by then.
-  const onApply = (): void => {
+  /** Write, for real. Only ever called once every pending write has been answered. */
+  const runApply = (): void => {
     const sid = activeId;
     const appliedCs = cs;
     setErrorBy((m) => ({ ...m, [sid]: null }));
@@ -275,6 +319,38 @@ export function DiffReview(): ReactElement | null {
       .finally(() => setApplyingBy((m) => ({ ...m, [sid]: false })));
   };
 
+  /**
+   * §3: NOTHING reaches disk before the human has seen the exact absolute path. Apply
+   * first asks core's ladder which of the planned writes need asking about; if any do,
+   * it raises the permission card instead of writing. The applier guard in MAIN is
+   * still on either way — this is the visible half, not the enforcing half.
+   */
+  const onApply = (): void => {
+    if (!cs) return;
+    const asks = pendingWrites(cs, selection, roots).filter(needsPermission);
+    if (asks.length > 0) {
+      setPending(asks);
+      return;
+    }
+    runApply();
+  };
+
+  /** Answer the card at the head of the queue. Deny cancels the WHOLE apply. */
+  const answer = (decision: "once" | "session" | "deny"): void => {
+    const head = pending[0];
+    if (!head) return;
+    if (decision === "deny") {
+      setPending([]);
+      setErrorBy((m) => ({ ...m, [activeId]: `denied: ${head.path} was not written` }));
+      return;
+    }
+    void grant(head, decision).then(() => {
+      const rest = pending.slice(1);
+      setPending(rest);
+      if (rest.length === 0) runApply();
+    });
+  };
+
   return (
     <Panel
       title={`AI changes · ${cs.rationale}`}
@@ -303,9 +379,12 @@ export function DiffReview(): ReactElement | null {
         </div>
       }
     >
-      <div style={{ maxHeight: 320, overflow: "auto" }}>
+      {/* §9: no fixed-px pane height. The changeset list grows with the rail and caps at
+          a fraction of the VIEWPORT, so a tall window shows more files instead of the
+          same 320px slice. */}
+      <div style={{ maxHeight: "min(52vh, 720px)", overflow: "auto" }}>
         {totalHunks === 0 && (
-          <p style={{ margin: 0, color: "var(--text-secondary, #9a9aa3)", fontSize: "0.78rem" }}>
+          <p style={{ margin: 0, color: "var(--text-secondary)", fontSize: "0.78rem" }}>
             no changes — the proposal matches the current file content.
           </p>
         )}
@@ -313,18 +392,45 @@ export function DiffReview(): ReactElement | null {
           <FileNode key={f.uri} file={f} locked={applying} />
         ))}
       </div>
+      {/* §3: the permission card — one exact path at a time, ahead of any write. */}
+      {pending[0] && (
+        <div style={{ marginTop: 8 }}>
+          <PermissionCard
+            kind={pending[0].change === "delete" ? "delete file" : "write file"}
+            target={pending[0].path}
+            insideWorkingSet={pending[0].insideWorkingSet}
+            change={pending[0].change}
+            {...(pending[0].magnitude ? { magnitude: pending[0].magnitude } : {})}
+            authLevel={authLevel}
+            authVar={authLevelVar(authLevel)}
+            onAllowOnce={() => answer("once")}
+            onAllowSession={() => answer("session")}
+            onDeny={() => answer("deny")}
+          >
+            {pending.length > 1 && (
+              <span style={{ fontSize: 11, color: "var(--text-muted)" }}>
+                {pending.length - 1} more file{pending.length - 1 === 1 ? "" : "s"} after this one
+              </span>
+            )}
+          </PermissionCard>
+        </div>
+      )}
       <div style={{ display: "flex", gap: 8, marginTop: 8, alignItems: "center" }}>
-        <Button variant="primary" disabled={!plan || plan.empty || applying} onClick={onApply}>
-          {applying ? "Applying…" : "Apply selected"}
+        <Button
+          variant="primary"
+          disabled={!plan || plan.empty || applying || pending.length > 0}
+          onClick={onApply}
+        >
+          {applying ? "Applying…" : pending.length > 0 ? "Awaiting permission…" : "Apply selected"}
         </Button>
-        <span style={{ color: "var(--text-secondary, #9a9aa3)", fontSize: "0.75rem" }}>
+        <span style={{ color: "var(--text-secondary)", fontSize: "0.75rem" }}>
           {plan ? `${plan.files.length} file(s)` : ""}
           {plan && plan.newFilesToGate.length > 0
             ? ` · ${plan.newFilesToGate.length} new → run-gate`
             : ""}
         </span>
         {applyError ? (
-          <span style={{ color: "var(--danger, #e5534b)", fontSize: "0.75rem" }} role="alert">
+          <span style={{ color: "var(--danger)", fontSize: "0.75rem" }} role="alert">
             apply failed: {applyError}
           </span>
         ) : null}

@@ -40,6 +40,7 @@ import {
   extractiveSummary,
   makeLlmClient,
   makeToolRunner,
+  measuredSessionUsage,
   rebuildThread,
   restoreCheckpoint,
   revertEdit,
@@ -572,6 +573,56 @@ test("runMessageTurn: injects assembled steering as a system block iff present (
   );
 });
 
+test("runMessageTurn: injects durable memory as a system block iff present, AFTER steering", async () => {
+  const { client } = fakeEngine(() => ({ command: "scan", ok: true }));
+  const endpoint = {
+    id: "local:test",
+    baseUrl: "http://x",
+    locality: "local" as const,
+    contextWindow: 8192,
+    supportsTools: false,
+  };
+  const captureLlm = (sink: (t: Thread) => void): LLMClient => ({
+    async *turn(thread: Thread): AsyncIterable<LlmTurn> {
+      sink(thread);
+      yield { kind: "final" };
+    },
+  });
+
+  // both steering and memory present: steering comes first, memory second (CLI-061 order).
+  const { ctx } = fakeCtx(client, {
+    endpoint,
+    steering: () => "# Rules from AGENTS.md\n\nalways run the tests",
+    memory: () => "# Project memory index\n\n- staging deploys blue-green (deploy)",
+  });
+  let thread: Thread | undefined;
+  await runMessageTurn(undefined, "hi", {
+    ctx,
+    llm: captureLlm((t) => {
+      thread = t;
+    }),
+    now: fixedNow,
+    newId: fixedId,
+  });
+  const sys = (thread?.messages ?? []).filter((m) => m.role === "system");
+  assert.equal(sys.length, 3); // system prompt + steering + memory
+  assert.match(String(sys[1]?.content), /always run the tests/);
+  assert.match(String(sys[2]?.content), /blue-green/);
+
+  // memory getter returns null (nothing ever recorded for this project) ⇒ no extra block.
+  const { ctx: noMemCtx } = fakeCtx(client, { endpoint, memory: () => null });
+  let noMemThread: Thread | undefined;
+  await runMessageTurn(undefined, "hi", {
+    ctx: noMemCtx,
+    llm: captureLlm((t) => {
+      noMemThread = t;
+    }),
+    now: fixedNow,
+    newId: fixedId,
+  });
+  assert.equal((noMemThread?.messages ?? []).filter((m) => m.role === "system").length, 1);
+});
+
 test("runMessageTurn: confirm DEFAULTS to deny — a destructive tool is blocked", async () => {
   // The fake LLM asks to call a destructive tool; with no ctx.confirm it must be blocked.
   const { client } = fakeEngine(() => ({ command: "install", ok: true }));
@@ -928,10 +979,12 @@ test("confirmPrompt: the file writers name the absolute target and flag an escap
     confirmPrompt(call("propose_edit", join(repo, "a.ts")), repo, [repo]),
     `edit file ${join(repo, "a.ts")}?`,
   );
-  // a target outside the roots is called out
+  // a target outside the roots is called out — and the warning LEADS, because spliced
+  // mid-sentence it reads as part of the description rather than as an alarm, and it has no
+  // sensible position at all for a two-path tool like `move_file`.
   assert.equal(
     confirmPrompt(call("write_file", join(away, "hosts")), repo, [repo]),
-    `write file OUTSIDE the working set: ${join(away, "hosts")}?`,
+    `OUTSIDE the working set — write file ${join(away, "hosts")}?`,
   );
   // no roots configured, or a path-free tool → the terse form
   assert.equal(
@@ -1717,4 +1770,1139 @@ test("makeLlmClient: gpt-oss puts `Reasoning:` in the system prompt, not the bod
     body.messages.some((m) => m.role === "system" && m.content.includes("Reasoning: high")),
     "the harmony system line must be present",
   );
+});
+
+/* ------------------------------------------------------------------------- *
+ * The TEXT tool-call transport (the universal floor)
+ * ------------------------------------------------------------------------- */
+
+/**
+ * `supportsTools: false` used to be a cliff: the model was handed an empty tool list and
+ * could only ever describe the work. These pin the replacement — the model is taught the
+ * protocol in the prompt and its calls are read back out of ordinary text.
+ */
+
+test("a supportsTools:false endpoint is offered tools in the PROMPT, not on the wire", async () => {
+  const f = capturingFetch(DONE_SSE);
+  const llm = makeLlmClient(OLLAMA_ENDPOINT, { fetch: f.fetch as never });
+  const tools = [fakeTool("read_file", () => ["read"])];
+
+  await collect(llm.turn(thread("read a.ts"), fakeTuning(), tools));
+
+  const body = f.body();
+  assert.equal(
+    "tools" in body,
+    false,
+    "tools went on the wire to an endpoint that cannot use them",
+  );
+  const messages = body.messages as Array<{ role: string; content: string }>;
+  const system = messages.find((m) => m.role === "system");
+  assert.ok(system, "no system message carried the preamble");
+  assert.match(system.content, /<tool_call>/, "the call syntax was never taught");
+  assert.match(system.content, /read_file/, "the tool was never named");
+});
+
+test("a text-protocol call is read back out of the model's prose", async () => {
+  // The whole feature, at the transport seam: a model that cannot function-call still acts.
+  const sse =
+    'data: {"choices":[{"delta":{"content":"Let me look. <tool_call>{\\"name\\":"}}]}\n' +
+    'data: {"choices":[{"delta":{"content":"\\"read_file\\",\\"arguments\\":{\\"path\\":\\"a.ts\\"}}"}}]}\n' +
+    'data: {"choices":[{"delta":{"content":"</tool_call>"}}]}\n' +
+    "data: [DONE]\n";
+  const llm = makeLlmClient(OLLAMA_ENDPOINT, { fetch: capturingFetch(sse).fetch as never });
+
+  const turns = await collect(
+    llm.turn(thread("read a.ts"), fakeTuning(), [fakeTool("read_file", () => ["read"])]),
+  );
+
+  const calls = turns.filter((t) => t.kind === "tool_call");
+  assert.equal(calls.length, 1, "the call split across three SSE frames was not reassembled");
+  assert.equal(calls[0]?.kind === "tool_call" ? calls[0].call.name : "", "read_file");
+  assert.deepEqual(calls[0]?.kind === "tool_call" ? calls[0].call.args : {}, { path: "a.ts" });
+  // The user sees the prose, never the protocol.
+  const text = turns
+    .filter((t) => t.kind === "text")
+    .map((t) => (t.kind === "text" ? t.text : ""))
+    .join("");
+  assert.equal(text, "Let me look. ");
+  assert.equal(
+    turns.some((t) => t.kind === "final"),
+    false,
+    "`final` alongside a tool call ends the round before the result comes back",
+  );
+});
+
+test("a plain text answer still ends the turn with `final`", async () => {
+  const llm = makeLlmClient(OLLAMA_ENDPOINT, { fetch: capturingFetch(DONE_SSE).fetch as never });
+  const turns = await collect(
+    llm.turn(thread("hi"), fakeTuning(), [fakeTool("read_file", () => ["read"])]),
+  );
+  assert.equal(turns.filter((t) => t.kind === "tool_call").length, 0);
+  assert.ok(turns.some((t) => t.kind === "final"));
+});
+
+test("with NO tools exposed the deltas stream through untouched", async () => {
+  // The zero-regression case: nothing to scan for, so the transcript is byte-identical.
+  const sse = 'data: {"choices":[{"delta":{"content":"a ``` b"}}]}\ndata: [DONE]\n';
+  const llm = makeLlmClient(OLLAMA_ENDPOINT, { fetch: capturingFetch(sse).fetch as never });
+  const turns = await collect(llm.turn(thread("hi"), fakeTuning(), []));
+  const text = turns
+    .filter((t) => t.kind === "text")
+    .map((t) => (t.kind === "text" ? t.text : ""))
+    .join("");
+  assert.equal(text, "a ``` b");
+});
+
+test("a malformed text call is reported back so the model can correct itself", async () => {
+  // Dropping it silently is what makes a small model repeat the same broken syntax until the
+  // round cap: it never learns anything went wrong.
+  const sse =
+    'data: {"choices":[{"delta":{"content":"<tool_call>{\\"name\\":\\"read_file\\",\\"arguments\\":{bad}}</tool_call>"}}]}\n' +
+    "data: [DONE]\n";
+  const llm = makeLlmClient(OLLAMA_ENDPOINT, { fetch: capturingFetch(sse).fetch as never });
+  const turns = await collect(
+    llm.turn(thread("read a.ts"), fakeTuning(), [fakeTool("read_file", () => ["read"])]),
+  );
+  const call = turns.find((t) => t.kind === "tool_call");
+  assert.ok(call, "a broken call vanished with no feedback to the model");
+  assert.equal(call.kind === "tool_call" ? call.call.name : "", "malformed_tool_call");
+});
+
+test("a NATIVE endpoint that answers in text has its call recovered anyway", async () => {
+  // Extremely common with small local models: the template renders tools, the model ignores
+  // the channel and writes the call as prose. Dropping it looks like a refusal to act.
+  const sse =
+    'data: {"choices":[{"delta":{"content":"<tool_call>{\\"name\\":\\"read_file\\",\\"arguments\\":{\\"path\\":\\"a.ts\\"}}</tool_call>"}}]}\n' +
+    "data: [DONE]\n";
+  const llm = makeLlmClient(
+    { ...OLLAMA_ENDPOINT, supportsTools: true },
+    { fetch: capturingFetch(sse).fetch as never },
+  );
+  const turns = await collect(
+    llm.turn(thread("read a.ts"), fakeTuning(), [fakeTool("read_file", () => ["read"])]),
+  );
+  const calls = turns.filter((t) => t.kind === "tool_call");
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0]?.kind === "tool_call" ? calls[0].call.name : "", "read_file");
+});
+
+test("an endpoint that REFUSES tools degrades to the text protocol on the next turn", async () => {
+  // A tools-shaped 400 must cost one turn, not the session.
+  let call = 0;
+  const bodies: Array<Record<string, unknown>> = [];
+  const fetchImpl = async (_url: string, init?: { body?: string }) => {
+    bodies.push(JSON.parse(init?.body ?? "{}"));
+    call += 1;
+    if (call === 1) {
+      return {
+        ok: false,
+        status: 400,
+        statusText: "Bad Request",
+        body: null,
+        async text() {
+          return '{"error":{"message":"this model does not support tools"}}';
+        },
+      };
+    }
+    return {
+      ok: true,
+      status: 200,
+      statusText: "OK",
+      body: streamFromString(DONE_SSE),
+      async text() {
+        return "";
+      },
+    };
+  };
+  const llm = makeLlmClient(
+    { ...OLLAMA_ENDPOINT, supportsTools: true },
+    { fetch: fetchImpl as never },
+  );
+  const tools = [fakeTool("read_file", () => ["read"])];
+
+  await collect(llm.turn(thread("read a.ts"), fakeTuning(), tools));
+  await collect(llm.turn(thread("read a.ts"), fakeTuning(), tools));
+
+  assert.equal("tools" in (bodies[0] ?? {}), true, "the first turn should still try native");
+  assert.equal("tools" in (bodies[1] ?? {}), false, "the endpoint was asked natively again");
+  const messages = (bodies[1]?.messages ?? []) as Array<{ role: string; content: string }>;
+  assert.match(messages.find((m) => m.role === "system")?.content ?? "", /<tool_call>/);
+});
+
+test("an UNRELATED 400 does not demote a capable endpoint", async () => {
+  const bodies: Array<Record<string, unknown>> = [];
+  let call = 0;
+  const fetchImpl = async (_url: string, init?: { body?: string }) => {
+    bodies.push(JSON.parse(init?.body ?? "{}"));
+    call += 1;
+    if (call === 1) {
+      return {
+        ok: false,
+        status: 400,
+        statusText: "Bad Request",
+        body: null,
+        async text() {
+          return '{"error":{"message":"maximum context length is 8192 tokens"}}';
+        },
+      };
+    }
+    return {
+      ok: true,
+      status: 200,
+      statusText: "OK",
+      body: streamFromString(DONE_SSE),
+      async text() {
+        return "";
+      },
+    };
+  };
+  const llm = makeLlmClient(
+    { ...OLLAMA_ENDPOINT, supportsTools: true },
+    { fetch: fetchImpl as never },
+  );
+  const tools = [fakeTool("read_file", () => ["read"])];
+  await collect(llm.turn(thread("go"), fakeTuning(), tools));
+  await collect(llm.turn(thread("go"), fakeTuning(), tools));
+  assert.equal(
+    "tools" in (bodies[1] ?? {}),
+    true,
+    "a context-length error stranded a capable model on the weaker transport",
+  );
+});
+
+/* ------------------------------------------------------------------------- *
+ * Cloud auth + accounting on the NATIVE tool transport
+ * ------------------------------------------------------------------------- */
+
+/** A capturing fetch that also records the request headers. */
+/**
+ * Read the credential header WITHOUT pinning its capitalisation.
+ *
+ * The request is built by `ai/wire.ts` now, and that module spells the OpenAI header
+ * `authorization` — the casing `createAiClient` has always used. HTTP header names are
+ * case-insensitive and `fetch` normalizes them, so asserting on `headers.Authorization`
+ * tested the spelling rather than the behaviour, and failed on a change that sent exactly the
+ * same bytes. Anthropic and Gemini do not use this header at all; see the format tests.
+ */
+function authHeader(headers: Record<string, string>): string | undefined {
+  const hit = Object.entries(headers).find(([k]) => k.toLowerCase() === "authorization");
+  return hit?.[1];
+}
+
+function headerFetch(sse: string): {
+  fetch: unknown;
+  headers: () => Record<string, string>;
+  body: () => Record<string, unknown>;
+  url: () => string;
+} {
+  let seen: Record<string, string> = {};
+  let captured: Record<string, unknown> = {};
+  let seenUrl = "";
+  const fetch = async (url: string, init?: { body?: string; headers?: Record<string, string> }) => {
+    seenUrl = url;
+    seen = init?.headers ?? {};
+    captured = JSON.parse(init?.body ?? "{}");
+    return {
+      ok: true,
+      status: 200,
+      statusText: "OK",
+      body: streamFromString(sse),
+      async text() {
+        return "";
+      },
+    };
+  };
+  return { fetch, headers: () => seen, body: () => captured, url: () => seenUrl };
+}
+
+const CLOUD_ENDPOINT = {
+  id: "cloud:anthropic:sonnet",
+  baseUrl: "https://api.example.com/v1",
+  locality: "cloud" as const,
+  contextWindow: 200000,
+  supportsTools: true,
+  model: "claude-sonnet-5",
+  apiKeyRef: "keychain://prometheus/anthropic",
+};
+
+test("a CLOUD endpoint's key is resolved — not sent as the literal `Bearer local`", async () => {
+  // This transport hard-coded `Authorization: Bearer local`, so EVERY cloud model with tools
+  // enabled authenticated as the string "local" and took a 401. Cloud models could use tools
+  // only by failing over to the text protocol.
+  const f = headerFetch(DONE_SSE);
+  const llm = makeLlmClient(CLOUD_ENDPOINT, {
+    fetch: f.fetch as never,
+    resolveKey: async (ref) => `secret-for-${ref}`,
+  });
+  await collect(llm.turn(thread("hi"), fakeTuning(), [fakeTool("read_file", () => ["read"])]));
+  assert.equal(authHeader(f.headers()), "Bearer secret-for-keychain://prometheus/anthropic");
+});
+
+test("a LOCAL endpoint still gets the placeholder some shims insist on", async () => {
+  const f = headerFetch(DONE_SSE);
+  const llm = makeLlmClient(
+    { ...OLLAMA_ENDPOINT, supportsTools: true },
+    { fetch: f.fetch as never },
+  );
+  await collect(llm.turn(thread("hi"), fakeTuning(), [fakeTool("read_file", () => ["read"])]));
+  assert.equal(authHeader(f.headers()), "Bearer local");
+});
+
+test("a KEYLESS cloud endpoint sends no Authorization at all", async () => {
+  // A bogus bearer turns "you forgot to configure a key" into an opaque 401.
+  const f = headerFetch(DONE_SSE);
+  const { apiKeyRef: _drop, ...keyless } = CLOUD_ENDPOINT;
+  const llm = makeLlmClient(keyless, { fetch: f.fetch as never });
+  await collect(llm.turn(thread("hi"), fakeTuning(), [fakeTool("read_file", () => ["read"])]));
+  assert.equal(authHeader(f.headers()), undefined);
+});
+
+test("a missing key resolver is an honest message, not a silent 401", async () => {
+  const f = headerFetch(DONE_SSE);
+  const llm = makeLlmClient(CLOUD_ENDPOINT, { fetch: f.fetch as never });
+  const turns = await collect(
+    llm.turn(thread("hi"), fakeTuning(), [fakeTool("read_file", () => ["read"])]),
+  );
+  const text = turns
+    .filter((t) => t.kind === "text")
+    .map((t) => (t.kind === "text" ? t.text : ""))
+    .join("");
+  assert.match(text, /needs an API key/);
+});
+
+test("a tool turn asks for usage on CLOUD and stays silent on LOCAL", async () => {
+  // Gated exactly like the GUI's: a strict local server 400s on the unknown field, and local
+  // tokens are free so the estimate costs nothing there.
+  const cloud = headerFetch(DONE_SSE);
+  await collect(
+    makeLlmClient(CLOUD_ENDPOINT, {
+      fetch: cloud.fetch as never,
+      resolveKey: async () => "k",
+    }).turn(thread("hi"), fakeTuning(), [fakeTool("read_file", () => ["read"])]),
+  );
+  assert.deepEqual(cloud.body().stream_options, { include_usage: true });
+
+  const local = headerFetch(DONE_SSE);
+  await collect(
+    makeLlmClient(
+      { ...OLLAMA_ENDPOINT, supportsTools: true },
+      {
+        fetch: local.fetch as never,
+      },
+    ).turn(thread("hi"), fakeTuning(), [fakeTool("read_file", () => ["read"])]),
+  );
+  assert.equal("stream_options" in local.body(), false);
+});
+
+test("an agentic turn is ACCOUNTED — it was the only kind that cost nothing", async () => {
+  const sse =
+    'data: {"choices":[{"delta":{"content":"ok"}}]}\n' +
+    'data: {"choices":[],"usage":{"prompt_tokens":120,"completion_tokens":34,"total_tokens":154}}\n' +
+    "data: [DONE]\n";
+  const records: AccountingRecord[] = [];
+  const llm = makeLlmClient(CLOUD_ENDPOINT, {
+    fetch: headerFetch(sse).fetch as never,
+    resolveKey: async () => "k",
+    onUsage: (r) => records.push(r),
+    now: () => "2026-08-10T00:00:00.000Z",
+  });
+  await collect(llm.turn(thread("hi"), fakeTuning(), [fakeTool("read_file", () => ["read"])]));
+  assert.equal(records.length, 1, "a native tool turn produced no accounting record");
+  assert.equal(records[0]?.promptTokens, 120);
+  assert.equal(records[0]?.completionTokens, 34);
+  assert.equal(records[0]?.estimated, false);
+});
+
+test("a tool turn with no usage frame still records an ESTIMATE", async () => {
+  const records: AccountingRecord[] = [];
+  const llm = makeLlmClient(
+    { ...OLLAMA_ENDPOINT, supportsTools: true },
+    {
+      fetch: headerFetch(DONE_SSE).fetch as never,
+      onUsage: (r) => records.push(r),
+      now: () => "2026-08-10T00:00:00.000Z",
+    },
+  );
+  await collect(llm.turn(thread("hi"), fakeTuning(), [fakeTool("read_file", () => ["read"])]));
+  assert.equal(records.length, 1);
+  assert.equal(records[0]?.estimated, true);
+  assert.ok((records[0]?.promptTokens ?? 0) > 0);
+});
+
+test("a turn that produced NOTHING usable is fed back, not silently ended", async () => {
+  // A real gemma4:12b opens turns with a stray `</tool_call>` and stops. The scanner
+  // correctly discards the residue; what is left is a blank reply presented as an answer.
+  const sse = 'data: {"choices":[{"delta":{"content":"</tool_call>"}}]}\ndata: [DONE]\n';
+  const llm = makeLlmClient(OLLAMA_ENDPOINT, { fetch: capturingFetch(sse).fetch as never });
+  const turns = await collect(
+    llm.turn(thread("read a.ts"), fakeTuning(), [fakeTool("read_file", () => ["read"])]),
+  );
+  const text = turns
+    .filter((t) => t.kind === "text")
+    .map((t) => (t.kind === "text" ? t.text : ""))
+    .join("");
+  assert.equal(text, "", "the protocol residue leaked into the transcript");
+  const call = turns.find((t) => t.kind === "tool_call");
+  assert.ok(call, "an empty turn ended silently instead of being corrected");
+  assert.equal(call.kind === "tool_call" ? call.call.name : "", "malformed_tool_call");
+  assert.match(call.kind === "tool_call" ? String(call.call.args.reason) : "", /nothing usable/);
+});
+
+test("a normal text answer is NOT treated as an empty turn", async () => {
+  const llm = makeLlmClient(OLLAMA_ENDPOINT, { fetch: capturingFetch(DONE_SSE).fetch as never });
+  const turns = await collect(
+    llm.turn(thread("hi"), fakeTuning(), [fakeTool("read_file", () => ["read"])]),
+  );
+  assert.equal(turns.filter((t) => t.kind === "tool_call").length, 0);
+  assert.ok(turns.some((t) => t.kind === "final"));
+});
+
+test("an empty turn with NO tools exposed is left alone", async () => {
+  // Plain chat has nothing to correct toward, and a synthetic tool call there would be noise.
+  const sse = 'data: {"choices":[{"delta":{"content":""}}]}\ndata: [DONE]\n';
+  const llm = makeLlmClient(OLLAMA_ENDPOINT, { fetch: capturingFetch(sse).fetch as never });
+  const turns = await collect(llm.turn(thread("hi"), fakeTuning(), []));
+  assert.equal(turns.filter((t) => t.kind === "tool_call").length, 0);
+});
+
+/* ------------------------------------------------------------------------- *
+ * Native tool_call_id pairing (cloud models are trained on the paired form)
+ * ------------------------------------------------------------------------- */
+
+test("the provider's tool_call id is captured and surfaced on the call", async () => {
+  // It was not even in the delta type, so there was never an id to pair a result back to.
+  const sse =
+    'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_abc","function":{"name":"read_file","arguments":"{\\"path\\":\\"a.ts\\"}"}}]}}]}\n' +
+    "data: [DONE]\n";
+  const llm = makeLlmClient(
+    { ...OLLAMA_ENDPOINT, supportsTools: true },
+    {
+      fetch: capturingFetch(sse).fetch as never,
+    },
+  );
+  const turns = await collect(
+    llm.turn(thread("read a.ts"), fakeTuning(), [fakeTool("read_file", () => ["read"])]),
+  );
+  const call = turns.find((t) => t.kind === "tool_call");
+  assert.ok(call);
+  assert.equal(call.kind === "tool_call" ? call.call.id : undefined, "call_abc");
+});
+
+test("a paired thread goes out as assistant.tool_calls + role:tool", async () => {
+  const f = capturingFetch(DONE_SSE);
+  const llm = makeLlmClient(
+    { ...OLLAMA_ENDPOINT, supportsTools: true },
+    {
+      fetch: f.fetch as never,
+    },
+  );
+  const paired: Thread = {
+    messages: [
+      { role: "user", content: "read a.ts" },
+      {
+        role: "assistant",
+        content: "<tool_call>…</tool_call>",
+        toolCalls: [{ id: "call_1", name: "read_file", args: { path: "a.ts" } }],
+      },
+      { role: "tool", content: "[tool_result read_file]\nok: true\nx", toolCallId: "call_1" },
+    ],
+  };
+  await collect(llm.turn(paired, fakeTuning(), [fakeTool("read_file", () => ["read"])]));
+
+  const msgs = f.body().messages as Array<Record<string, unknown>>;
+  const assistant = msgs.find((m) => m.role === "assistant");
+  assert.ok(Array.isArray(assistant?.tool_calls), "the assistant turn lost its tool_calls");
+  const tc = (assistant?.tool_calls as Array<Record<string, unknown>>)[0];
+  assert.equal(tc?.id, "call_1");
+  assert.deepEqual(tc?.function, { name: "read_file", arguments: '{"path":"a.ts"}' });
+  const toolMsg = msgs.find((m) => m.role === "tool");
+  assert.equal(toolMsg?.tool_call_id, "call_1");
+});
+
+test("a tool result whose call was never announced is flattened, not sent unpaired", async () => {
+  // OpenAI rejects a `tool` message whose id matches no preceding call, and that rejection
+  // takes the whole turn with it — a half-paired transcript is worse than an unpaired one.
+  const f = capturingFetch(DONE_SSE);
+  const llm = makeLlmClient(
+    { ...OLLAMA_ENDPOINT, supportsTools: true },
+    {
+      fetch: f.fetch as never,
+    },
+  );
+  const orphan: Thread = {
+    messages: [
+      { role: "user", content: "go" },
+      { role: "tool", content: "[tool_result read_file]\nok: true", toolCallId: "call_missing" },
+    ],
+  };
+  await collect(llm.turn(orphan, fakeTuning(), [fakeTool("read_file", () => ["read"])]));
+  const msgs = f.body().messages as Array<Record<string, unknown>>;
+  assert.equal(
+    msgs.some((m) => m.role === "tool"),
+    false,
+    "an orphan tool message went out",
+  );
+  assert.equal(msgs.filter((m) => m.role === "user").length, 2);
+});
+
+test("an UNPAIRED thread (the text protocol's) still flattens exactly as before", async () => {
+  const f = capturingFetch(DONE_SSE);
+  const llm = makeLlmClient(
+    { ...OLLAMA_ENDPOINT, supportsTools: true },
+    {
+      fetch: f.fetch as never,
+    },
+  );
+  const plain: Thread = {
+    messages: [
+      { role: "user", content: "go" },
+      { role: "assistant", content: "<tool_call>…</tool_call>" },
+      { role: "tool", content: "[tool_result read_file]\nok: true" },
+    ],
+  };
+  await collect(llm.turn(plain, fakeTuning(), [fakeTool("read_file", () => ["read"])]));
+  const msgs = f.body().messages as Array<Record<string, unknown>>;
+  assert.equal(
+    msgs.some((m) => m.role === "tool"),
+    false,
+  );
+  assert.equal(
+    msgs.some((m) => m.tool_calls !== undefined),
+    false,
+  );
+});
+
+test("the TEXT transport never sends role:tool — Ollama renders nothing for it", async () => {
+  // The regression this guards: a template with no `.ToolResults` branch silently drops the
+  // message, so the result exists everywhere except where the model can see it.
+  const f = capturingFetch(DONE_SSE);
+  const llm = makeLlmClient(OLLAMA_ENDPOINT, { fetch: f.fetch as never });
+  const paired: Thread = {
+    messages: [
+      { role: "user", content: "go" },
+      { role: "tool", content: "[tool_result read_file]\nok: true", toolCallId: "call_1" },
+    ],
+  };
+  await collect(llm.turn(paired, fakeTuning(), [fakeTool("read_file", () => ["read"])]));
+  const msgs = f.body().messages as Array<Record<string, unknown>>;
+  assert.equal(
+    msgs.some((m) => m.role === "tool"),
+    false,
+  );
+});
+
+test("SessionCtx.resolveKey reaches the transport — a cloud key actually gets sent", async () => {
+  // The transport resolved `apiKeyRef` correctly, but neither live call site handed it a
+  // resolver, so in production every cloud endpoint still failed to authenticate. The
+  // connectors had been returning a `resolveKey` all along with nowhere to put it.
+  const f = headerFetch(DONE_SSE);
+  const llm = makeLlmClient(CLOUD_ENDPOINT, {
+    fetch: f.fetch as never,
+    resolveKey: async (ref) => `resolved:${ref}`,
+  });
+  await collect(llm.turn(thread("hi"), fakeTuning(), [fakeTool("read_file", () => ["read"])]));
+  assert.equal(authHeader(f.headers()), "Bearer resolved:keychain://prometheus/anthropic");
+});
+
+test("a turn ABANDONED early (the loop breaking on `final`) is still accounted", async () => {
+  // `runAgentTurn` breaks its for-await on `final`, which calls the generator's `.return()`
+  // — so straight-line code after the `yield*` never runs on any turn that produced an
+  // answer. Accounting and capability observation were both dropped there. A test that
+  // drains the iterator cannot see this; it has to stop early, as the real loop does.
+  const sse =
+    'data: {"choices":[{"delta":{"content":"done"}}]}\n' +
+    'data: {"choices":[],"usage":{"prompt_tokens":90,"completion_tokens":7,"total_tokens":97}}\n' +
+    "data: [DONE]\n";
+  const records: AccountingRecord[] = [];
+  const llm = makeLlmClient(
+    { ...OLLAMA_ENDPOINT, supportsTools: true },
+    {
+      fetch: capturingFetch(sse).fetch as never,
+      onUsage: (r) => records.push(r),
+      now: () => "2026-08-10T00:00:00.000Z",
+    },
+  );
+
+  // Consume exactly like the loop does: stop at `final` instead of draining.
+  const it = llm.turn(thread("hi"), fakeTuning(), [fakeTool("read_file", () => ["read"])]);
+  for await (const t of it) {
+    if (t.kind === "final") break;
+  }
+
+  assert.equal(records.length, 1, "the abandoned turn produced no accounting record");
+  assert.equal(records[0]?.promptTokens, 90);
+});
+
+/* ------------------------------------------------------------------------- *
+ * Tier W — the file mutators (delete / move / mkdir)
+ * ------------------------------------------------------------------------- */
+
+/**
+ * Before these, the catalog could read, search, write and edit a file but could not remove or
+ * rename one: an ordinary refactor forced the agent into `run_command`, a shell-shaped detour
+ * at a higher permission tier for a structured operation.
+ */
+
+async function fsFixture(prefix: string) {
+  const { mkdtempSync, realpathSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  return realpathSync.native(mkdtempSync(join(tmpdir(), prefix)));
+}
+
+test("delete_file removes a file and keeps its pre-image for revert", async () => {
+  const { writeFileSync, existsSync } = await import("node:fs");
+  const { join } = await import("node:path");
+  const root = await fsFixture("prom-del-");
+  writeFileSync(join(root, "gone.ts"), "export const x = 1;\n");
+
+  const { client, calls } = fakeEngine(() => ({ ok: true }));
+  const history: EditRecord[] = [];
+  const run = makeToolRunner(client, { roots: [root], cwd: root, editHistory: history });
+  const res = await run(
+    fakeTool("delete_file", () => []),
+    { path: "gone.ts" },
+  );
+
+  assert.equal(res.ok, true);
+  assert.equal(existsSync(join(root, "gone.ts")), false);
+  assert.equal(history.length, 1, "the delete was not captured for revert");
+  assert.equal(history[0]?.preImage, "export const x = 1;\n");
+  assert.equal(calls.length, 0, "delete_file must never reach the engine");
+});
+
+test("delete_file refuses a DIRECTORY unless recursive is asked for explicitly", async () => {
+  const { mkdirSync, existsSync } = await import("node:fs");
+  const { join } = await import("node:path");
+  const root = await fsFixture("prom-deldir-");
+  mkdirSync(join(root, "pkg"));
+
+  const { client } = fakeEngine(() => ({ ok: true }));
+  const run = makeToolRunner(client, { roots: [root], cwd: root });
+  const refused = await run(
+    fakeTool("delete_file", () => []),
+    { path: "pkg" },
+  );
+  assert.equal(refused.ok, false);
+  assert.match(refused.summary, /recursive/);
+  assert.equal(existsSync(join(root, "pkg")), true, "a directory was removed without asking");
+
+  const done = await run(
+    fakeTool("delete_file", () => []),
+    { path: "pkg", recursive: true },
+  );
+  assert.equal(done.ok, true);
+  assert.match(done.summary, /not revertible/, "a recursive delete implied it could be undone");
+  assert.equal(existsSync(join(root, "pkg")), false);
+});
+
+test("delete_file outside the working set is refused", async () => {
+  const { writeFileSync, existsSync } = await import("node:fs");
+  const { join } = await import("node:path");
+  const root = await fsFixture("prom-delin-");
+  const away = await fsFixture("prom-delout-");
+  const victim = join(away, "keep.txt");
+  writeFileSync(victim, "important\n");
+
+  const { client } = fakeEngine(() => ({ ok: true }));
+  const run = makeToolRunner(client, { roots: [root], cwd: root });
+  const res = await run(
+    fakeTool("delete_file", () => []),
+    { path: victim },
+  );
+  assert.equal(res.ok, false);
+  assert.match(res.summary, /outside the working set/);
+  assert.equal(existsSync(victim), true, "a refused delete still touched the disk");
+});
+
+test("move_file renames, and refuses to clobber unless overwrite is set", async () => {
+  const { writeFileSync, existsSync, readFileSync } = await import("node:fs");
+  const { join } = await import("node:path");
+  const root = await fsFixture("prom-mv-");
+  writeFileSync(join(root, "old.ts"), "a\n");
+  writeFileSync(join(root, "taken.ts"), "keep me\n");
+
+  const { client } = fakeEngine(() => ({ ok: true }));
+  const run = makeToolRunner(client, { roots: [root], cwd: root });
+  const tool = fakeTool("move_file", () => []);
+
+  const ok = await run(tool, { from: "old.ts", to: "nested/new.ts" });
+  assert.equal(ok.ok, true, ok.summary);
+  assert.equal(existsSync(join(root, "old.ts")), false);
+  assert.equal(readFileSync(join(root, "nested/new.ts"), "utf8"), "a\n");
+
+  const clobber = await run(tool, { from: "nested/new.ts", to: "taken.ts" });
+  assert.equal(clobber.ok, false);
+  assert.match(clobber.summary, /overwrite/);
+  assert.equal(readFileSync(join(root, "taken.ts"), "utf8"), "keep me\n");
+
+  const forced = await run(tool, { from: "nested/new.ts", to: "taken.ts", overwrite: true });
+  assert.equal(forced.ok, true);
+  assert.equal(readFileSync(join(root, "taken.ts"), "utf8"), "a\n");
+});
+
+test("move_file cannot escape the working set in EITHER direction", async () => {
+  const { writeFileSync, existsSync } = await import("node:fs");
+  const { join } = await import("node:path");
+  const root = await fsFixture("prom-mvin-");
+  const away = await fsFixture("prom-mvout-");
+  writeFileSync(join(root, "a.ts"), "x\n");
+
+  const { client } = fakeEngine(() => ({ ok: true }));
+  const run = makeToolRunner(client, { roots: [root], cwd: root });
+  const tool = fakeTool("move_file", () => []);
+
+  const out = await run(tool, { from: "a.ts", to: join(away, "a.ts") });
+  assert.equal(out.ok, false, "a file was moved OUT of the working set");
+  assert.equal(existsSync(join(root, "a.ts")), true);
+
+  writeFileSync(join(away, "b.ts"), "y\n");
+  const inward = await run(tool, { from: join(away, "b.ts"), to: "b.ts" });
+  assert.equal(inward.ok, false, "a file was pulled IN from outside the working set");
+});
+
+test("mkdir creates the chain and is idempotent", async () => {
+  const { existsSync } = await import("node:fs");
+  const { join } = await import("node:path");
+  const root = await fsFixture("prom-mkdir-");
+  const { client } = fakeEngine(() => ({ ok: true }));
+  const run = makeToolRunner(client, { roots: [root], cwd: root });
+  const tool = fakeTool("mkdir", () => []);
+
+  assert.equal((await run(tool, { path: "a/b/c" })).ok, true);
+  assert.equal(existsSync(join(root, "a/b/c")), true);
+  assert.equal((await run(tool, { path: "a/b/c" })).ok, true, "mkdir was not idempotent");
+});
+
+test("the Tier-W tools are NOT readOnly — they can never auto-approve at A1", async () => {
+  // Everything in Tier R carries readOnlyHint, which classifyAuth reads first to auto-approve.
+  // A mutator that inherited that would delete files with no human in the loop.
+  const { SYSTEM_FS_WRITE_TOOLS } = await import("@prometheus/core/agent-system");
+  for (const t of SYSTEM_FS_WRITE_TOOLS) {
+    assert.notEqual(t.annotations.readOnlyHint, true, `${t.name} is marked readOnlyHint`);
+  }
+  const byName = new Map(SYSTEM_FS_WRITE_TOOLS.map((t) => [t.name, t]));
+  assert.equal(byName.get("delete_file")?.annotations.destructiveHint, true);
+  assert.equal(byName.get("move_file")?.annotations.destructiveHint, true);
+});
+
+/* ── the two spend windows are evaluated over DIFFERENT record sets ────────*/
+
+/**
+ * `daily_usd` was a session cap wearing a different name: the gate read only the current
+ * session's file, and a fresh sessionId is minted every launch, so the window reset to $0 on
+ * restart.
+ *
+ * The fix has a trap of its own, and these pin it: `evaluateBudgets` sums the SESSION window over
+ * every record it is handed and only filters for the daily one, so feeding it a merged
+ * cross-session array makes `session_usd` trip on the whole machine's day. The two windows are
+ * therefore evaluated separately, over different inputs, and the stricter answer wins.
+ */
+
+/** One record priced at $8 by `priceFor` above (200k in @ $10/M + 200k out @ $30/M). */
+const eightDollars = (atIso: string): AccountingRecord =>
+  ({ ...overCapRecords[0], atIso }) as AccountingRecord;
+
+test("a DAILY cap trips on another session's spend from today", () => {
+  const r = checkBudgetGate(
+    gateCtx({ budget: budget({ config: { dailyUsd: 5 } }) }),
+    "2026-07-17T13:00:00Z",
+    () => [], // this session has spent nothing…
+    () => [eightDollars("2026-07-17T09:00:00Z")], // …but an earlier session spent $8 today
+  );
+  assert.equal(r.action, "block", "the daily window did not see the rest of the day");
+  assert.match(r.message ?? "", /daily/i);
+});
+
+test("a SESSION cap does NOT move when a DIFFERENT session spends", () => {
+  // The regression this guards: merging the day's records into the session window made
+  // `session_usd` trip on spend this session never made.
+  const r = checkBudgetGate(
+    gateCtx({ budget: budget({ config: { sessionUsd: 5, dailyUsd: 1000 } }) }),
+    "2026-07-17T13:00:00Z",
+    () => [], // this session: nothing
+    () => [eightDollars("2026-07-17T09:00:00Z")], // the day: $8, under the $1000 daily cap
+  );
+  assert.equal(r.action, "ok", "another session's spend was charged to this session's cap");
+});
+
+test("the day scan is not even performed when no daily cap is configured", () => {
+  let scanned = false;
+  const r = checkBudgetGate(
+    gateCtx({ budget: budget({ config: { sessionUsd: 5 } }) }),
+    "2026-07-17T13:00:00Z",
+    () => [],
+    () => {
+      scanned = true;
+      return [];
+    },
+  );
+  assert.equal(scanned, false, "a session-only cap paid for a whole-home directory scan");
+  assert.equal(r.action, "ok");
+});
+
+test("the stricter of the two windows wins", () => {
+  const r = checkBudgetGate(
+    gateCtx({ budget: budget({ config: { sessionUsd: 1000, dailyUsd: 5 } }) }),
+    "2026-07-17T13:00:00Z",
+    () => [],
+    () => [eightDollars("2026-07-17T09:00:00Z")],
+  );
+  assert.equal(r.action, "block");
+});
+
+test("the current session is not double-counted when it appears in both reads", () => {
+  // The session file IS one of the day's files, so the same $8 record arrives from both readers.
+  // Counted once it is $8 of a $12 cap (under the 80% warn line); counted twice it is $16 and
+  // would BLOCK. The pass condition is therefore "ok" — and the contrasting case below shows
+  // that $16 really would have blocked, so this is not passing by accident.
+  const rec = eightDollars("2026-07-17T09:00:00Z");
+  const deduped = checkBudgetGate(
+    gateCtx({ budget: budget({ config: { dailyUsd: 12 } }) }),
+    "2026-07-17T13:00:00Z",
+    () => [rec],
+    () => [rec],
+  );
+  assert.equal(deduped.action, "ok", "the same record was counted twice");
+
+  const genuinelyTwo = checkBudgetGate(
+    gateCtx({ budget: budget({ config: { dailyUsd: 12 } }) }),
+    "2026-07-17T13:00:00Z",
+    () => [rec],
+    () => [rec, eightDollars("2026-07-17T10:00:00Z")], // a DIFFERENT record, same day
+  );
+  assert.equal(genuinelyTwo.action, "block", "two distinct $8 records must exceed a $12 cap");
+});
+
+/* ------------------------------------------------------------------------- *
+ * The native transport speaks ALL THREE wires — not only OpenAI's
+ * ------------------------------------------------------------------------- */
+
+/**
+ * These are the tests that decide whether `ai/wire.ts`'s tool support is real or dark.
+ *
+ * The wire module can encode Anthropic and Gemini tool calls perfectly and it changes
+ * nothing unless THIS transport uses it — and until now it did not: `toolTurn` hard-coded
+ * the OpenAI URL, an `Authorization: Bearer` header, an OpenAI body and an inline OpenAI SSE
+ * parser, then bailed out to the text protocol for anything else. So each of these asserts a
+ * property of the REQUEST that actually left, or of a call recovered from a real provider
+ * frame, rather than that some function was called.
+ */
+
+const ANTHROPIC_ENDPOINT = {
+  id: "cloud:anthropic:sonnet",
+  baseUrl: "https://api.anthropic.com",
+  locality: "cloud" as const,
+  contextWindow: 200000,
+  supportsTools: true,
+  model: "claude-sonnet-5",
+  apiKeyRef: "keychain://prometheus/anthropic",
+};
+
+const GEMINI_ENDPOINT = {
+  id: "cloud:gemini:pro",
+  baseUrl: "https://generativelanguage.googleapis.com",
+  locality: "cloud" as const,
+  contextWindow: 1000000,
+  supportsTools: true,
+  model: "gemini-2.5-pro",
+  apiKeyRef: "keychain://prometheus/gemini",
+};
+
+test("an Anthropic endpoint gets Anthropic's URL, headers and tool schema", async () => {
+  const f = headerFetch('data: {"type":"message_stop"}\n');
+  const llm = makeLlmClient(ANTHROPIC_ENDPOINT, {
+    fetch: f.fetch as never,
+    resolveKey: async () => "sk-ant-test",
+  });
+  await collect(llm.turn(thread("hi"), fakeTuning(), [fakeTool("read_file", () => ["read"])]));
+
+  // `/v1/chat/completions` does not exist on api.anthropic.com — it 404s.
+  assert.equal(f.url(), "https://api.anthropic.com/v1/messages");
+  // `x-api-key`, NOT a bearer, and the version header is mandatory.
+  assert.equal(f.headers()["x-api-key"], "sk-ant-test");
+  assert.equal(f.headers()["anthropic-version"], "2023-06-01");
+  assert.equal(authHeader(f.headers()), undefined, "a bearer here authenticates as nobody");
+
+  const body = f.body() as Record<string, any>;
+  assert.ok(Array.isArray(body.tools), "the tools never reached the wire");
+  assert.equal(body.tools[0].name, "read_file");
+  assert.ok(body.tools[0].input_schema, "Anthropic takes input_schema, not parameters");
+  assert.ok(body.max_tokens, "omitting max_tokens is a 400 on this API");
+});
+
+test("a Gemini endpoint gets Gemini's URL, header and functionDeclarations", async () => {
+  const f = headerFetch("data: {}\n");
+  const llm = makeLlmClient(GEMINI_ENDPOINT, {
+    fetch: f.fetch as never,
+    resolveKey: async () => "goog-test",
+  });
+  await collect(llm.turn(thread("hi"), fakeTuning(), [fakeTool("read_file", () => ["read"])]));
+
+  assert.match(f.url(), /\/v1beta\/models\/gemini-2\.5-pro:streamGenerateContent\?alt=sse$/);
+  assert.equal(f.headers()["x-goog-api-key"], "goog-test");
+
+  const body = f.body() as Record<string, any>;
+  assert.equal(body.tools[0].functionDeclarations[0].name, "read_file");
+  assert.deepEqual(body.toolConfig, { functionCallingConfig: { mode: "AUTO" } });
+  // Gemini has no `messages` — sending one is a 400.
+  assert.ok(Array.isArray(body.contents), "the thread was not rendered as Gemini contents");
+});
+
+test("a tool call streamed in ANTHROPIC's shape is recovered", async () => {
+  // Anthropic opens the call in `content_block_start` and streams the arguments as
+  // `input_json_delta` fragments. The old inline parser looked only at
+  // `choices[0].delta.tool_calls`, so every one of these was invisible.
+  const sse =
+    'data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_1","name":"read_file"}}\n' +
+    'data: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\\"path\\":"}}\n' +
+    'data: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"\\"a.ts\\"}"}}\n' +
+    'data: {"type":"message_stop"}\n';
+  const llm = makeLlmClient(ANTHROPIC_ENDPOINT, {
+    fetch: headerFetch(sse).fetch as never,
+    resolveKey: async () => "sk-ant-test",
+  });
+  const turns = await collect(
+    llm.turn(thread("read a.ts"), fakeTuning(), [fakeTool("read_file", () => ["read"])]),
+  );
+  const call = turns.find((t) => t.kind === "tool_call");
+  assert.ok(call, "the Anthropic tool call was dropped");
+  if (call.kind !== "tool_call") throw new Error("unreachable");
+  assert.equal(call.call.name, "read_file");
+  assert.deepEqual(call.call.args, { path: "a.ts" });
+  assert.equal(call.call.id, "toolu_1");
+});
+
+test("a tool call streamed in GEMINI's shape is recovered", async () => {
+  // Gemini delivers the call WHOLE, in a `functionCall` part, and issues no id.
+  const sse =
+    'data: {"candidates":[{"content":{"parts":[{"functionCall":{"name":"read_file","args":{"path":"a.ts"}}}]}}]}\n';
+  const llm = makeLlmClient(GEMINI_ENDPOINT, {
+    fetch: headerFetch(sse).fetch as never,
+    resolveKey: async () => "goog-test",
+  });
+  const turns = await collect(
+    llm.turn(thread("read a.ts"), fakeTuning(), [fakeTool("read_file", () => ["read"])]),
+  );
+  const call = turns.find((t) => t.kind === "tool_call");
+  assert.ok(call, "the Gemini function call was dropped");
+  if (call.kind !== "tool_call") throw new Error("unreachable");
+  assert.equal(call.call.name, "read_file");
+  assert.deepEqual(call.call.args, { path: "a.ts" });
+});
+
+test("NEITHER provider is demoted to the text protocol any more", async () => {
+  // The demotion status line was the whole user-visible symptom: the first prompt on Claude
+  // or Gemini produced that one line and no answer, and only the second worked.
+  for (const ep of [ANTHROPIC_ENDPOINT, GEMINI_ENDPOINT]) {
+    const llm = makeLlmClient(ep, {
+      fetch: headerFetch("data: {}\n").fetch as never,
+      resolveKey: async () => "k",
+    });
+    const turns = await collect(
+      llm.turn(thread("hi"), fakeTuning(), [fakeTool("read_file", () => ["read"])]),
+    );
+    const demoted = turns.some(
+      (t) => t.kind === "status" && /without native tool calls/.test(t.text),
+    );
+    assert.equal(demoted, false, `${ep.id} still falls back to the text protocol`);
+  }
+});
+
+/* ------------------------------------------------------------------------- *
+ * Informed consent: the prompt must name what is about to happen
+ * ------------------------------------------------------------------------- */
+
+test("run_command's confirm prompt shows the COMMAND, not the tool's name", async () => {
+  // This is the whole finding: the human approving a shell command was shown the literal
+  // words "run tool run_command?" and never the command line. `ls` and `rm -rf ~` presented
+  // identically, so the approval could not distinguish them.
+  const p = confirmPrompt(
+    { name: "run_command", args: { command: "rm -rf /tmp/x" } } as ToolCall,
+    "/repo",
+  );
+  assert.match(p, /rm -rf \/tmp\/x/);
+  assert.equal(/run tool run_command/.test(p), false);
+});
+
+test("run_command names a non-default cwd and a background launch", async () => {
+  // Both change what approving means: somewhere else, and after the turn ends.
+  const p = confirmPrompt(
+    {
+      name: "run_command",
+      args: { command: "make", cwd: "/other", mode: "background" },
+    } as ToolCall,
+    "/repo",
+  );
+  assert.match(p, /BACKGROUND/);
+  assert.match(p, /in \/other/);
+});
+
+test("the command line is never truncated — a shortened one is one nobody read", async () => {
+  const long = `echo ${"a".repeat(400)}`;
+  const p = confirmPrompt({ name: "run_command", args: { command: long } } as ToolCall, "/repo");
+  assert.match(p, /a{400}/);
+});
+
+test("delete_file says WHICH path, and says when it cannot be undone", async () => {
+  const one = confirmPrompt(
+    { name: "delete_file", args: { path: "notes.txt" } } as ToolCall,
+    "/repo",
+  );
+  assert.match(one, /\/repo\/notes\.txt/);
+  const rec = confirmPrompt(
+    { name: "delete_file", args: { path: "build", recursive: true } } as ToolCall,
+    "/repo",
+  );
+  assert.match(rec, /cannot be undone/);
+  assert.match(rec, /\/repo\/build/);
+});
+
+test("move_file names BOTH ends, and flags a clobbering overwrite", async () => {
+  const p = confirmPrompt(
+    { name: "move_file", args: { from: "a.ts", to: "b.ts", overwrite: true } } as ToolCall,
+    "/repo",
+  );
+  assert.match(p, /\/repo\/a\.ts/);
+  assert.match(p, /\/repo\/b\.ts/);
+  assert.match(p, /REPLACING/);
+});
+
+test("apply_patch lists every file it will touch", async () => {
+  // One approval covers the whole patch, so the list is the only thing being consented to.
+  const p = confirmPrompt(
+    {
+      name: "apply_patch",
+      args: {
+        edits: [
+          { path: "a.ts", hunks: [] },
+          { path: "sub/b.ts", hunks: [] },
+        ],
+      },
+    } as ToolCall,
+    "/repo",
+  );
+  assert.match(p, /\/repo\/a\.ts/);
+  assert.match(p, /\/repo\/sub\/b\.ts/);
+  assert.match(p, /2 file/);
+});
+
+test("a MALFORMED call does not produce a prompt that pretends to name a target", async () => {
+  // `run: ?` would read as an approved empty command rather than as a broken call.
+  assert.equal(
+    confirmPrompt({ name: "run_command", args: {} } as ToolCall, "/repo"),
+    "run tool run_command?",
+  );
+});
+
+test("the escape check now covers EVERY described tool, not just the two file writers", async () => {
+  const { mkdtempSync, realpathSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const repo = realpathSync.native(mkdtempSync(join(tmpdir(), "prom-cp2-repo-")));
+  const away = realpathSync.native(mkdtempSync(join(tmpdir(), "prom-cp2-away-")));
+  // A move whose DESTINATION leaves the working set is an escape, and nothing used to say so.
+  const p = confirmPrompt(
+    { name: "move_file", args: { from: join(repo, "a"), to: join(away, "a") } } as ToolCall,
+    repo,
+    [repo],
+  );
+  assert.match(p, /OUTSIDE the working set/);
+});
+
+/* ------------------------------------------------------------------------- *
+ * /stats reads the PROVIDER's numbers, not a transcript estimate
+ * ------------------------------------------------------------------------- */
+
+test("measured usage beats the estimate, and is not merely a relabelled one", async () => {
+  // `sessionUsage` counts each transcript message ONCE, but every turn re-sends the whole
+  // thread — so on an N-turn session it undercounts billed input by roughly a factor of N.
+  // The provider's real counts were written every round and read by nothing but the separate
+  // `tokens report`. So this is not an "estimated" label problem; the number was wrong.
+  const fallback = {
+    turns: 2,
+    inputTokens: 100,
+    outputTokens: 50,
+    estTokens: 150,
+    estimated: true,
+    cost: 0,
+    model: "x:y",
+    estCostUsd: 0,
+  };
+  const out = measuredSessionUsage(
+    "/home",
+    "s1",
+    fallback as never,
+    "gpt-4o",
+    false,
+    {} as never,
+    () =>
+      [
+        { promptTokens: 4_000, completionTokens: 200, estimated: false },
+        { promptTokens: 9_000, completionTokens: 300, estimated: false },
+      ] as never,
+  );
+  assert.equal(out.inputTokens, 13_000, "the billed input must be the SUM of every round-trip");
+  assert.equal(out.outputTokens, 500);
+  assert.equal(out.estimated, false, "provider-reported usage must not be labelled an estimate");
+});
+
+test("with NO accounting records the honest estimate survives untouched", async () => {
+  // A fabricated zero would read as "this session cost nothing", which is worse than an
+  // estimate — local models legitimately report no usage at all.
+  const fallback = {
+    turns: 1,
+    inputTokens: 10,
+    outputTokens: 5,
+    estTokens: 15,
+    estimated: true,
+    cost: 0,
+    model: "x:y",
+    estCostUsd: 0,
+  };
+  const out = measuredSessionUsage("/h", "s", fallback as never, "m", true, {} as never, () => []);
+  assert.deepEqual(out, fallback);
+});
+
+test("an UNREADABLE accounting store degrades to the estimate instead of taking the session down", async () => {
+  // `readAccounting` throws on purpose — the budget gate fails closed on it. A read-only
+  // display must not inherit that.
+  const fallback = {
+    turns: 1,
+    inputTokens: 1,
+    outputTokens: 1,
+    estTokens: 2,
+    estimated: true,
+    cost: 0,
+    model: "m",
+    estCostUsd: 0,
+  };
+  const out = measuredSessionUsage("/h", "s", fallback as never, "m", true, {} as never, () => {
+    throw new Error("permission denied");
+  });
+  assert.deepEqual(out, fallback);
+});
+
+test("a session whose records are chars/4 fallbacks is still labelled an estimate", async () => {
+  const fallback = {
+    turns: 1,
+    inputTokens: 1,
+    outputTokens: 1,
+    estTokens: 2,
+    estimated: true,
+    cost: 0,
+    model: "m",
+    estCostUsd: 0,
+  };
+  const out = measuredSessionUsage(
+    "/h",
+    "s",
+    fallback as never,
+    "m",
+    true,
+    {} as never,
+    () => [{ promptTokens: 900, completionTokens: 100, estimated: true }] as never,
+  );
+  assert.equal(out.inputTokens, 900, "the fallback records are still the best number available");
+  assert.equal(out.estimated, true, "…but they must not be presented as measured");
 });

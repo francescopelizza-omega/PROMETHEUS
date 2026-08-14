@@ -6,6 +6,9 @@
  * validator sanitizes known keys (drops a known key with the wrong type) but passes
  * unknown extension keys through — strict for core, open for extensions.
  */
+import { type HookSpec, validateHooks } from "../agent/hooks.js";
+
+export type { HookSpec };
 
 export interface Settings {
   /** active profile id (§7.1). */
@@ -41,6 +44,40 @@ export interface Settings {
    *  `caseSensitive:false` compiles with the `i` flag. Sanitized element-wise below (a single
    *  bad row drops that row, not the array), consistent with the lenient validator contract. */
   todoPatterns?: { name: string; regex: string; caseSensitive?: boolean }[];
+  /**
+   * SPEND CAPS for metered (cloud) turns — the desktop's half of the CLI's profile
+   * `[budget]` table.
+   *
+   * These exist because the cap was previously a LABEL in the GUI: `AgentPane` rendered a
+   * `SpendMeter` with a `capUsd` read from localStorage and nothing anywhere consulted it, so
+   * an "auto-disable at cap" caption sat above a turn that would happily keep spending. The
+   * CLI has enforced `session_usd`/`daily_usd` from its profile TOML for a while; settings is
+   * where the desktop can read the same numbers, so both hosts refuse on the same rule.
+   *
+   * Absent (or both windows absent) ⇒ NO cap, and the accounting store is never even read —
+   * the zero-config behaviour is unchanged.
+   */
+  "budget.sessionUsd"?: number;
+  "budget.dailyUsd"?: number;
+  /** warn once per window when spend crosses this % of a cap (default 80). */
+  "budget.warnAtPercent"?: number;
+  /**
+   * What to do when a metered model has NO price entry: `"block"` (fail-closed, the default)
+   * or `"warn"`. Most cloud providers have no price row, and counting an unpriced record as
+   * $0 is what makes a cap silently inapplicable — see `budgetWindows.BudgetConfig`.
+   */
+  "budget.unpricedPolicy"?: "block" | "warn";
+  /**
+   * LIFECYCLE HOOKS — user-authored shell commands bound to `PreToolUse` / `PostToolUse` /
+   * `SessionStart` (see `agent/hooks.ts` for the semantics and the fail-soft contract).
+   *
+   * Settings-only, never a tool argument: the agent can neither author a hook nor reach this
+   * key, which is what makes a PreToolUse veto meaningful rather than advisory.
+   *
+   * Sanitized ELEMENT-wise below (a malformed row drops that row, not every hook the user
+   * configured) — the same lenient contract `todoPatterns` uses.
+   */
+  hooks?: HookSpec[];
   /** extension-contributed keys (open) — also carries the `format.lang.<id>` booleans. */
   [key: string]: unknown;
 }
@@ -130,11 +167,36 @@ export function validateSettings(value: unknown): Settings {
         // fatal. Per-entry validity is the renderer's job (sanitizeUserTemplates).
         if (Array.isArray(v)) out["templates.user"] = v;
         break;
+      case "budget.sessionUsd":
+      case "budget.dailyUsd":
+      case "budget.warnAtPercent":
+        /**
+         * A cap must be a finite, non-negative number or it is DROPPED — never coerced.
+         *
+         * Coercing here would be the dangerous direction: `"budget.dailyUsd": "ten"` becoming
+         * `NaN` makes every comparison false, so the cap silently stops applying while the
+         * settings file still reads as though it is set. Dropping the key means the gate sees
+         * "no cap configured", which at least matches what is actually being enforced.
+         */
+        if (typeof v === "number" && Number.isFinite(v) && v >= 0) out[key] = v;
+        break;
+      case "budget.unpricedPolicy":
+        if (v === "block" || v === "warn") out["budget.unpricedPolicy"] = v;
+        break;
       case "todoPatterns":
         // APP-096 — drop-don't-throw ELEMENT-wise: a non-array drops the key; within an array
         // a row missing a string name/regex (or a non-boolean caseSensitive) is dropped, the
         // rest kept. The renderer's compilePatterns still fail-softs any surviving-but-bad regex.
         if (Array.isArray(v)) out.todoPatterns = v.filter(isTodoPattern);
+        break;
+      case "hooks":
+        /**
+         * Element-wise, same as todoPatterns. A row with an unknown `event` or an empty
+         * `command` is DROPPED rather than fatal — the alternative (throwing) would make a
+         * single typo in a settings file brick every session that reads it, and hooks are
+         * exactly the sort of key people hand-edit.
+         */
+        out.hooks = validateHooks(v);
         break;
       default:
         // format-on-save keys are strictly boolean (a corrupt value is dropped, not

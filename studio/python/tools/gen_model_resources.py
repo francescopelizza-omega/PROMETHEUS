@@ -191,8 +191,8 @@ def main():
         catalog.get("note", "")
         + " Each model carries `arch` (verified architecture) + `resource` (precomputed "
         "RAM/CPU/GPU demand at Q4_K_M: min_ram_gb, gpu_min_vram_gb, cpu_ok, tier, needs_offload "
-        "+ a one-line `resource.label` shown beside the descriptor). See model-arch.json + "
-        "MDS/model-resource-methodology.md for the formula."
+        "+ a one-line `resource.label` shown beside the descriptor). See model-arch.json for "
+        "the source data; the sizing formula is documented internally."
     )
     CATALOG.write_text(json.dumps(catalog, indent=2) + "\n")
     print(f"patched {n_res} models ({n_arch} with arch) -> {CATALOG}")

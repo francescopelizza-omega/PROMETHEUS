@@ -243,21 +243,21 @@
       "tosUrl": "https://cursor.com/terms"
     }
   ],
-  "pricingNote": "USD per 1M tokens; longest-prefix match, case-insensitive (CLI-058). Local models are $0 via endpoint locality, NOT this table. Approximate 2026 list prices — verify against the provider before relying on a figure.",
+  "pricingNote": "USD per 1M tokens; longest-prefix match, case-insensitive (CLI-058). Local models are $0 via endpoint locality, NOT this table. Approximate 2026 list prices — verify against the provider before relying on a figure. contextLen is the connector's PUBLICLY DECLARED context window (CLI-092) — never probed live for a cloud endpoint (see ai/context-window.ts); when uncertain the conservative published figure is used, never a guess.",
   "pricing": {
-    "claude-opus-4": { "inputUsdPerMTok": 5, "outputUsdPerMTok": 25 },
-    "claude-sonnet-4": { "inputUsdPerMTok": 3, "outputUsdPerMTok": 15 },
-    "claude-haiku-4": { "inputUsdPerMTok": 1, "outputUsdPerMTok": 5 },
-    "claude-fable-5": { "inputUsdPerMTok": 10, "outputUsdPerMTok": 50 },
-    "claude-3-5-sonnet": { "inputUsdPerMTok": 3, "outputUsdPerMTok": 15 },
-    "claude-3-5-haiku": { "inputUsdPerMTok": 1, "outputUsdPerMTok": 5 },
-    "claude": { "inputUsdPerMTok": 3, "outputUsdPerMTok": 15 },
-    "gpt-4o-mini": { "inputUsdPerMTok": 0.15, "outputUsdPerMTok": 0.6 },
-    "gpt-4o": { "inputUsdPerMTok": 2.5, "outputUsdPerMTok": 10 },
-    "gpt-4.1": { "inputUsdPerMTok": 2, "outputUsdPerMTok": 8 },
-    "o3": { "inputUsdPerMTok": 2, "outputUsdPerMTok": 8 },
-    "gemini-2.5-pro": { "inputUsdPerMTok": 1.25, "outputUsdPerMTok": 10 },
-    "gemini-2.5-flash": { "inputUsdPerMTok": 0.3, "outputUsdPerMTok": 2.5 },
-    "deepseek": { "inputUsdPerMTok": 0.27, "outputUsdPerMTok": 1.1 }
+    "claude-opus-4": { "inputUsdPerMTok": 5, "outputUsdPerMTok": 25, "contextLen": 200000 },
+    "claude-sonnet-4": { "inputUsdPerMTok": 3, "outputUsdPerMTok": 15, "contextLen": 200000 },
+    "claude-haiku-4": { "inputUsdPerMTok": 1, "outputUsdPerMTok": 5, "contextLen": 200000 },
+    "claude-fable-5": { "inputUsdPerMTok": 10, "outputUsdPerMTok": 50, "contextLen": 200000 },
+    "claude-3-5-sonnet": { "inputUsdPerMTok": 3, "outputUsdPerMTok": 15, "contextLen": 200000 },
+    "claude-3-5-haiku": { "inputUsdPerMTok": 1, "outputUsdPerMTok": 5, "contextLen": 200000 },
+    "claude": { "inputUsdPerMTok": 3, "outputUsdPerMTok": 15, "contextLen": 200000 },
+    "gpt-4o-mini": { "inputUsdPerMTok": 0.15, "outputUsdPerMTok": 0.6, "contextLen": 128000 },
+    "gpt-4o": { "inputUsdPerMTok": 2.5, "outputUsdPerMTok": 10, "contextLen": 128000 },
+    "gpt-4.1": { "inputUsdPerMTok": 2, "outputUsdPerMTok": 8, "contextLen": 1000000 },
+    "o3": { "inputUsdPerMTok": 2, "outputUsdPerMTok": 8, "contextLen": 200000 },
+    "gemini-2.5-pro": { "inputUsdPerMTok": 1.25, "outputUsdPerMTok": 10, "contextLen": 1000000 },
+    "gemini-2.5-flash": { "inputUsdPerMTok": 0.3, "outputUsdPerMTok": 2.5, "contextLen": 1000000 },
+    "deepseek": { "inputUsdPerMTok": 0.27, "outputUsdPerMTok": 1.1, "contextLen": 64000 }
   }
 }

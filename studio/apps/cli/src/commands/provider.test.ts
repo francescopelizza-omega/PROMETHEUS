@@ -303,3 +303,57 @@ test("enable-metered: already-enabled → ok, no prompt", async () => {
     rmSync(home, { recursive: true, force: true });
   }
 });
+
+/* ── the verify ping, which was OpenAI's and only OpenAI's ─────────────────── */
+
+/** Capture the URL and headers the verify ping actually used. */
+function pingSpy(): { fetch: FetchLike; url: () => string; headers: () => Record<string, string> } {
+  let url = "";
+  let headers: Record<string, string> = {};
+  const fetch: FetchLike = async (u, init) => {
+    url = String(u);
+    headers = (init?.headers ?? {}) as Record<string, string>;
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({ data: [{ id: "m1" }] }),
+      text: async () => "{}",
+    };
+  };
+  return { fetch, url: () => url, headers: () => headers };
+}
+
+test("connecting Anthropic pings ANTHROPIC's path with ANTHROPIC's headers", async () => {
+  // Both halves of this request used to be OpenAI's: `/models` and `Authorization: Bearer`.
+  // Anthropic serves `/v1/models` and takes `x-api-key` + a mandatory version header, so the
+  // ping 404'd, `connect` read that as an invalid key, and a CORRECT key could not be stored.
+  const spy = pingSpy();
+  const deps = io({ fetch: spy.fetch });
+  const out = await runProviderConnect(ctxFor(["provider", "connect", "anthropic"]), deps);
+  assert.equal(out.exitCode, 0, "a valid Anthropic key must be storable");
+  assert.equal(spy.url(), "https://api.anthropic.com/v1/models");
+  assert.equal(spy.headers()["x-api-key"], "sk-test-key-123");
+  assert.equal(spy.headers()["anthropic-version"], "2023-06-01");
+  assert.equal(spy.headers().Authorization, undefined, "a bearer authenticates as nobody here");
+  assert.equal(await deps.secrets.get(SVC, "provider:anthropic"), "sk-test-key-123");
+});
+
+test("connecting Gemini pings GEMINI's path with GEMINI's header", async () => {
+  const spy = pingSpy();
+  const deps = io({ fetch: spy.fetch });
+  const out = await runProviderConnect(ctxFor(["provider", "connect", "gemini"]), deps);
+  assert.equal(out.exitCode, 0);
+  assert.equal(spy.url(), "https://generativelanguage.googleapis.com/v1beta/models");
+  assert.equal(spy.headers()["x-goog-api-key"], "sk-test-key-123");
+  assert.equal(await deps.secrets.get(SVC, "provider:gemini"), "sk-test-key-123");
+});
+
+test("an OpenAI-compatible provider is UNCHANGED — /models and a bearer", async () => {
+  // The default path must not move: sixteen of the eighteen rows depend on it. Named
+  // explicitly rather than via KNOWN, which now resolves to `anthropic` — the first row with
+  // `confidence: "known"` — and so no longer exercises the OpenAI wire at all.
+  const spy = pingSpy();
+  await runProviderConnect(ctxFor(["provider", "connect", "groq"]), io({ fetch: spy.fetch }));
+  assert.equal(spy.url(), "https://api.groq.com/openai/v1/models");
+  assert.equal(spy.headers().authorization, "Bearer sk-test-key-123");
+});

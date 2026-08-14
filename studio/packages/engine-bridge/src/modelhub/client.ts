@@ -612,15 +612,18 @@ export class ModelHubClient {
       // true source/modality/params instead of being flattened to a HF text model.
       const source: Model["source"] =
         r.source === "ollama" || r.source === "url" ? r.source : "huggingface";
-      const modality = (
-        typeof r.modality === "string" ? r.modality : "text"
-      ) as Model["modality"];
+      const modality = (typeof r.modality === "string" ? r.modality : "text") as Model["modality"];
       const params =
-        typeof r.params === "string"
-          ? r.params
-          : typeof r.quant === "string"
-            ? r.quant
-            : undefined;
+        typeof r.params === "string" ? r.params : typeof r.quant === "string" ? r.quant : undefined;
+      // `model.list` measures the FILE — size, quantization, container, and (for
+      // Ollama-indexed rows) whether the daemon already serves it. All of that used to be
+      // dropped on the floor here, which is why the Model Hub's Installed list could show a
+      // name and nothing else: the data existed at the source and died in this mapper.
+      // Passed through only when present, so a catalog row is unaffected.
+      const size = typeof r.size_bytes === "number" ? r.size_bytes : undefined;
+      const quant = typeof r.quant === "string" && r.quant ? r.quant : undefined;
+      const fmt = typeof r.format === "string" && r.format ? r.format : undefined;
+      const endpoint = typeof r.endpoint === "string" && r.endpoint ? r.endpoint : undefined;
       return {
         id: String(r.id ?? r.name ?? ""),
         source,
@@ -632,6 +635,13 @@ export class ModelHubClient {
         installed: r.installed !== false,
         localPath: typeof r.path === "string" && r.path ? r.path : undefined,
         params,
+        ...(typeof r.name === "string" && r.name ? { name: r.name } : {}),
+        ...(typeof r.family === "string" && r.family ? { family: r.family } : {}),
+        ...(size !== undefined ? { sizeBytes: size } : {}),
+        ...(quant !== undefined ? { quant } : {}),
+        ...(fmt !== undefined ? { format: fmt } : {}),
+        ...(r.served === true ? { served: true } : {}),
+        ...(endpoint !== undefined ? { endpoint } : {}),
       };
     });
   }

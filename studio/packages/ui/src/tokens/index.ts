@@ -15,3 +15,4 @@ export * from "./ansi.js";
 export * from "./pelly-syntax.js";
 export { tailwindPreset } from "./tailwind-preset.js";
 export * from "./monaco-theme.js";
+export { Z, LAYER_VARS, type LayerName } from "./layers.js";

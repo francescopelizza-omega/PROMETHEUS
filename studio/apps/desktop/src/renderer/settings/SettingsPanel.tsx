@@ -31,6 +31,7 @@ import { type CSSProperties, type ReactElement, useMemo, useState } from "react"
 import { AppearancePage } from "./AppearancePage.js";
 import { FontsPage } from "./FontsPage.js";
 import { FormatPage } from "./FormatPage.js";
+import { HooksPage } from "./HooksPage.js";
 import { KeymapPage } from "./KeymapPage.js";
 import type { KeyConflictView } from "./KeymapPage.js";
 import { SettingsTreePage } from "./SettingsTreePage.js";
@@ -45,7 +46,7 @@ import {
 } from "./keymap-overrides.js";
 import type { KeyBindingView } from "./settings-view.js";
 
-type Page = "appearance" | "fonts" | "keymap" | "format" | "templates" | "all";
+type Page = "appearance" | "fonts" | "keymap" | "format" | "templates" | "hooks" | "all";
 
 const NAV: { id: Page; label: string }[] = [
   { id: "appearance", label: "Appearance" },
@@ -53,6 +54,7 @@ const NAV: { id: Page; label: string }[] = [
   { id: "keymap", label: "Keymap" },
   { id: "format", label: "Formatting" },
   { id: "templates", label: "Live Templates" },
+  { id: "hooks", label: "Lifecycle Hooks" },
   { id: "all", label: "All Settings" },
 ];
 
@@ -258,6 +260,7 @@ export function SettingsPanel({ workspaceRoot }: SettingsPanelProps = {}): React
         {page === "fonts" && <FontsPage />}
         {page === "format" && <FormatPage />}
         {page === "templates" && <TemplatesPage />}
+        {page === "hooks" && <HooksPage {...(workspaceRoot ? { workspaceRoot } : {})} />}
         {page === "keymap" && (
           <KeymapPage
             presets={KEYMAP_PRESETS}

@@ -655,3 +655,197 @@ test("/export --json uses the structured export; plain /export unchanged (CLI-08
   await findSlash("export")?.run("--json", ctx);
   assert.match(strip(calls.writes.at(-1) ?? ""), /session\.json/); // structured JSON sibling
 });
+
+test("/tools reaches the HOST-LOCAL tools, so the machine-touching ones can be disarmed", async () => {
+  // `/tools` listed only the shared catalog, which meant write_file, run_command, apply_patch,
+  // spawn_agent and every MCP tool were invisible to `list` AND rejected as unknown names by
+  // `off` — the user could not disarm exactly the tools that touch their machine.
+  const cmd = findSlash("tools");
+  assert.ok(cmd);
+  const hostTool = {
+    name: "mcp__github__create_issue",
+    title: "",
+    description: "opens an issue",
+    schema: {},
+    annotations: {},
+    toArgv: () => [],
+  };
+  const withExtra = {
+    ...TUNING,
+    tools: { enabled: true, allow: [], deny: [], extra: [hostTool] },
+  } as unknown as agent.AgentTuning;
+
+  {
+    const { ctx, calls } = fakeCtx();
+    ctx.tuning = () => withExtra;
+    await cmd.run("list", ctx);
+    assert.ok(
+      calls.writes.some((w) => /mcp__github__create_issue/.test(w)),
+      "a connected server's tool was not listed",
+    );
+  }
+  {
+    const { ctx, calls } = fakeCtx();
+    ctx.tuning = () => withExtra;
+    await cmd.run("off mcp__github__create_issue", ctx);
+    assert.deepEqual((calls.tunes.at(-1) as { tools: { deny: string[] } })?.tools.deny, [
+      "mcp__github__create_issue",
+    ]);
+  }
+  // …and a name that is in NEITHER catalog is still refused with zero state change.
+  {
+    const { ctx, calls } = fakeCtx();
+    ctx.tuning = () => withExtra;
+    await cmd.run("off mcp__ghost__nope", ctx);
+    assert.equal(calls.tunes.length, 0);
+  }
+});
+
+/* ---- /hooks (CLI-102): list configured lifecycle hooks + dry-run one for real ---- */
+
+test("/hooks: a surface with no diagnostic wired says so, rather than throwing", async () => {
+  const { ctx, calls } = fakeCtx();
+  const cmd = findSlash("hooks");
+  assert.ok(cmd, "/hooks must be registered");
+  await cmd.run("", ctx); // fakeCtx() never sets ctx.hooks
+  assert.match(calls.writes.join("\n"), /no hooks diagnostic/);
+});
+
+test("/hooks: no-arg lists every configured hook — event, matcher, command, source", async () => {
+  const { ctx, calls } = fakeCtx();
+  ctx.hooks = {
+    list: () => [
+      { event: "PreToolUse", matcher: "write_*", command: "guard.sh", source: "workspace" },
+      { event: "SessionStart", command: "welcome.sh", source: "global" },
+    ],
+    test: async () => [],
+  };
+  await findSlash("hooks")?.run("", ctx);
+  const out = strip(calls.writes.join("\n"));
+  assert.match(out, /PreToolUse/);
+  assert.match(out, /write_\*/);
+  assert.match(out, /guard\.sh/);
+  assert.match(out, /workspace/);
+  assert.match(out, /SessionStart/);
+  assert.match(out, /welcome\.sh/);
+  assert.match(out, /global/);
+});
+
+test("/hooks: no-arg with nothing configured says so instead of an empty list", async () => {
+  const { ctx, calls } = fakeCtx();
+  ctx.hooks = { list: () => [], test: async () => [] };
+  await findSlash("hooks")?.run("", ctx);
+  assert.match(calls.writes.join("\n"), /no hooks configured/);
+});
+
+test("/hooks test: rejects an unknown event before calling into the runner", async () => {
+  const { ctx, calls } = fakeCtx();
+  let called = false;
+  ctx.hooks = {
+    list: () => [],
+    test: async () => {
+      called = true;
+      return [];
+    },
+  };
+  await findSlash("hooks")?.run("test Whoops write_file", ctx);
+  assert.match(calls.writes.join("\n"), /unknown event/);
+  assert.equal(called, false, "an invalid event must never reach the runner");
+});
+
+test("/hooks test: PreToolUse/PostToolUse require a tool name", async () => {
+  const { ctx, calls } = fakeCtx();
+  ctx.hooks = { list: () => [], test: async () => [] };
+  await findSlash("hooks")?.run("test PreToolUse", ctx);
+  assert.match(calls.writes.join("\n"), /needs a tool name/);
+});
+
+test("/hooks test: SessionStart needs no tool and synthesizes {event, cwd}", async () => {
+  const { ctx, calls, setCwd } = fakeCtx();
+  setCwd("/tmp/proj");
+  let seenPayload = "";
+  ctx.hooks = {
+    list: () => [],
+    test: async (event, payload) => {
+      seenPayload = payload;
+      assert.equal(event, "SessionStart");
+      return [{ command: "welcome.sh", exitCode: 0, stdout: "hi\n", stderr: "" }];
+    },
+  };
+  await findSlash("hooks")?.run("test SessionStart", ctx);
+  assert.deepEqual(JSON.parse(seenPayload), { event: "SessionStart", cwd: "/tmp/proj" });
+  const out = strip(calls.writes.join("\n"));
+  assert.match(out, /welcome\.sh/);
+  assert.match(out, /exit 0/);
+  assert.match(out, /hi/);
+});
+
+test("/hooks test: PreToolUse synthesizes a schema-shaped {tool, args} payload", async () => {
+  const { ctx } = fakeCtx();
+  let seenPayload = "";
+  let seenTool: string | undefined;
+  ctx.hooks = {
+    list: () => [],
+    test: async (_event, payload, tool) => {
+      seenPayload = payload;
+      seenTool = tool;
+      return [{ command: "guard.sh", matcher: "write_*", exitCode: 1, stdout: "", stderr: "nope" }];
+    },
+  };
+  await findSlash("hooks")?.run("test PreToolUse write_file", ctx);
+  assert.equal(seenTool, "write_file");
+  const payload = JSON.parse(seenPayload) as { tool: string; args: Record<string, unknown> };
+  assert.equal(payload.tool, "write_file");
+  // write_file's real schema is {path, content} (both required strings) — the synthesized args
+  // must carry both keys so a hook script reading `.args.path` sees something.
+  assert.ok("path" in payload.args, "synthesized args must include the tool's `path` field");
+  assert.ok("content" in payload.args, "synthesized args must include the tool's `content` field");
+});
+
+test("/hooks test: PostToolUse's payload additionally carries a synthesized `result`", async () => {
+  const { ctx } = fakeCtx();
+  let seenPayload = "";
+  ctx.hooks = {
+    list: () => [],
+    test: async (_event, payload) => {
+      seenPayload = payload;
+      return [];
+    },
+  };
+  await findSlash("hooks")?.run("test PostToolUse write_file", ctx);
+  const payload = JSON.parse(seenPayload) as { tool: string; result: unknown };
+  assert.equal(payload.tool, "write_file");
+  assert.ok(payload.result, "PostToolUse must synthesize a `result` alongside tool/args");
+});
+
+test("/hooks test: renders exit code, stdout, stderr, and a no-match line honestly", async () => {
+  // a matching hook that fails
+  {
+    const { ctx, calls } = fakeCtx();
+    ctx.hooks = {
+      list: () => [],
+      test: async () => [
+        {
+          command: "guard.sh",
+          matcher: "write_*",
+          exitCode: 1,
+          stdout: "checking…\n",
+          stderr: "denied",
+        },
+      ],
+    };
+    await findSlash("hooks")?.run("test PreToolUse write_file", ctx);
+    const out = strip(calls.writes.join("\n"));
+    assert.match(out, /guard\.sh/);
+    assert.match(out, /exit 1/);
+    assert.match(out, /checking/);
+    assert.match(out, /denied/);
+  }
+  // nothing matched → an honest "no hook matches" line, not a blank screen
+  {
+    const { ctx, calls } = fakeCtx();
+    ctx.hooks = { list: () => [], test: async () => [] };
+    await findSlash("hooks")?.run("test PreToolUse run_command", ctx);
+    assert.match(calls.writes.join("\n"), /no hook matches/);
+  }
+});

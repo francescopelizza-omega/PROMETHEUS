@@ -42,6 +42,8 @@ import { TodoView } from "../renderer/ide/TodoView.js";
 import { TypeHierarchyView } from "../renderer/ide/TypeHierarchyView.js";
 import { AgentPane } from "../renderer/ide/ai/AgentPane.js";
 import { DatabasePanel } from "../renderer/ide/db/DatabasePanel.js";
+import { SystemHealthPanel } from "../renderer/ide/health/SystemHealthPanel.js";
+import { deriveSystemHealthView } from "../renderer/ide/health/health-panel-view.js";
 import { ProfilePanel } from "../renderer/ide/profile/ProfilePanel.js";
 import { byMnemonic, useBookmarksStore } from "../renderer/ide/state/bookmarks.js";
 import { useCodeIndexStore } from "../renderer/ide/state/code-index-store.js";
@@ -72,7 +74,9 @@ import { useDiagnosticsStore, useTabsStore } from "../renderer/ide/state/stores.
 import { TestExplorer } from "../renderer/ide/test/TestExplorer.js";
 import { BottomPanel, type BottomTab as ShellBottomTab } from "../renderer/shell/BottomPanel.js";
 import { ResizeHandle, useResizable } from "../renderer/shell/Resizable.js";
+import { useEngineStore } from "../renderer/stores/engine.js";
 import { terminalCwd } from "./no-folder-guard.js";
+import { requestRouteTab } from "./route-tabs.js";
 
 type Activity =
   | "explorer"
@@ -87,7 +91,7 @@ type Activity =
   | "methodhierarchy"
   | "blame"
   | "coverage";
-type BottomTab = "terminal" | "problems" | "database" | "profiler";
+type BottomTab = "terminal" | "claude" | "problems" | "health" | "database" | "profiler";
 // APP-021: the fused Search Everywhere popup. The 4 legacy strings still open it (on the
 // equivalent tab via `tabForMode`); "all" is the double-Shift entry point.
 type Palette =
@@ -121,12 +125,20 @@ const ACTIVITY: { id: Activity; icon: string; label: string }[] = [
 
 // APP-072: the editor's bottom-panel tab subset (shell BottomTab ids) — passed to the shared
 // BottomPanel `tabs` prop so it reuses the canonical tabStyle + badge/collapse/maximize chrome.
+// handoff §2.4 names four: Terminal · ✳ Claude Code · Problems · Health. Database and
+// Profiler stay on the strip after them — this bottom panel is their ONLY entry point, and
+// silently deleting a working surface is a bigger regression than a six-tab strip.
 const EDITOR_BOTTOM_TABS: readonly { id: ShellBottomTab; label: string }[] = [
   { id: "terminal", label: "Terminal" },
+  { id: "claude", label: "✳ Claude Code" },
   { id: "problems", label: "Problems" },
+  { id: "health", label: "Health" },
   { id: "database", label: "Database" },
   { id: "profiler", label: "Profiler" },
 ];
+
+/** The launcher-menu id the "✳ Claude Code" tab opens (TerminalPanel's FALLBACK_MENU). */
+const CLAUDE_PRESET_ID = "ai.claude";
 
 function ide(): Window["prometheus"]["ide"] | undefined {
   return typeof window !== "undefined" ? window.prometheus?.ide : undefined;
@@ -191,22 +203,22 @@ export function EditorRoute({
   // APP-073: null until a real folder is picked (or a persisted one is restored) — NO "." shim,
   // so nothing in the sidebar ever fs-lists the Electron process CWD.
   const root = workspaceRoot;
+  // §2.4: the Health tab's body + its badge come from the SAME engine store the shell
+  // reads — one health truth, two surfaces.
+  const engineHealth = useEngineStore((st) => st.health);
+  const enginePill = useEngineStore((st) => st.pill);
+  const refreshEngineHealth = useEngineStore((st) => st.refreshHealth);
+  const healthIssueCount = deriveSystemHealthView(engineHealth, enginePill).components.filter(
+    (c) => c.status !== "ok",
+  ).length;
 
   // drag-resizable workbench panes (was hardcoded 260 / 320 / flex-only split).
   const sidePane = useResizable({
     axis: "x",
-    initial: 260,
+    initial: 200,
     min: 200,
     max: () => Math.max(200, Math.round(window.innerWidth * 0.5)),
     storageKey: "prometheus.layout.editor.sideWidth",
-  });
-  const agentPane = useResizable({
-    axis: "x",
-    initial: 320,
-    min: 260,
-    max: () => Math.max(260, Math.round(window.innerWidth * 0.55)),
-    invert: true,
-    storageKey: "prometheus.layout.editor.agentWidth",
   });
   // APP-072: the bottom panel now owns its own resize (shell BottomPanel's useResizable) —
   // the editor no longer keeps a bespoke bottomPane.
@@ -657,6 +669,12 @@ export function EditorRoute({
         case "git.commit":
           setActivity("git");
           break;
+        // Task #5 (desktop parity): the Worktrees section lives inside GitPanel — open the
+        // Git activity, then tell it to reveal the section (it may already be hidden).
+        case "git.worktrees":
+          setActivity("git");
+          window.dispatchEvent(new CustomEvent("ide:open-worktrees"));
+          break;
         case "debug.start":
           setActivity("debug");
           break;
@@ -825,7 +843,10 @@ export function EditorRoute({
         // surface (APP-004): the Environments route lists interpreters (EnvPicker),
         // the Model Hub owns endpoints/serving. Navigation, not silence.
         case "python.selectInterpreter":
-          onNavigate?.("environments");
+          (() => {
+            requestRouteTab("workspace", "environments");
+            onNavigate?.("workspace");
+          })();
           break;
         case "models.selectEndpoint":
           onNavigate?.("models");
@@ -864,7 +885,10 @@ export function EditorRoute({
   }, [runCommand]);
 
   return (
-    <div style={{ display: "flex", height: "100%", minHeight: 0 }}>
+    // handoff §2/§2.4: 8px-gapped ISLANDS on the inset ground — no full-bleed panels,
+    // no shared hairlines. The agent rail is NOT here: it is the shell's global
+    // RightRail (§2.5), so the editor never mounts a second AgentPane.
+    <div style={{ display: "flex", height: "100%", minHeight: 0, gap: 8 }}>
       {/* activity bar */}
       <nav
         aria-label="activity bar"
@@ -873,7 +897,8 @@ export function EditorRoute({
           flexDirection: "column",
           gap: 4,
           padding: "8px 4px",
-          borderRight: "1px solid var(--border-subtle)",
+          borderRadius: "var(--radius-island)",
+          border: "1px solid var(--border-subtle)",
           background: "var(--bg-surface)",
           // scroll instead of clipping the lower activities off a short window
           overflowY: "auto",
@@ -912,10 +937,12 @@ export function EditorRoute({
           position: "relative",
           width: sidePane.size,
           flexShrink: 0,
-          borderRight: "1px solid var(--border-subtle)",
+          borderRadius: "var(--radius-island)",
+          border: "1px solid var(--border-subtle)",
           display: "flex",
           flexDirection: "column",
           background: "var(--bg-surface)",
+          overflow: "hidden",
         }}
       >
         <ResizeHandle axis="x" edge="right" rz={sidePane} label="Resize side panel" min={200} />
@@ -924,8 +951,8 @@ export function EditorRoute({
             display: "flex",
             alignItems: "center",
             gap: 6,
-            padding: "6px 8px",
-            borderBottom: "1px solid var(--border-subtle)",
+            padding: "9px 12px",
+            borderBottom: "1px solid var(--border-header)",
           }}
         >
           <button
@@ -1010,7 +1037,7 @@ export function EditorRoute({
       </aside>
 
       {/* center: editor + bottom panel */}
-      <main style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column" }}>
+      <main style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", gap: 8 }}>
         <RunToolbar
           configs={runConfigs}
           selectedIdx={runCfgIdx}
@@ -1018,7 +1045,19 @@ export function EditorRoute({
           workspaceRoot={root || null}
           onShowDebugPanel={() => setActivity("debug")}
         />
-        <div style={{ flex: 1, minHeight: 80 }}>
+        {/* the EDITOR island — its own ground (bg-inset), radius + border (§2.4). */}
+        <div
+          style={{
+            flex: 1,
+            minHeight: 80,
+            display: "flex",
+            flexDirection: "column",
+            borderRadius: "var(--radius-island)",
+            border: "1px solid var(--border-subtle)",
+            background: "var(--bg-inset)",
+            overflow: "hidden",
+          }}
+        >
           <EditorPane />
         </div>
         {/* APP-072: shell BottomPanel parity — badge counts, collapse, maximize, tabStyle.
@@ -1027,41 +1066,45 @@ export function EditorRoute({
           collapsed={bottomCollapsed}
           active={bottom}
           tabs={EDITOR_BOTTOM_TABS}
-          counts={{ problems: problemsCount }}
-          onSelect={(t) => setBottom(t as BottomTab)}
+          counts={{ problems: problemsCount, health: healthIssueCount }}
+          onSelect={(t) => {
+            const tab = t as BottomTab;
+            setBottom(tab);
+            // opening the tab IS the launch action (TerminalPanel de-dupes repeats).
+            if (tab === "claude")
+              window.dispatchEvent(
+                new CustomEvent("ide:terminal-preset", { detail: CLAUDE_PRESET_ID }),
+              );
+          }}
           onToggle={() => setBottomCollapsed((v) => !v)}
           maximized={bottomMax}
           onMaximize={setBottomMax}
         >
-          <div style={{ display: bottom === "terminal" ? "block" : "none", height: "100%" }}>
+          {/* Terminal AND ✳ Claude Code share one mounted TerminalPanel — the Claude tab is
+              a terminal SESSION running the CLI, so a second panel would fork the ptys. */}
+          <div
+            style={{
+              display: bottom === "terminal" || bottom === "claude" ? "block" : "none",
+              height: "100%",
+            }}
+          >
             <TerminalPanel cwd={terminalCwd(root)} />
           </div>
           {bottom === "problems" && <Problems />}
+          {bottom === "health" && (
+            <SystemHealthPanel
+              view={deriveSystemHealthView(engineHealth, enginePill)}
+              onRefresh={() => void refreshEngineHealth()}
+            />
+          )}
           {bottom === "database" && <DatabasePanel />}
           {bottom === "profiler" && <ProfilePanel />}
         </BottomPanel>
       </main>
 
-      {/* right: agent / chat */}
-      <aside
-        style={{
-          position: "relative",
-          width: agentPane.size,
-          flexShrink: 0,
-          borderLeft: "1px solid var(--border-subtle)",
-          padding: 8,
-          background: "var(--bg-surface)",
-        }}
-      >
-        <ResizeHandle axis="x" edge="left" rz={agentPane} label="Resize agent pane" min={260} />
-        <AgentPane
-          {...(onNavigate ? { onNavigate } : {})}
-          // APP-092: the composer `/` slash menu runs SHELL registry commands via App.tsx.
-          onRunCommand={(id) =>
-            window.dispatchEvent(new CustomEvent("ide:run-shell-command", { detail: id }))
-          }
-        />
-      </aside>
+      {/* NO agent aside here (handoff §2.5): the chat rail is GLOBAL — the shell's
+          RightRail hosts the one AgentPane on every route, so the editor cannot mount a
+          second one against the same session store. */}
 
       {palette !== "none" && (
         <CommandPalette

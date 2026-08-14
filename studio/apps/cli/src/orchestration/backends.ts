@@ -17,7 +17,10 @@ import { join } from "node:path";
 
 import {
   type AiEndpoint,
+  DEFAULT_CONTEXT_WINDOW,
   type Msg,
+  type SseTokenUsage,
+  ai,
   createAiClient,
   orchestration,
   secrets,
@@ -123,13 +126,20 @@ async function localInvoke(req: InvokeRequest, deps: InvokerDeps): Promise<strin
   return text.trim();
 }
 
+/** The pricing table, loaded once per process (it is a shipped JSON file, not user state). */
+let pricingCache: ai.Pricing | undefined;
+function pricingTable(): ai.Pricing {
+  pricingCache ??= ai.loadPricing();
+  return pricingCache;
+}
+
 /**
  * Run a prompt on a paid OpenAI-compatible API provider with the USER'S OWN key (kind:"api").
  * The key is read from the agent env (or process env) for the provider's key var — NEVER
  * stored; resolveKey hands it to the client only at request time. This is the ToS-clean
  * automation lane: a commercial API you pay for, driven over HTTP, no CLI/subscription driving.
  */
-async function apiInvoke(req: InvokeRequest, deps: InvokerDeps): Promise<string> {
+async function apiInvoke(req: InvokeRequest, deps: InvokerDeps): Promise<InvokeResult> {
   const b = req.agent.backend;
   if (!b.baseUrl) throw new Error(`agent "${req.agent.name}" is an api backend with no baseUrl`);
   const env: Record<string, string | undefined> = { ...process.env, ...(b.env ?? {}) };
@@ -157,12 +167,14 @@ async function apiInvoke(req: InvokeRequest, deps: InvokerDeps): Promise<string>
       `${b.service ?? "api"}: no API key — set ${hint} (own-key commercial API, automation allowed within terms)`,
     );
   }
+  const contextWindow =
+    ai.contextLenForModel(pricingTable(), b.model ?? b.service ?? "") ?? DEFAULT_CONTEXT_WINDOW;
   const endpoint: AiEndpoint = {
     id: `cloud:${b.service ?? "api"}:${b.model ?? "default"}`,
     baseUrl: b.baseUrl,
     locality: "cloud",
     apiKeyRef: `env:${keyName}`,
-    contextWindow: 8192,
+    contextWindow,
     supportsTools: false,
     ...(b.model ? { model: b.model } : {}),
   };
@@ -175,11 +187,40 @@ async function apiInvoke(req: InvokeRequest, deps: InvokerDeps): Promise<string>
   );
   const messages: Msg[] = [{ role: "user", content: req.prompt }];
   let text = "";
+  let usage: SseTokenUsage | undefined;
   for await (const chunk of client.chat(messages)) {
     if (chunk.delta) text += chunk.delta;
+    if (chunk.usage) usage = chunk.usage;
     if (chunk.done || text.length > MAX_STREAM_CHARS) break;
   }
-  return text.trim() || "(no output)";
+  return { text: text.trim() || "(no output)", ...priceCall(endpoint.model ?? "", usage, text) };
+}
+
+/**
+ * Price one API call so the run budget can actually count it.
+ *
+ * This is the missing half of `RunLimits.maxCostUsd`. `Coordinator` has always called
+ * `budget.addCost(out.costUsd)` — but every invoker returned a bare `{ text }`, so `costUsd` was
+ * never a number, the counter never moved, and `overBudget()` compared a permanent 0 against the
+ * cap. The ceiling read as enforced and enforced nothing. Both halves or neither.
+ *
+ * Prefers the provider's own usage frame; falls back to the same chars/4 estimate the session
+ * accounting uses. An unpriced model yields NO cost rather than 0 — see below.
+ */
+function priceCall(
+  model: string,
+  usage: SseTokenUsage | undefined,
+  text: string,
+): { costUsd?: number } {
+  const p = ai.priceForModel(pricingTable(), model);
+  // An unknown model has no price. Reporting 0 would be a measurement ("this cost nothing");
+  // reporting nothing lets the counter stay honest about what it does not know.
+  if (!p) return {};
+  const inTok = usage?.inputTokens ?? 0;
+  const outTok = usage?.outputTokens ?? Math.ceil(text.length / 4);
+  return {
+    costUsd: (inTok / 1_000_000) * p.inputUsdPerMTok + (outTok / 1_000_000) * p.outputUsdPerMTok,
+  };
 }
 
 /** Run a prompt through the engine's local chat (`chat --local <model> <prompt>`). */
@@ -328,10 +369,10 @@ export function makeInvoker(deps: InvokerDeps): BackendInvoker {
           cliInvoke(req, deps, spawn, which),
         );
       case "api":
-        // own-key OpenAI-compatible API — bulkhead per provider (its own rate limit).
-        return sem.run(req.agent.backend.service ?? "api", async () => ({
-          text: await apiInvoke(req, deps),
-        }));
+        // own-key OpenAI-compatible API — bulkhead per provider (its own rate limit). The
+        // result is returned WHOLE, `costUsd` included: dropping it here is what left the run
+        // budget counting zero on the one lane that spends real money.
+        return sem.run(req.agent.backend.service ?? "api", () => apiInvoke(req, deps));
       default:
         throw new Error(`unknown backend kind "${kind}"`);
     }

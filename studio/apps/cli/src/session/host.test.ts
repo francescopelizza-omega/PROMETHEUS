@@ -24,7 +24,7 @@ import type { CommandOutcome } from "../context.js";
 import type { ParsedArgs } from "../parse.js";
 import { setColorEnabled } from "../render.js";
 import type { MessageTurnResult } from "./agent-runtime.js";
-import { type SessionHandlers, launchSession, seedTuning } from "./host.js";
+import { type SessionHandlers, launchSession, makeBudgetGuard, seedTuning } from "./host.js";
 import type { SlashResult } from "./slash-exec.js";
 
 // Color OFF so assertions match plain text (no ANSI escapes in captured output).
@@ -293,4 +293,324 @@ test("the confirm seam asks via readline.question and honors a typed no", async 
   });
   assert.equal(confirmed, false); // default-deny on "n"
   assert.ok(rl.questions.length >= 1); // the readline question seam was exercised
+});
+
+/* ── host parity: the two front ends must offer the SAME agent ──────────────*/
+
+/**
+ * Capture the SessionCtx the readline host hands to a turn.
+ *
+ * This exists because the two hosts silently diverged: the TUI wired the task list and the
+ * remembered-grant store, this one did not, so `todowrite` reported itself unavailable and
+ * every approval was asked again — depending on nothing but which front end you launched.
+ * A capability that only half the hosts wire is a capability that does not exist.
+ */
+async function captureCtx(
+  over: Parameters<typeof launchSession>[1] = {},
+): Promise<Record<string, unknown>> {
+  let captured: Record<string, unknown> = {};
+  const rl = new FakeReadline(["hello"]);
+  await launchSession(args(), {
+    isTty: true,
+    makeReadline: () => {
+      setImmediate(() => rl.drive());
+      return rl as unknown as never;
+    },
+    write: () => {},
+    backends: { liveRunners: [], paidClis: [] },
+    home: TMP_HOME,
+    ...over,
+    handlers: {
+      runMessageTurn: async (_s, _m, deps) => {
+        captured = deps.ctx as unknown as Record<string, unknown>;
+        return turnResult("");
+      },
+    },
+  });
+  return captured;
+}
+
+test("the readline host wires the task list, so todowrite is not a dead tool", async () => {
+  const ctx = await captureCtx();
+  assert.ok(ctx.todos, "no TodoStore reached the turn — todowrite would report unavailable");
+  assert.equal(typeof ctx.onTodos, "function", "a written plan would never be rendered");
+});
+
+test("the readline host wires remembered grants, so `don't ask again` can work", async () => {
+  const ctx = await captureCtx();
+  assert.ok(ctx.grants, "no permission store reached the turn");
+  assert.equal(typeof ctx.onRemember, "function");
+  assert.equal(typeof ctx.onAutoApprove, "function");
+});
+
+test("an MCP session's tools reach the catalog the model is shown", async () => {
+  const fakeMcp = {
+    tools: () => [
+      {
+        name: "mcp__x__ping",
+        title: "ping",
+        description: "",
+        schema: {},
+        annotations: {},
+        toArgv: () => [],
+      },
+    ],
+    callTool: async () => ({ ok: true, summary: "pong" }),
+    banner: () => "",
+    close: async () => {},
+  };
+  const ctx = await captureCtx({ mcp: fakeMcp });
+  const tuning = ctx.tuning as { tools: { extra?: { name: string }[] } };
+  assert.ok(
+    tuning.tools.extra?.some((t) => t.name === "mcp__x__ping"),
+    "the connector's tool never reached the catalog",
+  );
+  assert.equal(typeof ctx.callMcpTool, "function", "the tool was offered with no way to run it");
+});
+
+test("with no MCP session the catalog is unchanged and no dispatcher is claimed", async () => {
+  // Offering a tool the host cannot dispatch is worse than not offering it: the model spends a
+  // round discovering the failure.
+  const ctx = await captureCtx({ mcp: undefined });
+  const tuning = ctx.tuning as { tools: { extra?: { name: string }[] } };
+  assert.equal(
+    tuning.tools.extra?.some((t) => t.name.startsWith("mcp__")),
+    false,
+  );
+});
+
+/* ── the spend cap: wired, not merely declared ─────────────────────────────*/
+
+/**
+ * `checkBudgetGate` has been called since CLI-030 and could never fire: it returns "ok" unless
+ * BOTH `ctx.budget` and `ctx.accounting` are set, and neither host set either. So `[budget]
+ * session_usd = 5` in a profile was decoration, and `prometheus tokens report` read a store
+ * nothing ever wrote. These pin the wiring rather than the gate (which has its own tests).
+ */
+
+test("the readline host wires token accounting, so the store is not always empty", async () => {
+  const ctx = await captureCtx();
+  const acct = ctx.accounting as { home?: string; sessionId?: string } | undefined;
+  assert.ok(acct, "no accounting sink — `prometheus tokens report` reads an empty store");
+  assert.equal(typeof acct?.home, "string");
+  assert.equal(typeof acct?.sessionId, "string");
+});
+
+test("makeBudgetGuard maps the price fields ACROSS the two naming conventions", () => {
+  // The registry says inputUsdPerMTok; the guardrail wants pricePerMTokIn. Every field on both
+  // is optional, so the wrong shape is not a type error — it silently prices every turn at $0
+  // and the cap never fires. This is the assertion that would have caught that.
+  const guard = makeBudgetGuard(
+    { sessionUsd: 5 },
+    { "gpt-x": { inputUsdPerMTok: 3, outputUsdPerMTok: 15 } },
+    false,
+  );
+  assert.ok(guard, "a declared cap produced no guard");
+  const price = guard?.priceFor("gpt-x");
+  assert.equal(price?.pricePerMTokIn, 3);
+  assert.equal(price?.pricePerMTokOut, 15);
+});
+
+test("an unpriced model yields NO price rather than a free one", () => {
+  // Reporting 0 would be a measurement ("this cost nothing"). Absent is the honest answer.
+  const guard = makeBudgetGuard({ sessionUsd: 5 }, {}, false);
+  assert.equal(guard?.priceFor("who-knows"), undefined);
+});
+
+test("a profile with no [budget] table produces no guard — zero regression", () => {
+  assert.equal(makeBudgetGuard(undefined, {}, false), undefined);
+  // …and a table with only a warn percentage is not a cap either.
+  assert.equal(makeBudgetGuard({ warnAtPercent: 80 }, {}, false), undefined);
+});
+
+test("--force-budget rides the guard and is never sourced from a profile", () => {
+  // A config file must not be able to pre-authorise blowing through its own cap.
+  assert.equal(makeBudgetGuard({ sessionUsd: 1 }, {}, true)?.forceBudget, true);
+  assert.equal(makeBudgetGuard({ sessionUsd: 1 }, {}, false)?.forceBudget, false);
+});
+
+/* ── Ctrl-C has to reach the TURN, not just the prompt ─────────────────────── */
+
+test("the readline host hands runMessageTurn an abort signal", async () => {
+  // `turnAbort` was created, aborted by the SIGINT handler, and handed to nothing. So Ctrl-C
+  // printed "(cancelled …)" and returned to the prompt while the turn kept running: the model
+  // kept streaming and every remaining tool in the round still executed. A user who hit
+  // Ctrl-C to stop a destructive command watched it run anyway.
+  //
+  // Asserted as "a live, un-aborted signal arrives", which is the property the cancel path
+  // needs — a test that only checked `signal !== undefined` would pass on a stale controller.
+  let signal: AbortSignal | undefined;
+  await runSession(["do the thing"], {
+    runMessageTurn: async (_session, _message, deps) => {
+      signal = (deps as { signal?: AbortSignal }).signal;
+      return turnResult("done");
+    },
+  });
+  assert.ok(signal, "no signal reached the turn — Ctrl-C cannot cancel it");
+  assert.equal(signal.aborted, false, "the turn was handed an already-aborted signal");
+});
+
+test("/continue is interruptible too — a continuation is a full turn", async () => {
+  const seen: Array<AbortSignal | undefined> = [];
+  await runSession(["do the thing", "/continue"], {
+    runMessageTurn: async (_session, _message, deps) => {
+      seen.push((deps as { signal?: AbortSignal }).signal);
+      // `capped` + `thread` is what stashes a resume point; without it /continue reports
+      // "nothing to continue" and never runs a second turn.
+      return { ...turnResult("partial"), capped: true, thread: [] } as never;
+    },
+  });
+  assert.equal(seen.length, 2, "the /continue turn did not run");
+  assert.ok(seen[1], "the continuation turn got no abort signal");
+});
+
+/* ── the autonomy ladder actually decides something ────────────────────────── */
+
+test("/authorisation raises the ladder and the readline host HONOURS it", async () => {
+  // `hostAuthLevel` was read from disk, exposed via getAuthLevel, written by /authorisation
+  // and persisted as the next session's default — and consulted by nothing. So the command
+  // printed "(saved as default)" and changed nothing: a user who raised their autonomy was
+  // still asked about every read, and one who LOWERED it to `paranoid` was not protected.
+  //
+  // Driven through the real ctx.confirm, with NO answer available on stdin — so anything that
+  // reaches the prompt cannot come back `true`.
+  const decisions: Array<boolean | object> = [];
+  await runSession(["/authorisation 5", "go"], {
+    runMessageTurn: async (_s, _m, deps) => {
+      const ctx = deps.ctx as { confirm?: (c: { name: string }) => Promise<unknown> };
+      if (ctx.confirm) decisions.push((await ctx.confirm({ name: "read_file" })) as boolean);
+      return turnResult("done");
+    },
+  });
+  assert.equal(decisions[0], true, "a read at level 5 must be auto-approved, not prompted");
+});
+
+test("at a LOW level a write is still put to the human", async () => {
+  // The other direction: the ladder must not become a blanket auto-approve. The level is set
+  // explicitly rather than relied on as a default, because `/authorisation` persists to the
+  // home directory — so a test that assumed the default would depend on test ORDER, and would
+  // have passed here for the wrong reason after the previous test raised it to 5.
+  const decisions: Array<unknown> = [];
+  await runSession(["/authorisation 1", "go"], {
+    runMessageTurn: async (_s, _m, deps) => {
+      const ctx = deps.ctx as { confirm?: (c: { name: string }) => Promise<unknown> };
+      if (ctx.confirm) decisions.push(await ctx.confirm({ name: "write_file" }));
+      return turnResult("done");
+    },
+  });
+  // stdin is exhausted, so the prompt resolves to a denial rather than to `true`.
+  assert.notEqual(decisions[0], true, "write_file was auto-approved at the readonly default");
+});
+
+/* ------------------------------------------------------------------------- *
+ * /save, /recall and --continue, asserted by CONSEQUENCE
+ *
+ * These replace regex-over-source-text tests in save-resume.test.ts, which asserted things
+ * like `/rebuildThread\(loadTurns\(home/` against the host's own bytes. That guards a SPELLING,
+ * not a behaviour: splitting one call into two statements broke them while the feature worked,
+ * and — far worse — any of them would keep passing if the code were reachable but wrong.
+ * ------------------------------------------------------------------------- */
+
+test("/save writes a real file to disk", async () => {
+  const { existsSync, readFileSync, mkdtempSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const out = join(mkdtempSync(join(tmpdir(), "prom-save-")), "transcript.txt");
+  await runSession(["hello", `/save ${out}`], {
+    runMessageTurn: async (_s, _m, deps) => {
+      deps.ctx.write("an answer\n");
+      return turnResult("an answer");
+    },
+  });
+  assert.ok(existsSync(out), "/save printed success and wrote nothing");
+  assert.match(readFileSync(out, "utf8"), /hello/);
+});
+
+test("a turn's content reaches the session store, so /recall has something to restore", async () => {
+  const { listSessions, loadTurns } = await import("./history-store.js");
+  await runSession(["remember this"], {
+    runMessageTurn: async () => turnResult("noted"),
+  });
+  const sessions = listSessions(TMP_HOME);
+  assert.ok(sessions.length > 0, "no session was recorded");
+  // The bug this guards was NOT an empty picker: it was a full picker over an empty store, so
+  // asserting the session is listed proves nothing on its own.
+  const withTurns = sessions.filter((s) => loadTurns(TMP_HOME, s.id).length > 0);
+  assert.ok(withTurns.length > 0, "sessions are listed but no transcript was persisted");
+});
+
+test("resuming a session with NO transcript leaves the live conversation alone", async () => {
+  // `history = messages` ran unconditionally, so this wiped the live thread and still printed
+  // "↻ resumed session". The user lost the conversation they were in the middle of, and the
+  // only symptom was the agent suddenly knowing nothing.
+  const { recordSession } = await import("./history-store.js");
+  recordSession(TMP_HOME, {
+    id: "ghost-session",
+    ts: "2026-01-01T00:00:00Z",
+    descriptor: "a session with no transcript",
+    cwd: process.cwd(),
+  });
+  const seen: number[] = [];
+  const { out } = await runSession(["first message", "/resume ghost-session", "second message"], {
+    runMessageTurn: async (_s, _m, deps) => {
+      seen.push((deps.history ?? []).length);
+      return turnResult("ok");
+    },
+  });
+  assert.equal(
+    /resumed session/.test(out),
+    false,
+    "it claimed to resume a transcript-less session",
+  );
+  assert.match(out, /nothing to resume|no transcript/);
+  assert.ok(seen.length >= 2, "the second turn never ran");
+  assert.ok(
+    (seen[1] as number) > 0,
+    "the failed restore wiped the live conversation instead of being a no-op",
+  );
+});
+
+/* ── the session-scoped fields that no host used to supply ─────────────────── */
+
+test("the exec audit's inputs REACH the turn — home and the live authorisation level", async () => {
+  // `ctx.home` and `ctx.authLevel` were declared and consumed (agent-runtime writes the
+  // Phase-3 exec audit line only when `home` is set, and stamps `authLevel` on it) and
+  // assigned by no host. So every runner-side audit line was silently dropped: the record of
+  // what the agent ran, at what autonomy, did not exist. Both fields are optional, so nothing
+  // ever failed to compile.
+  let ctx: { home?: string; authLevel?: number } | undefined;
+  await runSession(["/authorisation 3", "go"], {
+    runMessageTurn: async (_s, _m, deps) => {
+      ctx = deps.ctx as { home?: string; authLevel?: number };
+      return turnResult("ok");
+    },
+  });
+  assert.equal(ctx?.home, TMP_HOME, "no PROMETHEUS_HOME reached the turn — the audit is dropped");
+  assert.equal(ctx?.authLevel, 3, "the audit line would record the wrong autonomy level");
+});
+
+test("learned tool capability SURVIVES the next message", async () => {
+  // A fresh LLM client is built per user message, so the capability it accumulates —
+  // "this endpoint answers a tools request with prose, stop offering native tools" — was
+  // discarded every turn, and the two-observation demotion threshold could never be reached.
+  const seen: Array<{ textCallsWhileNative: number }> = [];
+  await runSession(["first", "second"], {
+    runMessageTurn: async (_s, _m, deps) => {
+      const ctx = deps.ctx as {
+        capability?: () => { textCallsWhileNative: number };
+        onCapability?: (s: unknown) => void;
+      };
+      assert.ok(ctx.capability, "the host supplies no capability getter");
+      seen.push(ctx.capability());
+      // Report an observation, exactly as the transport does after a turn.
+      ctx.onCapability?.({ nativeRejected: false, nativeCalls: 0, textCallsWhileNative: 1 });
+      return turnResult("ok");
+    },
+  });
+  assert.equal(seen[0]?.textCallsWhileNative, 0, "the first turn should start unopinionated");
+  assert.equal(
+    seen[1]?.textCallsWhileNative,
+    1,
+    "the observation was thrown away — the endpoint is re-probed natively forever",
+  );
 });

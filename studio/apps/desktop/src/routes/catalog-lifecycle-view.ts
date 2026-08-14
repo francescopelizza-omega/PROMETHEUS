@@ -62,10 +62,15 @@ export function lifecycleRequest(
 
 /** A run correlation id that always satisfies main's RUN_ID zod regex
  *  (`[A-Za-z0-9._:-]+`, ≤128) — tool names may carry `/`/`,` which are legal in
- *  NAME but not RUN_ID, so everything else maps to `-`. */
-export function lifecycleRunId(tool: string, seq: number): string {
-  const safe = tool.replace(/[^A-Za-z0-9._:-]/g, "-").slice(0, 100) || "tool";
-  return `lifecycle:${safe}:${seq}`;
+ *  NAME but not RUN_ID, so everything else maps to `-`.
+ *
+ *  `prefix` names the KIND of run (`lifecycle` / `install` / `uninstall`) so two
+ *  concurrent streams are legible in a log. Defaulted, so the existing callers and the
+ *  pinned test (`lifecycleRunId("comfy", 1) === "lifecycle:comfy:1"`) are unaffected. */
+export function lifecycleRunId(tool: string, seq: number, prefix = "lifecycle"): string {
+  const clean = (v: string): string => v.replace(/[^A-Za-z0-9._:-]/g, "-").slice(0, 100);
+  const safe = clean(tool) || "tool";
+  return `${clean(prefix) || "run"}:${safe}:${seq}`;
 }
 
 /** Cap so a chatty engine can't grow the pane unbounded. */

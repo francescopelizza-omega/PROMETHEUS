@@ -158,3 +158,53 @@ test("controller: edit refuses an unknown target + an option-shaped path (CLI-06
   });
   assert.match(await ctl.edit("99"), /no steering file matches/);
 });
+
+/* ── the monorepo case: a subdirectory must not lose the root AGENTS.md ─────── */
+
+test("steering walks UP to the repository root", () => {
+  // Discovery read `cwd` and nothing else, so working in `packages/core/` of a monorepo
+  // silently lost the root AGENTS.md — the file carrying the conventions for the whole repo,
+  // and the one a user most expects to be in force. Nothing said it had been skipped.
+  const files: Record<string, string> = {
+    "/repo/AGENTS.md": "root rules",
+    "/repo/.git": "",
+    "/repo/packages/core/AGENTS.md": "package rules",
+  };
+  const read = (p: string): string | null => files[p] ?? null;
+  const out = discoverSteering("/repo/packages/core", "/home", read, (p) => p in files);
+  const loaded = out.filter((f) => f.loaded).map((f) => f.path);
+  assert.ok(loaded.includes("/repo/AGENTS.md"), "the root AGENTS.md was lost");
+  assert.ok(loaded.includes("/repo/packages/core/AGENTS.md"));
+  // NEAREST LAST — a subdirectory that says something different is being specific on purpose,
+  // and `assembleSteering` concatenates in order, so the deeper file must come after.
+  assert.ok(
+    loaded.indexOf("/repo/AGENTS.md") < loaded.indexOf("/repo/packages/core/AGENTS.md"),
+    "the nearer file must be applied last",
+  );
+});
+
+test("the walk STOPS at the repository boundary", () => {
+  // Reading steering out of a user's parent directories would pick up files from unrelated
+  // projects — or from whatever happens to sit in $HOME.
+  const files: Record<string, string> = {
+    "/repo/.git": "",
+    "/AGENTS.md": "somebody else's rules",
+  };
+  const read = (p: string): string | null => files[p] ?? null;
+  const out = discoverSteering("/repo", "/home", read, (p) => p in files);
+  assert.equal(
+    out.some((f) => f.path === "/AGENTS.md"),
+    false,
+    "steering was read from outside the repository",
+  );
+});
+
+test("an ANCESTOR contributes only files that exist — no phantom candidates", () => {
+  // `cwd` still offers every candidate so `/memory create` has something to create; doing that
+  // for every ancestor would list one phantom AGENTS.md per directory up to the root.
+  const files: Record<string, string> = { "/repo/.git": "" };
+  const read = (p: string): string | null => files[p] ?? null;
+  const out = discoverSteering("/repo/a/b", "/home", read, (p) => p in files);
+  const project = out.filter((f) => f.scope === "project");
+  assert.ok(project.every((f) => f.path.startsWith("/repo/a/b/") || f.loaded));
+});

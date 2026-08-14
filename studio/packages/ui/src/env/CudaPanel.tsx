@@ -63,7 +63,7 @@ export function CudaPanel({
       className={className}
       aria-label="CUDA / GPU"
       style={{
-        border: "1px solid var(--border-subtle, #232329)",
+        border: "1px solid var(--border-subtle)",
         borderRadius: "var(--radius-lg, 10px)",
         padding: "var(--space-6, 12px)",
         display: "flex",
@@ -131,7 +131,7 @@ export function CudaPanel({
             margin: 0,
             marginTop: "var(--space-3, 6px)",
             padding: "var(--space-3, 6px)",
-            border: "1px solid var(--border-subtle, #232329)",
+            border: "1px solid var(--border-subtle)",
             borderRadius: "var(--radius-md, 6px)",
             color: "var(--text-secondary)",
             fontSize: "var(--text-small-size, 0.8125rem)",
@@ -161,7 +161,7 @@ function CudaButton({
       disabled={disabled || !onClick}
       style={{
         background: "transparent",
-        border: "1px solid var(--border-subtle, #232329)",
+        border: "1px solid var(--border-subtle)",
         borderRadius: "var(--radius-md, 6px)",
         color: "var(--text-primary)",
         cursor: disabled || !onClick ? "default" : "pointer",

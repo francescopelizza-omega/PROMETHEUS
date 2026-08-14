@@ -1,8 +1,8 @@
 # Prometheus Studio — Design (visual spec of record)
 
-These files are the **visual spec of record** for Prometheus Studio, kept in sync with
-[`MDS/the_real_prometheus/08-design-system-ux.md`](../../../MDS/the_real_prometheus/08-design-system-ux.md)
-(the owning design doc). If a value or screen here drifts from 08, 08 wins — update these to match.
+These files are the **visual spec of record** for Prometheus Studio, kept in sync with the
+maintainer's internal design-system doc (not part of this repo). If a value or screen here
+drifts from that doc, the doc wins — update these to match.
 
 ## Index
 

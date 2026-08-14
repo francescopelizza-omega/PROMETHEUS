@@ -6,19 +6,32 @@ plugins, skills, local model runtimes, self-hosted apps, pentest sandboxes) acro
 your machine, where **every piece of fetched code is scanned by a fail-closed
 supply-chain gate before a single line of it is allowed to execute.**
 
-It ships as three surfaces over one gated engine:
+It ships as three primary surfaces over one gated engine, plus two lighter integrations for
+working inside an existing editor:
 
 | Surface | What it is |
 |---|---|
 | 🖥️ **Studio** | A hardened **Electron desktop IDE** — code editor, catalog/installer, local-model hub, environments, repos, security console, and an AI chat rail. |
 | ⌨️ **`prometheus` CLI / TUI** | A terminal-first Node CLI + interactive TUI with **full Studio feature parity** over the same engine. |
 | 🔌 **Plugin (MCP)** | A cross-agent bridge that exposes PROMETHEUS to **Claude Code, Codex, Gemini, Cursor, Windsurf, Zed, Continue, Cline** and any MCP-capable CLI. |
+| 🧩 **VS Code extension** | A sidebar chat panel that drives the real agent loop against your open VS Code workspace (`studio/apps/vscode-extension`). |
+| 🧪 **JetBrains plugin (draft)** | An IntelliJ-family plugin scaffold (`studio/apps/jetbrains-plugin-DRAFT-UNTESTED`) — written without a JVM available to compile or run it; treat it as an unverified starting point, not a working build. |
 
-All three route through **`prometheus.py`** (the zero-dependency Python engine) and
-its **`nemesis`** security gate.
+All of these route through **`prometheus.py`** (the zero-dependency Python engine) and
+its **`nemesis`** security gate. The agent loop itself — sub-agents, a lifecycle-hooks system,
+cross-session memory, multi-provider model support, and a real per-command OS sandbox
+(macOS Seatbelt today; Linux via bubblewrap, unit-tested but not yet run on a real Linux
+kernel) — lives once in `packages/core` and is shared by every surface above, not
+reimplemented per host.
 
 > **Status:** active development. APIs and layout may change.
 > **License:** [Apache-2.0](./LICENSE) — Copyright 2026 Francesco Pelizza ([NOTICE](./NOTICE)).
+> The engine, `nemesis`, and the Studio desktop app/monorepo are Apache-2.0. The standalone,
+> independently-publishable client packages — the `prometheus` CLI (`studio/apps/cli`), the
+> VS Code extension (`studio/apps/vscode-extension`), and the `prometheus_plugin` cross-agent
+> adapters (own [`LICENSE`](./prometheus_plugin/LICENSE)) — are MIT, so they can be embedded
+> or redistributed with fewer conditions than the core project. Each package's own
+> `license` field is the source of truth for that package.
 
 ---
 
@@ -273,7 +286,7 @@ run-to-done *YOLO* mode — where **autonomy never overrides the security gate**
 
 ## `prometheus` — the CLI / TUI
 
-`studio/apps/cli` builds `prometheus` (and `prometheus`) — a Node ≥20 terminal CLI with
+`studio/apps/cli` builds `prometheus` — a Node ≥20 terminal CLI with
 **full Studio feature parity over the same engine-bridge**, plus an interactive TUI.
 It exposes scan/gate, catalog install/audit, model + provider management,
 environments, repos, MCP management, agent sessions, refactors, health/doctor, token
@@ -318,6 +331,20 @@ per-agent adapter** — fully gated, one machine-readable result returned.
 ---
 
 ## Install & run
+
+> **Status of the published routes.** Neither published route works yet, and the reasons are
+> unrelated to the code:
+>
+> - The `curl … install.sh` line below fetches from the `main` branch. `install.sh` is not on
+>   `main` yet, so that URL 404/403s. Until it is pushed there, use **[From source](#from-source)**
+>   or pass an explicit `--ref`.
+> - The `npx -y @prometheus-plugin/*` commands 404 because those packages have **never been
+>   published to npm**. Their manifests are publish-ready; the publish simply has not happened.
+>   Until it does, register the MCP server from a source checkout (see
+>   `prometheus_plugin/README.md`).
+>
+> `studio/scripts/release-preflight.mjs` checks both of these and fails loudly, so they cannot
+> silently regress again once fixed.
 
 ### Quick install
 
@@ -460,6 +487,16 @@ defense-in-depth: run untrusted sources `--strict`, `nemesis update` first, pin
 commit SHAs, install as a non-privileged user / in a container, and human-review the
 diff for anything you're about to grant credentials to.
 
+Separately, the agent's own shell/command execution (not `nemesis` — a different layer) *does*
+run under a real OS-level sandbox on macOS (Seatbelt, live-verified: real writes outside the
+working set are kernel-refused) and Linux (bubblewrap — real, but only unit-tested on this
+project's own dev machine; no Linux kernel was available to verify enforcement live). Windows
+has no equivalent primitive and runs unconfined at the OS level — the app-layer confirm/gate
+still applies there, it's just not backed by a kernel sandbox. Neither sandbox restricts file
+*reads*, CPU/memory/disk, or the temp/toolchain-cache directories a sandboxed command needs
+to be writable to actually run — see `packages/core/src/agent/system/host/exec-sandbox.ts`'s
+own header comment for the precise, current list of what is and isn't confined.
+
 ---
 
 ## Repository layout
@@ -470,9 +507,8 @@ diff for anything you're about to grant credentials to.
 | `bin/` | `prometheus` and `prometheus-app` launchers. POSIX shell, resolve the checkout from their own path, safe to symlink anywhere. |
 | `prometheus.py` | The zero-dep Python engine (installer/manager). Reading this file alone documents the whole system (it carries the full operator manual). |
 | `nemesis` | The stdlib-only supply-chain security scanner / gate. |
-| `studio/` | pnpm + Turbo monorepo: `apps/desktop` (Electron Studio), `apps/cli` (`prometheus`), `packages/*` (`core`, `engine-bridge`, `ui`), `python/sidecar` (gated sidecars), `staging/pyruntime` (bundled CPython). |
-| `prometheus_plugin/` | The cross-agent bridge: `mcp-server`, `tui`, `installer`, `adapters/`. |
-| `AI_SKILLS_WONDERLAND/`, `MDS/` | Skill dossiers and design/build specs that drive the catalog. |
+| `studio/` | pnpm + Turbo monorepo: `apps/desktop` (Electron Studio), `apps/cli` (`prometheus`), `apps/mcp-server` (a real stdio MCP server exposing the studio agent's own tool catalog — read-only tools only, see its own README), `apps/vscode-extension` (a sidebar chat panel driving the real agent loop inside VS Code), `apps/jetbrains-plugin-DRAFT-UNTESTED` (an IntelliJ-family plugin draft, never compiled — no JVM was available when it was written), `packages/*` (`core`, `engine-bridge`, `ui`), `python/sidecar` (gated sidecars), `staging/pyruntime` (bundled CPython). |
+| `prometheus_plugin/` | The cross-agent bridge for **other** tools (Claude Code, Cline, Gemini, …) to call into PROMETHEUS over MCP: `mcp-server` (bridges to the Python engine — distinct from `studio/apps/mcp-server`, which bridges to the newer TS agent runtime), `tui`, `installer`, `adapters/`. |
 
 ---
 

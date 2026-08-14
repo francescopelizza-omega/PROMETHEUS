@@ -6,13 +6,15 @@
  */
 export type { TomlValue, TomlTable } from "./toml.js";
 export { parseToml, stringifyToml, getPath, setPath } from "./toml.js";
-export type { CliProfile, ProfileFlagOverrides } from "./profile.js";
+export type { CliProfile, ProfileFlagOverrides, ProjectLayerRejection } from "./profile.js";
 export {
   parseProfile,
   parseModelRef,
   mergeFlags,
   resolveTuning,
   resolveEffectiveProfile,
+  resolveEffectiveProfileWithNotes,
+  sanitizeProjectLayer,
   serializeProfile,
 } from "./profile.js";
 export type { ProfileEntry } from "./seeds.js";

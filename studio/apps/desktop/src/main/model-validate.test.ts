@@ -137,12 +137,13 @@ test("validateModelDownload accepts id+quant; defaults force false", () => {
   }
 });
 
-test("validateModelDownload threads a staged dir + force + runId", () => {
+test("validateModelDownload threads a staged dir + runId, and PAIRS force with confirmForce", () => {
   const r = validateModelDownload({
     id: "x/y",
     quant: "Q8_0",
     staged: "/tmp/stage",
     force: true,
+    confirmForce: true,
     runId: "dl-1",
   });
   assert.equal(r.ok, true);
@@ -151,6 +152,20 @@ test("validateModelDownload threads a staged dir + force + runId", () => {
     assert.equal(r.value.force, true);
     assert.equal(r.value.runId, "dl-1");
   }
+});
+
+test("model:download DROPS a bare force with no typed confirm (§9a fail-safe)", () => {
+  // A download is nemesis-GATED, so `force` overrides a BLOCK. This seam used to honour it
+  // unpaired, which made the renderer's typed-confirm dialog friction rather than a gate.
+  const r = validateModelDownload({ id: "x/y", force: true });
+  assert.equal(r.ok, true);
+  if (r.ok) assert.equal(r.value.force, false);
+});
+
+test("model:remove's force is NOT paired — it means 'in use', not 'override the gate'", () => {
+  const r = validateModelRemove({ id: "x/y", force: true });
+  assert.equal(r.ok, true);
+  if (r.ok) assert.equal(r.value.force, true);
 });
 
 test("validateModelDownload REJECTS an unknown source + a missing id", () => {

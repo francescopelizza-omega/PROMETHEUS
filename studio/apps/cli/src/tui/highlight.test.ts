@@ -133,18 +133,24 @@ test("python: self, class name, func name, brackets, dot, constant, decorator, d
 });
 
 test("python: a triple-quote at statement start is a docstring (synDoc), mid-line is a string", () => {
-  assert.equal(tokenizeLine('    """doc."""', "python").tokens.find((t) => t.text.includes("doc"))?.role, "synDoc");
+  assert.equal(
+    tokenizeLine('    """doc."""', "python").tokens.find((t) => t.text.includes("doc"))?.role,
+    "synDoc",
+  );
   // carried across lines
   const open = tokenizeLine('    """multi', "python");
   assert.equal(open.state.role, "synDoc");
   const mid = tokenizeLine("still doc", "python", open.state);
   assert.equal(mid.tokens[0]?.role, "synDoc");
   // an assignment triple is a normal string, not a docstring
-  assert.equal(tokenizeLine('x = """v"""', "python").tokens.find((t) => t.text.includes("v"))?.role, "synString");
+  assert.equal(
+    tokenizeLine('x = """v"""', "python").tokens.find((t) => t.text.includes("v"))?.role,
+    "synString",
+  );
 });
 
 test("byte-invariant holds for a dense Pelly line (join === line)", () => {
-  const line = '        return sequence[-1] + self.calc(n, base=2)  # note';
+  const line = "        return sequence[-1] + self.calc(n, base=2)  # note";
   const { tokens } = tokenizeLine(line, "python");
   assert.equal(tokens.map((t) => t.text).join(""), line);
 });

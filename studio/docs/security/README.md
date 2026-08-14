@@ -44,5 +44,5 @@ in the bridge and is rendered (never re-decided) by the UI:
   + types — never `node:*` / `electron` / `engine-bridge`. A malicious model card,
   README, or finding `snippet` is treated as untrusted text.
 
-For the architecture, milestones, and per-screen UX, see
-`MDS/the_real_prometheus/03-security-core-nemesis-gui.md`.
+The architecture, milestones, and per-screen UX live in the maintainer's internal spec set
+(not part of this repo).

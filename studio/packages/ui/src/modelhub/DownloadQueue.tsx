@@ -119,7 +119,7 @@ function Row({
         gap: "4px",
         padding: "8px 10px",
         borderRadius: "var(--radius-md, 6px)",
-        border: `1px solid ${blocked ? "var(--danger, #ef5a5a)" : "var(--border-subtle)"}`,
+        border: `1px solid ${blocked ? "var(--danger)" : "var(--border-subtle)"}`,
         background: blocked ? "color-mix(in srgb, var(--danger) 8%, transparent)" : "transparent",
       }}
     >
@@ -252,9 +252,9 @@ export function DownloadQueue({
 }
 
 const warnBtn: React.CSSProperties = {
-  border: "1px solid var(--warn, #d6a532)",
+  border: "1px solid var(--warn)",
   background: "transparent",
-  color: "var(--warn, #d6a532)",
+  color: "var(--warn)",
   borderRadius: "var(--radius-md, 6px)",
   padding: "4px 9px",
   fontSize: "0.8rem",

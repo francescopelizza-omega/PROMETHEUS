@@ -157,6 +157,15 @@ export const modelDownloadSchema = z.object({
   license: LICENSE.optional(),
   staged: PATH.optional(),
   force: z.boolean().optional().default(false),
+  /**
+   * Proof the user typed the FORCE_TOKEN into ForceGate for THIS download (§9a).
+   *
+   * A model download is nemesis-GATED (see the "staging … for the nemesis gate" progress
+   * line in model-ipc), so `force` here overrides a BLOCK. It is honoured only paired.
+   * NOTE: `model:remove`'s `force` is deliberately NOT paired — that one means "delete even
+   * though a ServeProfile references it", which is not a gate override.
+   */
+  confirmForce: z.boolean().optional().default(false),
   runId: RUN_ID.optional(),
 });
 
@@ -288,7 +297,7 @@ export interface ModelDownloadArgs {
 export function validateModelDownload(arg: unknown): GuardResult<ModelDownloadArgs> {
   const r = runSchema(modelDownloadSchema, asObject(arg));
   if (!r.ok) return r;
-  const v: ModelDownloadArgs = { id: r.value.id, force: r.value.force };
+  const v: ModelDownloadArgs = { id: r.value.id, force: r.value.force && r.value.confirmForce };
   if (r.value.quant !== undefined) v.quant = r.value.quant;
   if (r.value.source !== undefined) v.source = r.value.source;
   if (r.value.license !== undefined) v.license = r.value.license;

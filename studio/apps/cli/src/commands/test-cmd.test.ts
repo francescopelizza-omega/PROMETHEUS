@@ -465,7 +465,10 @@ test("CLI-092 q quits: closes the watcher, restores raw mode, aborts the in-flig
   const drive = fakeWatchIo();
   const { deps, runs } = watchDeps({
     known: ["tests/test_foo.py"],
-    hold: () => new Promise<void>((r) => (release = r)), // the run hangs until released
+    hold: () =>
+      new Promise<void>((r) => {
+        release = r;
+      }), // the run hangs until released
   });
   const done = runWatch(makeCtx(["test", "watch"], ["pkg"]), deps, drive.io);
   await new Promise((r) => setTimeout(r, 0));
@@ -584,7 +587,8 @@ function flakyRetryDeps(opts: { onlyFlaky?: boolean } = {}) {
       }
       // retry — a single --id; scripted per-id outcome.
       const id = argv[argv.indexOf("--id") + 1] ?? "";
-      const n = (retryCounts[id] = (retryCounts[id] ?? 0) + 1);
+      retryCounts[id] = (retryCounts[id] ?? 0) + 1;
+      const n = retryCounts[id];
       const passed = id === "t::genuine" ? false : id === "t::flaky" ? n >= 2 : /* t::fixed */ true;
       return {
         ok: true,

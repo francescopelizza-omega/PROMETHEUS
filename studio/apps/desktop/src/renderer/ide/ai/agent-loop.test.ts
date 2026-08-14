@@ -11,20 +11,14 @@ import { test } from "node:test";
 
 import { applyReviewFile } from "../state/diff-review-state.js";
 import {
-  AGENT_TOOLS,
   type CommandResult,
   type ProposedEdit,
   buildReviewFile,
   createProposeEditTool,
-  formatCommandResult,
   normalizeWorkspaceRelPath,
+  parseApplyPatchArgs,
   parseProposeEditArgs,
-  parseToolArgs,
-  resumeAgentLoop,
-  runAgentLoop,
-  truncateMiddle,
 } from "./agent-loop.js";
-import type { ChatTurnResult, RendererEndpoint } from "./ai-client.js";
 
 const EP: RendererEndpoint = { id: "x", baseUrl: "http://localhost:1", locality: "local" };
 
@@ -81,229 +75,12 @@ interface DepOver {
   proposeEdit: (e: ProposedEdit) => Promise<string>;
 }
 
-test("auto-runs read_file, feeds the result back, then completes on a text answer", async () => {
-  const seen: string[][] = [];
-  const turns: ChatTurnResult[] = [
-    {
-      text: "",
-      toolCalls: [{ id: "1", name: "read_file", arguments: JSON.stringify({ path: "a.ts" }) }],
-    },
-    { text: "done.", toolCalls: [] },
-  ];
-  let i = 0;
-  const runTurn: AgentLoopRunTurn = async (_ep, messages) => {
-    seen.push(messages.map((m) => m.content));
-    return turns[i++] as ChatTurnResult;
-  };
-  const h = baseDeps(runTurn);
-  await runAgentLoop(
-    [
-      { role: "system", content: "sys" },
-      { role: "user", content: "read a.ts" },
-    ],
-    h.deps as never,
-  );
-  // the SECOND turn must have received the fed-back file content as context.
-  assert.ok(
-    seen[1]?.some((c) => c.includes("CONTENT a.ts")),
-    "read result fed back",
-  );
-  assert.ok(h.notes().some((n) => n.includes("read a.ts")));
-  assert.equal(h.committed(), 1); // only the final text turn commits
-});
-
-test("pauses on run_command — never auto-executes, never calls the model again", async () => {
-  const turns: ChatTurnResult[] = [
-    {
-      text: "",
-      toolCalls: [
-        { id: "1", name: "run_command", arguments: JSON.stringify({ command: "npm test" }) },
-      ],
-    },
-    { text: "unreached", toolCalls: [] },
-  ];
-  let i = 0;
-  const runTurn: AgentLoopRunTurn = async () => turns[i++] as ChatTurnResult;
-  const h = baseDeps(runTurn);
-  await runAgentLoop([{ role: "user", content: "run tests" }], h.deps as never);
-  assert.equal(h.proposed(), "npm test");
-  assert.equal(i, 1); // loop stopped after the first turn (paused for approval)
-});
-
-// ---- pause → resume (APP-050) ---------------------------------------------- //
-
-/** A scripted runTurn over a fixed list; records the messages each turn received. */
-function scripted(turns: ChatTurnResult[], seen: string[][], signal?: AbortSignal) {
-  let i = 0;
-  const runTurn: AgentLoopRunTurn = async (_ep, messages) => {
-    seen.push(messages.map((m) => m.content));
-    return (turns[i++] ?? { text: "", toolCalls: [] }) as ChatTurnResult;
-  };
-  const h = baseDeps(runTurn);
-  const deps = signal ? { ...h.deps, signal } : h.deps;
-  return { deps, calls: () => i, notes: h.notes };
-}
-
-test("pause→resume: the command's stdout/exit feed back and the model continues", async () => {
-  const seen: string[][] = [];
-  const s = scripted(
-    [
-      {
-        text: "",
-        toolCalls: [
-          { id: "1", name: "run_command", arguments: JSON.stringify({ command: "npm test" }) },
-        ],
-      },
-      { text: "all green ✓", toolCalls: [] },
-    ],
-    seen,
-  );
-  const paused = await runAgentLoop([{ role: "user", content: "run tests" }], s.deps as never);
-  assert.equal(paused.status, "paused");
-  if (paused.status !== "paused") return;
-  assert.deepEqual(paused.pending, [{ command: "npm test" }]);
-  assert.equal(paused.itersUsed, 1);
-
-  const done = await resumeAgentLoop(
-    paused,
-    [{ command: "npm test", stdout: "3 passed", exit: 0 }],
-    s.deps as never,
-  );
-  assert.equal(done.status, "done");
-  // the resumed turn (seen[1]) received the tool result with exit + stdout.
-  const resumedMsgs = seen[1]?.join("\n") ?? "";
-  assert.ok(resumedMsgs.includes("[tool run_command npm test]"));
-  assert.ok(resumedMsgs.includes("exit 0"));
-  assert.ok(resumedMsgs.includes("3 passed"));
-});
-
-test("denial resume: a denied command feeds a denial note (no dead-end)", async () => {
-  const seen: string[][] = [];
-  const s = scripted(
-    [
-      {
-        text: "",
-        toolCalls: [
-          { id: "1", name: "run_command", arguments: JSON.stringify({ command: "rm -rf /" }) },
-        ],
-      },
-      { text: "understood, I'll avoid that.", toolCalls: [] },
-    ],
-    seen,
-  );
-  const paused = await runAgentLoop([{ role: "user", content: "clean" }], s.deps as never);
-  if (paused.status !== "paused") throw new Error("expected paused");
-  const done = await resumeAgentLoop(
-    paused,
-    [{ command: "rm -rf /", denied: true }],
-    s.deps as never,
-  );
-  assert.equal(done.status, "done");
-  assert.ok((seen[1]?.join("\n") ?? "").includes("denied by user"));
-});
-
-test("multiple pending commands in one turn resume together in call order", async () => {
-  const seen: string[][] = [];
-  const s = scripted(
-    [
-      {
-        text: "",
-        toolCalls: [
-          { id: "1", name: "run_command", arguments: JSON.stringify({ command: "build" }) },
-          { id: "2", name: "run_command", arguments: JSON.stringify({ command: "lint" }) },
-        ],
-      },
-      { text: "both ran.", toolCalls: [] },
-    ],
-    seen,
-  );
-  const paused = await runAgentLoop([{ role: "user", content: "ci" }], s.deps as never);
-  if (paused.status !== "paused") throw new Error("expected paused");
-  assert.equal(paused.pending.length, 2);
-  const done = await resumeAgentLoop(
-    paused,
-    [
-      { command: "build", stdout: "built", exit: 0 },
-      { command: "lint", stderr: "1 warning", exit: 0 },
-    ],
-    s.deps as never,
-  );
-  assert.equal(done.status, "done");
-  const msg = seen[1]?.join("\n") ?? "";
-  const iBuild = msg.indexOf("[tool run_command build]");
-  const iLint = msg.indexOf("[tool run_command lint]");
-  assert.ok(iBuild >= 0 && iLint >= 0 && iBuild < iLint, "results appended in call order");
-});
-
-test("resume honors the remaining iter budget (no fresh budget → no infinite loop)", async () => {
-  const seen: string[][] = [];
-  const s = scripted(
-    [
-      {
-        text: "",
-        toolCalls: [{ id: "1", name: "run_command", arguments: JSON.stringify({ command: "x" }) }],
-      },
-      { text: "should not be reached", toolCalls: [] },
-    ],
-    seen,
-  );
-  const deps = { ...(s.deps as object), maxIters: 1 };
-  const paused = await runAgentLoop([{ role: "user", content: "go" }], deps as never);
-  if (paused.status !== "paused") throw new Error("expected paused");
-  assert.equal(paused.itersUsed, 1);
-  const done = await resumeAgentLoop(paused, [{ command: "x", exit: 0 }], deps as never);
-  assert.equal(done.status, "done");
-  assert.equal(s.calls(), 1, "resume did NOT call the model again (budget exhausted)");
-  assert.ok(s.notes().some((n) => n.includes("step limit")));
-});
-
-test("abort-while-paused: resume drops cleanly, never calls the model", async () => {
-  const seen: string[][] = [];
-  const ac = new AbortController();
-  const s = scripted(
-    [
-      {
-        text: "",
-        toolCalls: [{ id: "1", name: "run_command", arguments: JSON.stringify({ command: "x" }) }],
-      },
-      { text: "unreached", toolCalls: [] },
-    ],
-    seen,
-    ac.signal,
-  );
-  const paused = await runAgentLoop([{ role: "user", content: "go" }], s.deps as never);
-  if (paused.status !== "paused") throw new Error("expected paused");
-  ac.abort(); // the user hit stop / re-prompted while awaiting approval
-  const done = await resumeAgentLoop(paused, [{ command: "x", exit: 0 }], s.deps as never);
-  assert.equal(done.status, "done");
-  assert.equal(s.calls(), 1, "no resumed model call after abort");
-});
-
-test("formatCommandResult mirrors the tool envelope; truncateMiddle keeps head+tail", () => {
-  const ok = formatCommandResult({ command: "npm test", stdout: "PASS", exit: 0 });
-  assert.ok(ok.startsWith("[tool run_command npm test]"));
-  assert.ok(ok.includes("exit 0") && ok.includes("stdout:\nPASS"));
-  const denied: CommandResult = { command: "danger", denied: true };
-  assert.ok(formatCommandResult(denied).includes("denied by user"));
-  const big = truncateMiddle(`${"A".repeat(5000)}TAILMARKER`, 200);
-  assert.ok(big.length < 400);
-  assert.ok(big.includes("TAILMARKER"), "tail (error/exit context) preserved");
-  assert.ok(big.includes("elided"));
-});
-
-test("parseToolArgs is defensive", () => {
-  assert.deepEqual(parseToolArgs({ id: "1", name: "x", arguments: '{"a":1}' }), { a: 1 });
-  assert.deepEqual(parseToolArgs({ id: "1", name: "x", arguments: "garbage" }), {});
-  assert.deepEqual(parseToolArgs({ id: "1", name: "x", arguments: "[1,2]" }), {});
-  assert.deepEqual(parseToolArgs({ id: "1", name: "x", arguments: "" }), {});
-});
-
-test("AGENT_TOOLS offers read_file / list_dir / grep / propose_edit / run_command", () => {
-  const names = AGENT_TOOLS.map((t) => (t as { function: { name: string } }).function.name).sort();
-  assert.deepEqual(names, ["grep", "list_dir", "propose_edit", "read_file", "run_command"]);
-});
-
-/* ── propose_edit: path guard ─────────────────────────────────────────────── */
+/*
+ * The loop tests that used to sit here (auto-run read_file, pause on run_command,
+ * pause→resume, denial resume, iter-budget, abort-while-paused) went with the loop they
+ * covered — see core-agent.test.ts, which tests the invariants that REPLACED them: the
+ * broker routing, the --force ban, and the confirm-default-deny that the fork never had.
+ */
 
 test("normalizeWorkspaceRelPath rejects absolute / escaping / bogus paths", () => {
   assert.equal(normalizeWorkspaceRelPath("/etc/passwd"), null);
@@ -459,157 +236,12 @@ test("buildReviewFile hunks roundtrip through applyReviewFile", () => {
 
 /* ── propose_edit: loop orchestration ─────────────────────────────────────── */
 
-test("propose_edit dispatches to tools.proposeEdit, feeds the note back, does NOT pause", async () => {
-  const seen: string[][] = [];
-  const turns: ChatTurnResult[] = [
-    {
-      text: "",
-      toolCalls: [
-        {
-          id: "1",
-          name: "propose_edit",
-          arguments: JSON.stringify({
-            path: "src/a.ts",
-            edits: [{ oldText: "x", newText: "y" }],
-          }),
-        },
-      ],
-    },
-    { text: "done.", toolCalls: [] },
-  ];
-  let i = 0;
-  const runTurn: AgentLoopRunTurn = async (_ep, messages) => {
-    seen.push(messages.map((m) => m.content));
-    return turns[i++] as ChatTurnResult;
-  };
-  const h = baseDeps(runTurn);
-  await runAgentLoop([{ role: "user", content: "edit a.ts" }], h.deps as never);
-  assert.equal(i, 2); // the loop CONTINUED after the edit (review is async — no pause)
-  assert.deepEqual(h.proposedEdits(), [
-    { path: "src/a.ts", spans: [{ oldText: "x", newText: "y" }], description: undefined },
-  ]);
-  assert.ok(seen[1]?.some((c) => c.includes("✓ proposed 1 edit to src/a.ts")));
-  assert.ok(h.notes().some((n) => n.includes("✎ edit src/a.ts")));
-});
-
-test("propose_edit with a bad path is rejected client-side (tool impl never called)", async () => {
-  const seen: string[][] = [];
-  const turns: ChatTurnResult[] = [
-    {
-      text: "",
-      toolCalls: [
-        {
-          id: "1",
-          name: "propose_edit",
-          arguments: JSON.stringify({
-            path: "../../etc/passwd",
-            edits: [{ oldText: "", newText: "pwn" }],
-          }),
-        },
-      ],
-    },
-    { text: "ok", toolCalls: [] },
-  ];
-  let i = 0;
-  const runTurn: AgentLoopRunTurn = async (_ep, messages) => {
-    seen.push(messages.map((m) => m.content));
-    return turns[i++] as ChatTurnResult;
-  };
-  const h = baseDeps(runTurn);
-  await runAgentLoop([{ role: "user", content: "edit" }], h.deps as never);
-  assert.equal(h.proposedEdits().length, 0);
-  assert.ok(seen[1]?.some((c) => c.includes("[tool propose_edit] error:")));
-});
-
-/* ── propose_edit: ChangeSet accumulation + the fail-closed zero-write guarantee ── */
-
-test("createProposeEditTool accumulates the turn's edits into ONE ChangeSet", async () => {
-  const dispatched: { id: string; rationale: string; edits: { uri: string }[] }[] = [];
-  const files: Record<string, string> = { "file:///w/a.ts": "aaa\nbbb" };
-  const tool = createProposeEditTool({
-    changeSetId: "cs-1",
-    toUri: (rel) => `file:///w/${rel}`,
-    readOriginal: async (uri) => files[uri] ?? null,
-    dispatch: (cs) => dispatched.push(cs),
-  });
-  const r1 = await tool({ path: "a.ts", spans: [{ oldText: "aaa", newText: "AAA" }] });
-  assert.match(r1, /^✓/);
-  const r2 = await tool({
-    path: "new.ts",
-    spans: [{ oldText: "", newText: "fresh" }],
-    description: "add new.ts",
-  });
-  assert.match(r2, /new file/);
-  assert.equal(dispatched.length, 2);
-  assert.equal(dispatched[1]?.id, "cs-1");
-  assert.equal(dispatched[1]?.rationale, "add new.ts");
-  assert.deepEqual(
-    dispatched[1]?.edits.map((e) => e.uri),
-    ["file:///w/a.ts", "file:///w/new.ts"],
-  );
-  // a second edit to the SAME existing file merges (anchored to the same original)…
-  const r3 = await tool({ path: "a.ts", spans: [{ oldText: "bbb", newText: "BBB" }] });
-  assert.match(r3, /^✓/);
-  assert.equal(dispatched[2]?.edits.length, 2);
-  const aHunks = dispatched[2]?.edits.find((e) => e.uri === "file:///w/a.ts") as {
-    hunks: unknown[];
-  };
-  assert.equal(aHunks.hunks.length, 2);
-  // …but re-touching already-claimed lines is refused.
-  const r4 = await tool({ path: "a.ts", spans: [{ oldText: "aaa", newText: "zzz" }] });
-  assert.match(r4, /already touches/);
-});
-
-test("a full propose_edit turn performs ZERO writes on the entire ide api surface", async () => {
-  // spy the WHOLE surface: every method call is recorded; only fsRead may fire.
-  const calls: string[] = [];
-  const spied = (name: string, ret: unknown) => {
-    return (..._a: unknown[]) => {
-      calls.push(name);
-      return Promise.resolve(ret);
-    };
-  };
-  const api = {
-    fsRead: spied("fsRead", { ok: true, text: "old line" }),
-    fsWrite: spied("fsWrite", { ok: true }),
-    fsTree: spied("fsTree", []),
-    exec: spied("exec", { ok: true }),
-    search: spied("search", { ok: true, matches: [] }),
-  };
-  const dispatched: unknown[] = [];
-  const tool = createProposeEditTool({
-    changeSetId: "cs-z",
-    toUri: (rel) => `file:///w/${rel}`,
-    readOriginal: async (uri) => {
-      const r = (await api.fsRead(uri)) as { ok: boolean; text?: string };
-      return r.ok && typeof r.text === "string" ? r.text : null;
-    },
-    dispatch: (cs) => dispatched.push(cs),
-  });
-  const turns: ChatTurnResult[] = [
-    {
-      text: "",
-      toolCalls: [
-        {
-          id: "1",
-          name: "propose_edit",
-          arguments: JSON.stringify({
-            path: "a.ts",
-            edits: [{ oldText: "old line", newText: "new line" }],
-          }),
-        },
-      ],
-    },
-    { text: "done", toolCalls: [] },
-  ];
-  let i = 0;
-  const h = baseDeps(async () => turns[i++] as ChatTurnResult, {
-    proposeEdit: tool,
-  });
-  await runAgentLoop([{ role: "user", content: "edit" }], h.deps as never);
-  assert.equal(dispatched.length, 1); // the ChangeSet reached the store seam…
-  assert.deepEqual(calls, ["fsRead"]); // …and the ONLY api touch was the baselining read
-});
+/*
+ * `createProposeEditTool accumulates the turn's edits into ONE ChangeSet` lived here and
+ * drove the retired loop to get two propose_edit calls into one turn. The accumulation it
+ * covered is exercised directly by the next test (two tool() calls, one dispatch) — the
+ * loop was only ever the delivery mechanism.
+ */
 
 test("createProposeEditTool drops stale entries after the user Applied/Discarded mid-run", async () => {
   const dispatched: { edits: { uri: string }[] }[] = [];
@@ -634,4 +266,70 @@ test("createProposeEditTool drops stale entries after the user Applied/Discarded
     dispatched[1]?.edits.map((e) => e.uri),
     ["file:///w/b.ts"],
   );
+});
+
+/* ── apply_patch: a multi-file edit, into the SAME review queue ────────────*/
+
+/**
+ * The pane could not express a multi-file change: a rename-and-update-its-callers had to be N
+ * separate `propose_edit` calls, each reviewed on its own, so the user approved half a refactor
+ * and then the other half.
+ *
+ * The CLI's two-phase resolve-then-write is deliberately NOT copied here — it exists because the
+ * CLI writes disk directly, whereas the user's single Apply in DiffReview already is the atomic
+ * step. Copying it would add a second write path to keep correct.
+ */
+
+test("a multi-file patch becomes one proposed edit per file", () => {
+  const r = parseApplyPatchArgs({
+    edits: [
+      { path: "src/a.ts", hunks: [{ old: "one", new: "1" }] },
+      { path: "src/b.ts", hunks: [{ old: "two", new: "2" }] },
+    ],
+  });
+  assert.equal(r.ok, true);
+  if (r.ok) {
+    assert.deepEqual(
+      r.edits.map((e) => e.path),
+      ["src/a.ts", "src/b.ts"],
+    );
+    assert.deepEqual(r.edits[0]?.spans, [{ oldText: "one", newText: "1" }]);
+  }
+});
+
+test("the field names are core's `{old,new}`, not the renderer's `{oldText,newText}`", () => {
+  // The two spellings mean the same thing, and accepting both would invite a model to guess.
+  const r = parseApplyPatchArgs({
+    edits: [{ path: "a.ts", hunks: [{ oldText: "x", newText: "y" }] }],
+  });
+  assert.equal(r.ok, false);
+  if (!r.ok) assert.match(r.error, /string `old` and a string `new`/);
+});
+
+test("a JSON STRING of edits is parsed — models send one constantly", () => {
+  const r = parseApplyPatchArgs({
+    edits: JSON.stringify([{ path: "a.ts", hunks: [{ old: "x", new: "y" }] }]),
+  });
+  assert.equal(r.ok, true);
+});
+
+test("a path that escapes the workspace is refused, per file", () => {
+  for (const p of ["../../etc/passwd", "/etc/passwd", "~/x"]) {
+    const r = parseApplyPatchArgs({ edits: [{ path: p, hunks: [{ old: "a", new: "b" }] }] });
+    assert.equal(r.ok, false, `${p} was accepted`);
+  }
+});
+
+test("an entry with no hunks names the file it belongs to", () => {
+  const r = parseApplyPatchArgs({ edits: [{ path: "a.ts", hunks: [] }] });
+  assert.equal(r.ok, false);
+  if (!r.ok) assert.match(r.error, /a\.ts/);
+});
+
+test("garbage yields an actionable error, never a silent empty patch", () => {
+  for (const bad of [undefined, [], "not json", 42, {}]) {
+    const r = parseApplyPatchArgs({ edits: bad });
+    assert.equal(r.ok, false, `accepted ${String(bad)}`);
+    if (!r.ok) assert.match(r.error, /path, hunks/);
+  }
 });

@@ -723,7 +723,6 @@ test("CLI-097: color/unicode default predicates honor NO_COLOR presence + FORCE_
   };
   const set = (k: string, v: string | undefined) => {
     if (v === undefined) {
-      // biome-ignore lint/performance/noDelete: exact env restore
       delete process.env[k];
     } else {
       process.env[k] = v;

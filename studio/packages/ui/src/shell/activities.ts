@@ -19,11 +19,39 @@ export type ActivityId =
   | "catalog"
   | "chat"
   | "models"
-  | "environments"
   | "security"
-  | "repos"
-  | "docs"
-  | "extensions";
+  | "workspace";
+
+/**
+ * Ids that USED to be activities and are now segments inside a merged route (handoff_3 §1).
+ *
+ * They are not `ActivityId`s any more — nothing may navigate to them — but they still exist
+ * in the wild: `prometheus.layout` persists the last-open activity, so an operator who quit
+ * while on Repos has `"repos"` sitting in localStorage. `ACTIVITY_REDIRECTS` is what turns
+ * that into "Workspace, Repos tab" instead of a blank frame.
+ */
+export type LegacyActivityId = "environments" | "repos" | "docs" | "extensions";
+
+/** Where a retired activity now lives: the merged route + the segment inside it. */
+export interface ActivityRedirect {
+  activity: ActivityId;
+  /** the segmented-tab id within `activity` (CatalogTab | WorkspaceTab). */
+  tab: string;
+}
+
+/**
+ * handoff_3 §1: the rail drops from nine nouns to six, and these four fold in.
+ *
+ * Keep this table forever. Deleting a redirect does not remove the persisted value from
+ * anyone's disk — it only turns a working migration back into the blank-frame bug.
+ */
+export const ACTIVITY_REDIRECTS: Readonly<Record<LegacyActivityId, ActivityRedirect>> =
+  Object.freeze({
+    repos: { activity: "workspace", tab: "repos" },
+    environments: { activity: "workspace", tab: "environments" },
+    docs: { activity: "workspace", tab: "docs" },
+    extensions: { activity: "catalog", tab: "extensions" },
+  });
 
 /** A pinned-bottom rail item (engine status + settings) — not a route per se. */
 export type PinnedId = "engine" | "settings";
@@ -39,25 +67,37 @@ export interface Activity {
   label: string;
   /** the related feature-file pointer, for tooltips/dev (§4.1). */
   doc: string;
+  /**
+   * `false` = a real route that does NOT get a rail icon (handoff §2.2). `chat` is the
+   * only one: the agent moved into the ALWAYS-PRESENT RightRail, so a rail icon that
+   * opens a second, full-width copy of the same session is a duplicate door. The id
+   * stays a first-class ActivityId — deep links, the palette and `renderActivity`
+   * still resolve it — it simply isn't one of the nine rail nouns.
+   */
+  rail?: false;
 }
 
 /**
- * The activity rail, ordered by daily frequency (file 08 §4.1). Home first
- * (Mission Control), then the daily-driver surfaces, then the broader workspace
- * apps. Engine-status + Settings are pinned separately (PINNED below).
+ * The activity rail, ordered per handoff_3 §1: Home, Editor, Catalog, Model Hub, Security,
+ * Workspace. Six nouns, each doing more — Catalog absorbed Extensions and Skills, Workspace
+ * absorbed Repos, Environments and Docs. Engine-status + Settings are pinned separately
+ * (PINNED below). `chat` keeps its entry (so getActivity/sidebarTitle/isActivityId stay
+ * total for the route) but is marked `rail: false` — render RAIL_ACTIVITIES, not this.
  */
 export const ACTIVITIES: readonly Activity[] = Object.freeze([
   { id: "home", glyph: "⌂", icon: "Home", label: "Home", doc: "05.1" },
   { id: "editor", glyph: "⌨", icon: "Code2", label: "Editor", doc: "07" },
   { id: "catalog", glyph: "⬚", icon: "LayoutGrid", label: "Catalog", doc: "06" },
-  { id: "chat", glyph: "💬", icon: "MessageSquare", label: "Chat", doc: "12" },
   { id: "models", glyph: "◴", icon: "Boxes", label: "Model Hub", doc: "05" },
-  { id: "environments", glyph: "⬢", icon: "Container", label: "Environments", doc: "04" },
   { id: "security", glyph: "🛡", icon: "ShieldCheck", label: "Security", doc: "03" },
-  { id: "repos", glyph: "⤳", icon: "GitBranch", label: "Repos", doc: "06" },
-  { id: "docs", glyph: "📖", icon: "BookOpen", label: "Docs", doc: "01" },
-  { id: "extensions", glyph: "⚙", icon: "Puzzle", label: "Extensions", doc: "09" },
+  { id: "workspace", glyph: "▤", icon: "FolderOpen", label: "Workspace", doc: "06" },
+  { id: "chat", glyph: "💬", icon: "MessageSquare", label: "Chat", doc: "12", rail: false },
 ]);
+
+/** The SIX icons the §1 rail paints, in order. The ActivityBar renders this. */
+export const RAIL_ACTIVITIES: readonly Activity[] = Object.freeze(
+  ACTIVITIES.filter((a) => a.rail !== false),
+);
 
 /** The pinned-bottom rail items (§4.1): engine status + settings. */
 export const PINNED: readonly { id: PinnedId; glyph: string; icon: string; label: string }[] =
@@ -88,8 +128,29 @@ export function getActivity(id: string): Activity | undefined {
  * (a bad deep-link degrades to Mission Control, not a blank screen).
  */
 export function routeActivity(requested: string | null | undefined): ActivityId {
-  if (requested && isActivityId(requested)) return requested;
-  return DEFAULT_ACTIVITY;
+  return resolveActivity(requested).activity;
+}
+
+/**
+ * Resolve a requested id to the activity that should mount AND the tab it should open on.
+ *
+ * Three cases, in order: a live activity id passes through; one of the four retired ids
+ * (handoff_3 §1) redirects to its merged route with the right segment; anything else — an
+ * unknown or empty id — degrades to Home rather than a blank frame.
+ *
+ * This is the function every entry point must go through. `App.tsx`'s `loadLayout` used to
+ * cast the persisted string straight to `ActivityId`, so a stale `"repos"` survived
+ * rehydration and fell through `renderActivity`'s `default:` onto an unrelated route.
+ */
+export function resolveActivity(requested: string | null | undefined): {
+  activity: ActivityId;
+  tab?: string;
+} {
+  if (!requested) return { activity: DEFAULT_ACTIVITY };
+  if (isActivityId(requested)) return { activity: requested };
+  const redirect = (ACTIVITY_REDIRECTS as Record<string, ActivityRedirect | undefined>)[requested];
+  if (redirect) return { activity: redirect.activity, tab: redirect.tab };
+  return { activity: DEFAULT_ACTIVITY };
 }
 
 /**

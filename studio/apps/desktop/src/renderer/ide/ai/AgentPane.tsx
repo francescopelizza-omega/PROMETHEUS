@@ -40,6 +40,7 @@ import {
   serializeSession,
   truncateAfter,
 } from "@prometheus/core/agent-session";
+import { describeEffort } from "@prometheus/core/ai-effort";
 import * as rules from "@prometheus/core/rules";
 import {
   type ActivityId,
@@ -47,22 +48,76 @@ import {
   AiProvidersScreen,
   Button,
   type CostWarningConfirm,
+  Input,
   Panel,
   SpendMeter,
+  Z,
+  useAnchoredLayer,
 } from "@prometheus/ui";
-import { type ReactElement, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  type CSSProperties,
+  type ReactElement,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
+import { createPortal } from "react-dom";
 
-import type { IdeTreeNode } from "../../../shared/ipc-contract.js";
+import {
+  LatencyCard,
+  type LatencyPhases,
+  VerdictCard,
+  type VerdictCardFinding,
+} from "@prometheus/ui";
+import type {
+  AgentSystemToolResult,
+  GateResult,
+  IdeLoadedCommandFile,
+  IdeTreeNode,
+} from "../../../shared/ipc-contract.js";
 import { commandPaletteRows } from "../../commands/registry.js";
+import { useAuthorisationStore } from "../../stores/authorisation.js";
+import { useSecurityStore } from "../../stores/features.js";
+
+import { AuthPill } from "../../shell/AuthPill.js";
 import { getActiveEditorSelection } from "../EditorPane.js";
+import { NOTEBOOK_EDIT_TOOL_NAME, runNotebookTool } from "../notebook/notebook-tool.js";
 import { useCodeIndexStore } from "../state/code-index-store.js";
 import { type IndexedSymbol, searchSymbols, shortlistFiles } from "../state/code-index.js";
 import { fuzzyRank } from "../state/fuzzy.js";
 import { useAiSessionStore, useTabsStore } from "../state/stores.js";
 import { DiffReview } from "./DiffReview.js";
-import { AGENT_SYSTEM, type AgentLoopDeps, createProposeEditTool } from "./agent-loop.js";
+import { type AgentLoopDeps, createProposeEditTool } from "./agent-loop.js";
+import { runChatTurn } from "./ai-client.js";
+import { compactTurns } from "./compaction.js";
+import { AGENT_PANE_SYSTEM } from "./core-agent.js";
+
+/**
+ * Run a `notebook_edit` task card in the renderer and shape it like an `agent:systemTool`
+ * result, so the card's own reporting path below needs no second branch.
+ */
+async function notebookCardResult(
+  args: Record<string, unknown>,
+): Promise<AgentSystemToolResult | undefined> {
+  const out = await runNotebookTool(NOTEBOOK_EDIT_TOOL_NAME, args);
+  if (!out) return undefined;
+  return {
+    ok: out.ok,
+    summary: out.summary,
+    data: { exitCode: out.ok ? 0 : 1 },
+  };
+}
+import { expandCommandFile, matchCommandFileInvocation } from "./command-files.js";
+import { EFFORT_SHORT, effortFor, useEffortStore } from "./effort-store.js";
 import { useActiveEndpoint } from "./endpoint-hook.js";
-import { type CatalogModelLite, endpointMeta, formatContextWindow } from "./endpoints.js";
+import {
+  type CatalogModelLite,
+  contextWindowOf,
+  endpointMeta,
+  formatContextWindow,
+} from "./endpoints.js";
 import { Markdown } from "./markdown.js";
 import {
   type ActiveMention,
@@ -81,6 +136,23 @@ import {
 import { agentRuns } from "./run-controller.js";
 import { isSafeSessionId, liveToSession, sessionToLive } from "./session-map.js";
 import { activeSlashQuery, clampSlashIndex, filterSlashCommands } from "./slash.js";
+
+/**
+ * The heights the composer's floating layers are CLAMPED against (§9.2).
+ *
+ * Declared, not measured: the clamp decides where the layer will paint, so it has to run
+ * before the layer exists. Each value is the `maxHeight` its layer renders with — keep the
+ * two in step or a full list will hang past the viewport edge the clamp thought it cleared.
+ */
+const MENTION_H = 200;
+const SLASH_H = 240;
+const ENDPOINT_H = 220;
+/** The MCP surface, or a stub that refuses honestly when the preload did not expose one. */
+function mcpApi(): NonNullable<Window["prometheus"]["mcp"]> {
+  const api = typeof window !== "undefined" ? window.prometheus?.mcp : undefined;
+  if (api) return api;
+  throw new Error("the MCP bridge is unavailable");
+}
 
 function ide(): Window["prometheus"]["ide"] | undefined {
   return typeof window !== "undefined" ? window.prometheus?.ide : undefined;
@@ -207,6 +279,73 @@ async function loadArchivedSessions(root: string): Promise<Session[]> {
   return out.sort((a, b) => (a.updatedAt < b.updatedAt ? 1 : a.updatedAt > b.updatedAt ? -1 : 0));
 }
 
+/** The sessionStorage key Home's ask bar writes its draft into. */
+const HOME_PROMPT_KEY = "prometheus.home.prompt";
+
+/** A gate result's findings in the §4 card's shape (array-guarded, fail-soft). */
+function chatVerdictFindings(v: GateResult): VerdictCardFinding[] {
+  const raw = v.detail?.findings;
+  if (!Array.isArray(raw)) return [];
+  return raw.map((f) => ({
+    rule: f.rule,
+    description: f.klass,
+    where: f.where,
+    severity: f.severity,
+  }));
+}
+
+/**
+ * A card the agent uses to ASK the human something, mid-turn.
+ *
+ * Why a card and not a modal: the turn is already suspendable this way (the same
+ * `proposed`/`awaiting` machinery a command card uses), and a modal would steal focus from
+ * whatever the user is doing while the agent works. A question is a message, not an alarm.
+ *
+ * Skip is a first-class answer, not a cancel: core renders an empty answer as "the user gave
+ * no answer, proceed with the most reasonable interpretation and say which one you chose", so
+ * dismissing a question never hangs the run.
+ */
+function QuestionCard(props: {
+  id: string;
+  prompt: string;
+  status: string;
+  output: string;
+  onAnswer: (id: string, prompt: string, answer: string) => void;
+}): ReactElement {
+  const { id, prompt, status, output, onAnswer } = props;
+  const [text, setText] = useState("");
+  const pending = status === "pending";
+  return (
+    <Panel title={`question · ${status}`} elevation="e1">
+      <div style={{ fontSize: "0.78rem", marginBottom: 6, whiteSpace: "pre-wrap" }}>{prompt}</div>
+      {pending ? (
+        <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+          <Input
+            value={text}
+            placeholder="your answer"
+            aria-label={prompt}
+            onChange={(e) => setText(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                e.preventDefault();
+                onAnswer(id, prompt, text.trim());
+              }
+            }}
+          />
+          <Button size="sm" variant="primary" onClick={() => onAnswer(id, prompt, text.trim())}>
+            answer
+          </Button>
+          <Button size="sm" variant="ghost" onClick={() => onAnswer(id, prompt, "")}>
+            skip
+          </Button>
+        </div>
+      ) : (
+        <pre style={{ margin: 0, fontSize: "0.7rem", whiteSpace: "pre-wrap" }}>{output}</pre>
+      )}
+    </Panel>
+  );
+}
+
 export function AgentPane({
   onNavigate,
   onRunCommand,
@@ -221,6 +360,7 @@ export function AgentPane({
   const endpointId = useAiSessionStore((s) => s.endpointId);
   const selectEndpoint = useAiSessionStore((s) => s.selectEndpoint);
   const setNeverSendToCloud = useAiSessionStore((s) => s.setNeverSendToCloud);
+  const replaceTurns = useAiSessionStore((s) => s.replaceTurns);
   const ghostText = useAiSessionStore((s) => s.ghostText);
   const setGhostText = useAiSessionStore((s) => s.setGhostText);
 
@@ -231,11 +371,14 @@ export function AgentPane({
   const activeSession = sessions[activeId];
   const turns = activeSession?.turns ?? EMPTY_TURNS;
   const streaming = activeSession?.streaming ?? "";
+  // §9 "reasoning surfacing": the model's thinking and the wrapper's watchdog line. Both
+  // are EPHEMERAL (see AiSession.thinking) — rendered live, never appended to `turns`.
+  const thinking = activeSession?.thinking ?? "";
+  const runStatus = activeSession?.status ?? "";
   const taskCards = activeSession?.taskCards ?? EMPTY_CARDS;
   const busy = activeSession?.busy ?? false;
   const changeSet = activeSession?.changeSet ?? null;
   // anchor for the "edits proposed — review" chip → scrolls the DiffReview into view.
-  const diffRef = useRef<HTMLDivElement | null>(null);
 
   const pushTurn = useAiSessionStore((s) => s.pushTurn);
   const appendStreaming = useAiSessionStore((s) => s.appendStreaming);
@@ -262,8 +405,24 @@ export function AgentPane({
 
   const [input, setInput] = useState("");
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
+  // Task #5 (desktop parity): custom slash commands from markdown — the list itself is
+  // populated once `workspaceRoot` is in scope, just below.
+  const [customCommands, setCustomCommands] = useState<IdeLoadedCommandFile[]>([]);
   // APP-092: `/` slash-command menu (rows from the shell registry) + the highlighted row.
-  const commandRows = useMemo(() => commandPaletteRows(), []);
+  // Custom commands are prefixed `custom:` so `acceptSlash` can tell them apart from a shell
+  // registry action — picking one fills the composer for the user to type args, rather than
+  // executing immediately (a custom command isn't an action, it's a prompt template).
+  const commandRows = useMemo(
+    () => [
+      ...commandPaletteRows(),
+      ...customCommands.map((c) => ({
+        id: `custom:${c.file.name}`,
+        title: `/${c.file.name}${c.file.description ? ` — ${c.file.description}` : ""}`,
+        category: c.scope === "project" ? "Custom (project)" : "Custom",
+      })),
+    ],
+    [customCommands],
+  );
   const [slashActive, setSlashActive] = useState(0);
   // APP-092: the open-models catalog slice (context window + capability tags) for the picker.
   const [catalog, setCatalog] = useState<CatalogModelLite[]>([]);
@@ -280,6 +439,42 @@ export function AgentPane({
   // re-renders the meter on a controller notification.
   const [, setUsageTick] = useState(0);
   const [showProviders, setShowProviders] = useState(false);
+  // §2.5 composer chips: the compact model picker popover + the reasoning-effort tier.
+  const [showEndpointPicker, setShowEndpointPicker] = useState(false);
+  // §2.3.2: Home's ask bar hands its draft to THIS composer (the rail is always present,
+  // so the draft follows the user instead of a route change). Also drains the
+  // sessionStorage seed on mount, which covers a cold open straight into the rail.
+  useEffect(() => {
+    const seed = (text: string): void => {
+      if (!text.trim()) return;
+      setInput(text);
+      requestAnimationFrame(() => inputRef.current?.focus());
+    };
+    try {
+      const stored = sessionStorage.getItem(HOME_PROMPT_KEY);
+      if (stored) {
+        sessionStorage.removeItem(HOME_PROMPT_KEY);
+        seed(stored);
+      }
+    } catch {
+      /* sessionStorage blocked — the rail still opens, just unseeded. */
+    }
+    const onSeed = (e: Event): void => seed((e as CustomEvent<string>).detail ?? "");
+    window.addEventListener("prometheus:seed-agent-prompt", onSeed);
+    return () => window.removeEventListener("prometheus:seed-agent-prompt", onSeed);
+  }, []);
+  const effortTier = useEffortStore((s) => s.tier);
+  const cycleEffort = useEffortStore((s) => s.cycle);
+  const effortResolution = useMemo(() => effortFor(effortTier, active), [effortTier, active]);
+  // §3: the last settled run's phase totals for THIS tab. Read from the module-level
+  // controller (not local state) so switching tabs shows each tab's own attribution.
+  const [runPhases, setRunPhases] = useState<LatencyPhases | undefined>(undefined);
+  const lastVerdict = useSecurityStore((st) => st.lastVerdict);
+  useEffect(
+    () => agentRuns.subscribe(() => setRunPhases(agentRuns.getPhases(activeId))),
+    [activeId],
+  );
+  useEffect(() => setRunPhases(agentRuns.getPhases(activeId)), [activeId]);
   // metered per-provider caps (typed-confirm-gated), persisted (no secrets — just caps).
   const [meteredCaps, setMeteredCaps] = useState<
     Record<string, { capUsd: number; autoDisable: boolean }>
@@ -303,6 +498,24 @@ export function AgentPane({
   // lives in @prometheus/core; here we READ the files (fsRead) and assemble. Loaded once
   // per workspace root into a ref so the async `send` reads the latest without a dep.
   const workspaceRoot = useTabsStore((s) => s.workspaceRoot);
+  // Task #5 (desktop parity): (re)discover custom slash commands whenever the workspace root
+  // changes — the SAME `@prometheus/core/command-loader` the CLI's `/command` loader uses, run
+  // by MAIN (node:fs, C5) and reached over `window.prometheus.ide.commandFilesList`. A command
+  // file dropped in mid-session is usable on the very next render, not after a restart.
+  useEffect(() => {
+    let alive = true;
+    void (async () => {
+      if (!workspaceRoot) {
+        if (alive) setCustomCommands([]);
+        return;
+      }
+      const r = await ide()?.commandFilesList(workspaceRoot);
+      if (alive) setCustomCommands(r?.ok ? r.commands : []);
+    })();
+    return () => {
+      alive = false;
+    };
+  }, [workspaceRoot]);
   const [rulesInfo, setRulesInfo] = useState<{ order: string[] }>({ order: [] });
   const projectRulesRef = useRef<string>("");
   useEffect(() => {
@@ -326,6 +539,33 @@ export function AgentPane({
       const assembled = sources.length > 0 ? rules.assembleRules(sources) : { text: "", order: [] };
       projectRulesRef.current = assembled.text;
       setRulesInfo({ order: assembled.order });
+    })();
+    return () => {
+      alive = false;
+    };
+  }, [workspaceRoot]);
+
+  // DURABLE CROSS-SESSION MEMORY: the `memory_write`-authored index for this workspace,
+  // prepended to the system prompt alongside the AGENTS.md/CLAUDE.md rules above. Same
+  // "load once per root into a ref" posture — the async `send` reads the latest without a
+  // dep — but reached through `memory_read` over the `agent:systemTool` IPC channel (core owns
+  // the fs; the renderer is sandboxed) rather than `fsRead`. `data.count === 0` (nothing ever
+  // recorded for this project) is treated the same as "no rules": nothing is injected.
+  const memoryBlockRef = useRef<string>("");
+  useEffect(() => {
+    let alive = true;
+    const root = workspaceRoot;
+    memoryBlockRef.current = "";
+    if (!root) return;
+    void (async () => {
+      const api = ide();
+      if (!api) return;
+      const r = await api
+        .systemTool({ name: "memory_read", args: {}, cwd: root })
+        .catch(() => undefined);
+      if (!alive || !r?.ok) return;
+      if (r.data?.count === 0) return;
+      memoryBlockRef.current = r.summary;
     })();
     return () => {
       alive = false;
@@ -427,8 +667,53 @@ export function AgentPane({
     () => (slashQuery !== null ? filterSlashCommands(commandRows, slashQuery) : []),
     [slashQuery, commandRows],
   );
+  /* ── §9.2 "the rail cage": the composer's floating layers are PORTALED ────────
+   *
+   * These three pickers used to be `position: absolute` children of the composer. That
+   * anchors them inside the right rail — a 330px column whose island root is
+   * `overflow: hidden` — so a completion list could never be wider than the rail and was
+   * clipped at its edges. Portaling to document.body as `position: fixed`, with
+   * viewport-space coordinates from `useAnchoredLayer`, takes them out of the cage; the
+   * clamp inside that hook is what keeps them on screen once they are free to leave it.
+   *
+   * Heights are declared here (not measured) because the clamp has to decide where to
+   * paint BEFORE the layer paints. They match the `maxHeight` each layer renders with.
+   */
+  const composerRef = useRef<HTMLDivElement | null>(null);
+  const chipRowRef = useRef<HTMLDivElement | null>(null);
+  const mentionBox = useAnchoredLayer(
+    composerRef,
+    activeMention !== null && mentionMatches.length > 0,
+    { width: "anchor-min", maxWidth: 460, height: MENTION_H },
+  );
+  const noSymbolsBox = useAnchoredLayer(
+    composerRef,
+    activeMention?.kind === "sym" && mentionMatches.length === 0,
+    { width: 320, height: 26 },
+  );
+  const slashBox = useAnchoredLayer(composerRef, slashQuery !== null && slashMatches.length > 0, {
+    width: "anchor-min",
+    maxWidth: 460,
+    height: SLASH_H,
+  });
+  const endpointBox = useAnchoredLayer(chipRowRef, showEndpointPicker, {
+    width: 300,
+    height: ENDPOINT_H,
+  });
+
   const acceptSlash = useCallback(
     (id: string) => {
+      // Task #5 (desktop parity): a custom command isn't an action to RUN, it's a prompt
+      // template — fill the composer with `/name ` so the user types args and Enter sends it
+      // (send() below does the actual expansion), instead of executing + clearing like a
+      // shell-registry command.
+      if (id.startsWith("custom:")) {
+        const name = id.slice("custom:".length);
+        setInput(`/${name} `);
+        setSlashActive(0);
+        inputRef.current?.focus();
+        return;
+      }
       onRunCommand?.(id);
       setInput("");
       setSlashActive(0);
@@ -623,7 +908,28 @@ export function AgentPane({
     const sid = activeId;
     const store = useAiSessionStore.getState();
     if (!active || !input.trim() || store.sessions[sid]?.busy) return;
-    const text = input.trim();
+    let text = input.trim();
+    // Task #5 (desktop parity): a typed `/name args…` that matches a loaded custom command
+    // EXPANDS into the prompt the agent receives — the same `@file`/`!cmd` resolution + LAST
+    // argument substitution as the CLI's `/name`. Expansion happens here (send time), not at
+    // popup-pick time, so the user can type args after the name exactly as in the terminal.
+    const invocation = matchCommandFileInvocation(text, customCommands);
+    if (invocation) {
+      const expandRoot = useTabsStore.getState().workspaceRoot;
+      const expanded = await expandCommandFile(invocation.cmd, invocation.args, {
+        readFile: async (rel) => {
+          const uri = rel.startsWith("file://") ? rel : `file://${expandRoot ?? "."}/${rel}`;
+          const r = await ide()?.fsRead(uri);
+          if (!r?.ok || r.text === undefined) throw new Error(r?.error ?? "could not read file");
+          return r.text;
+        },
+        // See command-files.ts's module doc: desktop has no pre-send confirm dialog yet, so a
+        // `!`cmd`` injection always refuses (visibly, via the refusal marker) rather than
+        // either running ungated or faking a gate.
+        runShell: async () => null,
+      });
+      text = expanded.prompt;
+    }
     setInput("");
     setActiveMention(null);
     // capture the prior transcript BEFORE we append the new user turn (so the message
@@ -696,13 +1002,36 @@ export function AgentPane({
         return `${lines.join("\n")}${r.truncated ? "\n…(truncated)" : ""}`;
       },
       proposeEdit,
-      proposeCommand: (command: string): string => {
+      proposeCommand: (command: string, tool?: string, args?: Record<string, unknown>): string => {
         const cardId = `cmd-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
-        addTaskCard(sid, { id: cardId, command, cwd: root, status: "pending", output: "" });
-        // record the proposed card (id + command) so the pause can positionally match
-        // each pending command → its Run/Deny result → one resume (APP-050/056 controller).
+        addTaskCard(sid, {
+          id: cardId,
+          command,
+          cwd: root,
+          status: "pending",
+          output: "",
+          ...(tool ? { tool } : {}),
+          ...(args ? { args } : {}),
+        });
+        // register the card so the controller can find it: core's `confirm` suspends the
+        // turn on THIS card's id and `resolveCommand(sid, cardId, …)` releases it (§9c).
         agentRuns.recordProposed(sid, { id: cardId, command });
         return `proposed command (approve below to run): ${command}`;
+      },
+      // The agent asking the human something. A card rather than a modal: the turn is already
+      // suspendable this way, and a modal would steal focus from whatever the user is doing
+      // while the agent works.
+      askQuestion: (prompt: string): void => {
+        const cardId = `ask-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+        addTaskCard(sid, {
+          id: cardId,
+          command: prompt,
+          cwd: root,
+          status: "pending",
+          output: "",
+          kind: "question",
+        });
+        agentRuns.recordProposed(sid, { id: cardId, command: prompt });
       },
     };
     // @-mentions: resolve any `@relpath` tokens to their file contents and attach them
@@ -742,15 +1071,71 @@ export function AgentPane({
     if (blocks.length > 0) {
       userContent = `${text}\n\n---\nReferenced context:\n\n${blocks.join("\n\n")}`;
     }
-    // prepend the workspace AGENTS.md/CLAUDE.md rules (if any) to the system prompt.
+    // prepend the workspace AGENTS.md/CLAUDE.md rules (if any), then durable memory (if any),
+    // to the system prompt — same order as the CLI (steering, then memory).
     const projectRules = projectRulesRef.current;
-    const systemContent = projectRules ? `${AGENT_SYSTEM}\n\n${projectRules}` : AGENT_SYSTEM;
+    const memoryBlock = memoryBlockRef.current;
+    const systemContent = [AGENT_PANE_SYSTEM, projectRules, memoryBlock]
+      .filter((s) => s.trim() !== "")
+      .join("\n\n");
     // Deps carry NO signal — the controller mints the AbortController in `start` and injects
     // it, so the run + its abort live in the module controller (survive pane unmount, 056).
     const deps: Omit<AgentLoopDeps, "signal"> = {
-      endpoint: active,
+      // The context window the picker already derives from the open-models catalogue rides
+      // along, because it SIZES THE TOOL PREAMBLE. Without it the preamble is budgeted for an
+      // 8192 window and the degrade ladder drops every tool description — the part that tells
+      // the model which tool to reach for. The picker has shown this number in the UI all
+      // along; it just never reached the turn.
+      endpoint: { ...active, ...contextWindowOf(active, catalog) },
       neverSendToCloud,
       tools,
+      /**
+       * The bridge to core's tools in main — and the workspace they run against.
+       *
+       * These were never passed. `AgentLoopDeps.ide` and `.root` are optional (so a headless
+       * harness degrades instead of throwing), and the pane simply never filled them in, so
+       * `systemTool` resolved to undefined and every tool the broker AUTO-approved — which at
+       * A1 "read freely" is every read — came back `"read_file" is unavailable in this
+       * environment`. The only tools that worked were the ones a human clicked Run on, because
+       * the task card calls `ide()` directly. A whole tool tier was dark, and nothing failed
+       * loudly enough to say so.
+       */
+      root,
+      ide: {
+        systemTool: (req) =>
+          ide()?.systemTool(req) ??
+          Promise.resolve({ ok: false, summary: "the editor bridge is unavailable" }),
+        engineTool: (req) =>
+          ide()?.engineTool(req) ??
+          Promise.resolve({ ok: false, summary: "the engine bridge is unavailable" }),
+        // Task #5 (desktop parity): sub-agent personas from markdown for `spawn_agent`, the
+        // SAME `@prometheus/core/agent-files` clamping the CLI applies.
+        agentFilesList: (r) =>
+          ide()?.agentFilesList(r) ??
+          Promise.resolve({ ok: false, personas: [], error: "the editor bridge is unavailable" }),
+        // Lifecycle hooks: the pane lists them and proxies each run; MAIN is the only thing
+        // that spawns (the renderer cannot, by C5, and must not decide what may run).
+        hookRun: (req) =>
+          ide()?.hookRun(req) ??
+          Promise.resolve({ ok: false, error: "the editor bridge is unavailable" }),
+      },
+      // The MCP surface is a separate main-side module with its own manager, so it is a
+      // separate seam: the pane reads the descriptors per turn and calls one tool at a time.
+      ...(typeof window !== "undefined" && window.prometheus?.mcp
+        ? {
+            mcp: {
+              agentTools: () => mcpApi().agentTools(),
+              agentCall: (req) => mcpApi().agentCall(req),
+            },
+          }
+        : {}),
+      // handoff §2.5: the composer's effort chip is load-bearing — resolve the requested
+      // tier against THIS endpoint's real capability and forward the patch to every turn.
+      // A model with no reasoning control resolves to `applied: null` and nothing is sent.
+      ...(() => {
+        const e = effortFor(effortTier, active);
+        return e ? { effort: e } : {};
+      })(),
       onText: (d) => appendStreaming(sid, d),
       onTurnComplete: () => {
         commitStreaming(sid);
@@ -759,13 +1144,53 @@ export function AgentPane({
       onToolNote: (note) => pushTurn(sid, { role: "assistant", content: `🔧 ${note}` }),
       // APP-055/056: usage folds into the module controller (survives unmount).
       onUsage: (u) => agentRuns.recordUsage(sid, u),
+      // §3: the measured phase totals for THIS run — the latency card's only data source.
+      onPhases: (p) => agentRuns.recordPhases(sid, p),
     };
+    /**
+     * AUTO-COMPACT before the turn, the way both CLI hosts do.
+     *
+     * The pane has never compacted, so a long conversation simply grew until the model began
+     * refusing or truncating — with no warning and no recovery. Raising the round cap to 32 made
+     * that likelier, which is what turned the gap into debt.
+     *
+     * Fail-soft by construction: `compactTurns` returns the transcript UNCHANGED on any
+     * summarizer error, so a failed attempt at saving the conversation can never be what loses
+     * it. The store is written only when something actually changed.
+     */
+    let sendTurns = priorTurns;
+    try {
+      const win = contextWindowOf(active, catalog).contextWindow;
+      const res = await compactTurns(priorTurns, win, async (older) => {
+        const out = await runChatTurn(
+          { ...active, ...contextWindowOf(active, catalog) },
+          [
+            {
+              role: "system",
+              content:
+                "Summarize the conversation so far. Keep decisions, file paths and open questions; drop pleasantries.",
+            },
+            { role: "user", content: older.map((t) => `${t.role}: ${t.content}`).join("\n\n") },
+          ],
+          { neverSendToCloud },
+        );
+        return out.text;
+      });
+      if (res.compacted) {
+        replaceTurns(sid, res.turns);
+        sendTurns = res.turns;
+        if (res.note) pushTurn(sid, { role: "assistant", content: `⎿ ${res.note}` });
+      }
+    } catch {
+      /* compaction is best-effort; the turn proceeds on the full transcript */
+    }
+
     // Hand the run to the controller: it supersedes any prior run for this tab, drives the
     // loop to completion (even with the pane unmounted), and settles the outcome + busy flag.
     await agentRuns.start(sid, {
       messages: [
         { role: "system", content: systemContent },
-        ...priorTurns.map((t) => ({ role: t.role, content: t.content }) as const),
+        ...sendTurns.map((t) => ({ role: t.role, content: t.content }) as const),
         { role: "user", content: userContent },
       ],
       deps,
@@ -775,6 +1200,7 @@ export function AgentPane({
     input,
     activeId,
     neverSendToCloud,
+    effortTier,
     pushTurn,
     appendStreaming,
     commitStreaming,
@@ -844,19 +1270,80 @@ export function AgentPane({
   // Execute an APPROVED task-card command via the gated exec IPC (§7.3). Clicking Run IS
   // the human approval; main screens it (fail-closed blocklist) + spawns hardened. The
   // captured output is shown on the card (and can be fed back to the agent by the user).
+  /**
+   * Answer a question card, releasing the suspended turn.
+   *
+   * An EMPTY answer is still an answer: core renders it as "the user gave no answer, proceed
+   * with the most reasonable interpretation", which is what keeps a skipped question from
+   * hanging the run.
+   */
+  const answerCard = useCallback(
+    (cardId: string, prompt: string, answer: string) => {
+      const sid = activeId;
+      updateTaskCard(sid, cardId, { status: "done", output: answer || "(no answer)" });
+      agentRuns.resolveCommand(sid, cardId, { command: prompt, answer });
+    },
+    [activeId, updateTaskCard],
+  );
+
   const runCard = useCallback(
-    async (cardId: string, command: string, cwd: string): Promise<void> => {
+    async (
+      cardId: string,
+      command: string,
+      cwd: string,
+      tool = "run_command",
+      args: Record<string, unknown> = { command },
+      /**
+       * "…and stop asking." Rides the card's RESULT rather than a separate channel, so the
+       * approval and the memory are one decision and cannot end up disagreeing. The grants
+       * file has persisted `project`/`user` scopes from the start and `withRememberedGrants`
+       * has consulted them on every call — no surface ever produced one until now.
+       */
+      remember?: "project" | "user",
+    ): Promise<void> => {
       const sid = activeId;
       const root = cwd || useTabsStore.getState().workspaceRoot || ".";
       updateTaskCard(sid, cardId, { status: "running", output: "running…" });
       try {
-        const r = await ide()?.exec({ command, cwd: root });
+        // Phase 6: core's `run_command`, NOT `ide:exec`. The task card is unchanged — it is
+        // still the human approval (layer 5) — but what runs underneath it is now the same
+        // parse → registry → classify → nemesis → ladder → screen path the CLI uses, with
+        // no shell anywhere. `ide:exec` spawned `shell -c <command>` behind a regex list.
+        /**
+         * `notebook_edit` is dispatched in the RENDERER, not over `agent:systemTool`.
+         *
+         * Main's channel guard (`isHostDispatchTool`) rejects any name that is not one of
+         * core's host-dispatched tools, so sending it there would present the user a card,
+         * take their approval, and then fail with `unknown tool "notebook_edit"` — the exact
+         * "offered but unreachable" shape this pane has been bitten by before.
+         */
+        const st =
+          tool === NOTEBOOK_EDIT_TOOL_NAME
+            ? await notebookCardResult(args)
+            : await ide()?.systemTool({
+                name: tool,
+                args,
+                cwd: root,
+                // Same reason as run-controller's seam: main's OS sandbox for `run_command`
+                // opens the network only at the level the pill already permits, so the level
+                // has to travel with the call rather than be assumed.
+                authLevel: useAuthorisationStore.getState().level,
+              });
+        const r = st && {
+          ok: st.ok,
+          exitCode: typeof st.data?.exitCode === "number" ? st.data.exitCode : st.ok ? 0 : 1,
+          stdout: st.summary,
+          stderr: st.ok ? "" : st.summary,
+          blocked: !st.ok && Boolean(st.verdict),
+          reason: st.ok ? undefined : st.summary,
+          timedOut: false,
+        };
         if (!r) {
           updateTaskCard(sid, cardId, {
             status: "done",
             output: "exec unavailable in this environment",
           });
-          // resume the paused loop even without an exec backend (so it never hangs).
+          // release the suspended turn even without an exec backend (so it never hangs).
           agentRuns.resolveCommand(sid, cardId, { command, stderr: "exec unavailable", exit: 1 });
           return;
         }
@@ -871,7 +1358,7 @@ export function AgentPane({
           exitCode: r.exitCode,
           output: body ? `${head}\n${body}` : head,
         });
-        // feed the REAL stdout/stderr/exit back into the paused agent loop (APP-050).
+        // feed the REAL stdout/stderr/exit back into the suspended agent turn (APP-050).
         const exit =
           typeof r.exitCode === "number" ? r.exitCode : r.blocked ? 126 : r.timedOut ? 124 : 1;
         const stderr = [
@@ -886,6 +1373,12 @@ export function AgentPane({
           ...(r.stdout ? { stdout: r.stdout } : {}),
           ...(stderr ? { stderr } : {}),
           exit,
+          // The unflattened result rides along so the runner can replay it verbatim. Without
+          // it the gate `verdict` is lost in the mapping to stdout/stderr, and a BLOCKED
+          // command comes back looking like an ordinary non-zero exit — so core's loop, which
+          // aborts the turn on a block, would carry on instead.
+          ...(st ? { raw: st } : {}),
+          ...(remember ? { remember } : {}),
         });
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
@@ -896,7 +1389,7 @@ export function AgentPane({
     [activeId, updateTaskCard],
   );
 
-  /** Deny a proposed command: mark the card + resume the loop with a denial note. */
+  /** Deny a proposed command: mark the card + release the turn with a denial the model sees. */
   const denyCard = useCallback(
     (cardId: string, command: string) => {
       const sid = activeId;
@@ -917,7 +1410,7 @@ export function AgentPane({
           alignItems: "center",
           gap: 4,
           overflowX: "auto",
-          borderBottom: "1px solid var(--border-subtle, #232329)",
+          borderBottom: "1px solid var(--border-subtle)",
           paddingBottom: 4,
         }}
       >
@@ -950,7 +1443,7 @@ export function AgentPane({
                 background: selected
                   ? "color-mix(in srgb, var(--accent) 18%, var(--bg-surface-2))"
                   : "transparent",
-                border: `1px solid ${selected ? "var(--border-strong, #313139)" : "transparent"}`,
+                border: `1px solid ${selected ? "var(--border-strong)" : "transparent"}`,
               }}
             >
               {/* APP-056: run-status glyph. `s.busy` is a STORE flag, so it stays lit while
@@ -966,10 +1459,10 @@ export function AgentPane({
                     height: 6,
                     borderRadius: "50%",
                     flexShrink: 0,
-                    background: "var(--accent, #6d5ef0)",
+                    background: "var(--accent)",
                   }}
                 />
-              ) : agentRuns.getPaused(id) ? (
+              ) : agentRuns.isAwaiting(id) ? (
                 <span
                   aria-hidden="true"
                   title="awaiting approval"
@@ -978,7 +1471,7 @@ export function AgentPane({
                     height: 6,
                     borderRadius: "50%",
                     flexShrink: 0,
-                    border: "1.5px solid var(--warn, #d8a13a)",
+                    border: "1.5px solid var(--warn)",
                   }}
                 />
               ) : null}
@@ -997,7 +1490,7 @@ export function AgentPane({
                   style={{
                     background: "transparent",
                     border: "none",
-                    color: "var(--text-secondary, #9a9aa3)",
+                    color: "var(--text-secondary)",
                     cursor: "pointer",
                     fontSize: "0.72rem",
                     padding: 0,
@@ -1017,9 +1510,9 @@ export function AgentPane({
           onClick={() => newSession()}
           style={{
             background: "transparent",
-            border: "1px solid var(--border-subtle, #232329)",
+            border: "1px solid var(--border-subtle)",
             borderRadius: 5,
-            color: "var(--text-secondary, #9a9aa3)",
+            color: "var(--text-secondary)",
             cursor: "pointer",
             fontSize: "0.8rem",
             padding: "2px 8px",
@@ -1035,10 +1528,10 @@ export function AgentPane({
           aria-pressed={showSessions}
           onClick={() => setShowSessions((v) => !v)}
           style={{
-            background: showSessions ? "var(--bg-inset, #0b0b0e)" : "transparent",
-            border: "1px solid var(--border-subtle, #232329)",
+            background: showSessions ? "var(--bg-inset)" : "transparent",
+            border: "1px solid var(--border-subtle)",
             borderRadius: 5,
-            color: "var(--text-secondary, #9a9aa3)",
+            color: "var(--text-secondary)",
             cursor: "pointer",
             fontSize: "0.8rem",
             padding: "2px 8px",
@@ -1062,7 +1555,7 @@ export function AgentPane({
               boxSizing: "border-box",
               background: "var(--bg-app)",
               color: "var(--text-primary)",
-              border: "1px solid var(--border-subtle, #232329)",
+              border: "1px solid var(--border-subtle)",
               borderRadius: "var(--radius-sm, 4px)",
               padding: "3px 6px",
               fontSize: "0.78rem",
@@ -1102,7 +1595,7 @@ export function AgentPane({
                     gap: 1,
                     textAlign: "left",
                     background: "transparent",
-                    border: "1px solid var(--border-subtle, #232329)",
+                    border: "1px solid var(--border-subtle)",
                     borderRadius: "var(--radius-sm, 4px)",
                     color: "var(--text-primary)",
                     cursor: "pointer",
@@ -1134,16 +1627,16 @@ export function AgentPane({
 
       {/* model picker (§7.5) */}
       <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: "0.78rem" }}>
-        <span style={{ color: "var(--text-secondary, #9a9aa3)" }}>model:</span>
+        <span style={{ color: "var(--text-secondary)" }}>model:</span>
         <select
           value={endpointId ?? ""}
           onChange={(e) => selectEndpoint(e.target.value || null)}
           aria-label="model endpoint"
           style={{
             flex: 1,
-            background: "var(--bg-surface-2, #16161b)",
-            color: "var(--text-primary, #e7e7ea)",
-            border: "1px solid var(--border-subtle, #232329)",
+            background: "var(--bg-surface-2)",
+            color: "var(--text-primary)",
+            border: "1px solid var(--border-subtle)",
             borderRadius: 4,
             padding: "3px 6px",
           }}
@@ -1176,7 +1669,7 @@ export function AgentPane({
             onChange={(e) => setNeverSendToCloud(e.target.checked)}
             aria-label="never send to cloud"
           />
-          <span style={{ color: "var(--text-secondary, #9a9aa3)" }}>no-cloud</span>
+          <span style={{ color: "var(--text-secondary)" }}>no-cloud</span>
         </label>
         <label style={{ display: "flex", alignItems: "center", gap: 3 }}>
           <input
@@ -1185,7 +1678,7 @@ export function AgentPane({
             onChange={(e) => setGhostText(e.target.checked)}
             aria-label="AI ghost-text completions"
           />
-          <span style={{ color: "var(--text-secondary, #9a9aa3)" }}>ghost</span>
+          <span style={{ color: "var(--text-secondary)" }}>ghost</span>
         </label>
       </div>
 
@@ -1215,7 +1708,7 @@ export function AgentPane({
                   style={{
                     padding: "0 5px",
                     borderRadius: "var(--radius-sm, 4px)",
-                    border: "1px solid var(--border-subtle, #232329)",
+                    border: "1px solid var(--border-subtle)",
                     color: `var(--${b.role})`,
                   }}
                 >
@@ -1241,13 +1734,13 @@ export function AgentPane({
                 capUsd={meteredCaps[endpointId]?.capUsd ?? 20}
               />
             ) : totals.totalTokens > 0 ? (
-              <span style={{ color: "var(--text-secondary, #9a9aa3)" }}>
+              <span style={{ color: "var(--text-secondary)" }}>
                 {totals.totalTokens.toLocaleString()} tokens this session ·{" "}
                 {totals.lastTurnTokens.toLocaleString()} last turn
                 {isCloud ? " · cost unknown" : ""}
               </span>
             ) : (
-              <span style={{ color: "var(--text-secondary, #9a9aa3)" }}>no usage yet</span>
+              <span style={{ color: "var(--text-secondary)" }}>no usage yet</span>
             )}
             <span style={{ flex: 1 }} />
             <button
@@ -1255,10 +1748,10 @@ export function AgentPane({
               aria-pressed={showProviders}
               onClick={() => setShowProviders((v) => !v)}
               style={{
-                background: showProviders ? "var(--bg-inset, #0b0b0e)" : "transparent",
-                border: "1px solid var(--border-subtle, #232329)",
+                background: showProviders ? "var(--bg-inset)" : "transparent",
+                border: "1px solid var(--border-subtle)",
                 borderRadius: 4,
-                color: "var(--text-secondary, #9a9aa3)",
+                color: "var(--text-secondary)",
                 cursor: "pointer",
                 fontSize: "0.72rem",
                 padding: "2px 6px",
@@ -1364,7 +1857,7 @@ export function AgentPane({
         {rulesInfo.order.length > 0 && (
           <span
             title={`Project rules steering the agent: ${rulesInfo.order.join(", ")}`}
-            style={{ color: "var(--text-secondary, #9a9aa3)", alignSelf: "center" }}
+            style={{ color: "var(--text-secondary)", alignSelf: "center" }}
           >
             📏 {rulesInfo.order.join(" · ")}
           </span>
@@ -1377,8 +1870,8 @@ export function AgentPane({
       {!active && (
         <div
           style={{
-            border: "1px solid var(--border-strong, #313139)",
-            background: "var(--bg-surface-2, #16161b)",
+            border: "1px solid var(--border-strong)",
+            background: "var(--bg-surface-2)",
             borderRadius: 6,
             padding: 10,
             display: "flex",
@@ -1386,10 +1879,10 @@ export function AgentPane({
             gap: 8,
           }}
         >
-          <strong style={{ fontSize: "0.82rem", color: "var(--text-primary, #e7e7ea)" }}>
+          <strong style={{ fontSize: "0.82rem", color: "var(--text-primary)" }}>
             ⚠ No model backend connected
           </strong>
-          <span style={{ fontSize: "0.76rem", color: "var(--text-secondary, #9a9aa3)" }}>
+          <span style={{ fontSize: "0.76rem", color: "var(--text-secondary)" }}>
             {endpoints.length === 0
               ? "This chat needs a local model, an API endpoint, or an agent CLI — none is installed or served yet. Pick a path:"
               : "A model is available but none is selected. Choose one from the selector above to start chatting."}
@@ -1418,8 +1911,10 @@ export function AgentPane({
           gap: 6,
         }}
       >
-        {turns.length === 0 && !streaming && active && (
-          <p style={{ color: "var(--text-secondary, #9a9aa3)", fontSize: "0.8rem" }}>
+        {/* `!thinking` too: a reasoning model's first phase produces no text, so without it
+            the empty-state prompt sits above the thinking block for the whole think. */}
+        {turns.length === 0 && !streaming && !thinking && active && (
+          <p style={{ color: "var(--text-secondary)", fontSize: "0.8rem" }}>
             Ask the agent to read, grep, or propose an edit.
           </p>
         )}
@@ -1460,7 +1955,7 @@ export function AgentPane({
                 right: 3,
                 background: "transparent",
                 border: "none",
-                color: "var(--text-secondary, #9a9aa3)",
+                color: "var(--text-secondary)",
                 cursor: "pointer",
                 fontSize: "0.7rem",
                 padding: 0,
@@ -1482,7 +1977,7 @@ export function AgentPane({
                   right: 18,
                   background: "transparent",
                   border: "none",
-                  color: "var(--text-secondary, #9a9aa3)",
+                  color: "var(--text-secondary)",
                   cursor: "pointer",
                   fontSize: "0.7rem",
                   padding: 0,
@@ -1505,7 +2000,7 @@ export function AgentPane({
                   right: t.checkpointId ? 34 : 18,
                   background: "transparent",
                   border: "none",
-                  color: "var(--text-secondary, #9a9aa3)",
+                  color: "var(--text-secondary)",
                   cursor: "pointer",
                   fontSize: "0.7rem",
                   padding: 0,
@@ -1517,6 +2012,59 @@ export function AgentPane({
             )}
           </div>
         ))}
+        {/*
+          The model's THINKING, while it thinks (§9). A reasoning model streams nothing on
+          `content` during this phase, so without a surface for it the pane shows an empty
+          turn for 10–60s and the run is indistinguishable from a hang.
+
+          Deliberately quieter than an answer — dimmed, italic, and capped with its own
+          scroll — because it is scratch work the user may want to glance at, not read. It
+          disappears when the turn settles; it is never part of the transcript.
+        */}
+        {thinking && (
+          <details
+            open
+            style={{
+              alignSelf: "stretch",
+              padding: "6px 8px",
+              borderRadius: 6,
+              border: "1px dashed var(--border-subtle)",
+              background: "var(--bg-inset)",
+              color: "var(--text-secondary)",
+              fontSize: "0.74rem",
+            }}
+          >
+            <summary style={{ cursor: "pointer", color: "var(--text-muted)" }}>
+              thinking… ({thinking.length} chars)
+            </summary>
+            <div
+              style={{
+                marginTop: 4,
+                maxHeight: 160,
+                overflow: "auto",
+                whiteSpace: "pre-wrap",
+                fontStyle: "italic",
+                overflowWrap: "break-word",
+              }}
+            >
+              {thinking}
+            </div>
+          </details>
+        )}
+        {/* the wrapper's watchdog heartbeat — one line, replaced not appended */}
+        {runStatus && (
+          <div
+            role="status"
+            style={{
+              alignSelf: "flex-start",
+              color: "var(--text-muted)",
+              fontSize: "0.72rem",
+              fontStyle: "italic",
+            }}
+          >
+            {runStatus}
+          </div>
+        )}
         {streaming && (
           <div
             style={{
@@ -1526,71 +2074,138 @@ export function AgentPane({
               borderRadius: 6,
               fontSize: "0.8rem",
               whiteSpace: "pre-wrap",
-              background: "var(--bg-surface-2, #16161b)",
-              color: "var(--text-primary, #e7e7ea)",
+              background: "var(--bg-surface-2)",
+              color: "var(--text-primary)",
             }}
           >
             {streaming}
             <span aria-hidden="true">▍</span>
           </div>
         )}
+      </div>
 
-        {/* the proposed-edit ChangeSet (§7.4) — a chip links to the review card */}
-        {changeSet && (
-          <button
-            type="button"
-            aria-label="review proposed edits"
-            onClick={() =>
-              diffRef.current?.scrollIntoView({ behavior: "smooth", block: "nearest" })
-            }
+      {/*
+        §9.2 — the DECISION region is PINNED, not part of the transcript.
+
+        Every one of these (the gate verdict, the proposed-edit review with its permission
+        card, the confirm-gated command cards) is something the run is BLOCKED on. They used
+        to render as the last children of the `overflow:auto` transcript above, which meant a
+        long answer could scroll the thing the agent is waiting for out of sight — inside a
+        rail island that is itself `overflow:hidden`. The mitigation was a "review ↓" chip
+        that called `scrollIntoView`; a chip that scrolls you to the prompt is an admission
+        that the prompt is in the wrong place, so the chip is gone with the defect.
+
+        It scrolls WITHIN itself when several decisions stack up, and is capped in vh so it
+        can never push the composer off the bottom of the rail.
+      */}
+      <div
+        style={{
+          flex: "none",
+          maxHeight: "min(46vh, 520px)",
+          overflow: "auto",
+          display: "flex",
+          flexDirection: "column",
+          gap: 6,
+        }}
+      >
+        {/* §4: the LAST gate verdict, in chat, in the same card shape as everywhere else.
+          AI-authored new files go to the run-gate (DiffReview enqueues them), so the
+          verdict that lands here is usually about work this conversation just did. */}
+        {lastVerdict && (
+          <div
             style={{
-              alignSelf: "flex-start",
-              padding: "3px 10px",
-              borderRadius: 999,
-              border: "1px solid var(--border-strong, #313139)",
-              background: "color-mix(in srgb, var(--accent) 14%, var(--bg-surface-2))",
-              color: "var(--text-primary, #e7e7ea)",
-              cursor: "pointer",
-              fontSize: "0.72rem",
+              borderRadius: 11,
+              background: "var(--bg-surface)",
+              border: "1px solid var(--border-subtle)",
             }}
           >
-            ✎ edits proposed — {changeSet.edits.length} file
-            {changeSet.edits.length === 1 ? "" : "s"} · review ↓
-          </button>
+            <VerdictCard
+              verdict={lastVerdict.verdict}
+              artifact={lastVerdict.target}
+              sourceKind={lastVerdict.signed ? "signed" : "unsigned"}
+              riskScore={lastVerdict.riskScore}
+              findings={chatVerdictFindings(lastVerdict)}
+              maxFindings={3}
+              onDetails={() => onNavigate?.("security")}
+            />
+          </div>
         )}
-        <div ref={diffRef}>
+        {/* §3: the latency attribution card — after EVERY run, never during one (a
+          half-measured bar would misattribute the time still being spent). */}
+        {!busy && runPhases && <LatencyCard phases={runPhases} />}
+        <div>
           <DiffReview />
         </div>
 
-        {/* confirm-gated task cards (§7.3) */}
-        {taskCards.map((card) => (
-          <Panel key={card.id} title={`run_command · ${card.status}`} elevation="e1">
-            <code style={{ fontSize: "0.72rem", display: "block", marginBottom: 4 }}>
-              {card.cwd} $ {card.command}
-            </code>
-            {card.status === "pending" ? (
-              <div style={{ display: "flex", gap: 6 }}>
-                <Button
-                  size="sm"
-                  variant="primary"
-                  onClick={() => void runCard(card.id, card.command, card.cwd)}
-                >
-                  ▶ Run (gated)
-                </Button>
-                <Button size="sm" variant="ghost" onClick={() => copyText(card.command)}>
-                  ⧉ copy
-                </Button>
-                <Button size="sm" variant="ghost" onClick={() => denyCard(card.id, card.command)}>
-                  ✗ deny
-                </Button>
-              </div>
-            ) : (
-              <pre style={{ margin: 0, fontSize: "0.7rem", whiteSpace: "pre-wrap" }}>
-                {card.output}
-              </pre>
-            )}
-          </Panel>
-        ))}
+        {/* confirm-gated task cards (§7.3), and the agent's own questions */}
+        {taskCards.map((card) =>
+          card.kind === "question" ? (
+            <QuestionCard
+              key={card.id}
+              id={card.id}
+              prompt={card.command}
+              status={card.status}
+              output={card.output}
+              onAnswer={answerCard}
+            />
+          ) : (
+            <Panel
+              key={card.id}
+              title={`${card.tool ?? "run_command"} · ${card.status}`}
+              elevation="e1"
+            >
+              <code style={{ fontSize: "0.72rem", display: "block", marginBottom: 4 }}>
+                {card.cwd} $ {card.command}
+              </code>
+              {card.status === "pending" ? (
+                <div style={{ display: "flex", gap: 6 }}>
+                  <Button
+                    size="sm"
+                    variant="primary"
+                    onClick={() =>
+                      void runCard(
+                        card.id,
+                        card.command,
+                        card.cwd,
+                        card.tool ?? "run_command",
+                        card.args ?? { command: card.command },
+                      )
+                    }
+                  >
+                    ▶ Run (gated)
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    title="run it, and stop asking for this exact command in this workspace"
+                    onClick={() =>
+                      void runCard(
+                        card.id,
+                        card.command,
+                        card.cwd,
+                        card.tool ?? "run_command",
+                        card.args ?? { command: card.command },
+                        "project",
+                      )
+                    }
+                  >
+                    ▶ always
+                  </Button>
+                  <Button size="sm" variant="ghost" onClick={() => copyText(card.command)}>
+                    ⧉ copy
+                  </Button>
+                  <Button size="sm" variant="ghost" onClick={() => denyCard(card.id, card.command)}>
+                    ✗ deny
+                  </Button>
+                </div>
+              ) : (
+                <pre style={{ margin: 0, fontSize: "0.7rem", whiteSpace: "pre-wrap" }}>
+                  {card.output}
+                </pre>
+              )}
+            </Panel>
+          ),
+        )}
       </div>
 
       {/* APP-054: resolved mention chips (removable before send). */}
@@ -1635,144 +2250,157 @@ export function AgentPane({
       )}
 
       {/* composer (with @-mention picker: file / sym / folder / docs) */}
-      <div style={{ position: "relative" }}>
-        {activeMention && mentionMatches.length > 0 && (
-          <div
-            aria-label="mention picker"
-            style={{
-              position: "absolute",
-              bottom: "100%",
-              left: 0,
-              right: 0,
-              marginBottom: 4,
-              maxHeight: 200,
-              overflow: "auto",
-              background: "var(--bg-surface-2, #16161b)",
-              border: "1px solid var(--border-strong, #313139)",
-              borderRadius: 6,
-              boxShadow: "0 8px 24px rgba(0,0,0,0.4)",
-              zIndex: 20,
-            }}
-          >
-            {mentionMatches.map((sug, i) => (
-              <button
-                key={sug.key}
-                type="button"
-                aria-current={i === mentionActive ? "true" : undefined}
-                onMouseEnter={() => setMentionActive(i)}
-                onClick={() => void completeMention(sug)}
-                style={{
-                  display: "flex",
-                  gap: 6,
-                  width: "100%",
-                  textAlign: "left",
-                  border: "none",
-                  padding: "4px 8px",
-                  cursor: "pointer",
-                  fontFamily: "var(--font-mono, monospace)",
-                  fontSize: "0.72rem",
-                  background: i === mentionActive ? "var(--bg-inset)" : "transparent",
-                  color: "var(--text-primary, #e7e7ea)",
-                }}
-              >
-                <span aria-hidden="true" style={{ color: "var(--text-secondary)" }}>
-                  {sug.kind === "sym"
-                    ? "◈"
-                    : sug.kind === "folder"
-                      ? "▤"
-                      : sug.kind === "docs"
-                        ? "📄"
-                        : "@"}
-                </span>
-                {sug.label}
-              </button>
-            ))}
-          </div>
-        )}
-        {activeMention && activeMention.kind === "sym" && mentionMatches.length === 0 && (
-          <div
-            style={{
-              position: "absolute",
-              bottom: "100%",
-              left: 0,
-              marginBottom: 4,
-              padding: "3px 8px",
-              background: "var(--bg-surface-2, #16161b)",
-              border: "1px solid var(--border-subtle, #232329)",
-              borderRadius: 6,
-              color: "var(--text-secondary)",
-              fontSize: "0.7rem",
-              zIndex: 20,
-            }}
-          >
-            no indexed symbols — open files or build the repo map
-          </div>
-        )}
-        {/* APP-092: `/` slash-command menu (executes a shell registry command). */}
-        {slashQuery !== null && slashMatches.length > 0 && (
-          <div
-            aria-label="slash command menu"
-            style={{
-              position: "absolute",
-              bottom: "100%",
-              left: 0,
-              right: 0,
-              marginBottom: 4,
-              maxHeight: 240,
-              overflow: "auto",
-              background: "var(--bg-surface-2, #16161b)",
-              border: "1px solid var(--border-strong, #313139)",
-              borderRadius: 6,
-              boxShadow: "0 8px 24px rgba(0,0,0,0.4)",
-              zIndex: 20,
-            }}
-          >
-            {slashMatches.map((cmd, i) => (
-              <button
-                key={cmd.id}
-                type="button"
-                aria-current={i === slashActive ? "true" : undefined}
-                onMouseEnter={() => setSlashActive(i)}
-                onClick={() => acceptSlash(cmd.id)}
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  gap: 6,
-                  width: "100%",
-                  textAlign: "left",
-                  border: "none",
-                  padding: "4px 8px",
-                  cursor: "pointer",
-                  fontSize: "0.74rem",
-                  background: i === slashActive ? "var(--bg-inset)" : "transparent",
-                  color: "var(--text-primary, #e7e7ea)",
-                }}
-              >
-                <span aria-hidden="true" style={{ color: "var(--accent)" }}>
-                  ／
-                </span>
-                <span>{cmd.title}</span>
-                {cmd.category && (
-                  <span
-                    style={{
-                      marginLeft: "auto",
-                      color: "var(--text-secondary)",
-                      fontSize: "0.68rem",
-                    }}
-                  >
-                    {cmd.category}
+      <div ref={composerRef} style={{ position: "relative" }}>
+        {mentionBox &&
+          createPortal(
+            <div
+              aria-label="mention picker"
+              style={{
+                position: "fixed",
+                left: mentionBox.left,
+                top: mentionBox.top,
+                width: mentionBox.width,
+                maxHeight: MENTION_H,
+                overflow: "auto",
+                background: "var(--bg-surface-2)",
+                border: "1px solid var(--border-strong)",
+                borderRadius: 6,
+                boxShadow: "0 8px 24px rgba(0,0,0,0.4)",
+                zIndex: Z.dropdown,
+              }}
+            >
+              {mentionMatches.map((sug, i) => (
+                <button
+                  key={sug.key}
+                  type="button"
+                  aria-current={i === mentionActive ? "true" : undefined}
+                  onMouseEnter={() => setMentionActive(i)}
+                  onClick={() => void completeMention(sug)}
+                  style={{
+                    display: "flex",
+                    gap: 6,
+                    width: "100%",
+                    textAlign: "left",
+                    border: "none",
+                    padding: "4px 8px",
+                    cursor: "pointer",
+                    fontFamily: "var(--font-mono, monospace)",
+                    fontSize: "0.72rem",
+                    background: i === mentionActive ? "var(--bg-inset)" : "transparent",
+                    color: "var(--text-primary)",
+                  }}
+                >
+                  <span aria-hidden="true" style={{ color: "var(--text-secondary)" }}>
+                    {sug.kind === "sym"
+                      ? "◈"
+                      : sug.kind === "folder"
+                        ? "▤"
+                        : sug.kind === "docs"
+                          ? "📄"
+                          : "@"}
                   </span>
-                )}
-              </button>
-            ))}
-          </div>
-        )}
+                  {sug.label}
+                </button>
+              ))}
+            </div>,
+            document.body,
+          )}
+        {noSymbolsBox &&
+          createPortal(
+            <div
+              style={{
+                position: "fixed",
+                left: noSymbolsBox.left,
+                top: noSymbolsBox.top,
+                padding: "3px 8px",
+                background: "var(--bg-surface-2)",
+                border: "1px solid var(--border-subtle)",
+                borderRadius: 6,
+                color: "var(--text-secondary)",
+                fontSize: "0.7rem",
+                zIndex: Z.dropdown,
+              }}
+            >
+              no indexed symbols — open files or build the repo map
+            </div>,
+            document.body,
+          )}
+        {/* APP-092: `/` slash-command menu (executes a shell registry command). */}
+        {slashBox &&
+          createPortal(
+            <div
+              aria-label="slash command menu"
+              style={{
+                position: "fixed",
+                left: slashBox.left,
+                top: slashBox.top,
+                width: slashBox.width,
+                maxHeight: SLASH_H,
+                overflow: "auto",
+                background: "var(--bg-surface-2)",
+                border: "1px solid var(--border-strong)",
+                borderRadius: 6,
+                boxShadow: "0 8px 24px rgba(0,0,0,0.4)",
+                zIndex: Z.dropdown,
+              }}
+            >
+              {slashMatches.map((cmd, i) => (
+                <button
+                  key={cmd.id}
+                  type="button"
+                  aria-current={i === slashActive ? "true" : undefined}
+                  onMouseEnter={() => setSlashActive(i)}
+                  onClick={() => acceptSlash(cmd.id)}
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 6,
+                    width: "100%",
+                    textAlign: "left",
+                    border: "none",
+                    padding: "4px 8px",
+                    cursor: "pointer",
+                    fontSize: "0.74rem",
+                    background: i === slashActive ? "var(--bg-inset)" : "transparent",
+                    color: "var(--text-primary)",
+                  }}
+                >
+                  <span aria-hidden="true" style={{ color: "var(--accent)" }}>
+                    ／
+                  </span>
+                  <span>{cmd.title}</span>
+                  {cmd.category && (
+                    <span
+                      style={{
+                        marginLeft: "auto",
+                        color: "var(--text-secondary)",
+                        fontSize: "0.68rem",
+                      }}
+                    >
+                      {cmd.category}
+                    </span>
+                  )}
+                </button>
+              ))}
+            </div>,
+            document.body,
+          )}
         <form
           onSubmit={(e) => {
             e.preventDefault();
             void send();
           }}
-          style={{ display: "flex", gap: 6 }}
+          // handoff §2.5: an INPUT ISLAND — inset ground, its own border + radius, with the
+          // gradient send button riding inside it rather than sitting beside a bare field.
+          style={{
+            display: "flex",
+            alignItems: "flex-end",
+            gap: 8,
+            padding: "8px 10px",
+            borderRadius: "var(--radius-lg)",
+            background: "var(--bg-inset)",
+            border: "1px solid var(--border-chip)",
+          }}
         >
           <textarea
             ref={inputRef}
@@ -1851,30 +2479,224 @@ export function AgentPane({
             disabled={!active || busy}
             style={{
               flex: 1,
-              padding: "6px 8px",
-              borderRadius: 6,
-              border: "1px solid var(--border-subtle, #232329)",
-              background: "var(--bg-surface-2, #16161b)",
-              color: "var(--text-primary, #e7e7ea)",
+              padding: 0,
+              border: "none",
+              outline: "none",
+              background: "transparent",
+              color: "var(--text-primary)",
               resize: "none",
               maxHeight: "12rem",
               overflowY: "auto",
-              fontFamily: "var(--font-ui, system-ui)",
-              lineHeight: 1.4,
+              fontFamily: "var(--font-ui)",
+              fontSize: 12.5,
+              lineHeight: 1.45,
             }}
           />
-          <Button
+          <button
             type="submit"
-            size="sm"
-            variant="primary"
+            aria-label="Send"
+            title="Send (⏎)"
             disabled={!active || busy || !input.trim()}
+            style={{
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              width: 26,
+              height: 26,
+              flex: "none",
+              borderRadius: "var(--radius-md)",
+              border: "none",
+              background: "var(--gradient-brand)",
+              color: "var(--brand-fg)",
+              fontSize: 13,
+              lineHeight: 1,
+              cursor: !active || busy || !input.trim() ? "default" : "pointer",
+              opacity: !active || busy || !input.trim() ? 0.4 : 1,
+            }}
           >
-            send
-          </Button>
+            ↑
+          </button>
         </form>
+
+        {/* §2.5 chip row: the model picker, the effort tier, and the A{n} auth readout —
+            the three facts that decide what this next message will actually do. */}
+        <div
+          ref={chipRowRef}
+          style={{
+            display: "flex",
+            alignItems: "center",
+            // the rail is ~330px and the model chip's label is arbitrary length (§9)
+            minWidth: 0,
+            gap: 7,
+            marginTop: 7,
+            fontSize: 11,
+            color: "var(--text-muted)",
+            position: "relative",
+          }}
+        >
+          <button
+            type="button"
+            onClick={() => setShowEndpointPicker((v) => !v)}
+            aria-expanded={showEndpointPicker}
+            aria-haspopup="listbox"
+            title={active ? `${active.id} · ${active.baseUrl}` : "No model connected"}
+            style={{ ...composerChip(), fontFamily: "var(--font-mono)" }}
+          >
+            <span
+              aria-hidden="true"
+              style={{
+                width: 5,
+                height: 5,
+                borderRadius: "50%",
+                background: active ? "var(--ok)" : "var(--text-disabled)",
+              }}
+            />
+            <span
+              style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis" }}
+              title={active ? (active.model ?? active.id) : "no model"}
+            >
+              {active ? (active.model ?? active.id) : "no model"}
+            </span>
+            <span aria-hidden="true" style={{ flex: "none" }}>
+              ⌄
+            </span>
+          </button>
+          {endpointBox &&
+            createPortal(
+              <div
+                role="listbox"
+                tabIndex={-1}
+                aria-label="Model endpoint"
+                style={{
+                  position: "fixed",
+                  left: endpointBox.left,
+                  top: endpointBox.top,
+                  width: endpointBox.width,
+                  maxHeight: ENDPOINT_H,
+                  overflowY: "auto",
+                  zIndex: Z.dropdown,
+                  borderRadius: "var(--radius-island)",
+                  background: "var(--bg-surface-2)",
+                  border: "1px solid var(--border-strong)",
+                  boxShadow: "var(--elevation-e3)",
+                }}
+              >
+                {endpoints.length === 0 && (
+                  <div style={{ padding: "10px 12px", color: "var(--text-muted)" }}>
+                    No served model. Open the Model Hub to start one.
+                  </div>
+                )}
+                {endpoints.map((e) => {
+                  const blocked = neverSendToCloud && e.locality === "cloud";
+                  const selected = e.id === endpointId;
+                  return (
+                    <button
+                      key={e.id}
+                      type="button"
+                      role="option"
+                      aria-selected={selected}
+                      disabled={blocked}
+                      onClick={() => {
+                        selectEndpoint(e.id);
+                        setShowEndpointPicker(false);
+                      }}
+                      title={blocked ? "blocked by the never-send-to-cloud policy" : e.baseUrl}
+                      style={{
+                        display: "flex",
+                        alignItems: "center",
+                        gap: 7,
+                        width: "100%",
+                        padding: "7px 11px",
+                        border: "none",
+                        borderBottom: "1px solid var(--border-row)",
+                        background: selected ? "var(--bg-active)" : "transparent",
+                        color: blocked ? "var(--text-disabled)" : "var(--text-title)",
+                        cursor: blocked ? "not-allowed" : "pointer",
+                        fontFamily: "var(--font-mono)",
+                        fontSize: 11.5,
+                        textAlign: "left",
+                      }}
+                    >
+                      <span
+                        aria-hidden="true"
+                        style={{
+                          width: 5,
+                          height: 5,
+                          borderRadius: "50%",
+                          flex: "none",
+                          background: e.locality === "local" ? "var(--ok)" : "var(--accent)",
+                        }}
+                      />
+                      <span
+                        style={{
+                          flex: 1,
+                          overflow: "hidden",
+                          textOverflow: "ellipsis",
+                          whiteSpace: "nowrap",
+                        }}
+                      >
+                        {e.model ?? e.id}
+                      </span>
+                      <span style={{ color: "var(--text-muted)", flex: "none" }}>{e.locality}</span>
+                    </button>
+                  );
+                })}
+              </div>,
+              document.body,
+            )}
+          <button
+            type="button"
+            onClick={() => cycleEffort()}
+            title={
+              effortResolution?.degraded
+                ? `effort ${effortTier} — ${effortResolution.degraded.message}`
+                : `Reasoning effort — click to change (applied: ${describeEffort(effortResolution)})`
+            }
+            style={composerChip()}
+          >
+            effort:{" "}
+            <span
+              style={{
+                // honesty (§2.5): a tier the model cannot honour is warn-tinted and reads
+                // "n/a" — never a confident label for something that was never sent.
+                color: effortResolution?.degraded ? "var(--warn)" : "var(--accent)",
+              }}
+            >
+              {effortResolution?.degraded ? "n/a" : EFFORT_SHORT[effortTier]}
+            </span>
+          </button>
+          <span style={{ flex: 1 }} />
+          <AuthPill compact />
+        </div>
       </div>
     </div>
   );
+}
+
+/**
+ * The composer's chip shell (model picker / effort) — §2.5.
+ *
+ * `minWidth: 0` + `overflow: hidden` because these chips sit in the RIGHT RAIL, ~330px
+ * wide, and the model chip renders an arbitrary-length id (`hf.co/…-GGUF:Q4_K_M`). Without
+ * it the chip's min-content width is the whole id and the row pushes past the rail edge,
+ * taking the effort chip and the A{n} readout with it.
+ */
+function composerChip(): CSSProperties {
+  return {
+    display: "flex",
+    alignItems: "center",
+    gap: 5,
+    minWidth: 0,
+    overflow: "hidden",
+    padding: "2px 8px",
+    borderRadius: "var(--radius-md)",
+    background: "var(--bg-surface-2)",
+    border: "1px solid var(--border-chip)",
+    color: "var(--text-muted)",
+    cursor: "pointer",
+    fontSize: 11,
+    lineHeight: 1.6,
+  };
 }
 
 export default AgentPane;

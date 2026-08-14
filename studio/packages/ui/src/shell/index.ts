@@ -6,14 +6,23 @@
  * TS source. The desktop renderer's shell/ components BIND these to React + the
  * DOM; the CLI binds the same ids to its renderer.
  */
-export type { ActivityId, PinnedId, Activity } from "./activities.js";
+export type {
+  ActivityId,
+  PinnedId,
+  Activity,
+  LegacyActivityId,
+  ActivityRedirect,
+} from "./activities.js";
 export {
   ACTIVITIES,
+  RAIL_ACTIVITIES,
   PINNED,
   DEFAULT_ACTIVITY,
   isActivityId,
   getActivity,
   routeActivity,
+  resolveActivity,
+  ACTIVITY_REDIRECTS,
   sidebarTitle,
 } from "./activities.js";
 

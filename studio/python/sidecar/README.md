@@ -12,5 +12,5 @@ reusing the existing contract:
 
 At package time this is bundled (embedded interpreter / PyInstaller) so end users need no system Python.
 
-Specs → [`02-monorepo-tech-stack-bridge.md`](../../../MDS/the_real_prometheus/02-monorepo-tech-stack-bridge.md),
-[`10-build-dist-test-roadmap.md`](../../../MDS/the_real_prometheus/10-build-dist-test-roadmap.md).
+Monorepo/tech-stack and build/dist/test rationale live in the maintainer's internal spec set
+(not part of this repo).

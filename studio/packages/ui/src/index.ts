@@ -94,6 +94,18 @@ export { VerdictBadge } from "./components/VerdictBadge.js";
 export type { VerdictBadgeProps } from "./components/VerdictBadge.js";
 export { CostLight } from "./components/CostLight.js";
 export type { CostLightProps, CostTier } from "./components/CostLight.js";
+// handoff §6: the DEGRADED panel state (engine unreachable → last known + the real error).
+// §9 overlay contract: the shared focus trap + Escape handler every modal composes.
+export { useFocusTrap, clampToViewport } from "./components/primitives/overlay.js";
+export type { FocusTrapOptions } from "./components/primitives/overlay.js";
+export { useAnchoredLayer } from "./components/primitives/anchor.js";
+export type {
+  AnchoredLayerBox,
+  AnchoredLayerOptions,
+  AnchorPlacement,
+} from "./components/primitives/anchor.js";
+export { DegradedState } from "./components/DegradedState.js";
+export type { DegradedStateProps } from "./components/DegradedState.js";
 export { StatusBar } from "./components/StatusBar.js";
 export type { StatusBarProps, StatusItem } from "./components/StatusBar.js";
 export { Button } from "./components/Button.js";
@@ -108,6 +120,12 @@ export { StatusPill } from "./components/StatusPill.js";
 export type { StatusPillProps } from "./components/StatusPill.js";
 export { EmptyState } from "./components/EmptyState.js";
 export type { EmptyStateProps } from "./components/EmptyState.js";
+// `Progress` lives with the layout primitives; it is exported here because the app was
+// otherwise hand-rolling progress bars, and each copy had to re-derive the determinate /
+// INDETERMINATE distinction (aria-valuenow present vs omitted) that this one already gets
+// right — including the documented biome-ignore for `progressbar` being non-focusable.
+export { Progress } from "./components/primitives/Layout.js";
+export type { ProgressProps } from "./components/primitives/Layout.js";
 export { ProgressRing, Spinner } from "./components/ProgressRing.js";
 export type { ProgressRingProps } from "./components/ProgressRing.js";
 export type {
@@ -161,6 +179,14 @@ export * from "./modelhub/index.js";
  *    below, so both the engine-data FindingRow and the security one stay reachable. */
 export { VerdictPanel } from "./patterns/VerdictPanel.js";
 export type { VerdictPanelProps } from "./patterns/VerdictPanel.js";
+// handoff §3/§4 — the three action-feedback cards, hoisted to the root barrel because
+// every consumer (Home, catalog, security, chat, the diff applier) reaches for them.
+export { VerdictCard } from "./patterns/VerdictCard.js";
+export type { VerdictCardProps, VerdictCardFinding } from "./patterns/VerdictCard.js";
+export { PermissionCard } from "./patterns/PermissionCard.js";
+export type { PermissionCardProps, PermissionKind } from "./patterns/PermissionCard.js";
+export { LatencyCard, formatMs } from "./patterns/LatencyCard.js";
+export type { LatencyCardProps, LatencyPhases } from "./patterns/LatencyCard.js";
 export { ModelCard } from "./patterns/ModelCard.js";
 export type { ModelCardProps } from "./patterns/ModelCard.js";
 export { VenvRow, PackageRow } from "./patterns/VenvRow.js";

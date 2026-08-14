@@ -20,26 +20,32 @@ function models(): Window["prometheus"]["models"] | undefined {
   return typeof window !== "undefined" ? window.prometheus?.models : undefined;
 }
 
+function ai(): Window["prometheus"]["ai"] | undefined {
+  return typeof window !== "undefined" ? window.prometheus?.ai : undefined;
+}
+
 export interface ActiveEndpoint {
   endpoints: RendererEndpoint[];
   active: RendererEndpoint | null;
   neverSendToCloud: boolean;
 }
 
-/** Probe a LOCAL OpenAI-compatible runner for its served models (GET /v1/models).
- *  Returns model ids, or [] if unreachable/empty (fail-soft) — a down runner is dropped. */
+/**
+ * Probe a LOCAL OpenAI-compatible runner for its served models (GET /v1/models).
+ * Returns model ids, or [] if unreachable/empty (fail-soft) — a down runner is dropped.
+ *
+ * Task #18: this used to `fetch` the runner directly from the renderer, which the production
+ * CSP (`connect-src 'self'`, `main/index.ts`) REFUSES for `http://127.0.0.1:<port>` — a
+ * `TypeError: Failed to fetch` in the packaged app, silently dropping every local runner from
+ * this list (caught below, same as any other probe failure). Routed through `ai:probeModels`
+ * (`main/ai-ipc.ts`) instead — the same MAIN-process detour `ai-client.ts`'s chat streaming
+ * already takes for the identical reason. `connect-src` is unchanged; the renderer still never
+ * reaches the network on its own (C5).
+ */
 async function probeServedModels(baseUrl: string): Promise<string[]> {
   try {
-    const url = `${baseUrl.replace(/\/+$/, "")}/models`;
-    const ctrl = new AbortController();
-    const timer = setTimeout(() => ctrl.abort(), 2500);
-    const res = await fetch(url, { method: "GET", signal: ctrl.signal });
-    clearTimeout(timer);
-    if (!res.ok) return [];
-    const json = (await res.json()) as { data?: Array<{ id?: unknown }> };
-    return (Array.isArray(json.data) ? json.data : [])
-      .map((m) => String(m?.id ?? ""))
-      .filter((id) => id.length > 0);
+    const res = await ai()?.probeModels(baseUrl);
+    return res?.models ?? [];
   } catch {
     return [];
   }

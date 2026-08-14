@@ -56,7 +56,7 @@ export { Commands } from "./commands.js";
 
 // --- nemesis gate ----------------------------------------------------------
 export type { NemesisRunResult } from "./security/gate.js";
-export { gate, runNemesis } from "./security/gate.js";
+export { gate, gateCommand, runNemesis } from "./security/gate.js";
 
 // --- FULL nemesis.verdict/1 mirror (file 03 §3) ----------------------------
 // The RICH verdict the security UI renders. Lives alongside the lightweight C3

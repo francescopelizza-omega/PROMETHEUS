@@ -159,16 +159,32 @@ export async function loadEffective(
   const profileId =
     typeof global.profileId === "string" ? global.profileId : coreSettings.DEFAULT_PROFILE_ID;
   const profile = coreSettings.getProfile(profileId)?.settings;
+  // The posture the USER chose: defaults ◀ global ◀ profile, before the repository gets a say.
+  const userPosture = coreSettings.layerSettings(
+    coreSettings.DEFAULT_SETTINGS,
+    global as coreSettings.Settings,
+    profile,
+  );
+  /**
+   * The workspace layer is `<root>/.prometheus/settings.json` — it lives in the REPOSITORY and
+   * arrives with the code, and it is the last layer, so it wins over the global settings and
+   * over the active profile. Left unfiltered, opening a repo would be enough to undo a
+   * "Local-only" profile, which would make the whole profile mechanism decorative one level
+   * down. It may tighten the four security keys and nothing else.
+   */
+  const { layer: safeWorkspace } = coreSettings.sanitizeWorkspaceLayer(workspace, userPosture);
   const effective = coreSettings.layerSettings(
     coreSettings.DEFAULT_SETTINGS,
     global as coreSettings.Settings,
     profile,
-    workspace as coreSettings.Settings,
+    safeWorkspace as coreSettings.Settings,
   ) as unknown as Record<string, unknown>;
   return {
     effective,
     global,
     ...(profile ? { profile: profile as Record<string, unknown> } : {}),
+    // The RAW workspace layer is returned for provenance display — the settings page should
+    // still show what the file asked for, even where it was refused.
     workspace,
   };
 }

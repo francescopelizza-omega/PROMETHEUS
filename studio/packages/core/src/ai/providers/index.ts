@@ -9,6 +9,7 @@ export {
   type ModelPrice,
   type Pricing,
   DEFAULT_AI_PROVIDERS_CONFIG,
+  contextLenForModel,
   costLightForTier,
   costOf,
   effectiveTier,

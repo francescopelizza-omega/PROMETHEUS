@@ -124,9 +124,9 @@ function membershipOf(
 }
 
 const BADGE_COLOR: Record<Membership, string> = {
-  defines: "var(--ok, #4ea86b)",
-  overrides: "var(--warn, #e0a63a)",
-  inherits: "var(--text-secondary, #9a9aa3)",
+  defines: "var(--ok)",
+  overrides: "var(--warn)",
+  inherits: "var(--text-secondary)",
 };
 
 export function MethodHierarchyView({ root }: { root: string }): ReactElement {
@@ -333,40 +333,40 @@ export function MethodHierarchyView({ root }: { root: string }): ReactElement {
       {methodName && status === "ready" && (
         <div
           style={{
-            color: "var(--text-secondary, #9a9aa3)",
+            color: "var(--text-secondary)",
             fontFamily: "var(--font-mono, monospace)",
             fontSize: "0.72rem",
             marginBottom: 6,
           }}
         >
           {mode === "supertypes" ? "Supertypes defining" : "Subtypes overriding"}{" "}
-          <span style={{ color: "var(--text-primary, #e7e7ea)" }}>{methodName}()</span>{" "}
+          <span style={{ color: "var(--text-primary)" }}>{methodName}()</span>{" "}
           <span title="badges are name-based, not signature-resolved">·(name-based)</span>
         </div>
       )}
 
       {status === "idle" && (
-        <p style={{ color: "var(--text-secondary, #9a9aa3)", fontSize: "0.72rem" }}>
+        <p style={{ color: "var(--text-secondary)", fontSize: "0.72rem" }}>
           Put the caret on a method, then press ⟳.
         </p>
       )}
       {status === "nocaret" && (
-        <p style={{ color: "var(--text-secondary, #9a9aa3)", fontSize: "0.72rem" }}>
+        <p style={{ color: "var(--text-secondary)", fontSize: "0.72rem" }}>
           No caret yet — click into an editor first.
         </p>
       )}
       {status === "nomethod" && (
-        <p style={{ color: "var(--text-secondary, #9a9aa3)", fontSize: "0.72rem" }}>
+        <p style={{ color: "var(--text-secondary)", fontSize: "0.72rem" }}>
           No method at the caret — put it on a method name, then press ⟳.
         </p>
       )}
       {status === "unsupported" && (
-        <p style={{ color: "var(--text-secondary, #9a9aa3)", fontSize: "0.72rem" }}>
+        <p style={{ color: "var(--text-secondary)", fontSize: "0.72rem" }}>
           No hierarchy server for this file type.
         </p>
       )}
       {status === "empty" && (
-        <p style={{ color: "var(--text-secondary, #9a9aa3)", fontSize: "0.72rem" }}>
+        <p style={{ color: "var(--text-secondary)", fontSize: "0.72rem" }}>
           No enclosing type at the caret (the server may still be indexing — press ⟳).
         </p>
       )}
@@ -408,7 +408,7 @@ function HierRows({
                 style={{
                   background: "transparent",
                   border: "none",
-                  color: "var(--text-secondary, #9a9aa3)",
+                  color: "var(--text-secondary)",
                   cursor: "pointer",
                   width: 12,
                   padding: 0,
@@ -416,7 +416,7 @@ function HierRows({
               >
                 {n.loading ? "…" : n.expanded ? "▾" : "▸"}
               </button>
-              <span style={{ color: "var(--accent, #22d3ee)", width: 12, textAlign: "center" }}>
+              <span style={{ color: "var(--accent)", width: 12, textAlign: "center" }}>
                 {kindGlyph(n.item.kind)}
               </span>
               <button
@@ -428,7 +428,7 @@ function HierRows({
                   textAlign: "left",
                   background: "transparent",
                   border: "none",
-                  color: "var(--text-primary, #e7e7ea)",
+                  color: "var(--text-primary)",
                   cursor: "pointer",
                   fontFamily: "var(--font-mono, monospace)",
                   fontSize: "0.74rem",
@@ -439,10 +439,7 @@ function HierRows({
                 }}
               >
                 {n.item.name}
-                <span style={{ color: "var(--text-secondary, #9a9aa3)" }}>
-                  {" "}
-                  {basename(n.item.uri)}
-                </span>
+                <span style={{ color: "var(--text-secondary)" }}> {basename(n.item.uri)}</span>
               </button>
               <span style={{ color: BADGE_COLOR[badge], fontSize: "0.64rem", fontWeight: 600 }}>
                 {badge}
@@ -455,7 +452,7 @@ function HierRows({
               <div
                 style={{
                   paddingLeft: (depth + 1) * 12 + 12,
-                  color: "var(--text-secondary, #9a9aa3)",
+                  color: "var(--text-secondary)",
                   fontSize: "0.7rem",
                 }}
               >

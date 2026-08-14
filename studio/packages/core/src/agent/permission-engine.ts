@@ -135,8 +135,17 @@ function countClimb(path: string): number {
   return 0;
 }
 
-/** Count consecutive identical trailing refs (the doom-loop run length). */
-export function doomLoopRunLength(history: readonly string[], ref: string): number {
+/**
+ * Count consecutive identical trailing refs (the doom-loop run length).
+ *
+ * `history` is optional at every call site — `PermissionContext.callHistory` is an optional
+ * field no host ever populated — so an absent list must read as "nothing seen yet", not throw.
+ * It could not throw while it was unreachable: the branch below requires an `allow`, and until
+ * user rules had a producer the only source of `allow` was a remembered grant. Making rules
+ * real made an `allow` reachable, and the first one crashed the permission engine.
+ */
+export function doomLoopRunLength(history: readonly string[] | undefined, ref: string): number {
+  if (!history) return 0;
   let n = 0;
   for (let i = history.length - 1; i >= 0; i--) {
     if (history[i] === ref) n += 1;

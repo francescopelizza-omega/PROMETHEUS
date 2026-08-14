@@ -10,6 +10,7 @@ import type { SafeFetchOptions, SafeFetchResult } from "../security/fetchproxy.j
 import {
   type ForgeRemote,
   type SafeFetchFn,
+  createPullRequest,
   getPullRequest,
   listPullRequests,
   postComment,
@@ -172,6 +173,87 @@ test("postComment (GitHub): POST issues/comments with JSON body; token required"
   // guards
   assert.equal((await postComment(GH, 4, "  ", fetch, "tok")).ok, false); // empty
   assert.equal((await postComment(GH, 4, "x", fetch, "")).ok, false); // no token
+});
+
+test("createPullRequest (GitHub): POST pulls with head/base/title/body; token required", async () => {
+  const { fetch, calls } = fakeFetch(() => ({
+    data: JSON.stringify({ number: 42, html_url: "https://github.com/octo/demo/pull/42" }),
+  }));
+  const r = await createPullRequest(
+    GH,
+    { title: "Add thing", head: "feature", base: "main", body: "why" },
+    fetch,
+    "tok",
+  );
+  assert.equal(r.ok, true);
+  assert.equal(r.number, 42);
+  assert.equal(r.url, "https://github.com/octo/demo/pull/42");
+  const call = calls[0]!;
+  assert.match(call.url, /^https:\/\/api\.github\.com\/repos\/octo\/demo\/pulls$/);
+  assert.equal(call.opts?.method, "POST");
+  assert.deepEqual(JSON.parse(call.opts?.body as string), {
+    title: "Add thing",
+    head: "feature",
+    base: "main",
+    body: "why",
+  });
+  assert.equal(call.opts?.headers?.["Content-Type"], "application/json");
+  assert.equal(call.opts?.authHeader?.header, "Authorization");
+  assert.equal(call.opts?.sidecar?.env?.PROM_FORGE_TOKEN, "Bearer tok");
+  // guards
+  assert.equal(
+    (await createPullRequest(GH, { title: "  ", head: "f", base: "main" }, fetch, "tok")).ok,
+    false,
+  ); // empty title
+  assert.equal(
+    (await createPullRequest(GH, { title: "t", head: "", base: "main" }, fetch, "tok")).ok,
+    false,
+  ); // missing head
+  assert.equal(
+    (await createPullRequest(GH, { title: "t", head: "f", base: "main" }, fetch, "")).ok,
+    false,
+  ); // no token
+});
+
+test("createPullRequest (GitLab): POST merge_requests with source/target branch, PRIVATE-TOKEN", async () => {
+  const { fetch, calls } = fakeFetch(() => ({
+    data: JSON.stringify({ iid: 9, web_url: "https://gitlab.com/grp/sub/demo/-/merge_requests/9" }),
+  }));
+  const r = await createPullRequest(
+    GL,
+    { title: "MR title", head: "feat", base: "main", body: "desc" },
+    fetch,
+    "glpat",
+  );
+  assert.equal(r.ok, true);
+  assert.equal(r.number, 9);
+  assert.equal(r.url, "https://gitlab.com/grp/sub/demo/-/merge_requests/9");
+  const call = calls[0]!;
+  assert.match(call.url, /projects\/grp%2Fsub%2Fdemo\/merge_requests$/);
+  assert.deepEqual(JSON.parse(call.opts?.body as string), {
+    source_branch: "feat",
+    target_branch: "main",
+    title: "MR title",
+    description: "desc",
+  });
+  assert.equal(call.opts?.authHeader?.header, "PRIVATE-TOKEN");
+  assert.equal(call.opts?.sidecar?.env?.PROM_FORGE_TOKEN, "glpat");
+});
+
+test("createPullRequest surfaces a forge API error message (4xx body)", async () => {
+  const { fetch } = fakeFetch(() => ({
+    data: JSON.stringify({ message: "Validation Failed" }),
+  }));
+  const r = await createPullRequest(GH, { title: "t", head: "f", base: "main" }, fetch, "badtok");
+  assert.equal(r.ok, false);
+  assert.match(r.error ?? "", /Validation Failed/);
+});
+
+test("createPullRequest: a blocked / dead safeFetch surfaces a visible error", async () => {
+  const { fetch } = fakeFetch(() => ({ blocked: true }));
+  const r = await createPullRequest(GH, { title: "t", head: "f", base: "main" }, fetch, "tok");
+  assert.equal(r.ok, false);
+  assert.match(r.error ?? "", /blocked|fail-closed/i);
 });
 
 test("a blocked / dead safeFetch surfaces a visible error, never empty success", async () => {

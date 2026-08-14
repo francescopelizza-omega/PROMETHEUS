@@ -1,4 +1,6 @@
 #!/bin/sh
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Francesco Pelizza
 # prometheus-app — launch Prometheus Studio, the Electron desktop app.
 #
 # Resolution order (first hit wins), so the command means the same thing whether the
@@ -135,13 +137,70 @@ if [ -n "$APP" ]; then
   esac
 fi
 
-# ── fall back to the dev server ───────────────────────────────────────────────
-if have_sources; then
+# ── the dev server: EXPLICIT (--dev) only ─────────────────────────────────────
+# It used to start automatically whenever no packaged app was found. That was wrong twice
+# over: `prometheus-app` is the "open the app" command, and `pnpm dev` is a four-layer
+# toolchain (pnpm → turbo → electron-vite → Electron + esbuild + helpers, ~7 processes)
+# that a user who typed "open the app" never asked for. Worse, closing the Electron window
+# does not stop the layers above it — an instance was found still running hours later.
+if [ "$DEV" -eq 1 ]; then
+  have_sources || die "--dev needs the sources; $DESKTOP not found"
   command -v pnpm >/dev/null 2>&1 || corepack enable >/dev/null 2>&1 || true
   command -v pnpm >/dev/null 2>&1 || die "pnpm not found — run \`corepack enable\` (Node >= 20)"
-  echo "prometheus-app: no packaged app found — starting the dev server." >&2
-  echo "                run \`prometheus-app --build\` once to get a real app bundle." >&2
-  exec sh -c 'cd "$0/studio" && exec pnpm dev' "$ROOT"
+  echo "prometheus-app: starting the Electron dev server (Ctrl-C stops the whole tree)." >&2
+
+  # Job control puts the child in its own process group — necessary but NOT sufficient:
+  # turbo starts each task in a FRESH process group of its own, so signalling the top
+  # group reaches pnpm and turbo and misses electron-vite and Electron entirely (measured:
+  # pnpm/turbo in pgid A, electron-vite/Electron in pgid B). So we walk the actual process
+  # TREE as well, and snapshot it BEFORE signalling — once a parent dies its children are
+  # reparented to init and become unfindable by a ppid walk.
+  set -m
+  sh -c 'cd "$1/studio" && exec pnpm dev' _ "$ROOT" &
+  DEV_PID=$!
+
+  # print $1 and every descendant, depth-first
+  descendants() {
+    printf '%s\n' "$1"
+    for _c in $(pgrep -P "$1" 2>/dev/null); do descendants "$_c"; done
+  }
+
+  stop_dev() {
+    [ -n "${DEV_PID:-}" ] || return 0
+    _pids=$(descendants "$DEV_PID" 2>/dev/null | awk '!seen[$0]++')
+    _pgid=$(ps -o pgid= -p "$DEV_PID" 2>/dev/null | tr -d ' ')
+    # the group first (catches anything spawned after the snapshot), then the tree
+    if [ -n "$_pgid" ] && [ "$_pgid" -gt 1 ] 2>/dev/null; then
+      kill -TERM "-$_pgid" 2>/dev/null || true
+    fi
+    for _p in $_pids; do
+      [ "$_p" -gt 1 ] 2>/dev/null && kill -TERM "$_p" 2>/dev/null
+    done
+    # a dev server flushing to disk deserves a moment; a hung one does not get to stay
+    sleep 2
+    for _p in $_pids; do
+      if [ "$_p" -gt 1 ] 2>/dev/null && kill -0 "$_p" 2>/dev/null; then
+        kill -KILL "$_p" 2>/dev/null
+      fi
+    done
+    DEV_PID=""
+  }
+
+  trap 'stop_dev; exit 130' INT TERM HUP
+  wait "$DEV_PID"
+  status=$?
+  stop_dev # `pnpm dev` can return while the layers it started keep running
+  exit "$status"
+fi
+
+if have_sources; then
+  cat >&2 <<EOF
+prometheus-app: Prometheus Studio has not been built yet.
+
+  build it (once, a few minutes)   prometheus-app --build
+  or run it from source            prometheus-app --dev
+EOF
+  exit 1
 fi
 
 cat >&2 <<EOF

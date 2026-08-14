@@ -18,7 +18,8 @@ import { test } from "node:test";
 
 import { useAiSessionStore } from "../state/stores.js";
 import type { AgentLoopDeps, AgentLoopOutcome } from "./agent-loop.js";
-import { type StartParams, agentRuns } from "./run-controller.js";
+import type { CommandResult } from "./agent-loop.js";
+import { type StartParams, agentRuns, claimCardResult } from "./run-controller.js";
 
 const tick = (): Promise<void> => new Promise((r) => setTimeout(r, 0));
 
@@ -152,4 +153,79 @@ test("recordUsage() accumulates per-session; usageFor is empty for an unknown se
   assert.equal(u.costUsd, null); // local (null price) → tokens only, never invented $
   agentRuns.clearUsage(sid);
   assert.equal(agentRuns.usageFor(sid).totalTokens, 0);
+});
+
+/* ── the card already ran it: replay, never re-dispatch ─────────────────────*/
+
+/**
+ * The defect these pin: when the broker routes a call to a human, the task card runs the tool
+ * while the turn is suspended in `confirm`. The runner then ran it AGAIN, because the replay
+ * short-circuit was narrowed to `run_command` — correct only while that was the one tool a
+ * human could be asked about. `propose_elevated` and `job_kill` carry no annotations, so no
+ * authorisation level auto-approves them and they ALWAYS take the card path; at level 0 so does
+ * every read. Running an elevated proposal twice is not a cosmetic problem.
+ */
+
+const CARD = (over: Partial<CommandResult> = {}): CommandResult => ({
+  command: "git status",
+  stdout: "clean",
+  exit: 0,
+  ...over,
+});
+
+test("a result the card already produced is REPLAYED, not run a second time", () => {
+  const out = claimCardResult({ tool: "job_kill", result: CARD() }, "job_kill");
+  assert.ok(out, "the card's result was not claimed — the tool would run twice");
+  assert.equal(out?.ok, true);
+  assert.equal(out?.summary, "clean");
+});
+
+test("EVERY tool replays, not just run_command", () => {
+  // The narrowing was the bug. These three are the ones that always reach a human.
+  for (const tool of ["run_command", "propose_elevated", "job_kill", "read_file"]) {
+    assert.ok(claimCardResult({ tool, result: CARD() }, tool), `${tool} would have run twice`);
+  }
+});
+
+test("a STALE entry from another tool is never claimed", () => {
+  // Handing one tool's output back as another tool's result is a fabricated observation, and
+  // the model builds on it. Falling through to a real dispatch is the only honest option.
+  assert.equal(claimCardResult({ tool: "read_file", result: CARD() }, "git_status"), null);
+});
+
+test("with no card result at all, the tool dispatches for real", () => {
+  // The auto-approved path: no human was asked, so nothing ran yet.
+  assert.equal(claimCardResult(undefined, "read_file"), null);
+});
+
+test("the gate VERDICT survives the replay", () => {
+  // Load-bearing: core's loop aborts the turn on a `block` (agent/loop.ts). Reconstructing the
+  // result from stdout/stderr loses the verdict, so a blocked command would read as an
+  // ordinary failure and the turn would carry on.
+  const raw = {
+    ok: false,
+    summary: "refused",
+    verdict: { verdict: "block" as const, riskScore: 90 },
+  };
+  const out = claimCardResult(
+    { tool: "run_command", result: CARD({ raw, exit: 126 }) },
+    "run_command",
+  );
+  assert.deepEqual(out?.verdict, { verdict: "block", riskScore: 90 });
+  assert.equal(out?.ok, false);
+});
+
+test("without a raw result it falls back to the flattened stdout/stderr", () => {
+  // A card that failed before main answered has no raw result; the reconstruction is the
+  // fallback, and it must still carry the exit code the model reasons about.
+  const out = claimCardResult(
+    {
+      tool: "run_command",
+      result: CARD({ stdout: "out", stderr: "err", exit: 2, raw: undefined }),
+    },
+    "run_command",
+  );
+  assert.equal(out?.summary, "out\nerr");
+  assert.equal(out?.ok, false);
+  assert.deepEqual(out?.data, { exitCode: 2 });
 });

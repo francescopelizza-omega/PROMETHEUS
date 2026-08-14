@@ -1,0 +1,55 @@
+/* UNTESTED DRAFT. Deliberately minimal — no attempt to reuse or reproduce the
+   Prometheus Studio desktop app's actual design tokens (packages/ui/src/tokens/)
+   since that system is a full CSS-variable/theme pipeline built for a Vite/React
+   app, not something to hand-copy piecemeal into a standalone webview string
+   without a way to verify the result renders correctly. Colors below are a
+   plain dark-terminal look chosen independently for readability only. */
+
+html,
+body {
+  height: 100%;
+  margin: 0;
+  background: #1e1e1e;
+  color: #d4d4d4;
+  font-family: "JetBrains Mono", ui-monospace, Menlo, monospace;
+  font-size: 13px;
+}
+
+body {
+  display: flex;
+  flex-direction: column;
+}
+
+#log {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  padding: 8px 10px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+#log .line {
+  margin: 0 0 2px 0;
+}
+
+#input-form {
+  flex: 0 0 auto;
+  border-top: 1px solid #3c3c3c;
+  padding: 6px 8px;
+}
+
+#input-box {
+  width: 100%;
+  box-sizing: border-box;
+  background: #2d2d2d;
+  color: #d4d4d4;
+  border: 1px solid #3c3c3c;
+  border-radius: 4px;
+  padding: 6px 8px;
+  font: inherit;
+}
+
+#input-box:focus {
+  outline: none;
+  border-color: #007acc;
+}

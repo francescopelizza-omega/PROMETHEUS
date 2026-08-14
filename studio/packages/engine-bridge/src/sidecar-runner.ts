@@ -82,10 +82,14 @@ export function resolveSidecarDir(override?: string): string {
     const studio = join(here, "..", "..", "..");
     const guess = join(studio, "python", "sidecar");
     if (existsSync(guess)) return guess;
+    return guess;
   } catch {
     /* fall through */
   }
-  return "/Users/dev/ALPHA/PROMETHEUS/studio/python/sidecar";
+  // RELATIVE to the caller, never an absolute developer path: this string is compiled
+  // into the published CLI bundle and the Electron asar, so a hard-coded home directory
+  // here is shipped to every user (and resolves on exactly one machine anyway).
+  return join(process.cwd(), "studio", "python", "sidecar");
 }
 
 function pythonBin(opts: SidecarOptions): string {

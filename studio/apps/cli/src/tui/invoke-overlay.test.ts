@@ -23,7 +23,7 @@ const ITEMS: InvokeItem[] = [
   { name: "nemesis", summary: "security scanner", presence: "present" },
   { name: "gate-check", summary: "gate a directory", presence: "absent" },
   { name: "gatekeeper", summary: "another gate tool", presence: "unknown" },
-  { name: "remnutrition", summary: "diet engine", presence: "absent" },
+  { name: "inventory", summary: "unrelated entry (must not match 'gate')", presence: "absent" },
 ];
 
 /** Feed a sequence of keys, returning the final state + the LAST action. */
@@ -43,7 +43,7 @@ test("typing 'gate' isolates the gate-related entries (CLI-059)", () => {
   const names = state.filtered.map((i) => i.name);
   assert.ok(names.includes("gate-check"));
   assert.ok(names.includes("gatekeeper"));
-  assert.ok(!names.includes("remnutrition"), "unrelated entries filtered out");
+  assert.ok(!names.includes("inventory"), "unrelated entries filtered out");
   // backspace widens the filter again.
   const back = drive(state, [k("backspace"), k("backspace"), k("backspace"), k("backspace")]);
   assert.equal(back.state.query, "");

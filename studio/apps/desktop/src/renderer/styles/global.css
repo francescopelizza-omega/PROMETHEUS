@@ -25,14 +25,9 @@
 @tailwind components;
 @tailwind utilities;
 
-/* Brand typography — route the brand surfaces (the Prometheus wordmark + hero) onto
- * bundled Montserrat with a heavier default weight so the headline reads bold, not
- * thin. Kept here (not in the generated tokens.css) so a token regen can't drop it.
- * The general --font-ui stays system/Inter for dense-UI legibility. */
-:root {
-  --font-brand: "Montserrat", "Inter var", -apple-system, "Segoe UI", Roboto, sans-serif;
-  --font-brand-weight: 800;
-}
+/* Brand typography ships from the generated tokens.css now (--font-brand = bundled
+ * Space Grotesk, --font-brand-weight = 700 — handoff §1). Nothing to override here:
+ * a token regen owns the brand face so the CLI/TUI/Monaco read the same value. */
 
 /* App reset — paint from tokens so the frame is themed pre-mount (08 §6). */
 html,
@@ -42,14 +37,10 @@ body,
   height: 100%;
 }
 
-/* GLOBAL READABILITY — every text size in the app is authored in `rem`, so raising the
- * root font-size scales the WHOLE UI up at once (no per-component edits). 16→18px
- * (112.5%) lifts small/secondary text to a legible size WITHOUT the cramped/oversized
- * feel of the old 125% (20px), which scaled text past the fixed-px chrome. Paired with a
- * slightly heavier base weight + grayscale smoothing so text reads less thin on dark. */
-html {
-  font-size: 112.5%;
-}
+/* DENSITY DECISION (handoff §1): the root is a plain 16px. The old html{font-size:112.5%}
+ * scaled every rem-authored size up by 1.125× while the chrome stayed in fixed px, so text
+ * and frame drifted apart. One scale now: 16px root, UI text authored at 13px/12.5px via
+ * the --text-*-size tokens, applied everywhere. Do NOT reintroduce a root scale. */
 
 body {
   background: var(--bg-app);
@@ -57,10 +48,19 @@ body {
   font-family: var(--font-ui);
   font-size: var(--text-body-size);
   line-height: var(--text-body-line);
-  font-weight: 460;
+  font-weight: 450;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
   text-rendering: optimizeLegibility;
+}
+
+/* Links carry the accent (the prototype's #35c7ee → brightened hover). */
+a {
+  color: var(--accent);
+  text-decoration: none;
+}
+a:hover {
+  color: color-mix(in srgb, var(--accent) 70%, #ffffff);
 }
 
 /* The cyan focus ring (§2.1 / §7): visible on every keyboard-focused control. */

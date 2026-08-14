@@ -1,11 +1,15 @@
 /**
- * shell/ActivityBar.tsx — the 56px left icon rail (file 08 §4.1).
+ * shell/ActivityBar.tsx — the 46px left icon rail (handoff §2.2).
  *
  * "Where am I": an ordered icon list, each opening a contextual sidebar + a
- * default workbench route. Renders the PURE ACTIVITIES + PINNED model from
- * @prometheus/ui (shared with the prometheus TUI, §8). The active item is brand-tinted
- * (rounded pill + glowing left bar + brand→accent gradient glyph); the
- * pinned-bottom group is the engine status pulse (+ glowing health dot) + Settings.
+ * default workbench route. Renders the PURE RAIL_ACTIVITIES + PINNED model from
+ * @prometheus/ui (shared with the prometheus TUI, §8). The active item gets the
+ * `--bg-active` tint, an accent glyph, and a 2.5px brand→accent gradient bar on its
+ * left edge; Settings stays pinned at the bottom.
+ *
+ * The ENGINE pill moved to the TopBar (§2.1) — it is a window-level fact, not a
+ * navigation target. `PINNED` still carries its entry (the TUI reads the same model),
+ * so this component filters it out rather than the shared data dropping it.
  *
  * Icons: the §4.1 glyph stays the accessible/CLI fallback (aria-label carries the
  * meaning); the GUI paints the custom bold inline-SVG set (@prometheus/ui
@@ -15,66 +19,50 @@
  */
 
 import {
-  ACTIVITIES,
   ActivityIcon,
   type ActivityId,
   PINNED,
   type PinnedId,
+  RAIL_ACTIVITIES,
   VERDICT_GLYPH,
+  Z,
 } from "@prometheus/ui";
 import type { CSSProperties, ReactElement } from "react";
 import { useState } from "react";
 
-import type { HealthPill } from "../stores/health-derive.js";
-
 export interface ActivityBarProps {
   active: ActivityId;
   /** whether the ACTIVE activity's contextual sidebar is open — drives the left-bar
-   *  indicator variant (full+glow = open, short+dim = collapsed/none, APP-003). */
+   *  indicator variant (full = open, short = collapsed/none, APP-003). */
   sidebarOpen?: boolean;
   onSelect(id: ActivityId): void;
-  /** the engine pill state → tints the pinned engine glyph (◐ ready/degraded/down). */
-  enginePill: HealthPill;
-  /** whether the AI / right rail is currently open (tints the pinned ✦ toggle). */
+  /** whether the AI / right rail is currently open (tints the ✦ toggle). */
   aiOpen?: boolean;
   /** count of agent runs in flight (APP-056) — a count badge on the ✦ so background runs
-   *  stay visible even when the AI pane is collapsed (unmounted). 0 → no badge. */
+   *  stay visible even when the AI pane is minimised. 0 → no badge. */
   aiRunningCount?: number;
-  /** toggle the AI / right rail (the pinned ✦) — the visible entry point besides ⌥⌘B. */
+  /** toggle the AI / right rail (the ✦) — the visible entry point besides ⌥⌘B. */
   onToggleAI?(): void;
   /** open settings (the pinned ⚙). */
   onSettings(): void;
-  /** open the engine status (the pinned ◐). */
-  onEngineStatus(): void;
 }
 
-const PILL_ROLE: Record<HealthPill, string> = {
-  ready: "var(--ok)",
-  degraded: "var(--warn)",
-  down: "var(--danger)",
-  unknown: "var(--text-secondary)",
-};
-
+/** §2.2: 34×34 buttons, radius 9, active = --bg-active + accent glyph. */
 function railButtonStyle(activeItem: boolean, hovered: boolean): CSSProperties {
   return {
     display: "flex",
     alignItems: "center",
     justifyContent: "center",
-    width: 46,
-    height: 46,
+    width: 34,
+    height: 34,
     margin: "0 auto",
-    background: activeItem
-      ? "color-mix(in srgb, var(--brand) 16%, transparent)"
-      : hovered
-        ? "color-mix(in srgb, var(--text-secondary) 12%, transparent)"
-        : "transparent",
+    background: activeItem || hovered ? "var(--bg-active)" : "transparent",
     border: "none",
-    borderRadius: "var(--radius-lg, 12px)",
-    color: activeItem ? "var(--brand)" : hovered ? "var(--text-primary)" : "var(--text-secondary)",
+    borderRadius: 9,
+    color: activeItem ? "var(--accent)" : hovered ? "var(--text-title)" : "var(--text-muted)",
     cursor: "pointer",
     position: "relative",
-    transition: "background 120ms ease, color 120ms ease, transform 120ms ease",
-    transform: hovered && !activeItem ? "scale(1.06)" : "scale(1)",
+    transition: "background 120ms ease, color 120ms ease",
   };
 }
 
@@ -107,7 +95,7 @@ function RailTooltip({ label, show }: { label: string; show: boolean }): ReactEl
         pointerEvents: "none",
         opacity: show ? 1 : 0,
         transition: "opacity 90ms ease, transform 90ms ease",
-        zIndex: 40,
+        zIndex: Z.dropdown,
       }}
     >
       {label}
@@ -119,34 +107,31 @@ export function ActivityBar({
   active,
   sidebarOpen,
   onSelect,
-  enginePill,
   aiOpen,
   aiRunningCount = 0,
   onToggleAI,
   onSettings,
-  onEngineStatus,
 }: ActivityBarProps): ReactElement {
   const [hovered, setHovered] = useState<string | null>(null);
   return (
     <nav
       aria-label="Activity bar"
       style={{
-        width: 56,
+        width: 46,
         flexShrink: 0,
         display: "flex",
         flexDirection: "column",
         alignItems: "stretch",
-        paddingBlock: "var(--space-4, 8px)",
-        gap: "var(--space-2, 5px)",
-        background: "var(--bg-surface)",
-        borderRight: "1px solid var(--border-subtle)",
+        paddingBlock: "var(--space-4)",
+        gap: 2,
+        borderRight: "1px solid var(--border-header)",
         // own a stacking context above the contextual sidebar so hover tooltips
-        // overflow the 56px rail and paint over the workbench instead of clipping.
+        // overflow the 46px rail and paint over the workbench instead of clipping.
         position: "relative",
-        zIndex: 30,
+        zIndex: Z.raise,
       }}
     >
-      {ACTIVITIES.map((a) => {
+      {RAIL_ACTIVITIES.map((a) => {
         const isActive = a.id === active;
         const isHover = hovered === a.id;
         return (
@@ -164,26 +149,24 @@ export function ActivityBar({
             style={railButtonStyle(isActive, isHover)}
           >
             {isActive && (
-              // active-AND-open: full brand bar + glow · active-but-collapsed: short,
-              // dimmed bar (APP-003 — the two states must be tell-apart-able at a glance).
+              // §2.2: a 2.5px brand→accent gradient bar on the rail's left edge. It shortens
+              // when the contextual sidebar is closed, so "active" and "active + open" stay
+              // tell-apart-able at a glance (APP-003) without a second color.
               <span
                 aria-hidden="true"
                 style={{
                   position: "absolute",
-                  left: 0,
-                  top: sidebarOpen ? 8 : 16,
-                  bottom: sidebarOpen ? 8 : 16,
-                  width: 3,
-                  borderRadius: 3,
-                  background: sidebarOpen
-                    ? "var(--brand)"
-                    : "color-mix(in srgb, var(--brand) 45%, transparent)",
-                  boxShadow: sidebarOpen ? "0 0 8px var(--brand)" : "none",
-                  transition: "top 120ms ease, bottom 120ms ease, background 120ms ease",
+                  left: -6,
+                  top: sidebarOpen ? 4 : 10,
+                  bottom: sidebarOpen ? 4 : 10,
+                  width: 2.5,
+                  borderRadius: 2,
+                  background: "var(--gradient-brand-v)",
+                  transition: "top 120ms ease, bottom 120ms ease",
                 }}
               />
             )}
-            <ActivityIcon name={a.icon} size={25} active={isActive} />
+            <ActivityIcon name={a.icon} size={20} active={isActive} />
             <RailTooltip label={a.label} show={isHover} />
           </button>
         );
@@ -207,32 +190,32 @@ export function ActivityBar({
           onBlur={() => setHovered((h) => (h === "__ai" ? null : h))}
           style={{
             ...railButtonStyle(!!aiOpen, hovered === "__ai"),
-            fontSize: "1.25rem",
+            fontSize: 15,
             lineHeight: 1,
           }}
         >
           <span aria-hidden="true">✦</span>
           {aiRunningCount > 0 && (
             // background-run count badge (APP-056): visible even while the AI pane is
-            // collapsed/unmounted, so the user knows a run is still progressing.
+            // minimised to its tray, so the user knows a run is still progressing.
             <span
               aria-hidden="true"
               style={{
                 position: "absolute",
-                top: 5,
-                right: 5,
-                minWidth: 15,
-                height: 15,
+                top: 1,
+                right: 1,
+                minWidth: 14,
+                height: 14,
                 padding: "0 3px",
                 boxSizing: "border-box",
                 display: "flex",
                 alignItems: "center",
                 justifyContent: "center",
-                borderRadius: 8,
+                borderRadius: 7,
                 background: "var(--accent)",
-                color: "var(--on-accent, var(--bg-app))",
-                border: "1.5px solid var(--bg-surface)",
-                fontSize: "0.6rem",
+                color: "var(--bg-app)",
+                border: "1.5px solid var(--bg-app)",
+                fontSize: 9,
                 fontWeight: 700,
                 lineHeight: 1,
               }}
@@ -244,43 +227,25 @@ export function ActivityBar({
         </button>
       )}
 
-      {/* pinned bottom: engine status + settings (§4.1) */}
-      {PINNED.map((p) => {
-        const id = p.id as PinnedId;
-        const onClick = id === "settings" ? onSettings : onEngineStatus;
+      {/* pinned bottom: Settings only. The ENGINE pill moved to the TopBar (§2.1) — it is
+          a window-level fact, not a place you navigate to. PINNED keeps its `engine` entry
+          because the TUI renders the same shared model; we filter it here. */}
+      {PINNED.filter((p) => (p.id as PinnedId) !== "engine").map((p) => {
         const isHover = hovered === p.id;
-        const color = id === "engine" ? PILL_ROLE[enginePill] : undefined;
-        const tip = id === "engine" ? `Engine: ${enginePill}` : p.label;
         return (
           <button
             key={p.id}
             type="button"
             aria-label={p.label}
-            onClick={onClick}
+            onClick={onSettings}
             onMouseEnter={() => setHovered(p.id)}
             onMouseLeave={() => setHovered((h) => (h === p.id ? null : h))}
             onFocus={() => setHovered(p.id)}
             onBlur={() => setHovered((h) => (h === p.id ? null : h))}
-            style={{ ...railButtonStyle(false, isHover), ...(color ? { color } : {}) }}
+            style={railButtonStyle(false, isHover)}
           >
-            <ActivityIcon name={p.icon} size={id === "engine" ? 23 : 24} />
-            {id === "engine" && (
-              <span
-                aria-hidden="true"
-                style={{
-                  position: "absolute",
-                  right: 7,
-                  bottom: 7,
-                  width: 8,
-                  height: 8,
-                  borderRadius: "50%",
-                  background: color,
-                  boxShadow: `0 0 6px ${color}`,
-                  border: "1.5px solid var(--bg-surface)",
-                }}
-              />
-            )}
-            <RailTooltip label={tip} show={isHover} />
+            <ActivityIcon name={p.icon} size={19} />
+            <RailTooltip label={p.label} show={isHover} />
           </button>
         );
       })}

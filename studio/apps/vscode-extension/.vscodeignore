@@ -1,0 +1,16 @@
+# The .vsix ships the BUNDLE and the media assets, nothing else.
+#
+# `.vscode-test/` is the big one: the downloaded VS Code build is ~917MB, and without this line
+# it lands inside the extension package.
+
+.vscode-test/**
+.vscode-test-*/**
+src/**
+test/**
+out/**/*.map
+out/test/**
+node_modules/**
+tsconfig.json
+esbuild.mjs
+**/*.ts
+**/*.vsix

@@ -112,8 +112,13 @@ test("chat() streams OpenAI SSE deltas and stops on [DONE]", async () => {
     assert.equal(body.stream, true);
     assert.equal(body.model, "qwen2.5-coder");
     assert.equal(Array.isArray(body.messages), true);
-    // CLI-029: it requests the terminal usage frame.
-    assert.equal(body.stream_options?.include_usage, true);
+    // CLI-029: the terminal usage frame is requested on CLOUD only. Unconditional was wrong —
+    // a strict local server 400s on the unknown field, and this client is what the text
+    // tool-call transport runs on, so that 400 kills the whole turn rather than losing a
+    // token count. Local instead gets `keep_alive`, so a multi-round agentic turn does not
+    // pay a cold model reload between rounds.
+    assert.equal(body.stream_options, undefined);
+    assert.equal((body as { keep_alive?: string }).keep_alive, "30m");
   } finally {
     stub.server.close();
   }
@@ -327,4 +332,150 @@ test("endpointAllowed greys out cloud endpoints under a strict policy", () => {
   assert.equal(endpointAllowed(local, STRICT_POLICY), true);
   assert.equal(endpointAllowed(cloud, STRICT_POLICY), false);
   assert.equal(endpointAllowed(cloud, OPEN_POLICY), true);
+});
+
+test("a CLOUD endpoint gets stream_options and NO keep_alive", async () => {
+  // The mirror of the local case: cloud can afford the usage frame (its tokens cost money)
+  // and must never receive the Ollama-only `keep_alive`.
+  const stub = await startStub(["hi"]);
+  try {
+    const cloud: AiEndpoint = {
+      id: "cloud:openai:gpt",
+      baseUrl: stub.url,
+      locality: "cloud",
+      contextWindow: 128000,
+      supportsTools: true,
+      model: "gpt-x",
+    };
+    const client = createAiClient(cloud, OPEN_POLICY, { fetch: realFetch });
+    for await (const _c of client.chat([{ role: "user", content: "hi" }])) {
+      // drain
+    }
+    const body = stub.received.at(-1)?.body as {
+      stream_options?: { include_usage?: boolean };
+      keep_alive?: string;
+    };
+    assert.equal(body.stream_options?.include_usage, true);
+    assert.equal(body.keep_alive, undefined);
+  } finally {
+    stub.server.close();
+  }
+});
+
+/* ── the non-OpenAI wire formats ─────────────────────────────────────────────*/
+
+/** A byte stream over pre-baked SSE frames — no socket needed for a shape assertion. */
+function sseStream(frames: string[]): ReadableStream<Uint8Array> {
+  const enc = new TextEncoder();
+  let i = 0;
+  return new ReadableStream<Uint8Array>({
+    pull(controller) {
+      if (i >= frames.length) {
+        controller.close();
+        return;
+      }
+      controller.enqueue(enc.encode(frames[i] ?? ""));
+      i += 1;
+    },
+  });
+}
+
+test("an Anthropic endpoint gets the Messages protocol, not chat/completions", async () => {
+  // A request built for OpenAI hits `/v1/chat/completions` on api.anthropic.com — an endpoint
+  // that does not exist — and 404s. That is what made the vendor unreachable.
+  let seenUrl = "";
+  let seenHeaders: Record<string, string> = {};
+  let seenBody: Record<string, unknown> = {};
+  const client = createAiClient(
+    {
+      id: "cloud:anthropic:claude-sonnet-4-6",
+      baseUrl: "https://api.anthropic.com",
+      locality: "cloud",
+      apiKeyRef: "env:ANTHROPIC_API_KEY",
+      contextWindow: 200000,
+      supportsTools: true,
+      model: "claude-sonnet-4-6",
+    },
+    { neverSendToCloud: false },
+    {
+      resolveKey: async () => "sk-ant",
+      fetch: (async (url: string, init: { headers: Record<string, string>; body: string }) => {
+        seenUrl = url;
+        seenHeaders = init.headers;
+        seenBody = JSON.parse(init.body);
+        return {
+          ok: true,
+          status: 200,
+          statusText: "OK",
+          text: async () => "",
+          body: sseStream([
+            'data: {"type":"content_block_delta","delta":{"text":"hi"}}\n\n',
+            'data: {"type":"message_stop"}\n\n',
+          ]),
+        };
+      }) as never,
+    },
+  );
+  const out: string[] = [];
+  for await (const c of client.chat([
+    { role: "system", content: "be terse" },
+    { role: "user", content: "q" },
+  ])) {
+    if (c.delta) out.push(c.delta);
+  }
+  assert.equal(seenUrl, "https://api.anthropic.com/v1/messages");
+  // x-api-key, not a bearer — and the version header is mandatory.
+  assert.equal(seenHeaders["x-api-key"], "sk-ant");
+  assert.equal(seenHeaders["anthropic-version"], "2023-06-01");
+  assert.equal(seenHeaders.authorization, undefined, "a bearer token would 401 here");
+  // The system prompt is a top-level field; left in `messages` it is rejected outright.
+  assert.equal(seenBody.system, "be terse");
+  assert.equal((seenBody.messages as unknown[]).length, 1);
+  // max_tokens is REQUIRED by this API — omitting it is a 400, not a default.
+  assert.equal(typeof seenBody.max_tokens, "number");
+  assert.deepEqual(out, ["hi"]);
+});
+
+test("a Gemini endpoint gets generateContent, and its usage is normalized", async () => {
+  let seenUrl = "";
+  let seenHeaders: Record<string, string> = {};
+  const client = createAiClient(
+    {
+      id: "cloud:gemini:gemini-2.5-pro",
+      baseUrl: "https://generativelanguage.googleapis.com",
+      locality: "cloud",
+      apiKeyRef: "env:GEMINI_API_KEY",
+      contextWindow: 1000000,
+      supportsTools: true,
+      model: "gemini-2.5-pro",
+    },
+    { neverSendToCloud: false },
+    {
+      resolveKey: async () => "goog-key",
+      fetch: (async (url: string, init: { headers: Record<string, string> }) => {
+        seenUrl = url;
+        seenHeaders = init.headers;
+        return {
+          ok: true,
+          status: 200,
+          statusText: "OK",
+          text: async () => "",
+          body: sseStream([
+            'data: {"candidates":[{"content":{"parts":[{"text":"yo"}]}}],"usageMetadata":{"promptTokenCount":4,"candidatesTokenCount":2,"totalTokenCount":6}}\n\n',
+          ]),
+        };
+      }) as never,
+    },
+  );
+  let usage: { totalTokens: number } | undefined;
+  const out: string[] = [];
+  for await (const c of client.chat([{ role: "user", content: "q" }])) {
+    if (c.delta) out.push(c.delta);
+    if (c.usage) usage = c.usage;
+  }
+  assert.match(seenUrl, /\/v1beta\/models\/gemini-2\.5-pro:streamGenerateContent\?alt=sse$/);
+  // A header, not the query string: a URL is logged by proxies and appears in error messages.
+  assert.equal(seenHeaders["x-goog-api-key"], "goog-key");
+  assert.deepEqual(out, ["yo"]);
+  assert.equal(usage?.totalTokens, 6);
 });

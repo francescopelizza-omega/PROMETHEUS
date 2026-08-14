@@ -1,0 +1,13 @@
+<!--
+  UNTESTED DRAFT. Inlined at runtime into a single self-contained document by
+  PrometheusChatPanel.buildHtml() (see the VERIFY note there about why inlining
+  was chosen over loading these as separate relative-URL assets: JBCefBrowser
+  serving a local resource directory via relative <link>/<script> src paths
+  needs a registered scheme handler (JBCefFileSchemeHandlerFactory or similar),
+  and I was not confident enough in that exact API surface to use it here
+  without a way to verify it — inlining sidesteps the question entirely).
+-->
+<div id="log" role="log" aria-live="polite"></div>
+<form id="input-form">
+    <input id="input-box" type="text" autocomplete="off" placeholder="Message the prometheus CLI session…" />
+</form>

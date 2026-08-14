@@ -23,3 +23,15 @@ export {
   type SpendRecord,
   evaluateBudgets,
 } from "./budgetWindows.js";
+/**
+ * The shared pre-turn spend gate. Every host that can spend money calls THIS — see the
+ * module header for why `enforceGuardrail`/`evaluateGuardrail` are not composed into it.
+ */
+export {
+  type BudgetGateInput,
+  type BudgetGateResult,
+  decideBudget,
+  hasBudgetCap,
+  mergeDayRecords,
+  startOfLocalDayMs,
+} from "./budgetGate.js";

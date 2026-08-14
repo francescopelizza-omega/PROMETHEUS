@@ -27,16 +27,19 @@
 
 import { Button, Panel, VerdictSheet, gateToVerdict } from "@prometheus/ui";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { type ReactElement, useCallback, useState } from "react";
+import { type ReactElement, useCallback, useEffect, useRef, useState } from "react";
 
 import { openExternally, openFolderInWorkspace } from "../renderer/open-resource.js";
 
+import { DecisionOverlay } from "../renderer/shell/DecisionOverlay.js";
+import { ForceGate, useForceGate } from "../renderer/shell/ForceGate.js";
 import type {
   RepoCloneResult,
   RepoGateSummary,
   RepoListResult,
   RepoRow,
 } from "../shared/ipc-contract.js";
+import { WORKSPACE_CLONE_EVENT, cellVar, repoScan, repoSync } from "./workspace-view.js";
 
 /** The `window.prometheus.repo` surface (typed via the contract). */
 function repoApi(): Window["prometheus"]["repo"] {
@@ -51,11 +54,11 @@ function statusGlyph(
   status: RepoRow["status"],
   verdict?: string,
 ): { glyph: string; color: string } {
-  if (status === "blocked") return { glyph: "✕", color: "var(--danger, #b3261e)" };
-  if (verdict === "warn") return { glyph: "◐", color: "var(--warn, #e0a458)" };
-  if (status === "stale") return { glyph: "◌", color: "var(--text-secondary, #9a9aa3)" };
-  if (status === "missing") return { glyph: "?", color: "var(--text-secondary, #9a9aa3)" };
-  return { glyph: "●", color: "var(--ok, #5fd38d)" };
+  if (status === "blocked") return { glyph: "✕", color: "var(--danger)" };
+  if (verdict === "warn") return { glyph: "◐", color: "var(--warn)" };
+  if (status === "stale") return { glyph: "◌", color: "var(--text-secondary)" };
+  if (status === "missing") return { glyph: "?", color: "var(--text-secondary)" };
+  return { glyph: "●", color: "var(--ok)" };
 }
 
 /* ── the route ───────────────────────────────────────────────────────────────*/
@@ -73,8 +76,25 @@ interface PendingGate {
 
 export function ReposRoute(): ReactElement {
   const qc = useQueryClient();
+  // §9: the shared typed-confirm gate for deep-red overrides on this route.
+  const force = useForceGate();
   const [url, setUrl] = useState("");
   const [branch, setBranch] = useState("");
+  /**
+   * §5's island header carries a "Clone repo…" action, but the clone FORM stays here — it is
+   * the one staged-and-gated clone path (00-INDEX C6), and a second entry point would be a
+   * second place for that gate to be got wrong. The header therefore navigates and asks; this
+   * focuses + scrolls the real form.
+   */
+  const urlRef = useRef<HTMLInputElement | null>(null);
+  useEffect(() => {
+    const onAsk = (): void => {
+      urlRef.current?.scrollIntoView({ block: "nearest" });
+      urlRef.current?.focus();
+    };
+    window.addEventListener(WORKSPACE_CLONE_EVENT, onAsk);
+    return () => window.removeEventListener(WORKSPACE_CLONE_EVENT, onAsk);
+  }, []);
   const [pendingGate, setPendingGate] = useState<PendingGate | null>(null);
   const [banner, setBanner] = useState<{ id: string; reasons: string[] } | null>(null);
 
@@ -194,7 +214,7 @@ export function ReposRoute(): ReactElement {
       )}
 
       <Panel title="Clone a GitHub repo (staged + nemesis-gated)" elevation="e1">
-        <p style={{ marginTop: 0, color: "var(--text-secondary, #9a9aa3)", fontSize: "0.82rem" }}>
+        <p style={{ marginTop: 0, color: "var(--text-secondary)", fontSize: "0.82rem" }}>
           The ONLY arbitrary-URL clone path: staged with safe git flags, then scanned by the REAL
           nemesis before anything lands. A block is quarantined, never promoted (C5/C6).
         </p>
@@ -208,15 +228,16 @@ export function ReposRoute(): ReactElement {
           style={{ display: "flex", gap: 8, flexWrap: "wrap" }}
         >
           <input
+            ref={urlRef}
             placeholder="https://github.com/owner/repo.git"
             value={url}
             onChange={(e) => setUrl(e.target.value)}
             style={{
               flex: "1 1 320px",
-              background: "var(--bg-surface-2, #16161c)",
-              border: "1px solid var(--border-subtle, #2a2a33)",
+              background: "var(--bg-surface-2)",
+              border: "1px solid var(--border-subtle)",
               borderRadius: 6,
-              color: "var(--text-primary, #e7e7ea)",
+              color: "var(--text-primary)",
               padding: "6px 10px",
             }}
           />
@@ -226,10 +247,10 @@ export function ReposRoute(): ReactElement {
             onChange={(e) => setBranch(e.target.value)}
             style={{
               flex: "0 1 160px",
-              background: "var(--bg-surface-2, #16161c)",
-              border: "1px solid var(--border-subtle, #2a2a33)",
+              background: "var(--bg-surface-2)",
+              border: "1px solid var(--border-subtle)",
               borderRadius: 6,
-              color: "var(--text-primary, #e7e7ea)",
+              color: "var(--text-primary)",
               padding: "6px 10px",
             }}
           />
@@ -250,7 +271,7 @@ export function ReposRoute(): ReactElement {
       </Panel>
 
       <Panel title="Repos" elevation="e1">
-        <p style={{ marginTop: 0, color: "var(--text-secondary, #9a9aa3)", fontSize: "0.78rem" }}>
+        <p style={{ marginTop: 0, color: "var(--text-secondary)", fontSize: "0.78rem" }}>
           ● clean · ◐ warn · ✕ blocked · ◌ stale · Force… = deep-red override (typed confirm)
         </p>
         {reposQ.isError || (reposQ.data && !reposQ.data.ok) ? (
@@ -260,136 +281,238 @@ export function ReposRoute(): ReactElement {
             {reposQ.data?.error ?? "the repo sidecar didn't respond — try again."}
           </p>
         ) : reposQ.isPending ? (
-          <p style={{ color: "var(--text-secondary, #9a9aa3)" }}>loading repos…</p>
+          <p style={{ color: "var(--text-secondary)" }}>loading repos…</p>
         ) : repos.length === 0 ? (
-          <p style={{ color: "var(--text-secondary, #9a9aa3)" }}>
+          <p style={{ color: "var(--text-secondary)" }}>
             No repos yet — clone a GitHub repo above (staged + nemesis-scanned before anything
             lands).
           </p>
         ) : (
-          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "0.82rem" }}>
-            <thead>
-              <tr style={{ textAlign: "left", color: "var(--text-secondary, #9a9aa3)" }}>
-                <th style={{ padding: "4px 8px" }} />
-                <th style={{ padding: "4px 8px" }}>repo</th>
-                <th style={{ padding: "4px 8px" }}>branch @ commit</th>
-                <th style={{ padding: "4px 8px" }}>verdict</th>
-                <th style={{ padding: "4px 8px" }}>status</th>
-                <th style={{ padding: "4px 8px" }}>actions</th>
-              </tr>
-            </thead>
-            <tbody>
-              {repos.map((r) => {
-                const g = statusGlyph(r.status, r.lastVerdict?.verdict);
-                return (
-                  <tr
-                    key={r.id}
-                    title="Double-click to open this repo's folder in the editor"
-                    onDoubleClick={() => r.localPath && openFolderInWorkspace(r.localPath)}
+          <ul style={{ listStyle: "none", margin: 0, padding: 0 }}>
+            {repos.map((r) => {
+              const g = statusGlyph(r.status, r.lastVerdict?.verdict);
+              const sync = repoSync(r);
+              const scan = repoScan(r);
+              return (
+                <li
+                  key={r.id}
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    flexWrap: "wrap", // §7 — the action cluster wraps before anything is clipped
+                    gap: 8,
+                    padding: "6px 4px",
+                    borderTop: "1px solid var(--border-subtle)",
+                    minWidth: 0, // §7
+                  }}
+                >
+                  {/* §5's glyph chip — the tri-state gate mark, tinted at its own role. */}
+                  <span
+                    aria-hidden="true"
                     style={{
-                      borderTop: "1px solid var(--border-subtle, #2a2a33)",
-                      cursor: r.localPath ? "pointer" : "default",
+                      display: "inline-flex",
+                      alignItems: "center",
+                      justifyContent: "center",
+                      width: 30,
+                      height: 30,
+                      flex: "none",
+                      borderRadius: "var(--radius-md, 6px)",
+                      background: `color-mix(in srgb, ${g.color} 12%, transparent)`,
+                      border: `1px solid color-mix(in srgb, ${g.color} 28%, transparent)`,
+                      color: g.color,
+                      fontWeight: 700,
                     }}
                   >
-                    <td style={{ padding: "4px 8px", color: g.color, fontWeight: 700 }}>
-                      {g.glyph}
-                    </td>
-                    <td style={{ padding: "4px 8px" }}>
+                    {g.glyph}
+                  </span>
+
+                  <button
+                    type="button"
+                    onClick={() => r.localPath && openFolderInWorkspace(r.localPath)}
+                    disabled={!r.localPath}
+                    title="Open this repo's folder in the editor"
+                    style={{
+                      flex: "1 1 200px",
+                      minWidth: 0, // §7
+                      textAlign: "left",
+                      background: "transparent",
+                      border: "none",
+                      color: "var(--text-primary)",
+                      cursor: r.localPath ? "pointer" : "default",
+                      padding: 0,
+                    }}
+                  >
+                    <span
+                      style={{
+                        display: "block",
+                        fontSize: "0.82rem",
+                        fontWeight: 600,
+                        overflow: "hidden",
+                        textOverflow: "ellipsis",
+                        whiteSpace: "nowrap",
+                      }}
+                    >
                       {r.owner}/{r.name}
-                    </td>
-                    <td style={{ padding: "4px 8px", color: "var(--text-secondary, #9a9aa3)" }}>
-                      {r.branch}
-                      {r.pinnedCommit ? " @ pinned" : r.commit ? ` @ ${r.commit.slice(0, 7)}` : ""}
-                    </td>
-                    <td style={{ padding: "4px 8px" }}>{r.lastVerdict?.verdict ?? "—"}</td>
-                    <td style={{ padding: "4px 8px" }}>{r.status}</td>
-                    <td style={{ padding: "4px 8px", display: "flex", gap: 6, flexWrap: "wrap" }}>
-                      <Button
-                        variant="ghost"
-                        onClick={() => r.localPath && openFolderInWorkspace(r.localPath)}
-                        disabled={!r.localPath}
-                        title="Open the repo folder in the editor"
-                      >
-                        Open
-                      </Button>
-                      <Button
-                        variant="ghost"
-                        onClick={() => r.localPath && openExternally(r.localPath)}
-                        disabled={!r.localPath}
-                        title="Reveal the repo folder in Finder/Explorer"
-                      >
-                        ↗
-                      </Button>
-                      <Button
-                        variant="ghost"
-                        onClick={() => update.mutate({ id: r.id, force: false })}
-                        disabled={update.isPending}
-                      >
-                        Update
-                      </Button>
-                      <Button
-                        variant="ghost"
-                        onClick={() => rescan.mutate(r.id)}
-                        disabled={rescan.isPending}
-                      >
-                        Rescan
-                      </Button>
-                      <Button
-                        variant="danger"
-                        onClick={() => {
-                          // destructive: drops the clone dir + index entry — confirm first.
-                          if (
-                            window.confirm(
-                              `Remove repo "${r.id}"? This deletes its clone directory and index entry. This cannot be undone.`,
-                            )
-                          ) {
-                            remove.mutate(r.id);
-                          }
-                        }}
-                        disabled={remove.isPending}
-                      >
-                        Remove
-                      </Button>
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
+                    </span>
+                    <span
+                      style={{
+                        display: "block",
+                        fontFamily: "var(--font-mono)",
+                        fontSize: "0.68rem",
+                        color: "var(--text-muted)",
+                        overflow: "hidden",
+                        textOverflow: "ellipsis",
+                        whiteSpace: "nowrap",
+                      }}
+                    >
+                      {r.localPath || "not on disk"}
+                    </span>
+                  </button>
+
+                  {/* §5's `⎇ branch` inset pill */}
+                  <span
+                    style={{
+                      flex: "none",
+                      display: "inline-flex",
+                      alignItems: "center",
+                      gap: 4,
+                      padding: "2px 7px",
+                      borderRadius: "var(--radius-sm, 4px)",
+                      background: "var(--bg-inset)",
+                      border: "1px solid var(--border-chip)",
+                      fontFamily: "var(--font-mono)",
+                      fontSize: 10.5,
+                      color: "var(--text-secondary)",
+                      whiteSpace: "nowrap", // §7
+                    }}
+                  >
+                    <span aria-hidden="true">⎇</span>
+                    {r.branch || "—"}
+                  </span>
+
+                  <span
+                    style={{
+                      flex: "none",
+                      fontFamily: "var(--font-mono)",
+                      fontSize: "0.68rem",
+                      color: cellVar(sync.role),
+                      whiteSpace: "nowrap", // §7
+                    }}
+                  >
+                    {sync.text}
+                  </span>
+                  <span
+                    style={{
+                      flex: "none",
+                      fontSize: "0.7rem",
+                      fontWeight: 600,
+                      color: cellVar(scan.role),
+                      whiteSpace: "nowrap", // §7
+                    }}
+                  >
+                    {scan.text}
+                  </span>
+
+                  <span style={{ display: "flex", gap: 4, flexWrap: "wrap", flex: "none" }}>
+                    <Button
+                      variant="ghost"
+                      onClick={() => r.localPath && openFolderInWorkspace(r.localPath)}
+                      disabled={!r.localPath}
+                      title="Open the repo folder in the editor"
+                    >
+                      Open
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      onClick={() => r.localPath && openExternally(r.localPath)}
+                      disabled={!r.localPath}
+                      title="Reveal the repo folder in Finder/Explorer"
+                    >
+                      ↗
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      onClick={() => update.mutate({ id: r.id, force: false })}
+                      disabled={update.isPending}
+                    >
+                      Update
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      onClick={() => rescan.mutate(r.id)}
+                      disabled={rescan.isPending}
+                    >
+                      Rescan
+                    </Button>
+                    <Button
+                      variant="danger"
+                      onClick={() => {
+                        // destructive: drops the clone dir + index entry — confirm first.
+                        if (
+                          window.confirm(
+                            `Remove repo "${r.id}"? This deletes its clone directory and index entry. This cannot be undone.`,
+                          )
+                        ) {
+                          remove.mutate(r.id);
+                        }
+                      }}
+                      disabled={remove.isPending}
+                    >
+                      Remove
+                    </Button>
+                  </span>
+                </li>
+              );
+            })}
+          </ul>
         )}
       </Panel>
 
       {pendingGate && (
-        <VerdictSheet
-          verdict={gateToVerdict(pendingGate.gate, pendingGate.id ?? pendingGate.url ?? "repo")}
-          onProceed={() => {
-            // proceed = a warn the user accepts → re-run the SAME operation (engine re-gates).
-            // force=true: a warn is kept-staged (not promoted); force+confirm is the ONLY
-            // renderer lever to admit it. force:false re-gates → identical warn → loop.
-            if (pendingGate.kind === "clone" && pendingGate.url) {
-              clone.mutate({ url: pendingGate.url, branch: pendingGate.branch, force: true });
-            } else if (pendingGate.kind === "rescan" && pendingGate.id) {
-              rescan.mutate(pendingGate.id);
-            } else if (pendingGate.kind === "update" && pendingGate.id) {
-              update.mutate({ id: pendingGate.id, force: true });
-            }
-            setPendingGate(null);
-          }}
-          onCancel={() => setPendingGate(null)}
-          onRequestForce={() => {
-            // the deep-red override re-runs with force + confirm (§8). A rescan has no
-            // force path — re-running the rescan is the strongest action available.
-            if (pendingGate.kind === "clone" && pendingGate.url) {
-              clone.mutate({ url: pendingGate.url, branch: pendingGate.branch, force: true });
-            } else if (pendingGate.kind === "rescan" && pendingGate.id) {
-              rescan.mutate(pendingGate.id);
-            } else if (pendingGate.kind === "update" && pendingGate.id) {
-              update.mutate({ id: pendingGate.id, force: true });
-            }
-            setPendingGate(null);
-          }}
-        />
+        // §9: a decision surface is NEVER in-flow. Wrapped so the verdict — and the
+        // actions under it — cannot scroll below the fold.
+        <DecisionOverlay label="Security verdict" onDismiss={() => setPendingGate(null)}>
+          <VerdictSheet
+            verdict={gateToVerdict(pendingGate.gate, pendingGate.id ?? pendingGate.url ?? "repo")}
+            onProceed={() => {
+              // proceed = a warn the user accepts → re-run the SAME operation (engine re-gates).
+              // force=true: a warn is kept-staged (not promoted); force+confirm is the ONLY
+              // renderer lever to admit it. force:false re-gates → identical warn → loop.
+              if (pendingGate.kind === "clone" && pendingGate.url) {
+                clone.mutate({ url: pendingGate.url, branch: pendingGate.branch, force: true });
+              } else if (pendingGate.kind === "rescan" && pendingGate.id) {
+                rescan.mutate(pendingGate.id);
+              } else if (pendingGate.kind === "update" && pendingGate.id) {
+                update.mutate({ id: pendingGate.id, force: true });
+              }
+              setPendingGate(null);
+            }}
+            onCancel={() => setPendingGate(null)}
+            onRequestForce={() => {
+              // §9 (HIGH): the typed confirm gates the override. A rescan carries no force
+              // flag, so it runs directly — there is nothing dangerous to confirm.
+              const g = pendingGate;
+              if (g.kind === "rescan" && g.id) {
+                rescan.mutate(g.id);
+              } else {
+                force.ask({
+                  target: g.url ?? g.id ?? "repository",
+                  blockingReasons: g.gate.reasons,
+                  onConfirm: () => {
+                    if (g.kind === "clone" && g.url)
+                      clone.mutate({ url: g.url, branch: g.branch, force: true });
+                    else if (g.kind === "update" && g.id) update.mutate({ id: g.id, force: true });
+                  },
+                });
+              }
+              setPendingGate(null);
+            }}
+          />
+        </DecisionOverlay>
       )}
+
+      {/* §9: the typed confirm that gates every deep-red override on this route. */}
+      <ForceGate gate={force} />
     </div>
   );
 }

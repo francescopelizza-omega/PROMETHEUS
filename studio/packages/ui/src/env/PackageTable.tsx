@@ -173,7 +173,7 @@ export function PackageTable({
                   key={p.name}
                   data-state={p.state}
                   style={{
-                    borderTop: "1px solid var(--border-subtle, #232329)",
+                    borderTop: "1px solid var(--border-subtle)",
                     opacity: transitive ? 0.62 : 1,
                   }}
                 >
@@ -266,7 +266,7 @@ function Th({ children }: { children: string }): ReactElement {
       style={{
         padding: "var(--space-2, 4px) var(--space-3, 6px)",
         fontWeight: 600,
-        borderBottom: "1px solid var(--border-subtle, #232329)",
+        borderBottom: "1px solid var(--border-subtle)",
       }}
     >
       {children}
@@ -290,7 +290,7 @@ function HeaderButton({
       disabled={disabled || !onClick}
       style={{
         background: "transparent",
-        border: "1px solid var(--border-subtle, #232329)",
+        border: "1px solid var(--border-subtle)",
         borderRadius: "var(--radius-md, 6px)",
         color: "var(--text-primary)",
         cursor: disabled || !onClick ? "default" : "pointer",

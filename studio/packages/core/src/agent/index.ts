@@ -42,6 +42,14 @@ export {
 // WRAPPER Subsystem 3: remembered "don't ask again" grants (deny-priority) over the pure engine.
 export type { GrantScope, Grant, AddResult } from "./scoped-permission.js";
 export { ScopedPermissionStore, deriveSubject, isTooBroad } from "./scoped-permission.js";
+// The seam that makes those grants LIVE — without it the store had no production caller.
+export type {
+  RememberedConfirmOptions,
+  RefOf,
+  PathsOf,
+  ArgvOf,
+} from "./remembered-confirm.js";
+export { withRememberedGrants } from "./remembered-confirm.js";
 // CLI-011: the web_fetch tool (dispatched locally via the safeFetch L6 proxy).
 export { WEB_FETCH_TOOL } from "./web.js";
 export type { GateVerdictTier, AgentEvent } from "./events.js";
@@ -65,6 +73,34 @@ export {
   TOOL_OUTPUT_CAP_BYTES,
 } from "./loop.js";
 
+// --- user-authored lifecycle hooks (PreToolUse / PostToolUse / SessionStart) -------- //
+// PURE: the runner is injected (`agent/system/host/hook-runner.ts` is the node-backed one).
+export type {
+  HookDenial,
+  HookEvent,
+  HookInvocation,
+  HookOutcome,
+  HookRefusal,
+  HookRunner,
+  HookSpec,
+} from "./hooks.js";
+export {
+  DEFAULT_HOOK_TIMEOUT_MS,
+  HOOK_EVENTS,
+  HOOK_OUTPUT_CAP_CHARS,
+  HOOK_REFUSAL_HINT,
+  SESSION_START_BLOCK_HEADER,
+  firePostToolUseHooks,
+  hookMatchesTool,
+  hookRefusal,
+  isHookSpec,
+  matchingHooks,
+  runPreToolUseHooks,
+  runSessionStartHooks,
+  sessionStartHookBlock,
+  validateHooks,
+} from "./hooks.js";
+
 // --- file 14 §3.4: user-editable permission/approval engine (ToolBroker pre-filter) -- //
 // Autonomy policy ONLY — an `allow` here never bypasses the nemesis gate (C5).
 export type {
@@ -84,6 +120,10 @@ export {
   permissionEngine,
   shellWords,
 } from "./permission-engine.js";
+
+// --- the PRODUCER for those rules: a user `[permissions]` table (allow/ask/deny) --- //
+export type { CompiledPermissionRules, PermissionRulesConfig } from "./permission-config.js";
+export { compilePermissionRules } from "./permission-config.js";
 
 // --- Claude-parity permission MODES (default/acceptEdits/plan/bypass) over §3.4 ----- //
 export type {
@@ -158,9 +198,26 @@ export {
   compact,
   compactionSlices,
   estimateTokens,
+  estimateTextTokens,
   estimateTurnTokens,
   shouldCompact,
+  shouldCompactTexts,
+  sliceForCompaction,
 } from "./compact.js";
+
+// --- the doom-loop guard: same tool, same ARGS, above the broker -------------------- //
+export type { RepeatVerdict } from "./repeat-guard.js";
+export {
+  DEFAULT_REPEAT_LIMIT,
+  RepeatGuard,
+  callFingerprint,
+  repeatRefusal,
+  stableStringify,
+} from "./repeat-guard.js";
+
+// --- what the agent REMEMBERS between turns (tool results, budgeted) ---------------- //
+export type { CarryForwardOptions } from "./carry-forward.js";
+export { ELISION, carryBudgetFor, carryForward } from "./carry-forward.js";
 
 // --- file 14 E2: per-turn workspace checkpoint (exact revert incl. bash writes) ----- //
 export type { Checkpoint, RestorePlan, SnapshotPolicy } from "./checkpoint.js";
@@ -172,22 +229,162 @@ export {
   shouldSnapshot,
 } from "./checkpoint.js";
 
-// --- file 14 §3.1: modes-as-agents (Plan/Build + roster + @-mention + extra tools) -- //
-export type { AgentExtraTool, AgentModeId, ParsedAgentFile } from "./modes.js";
+/**
+ * file 14 §3.1 "modes-as-agents" — RETIRED.
+ *
+ * `modes.ts` held a second, parallel agent system (`AGENT_BUILD`/`AGENT_PLAN`/`SEED_AGENTS`
+ * AgentDefs, a fail-open `agentFileToDef`, an `@mention` parser and duplicate tool
+ * descriptors) that nothing outside this barrel and its own test ever imported, while the
+ * plan-mode posture that IS wired lives in `permission-modes.ts`. Keeping both meant two
+ * answers to "what does plan mode do". The unused half is deleted; the one live export
+ * (`parseAgentFile`) moved next to its only consumer in `agent-files.ts`.
+ */
+export type { ParsedAgentFile } from "./agent-files.js";
+export { parseAgentFile } from "./agent-files.js";
+
+// full_wrapper_compose Phase 2: the exec core (parse → classify). Re-exported here so hosts
+// reach it through the same `agent.*` namespace they already use for the ladder and the
+// broker — a command's tier is an authorization concern, not a separate subsystem.
 export {
-  AGENT_BUILD,
-  AGENT_EXPLORE,
-  AGENT_EXTRA_TOOLS,
-  AGENT_PLAN,
-  AGENT_SCOUT,
-  DEFAULT_AGENT_ID,
-  SEED_AGENTS,
-  TOOL_QUESTION,
-  TOOL_TODOREAD,
-  TOOL_TODOWRITE,
-  agentFileToDef,
-  getAgent,
-  parseAgentFile,
-  parseMention,
-  parseModelRef,
-} from "./modes.js";
+  parseCommand,
+  formatCommand,
+  allStages,
+  classifyCommand,
+  describeCommand,
+  execAuthDecision,
+  PROGRAMS,
+  FORBIDDEN,
+  forbiddenReason,
+  programSpec,
+} from "./exec/index.js";
+export type {
+  ClassifyResult,
+  ExecTier,
+  ParsedCommand,
+  ParseResult,
+  Stage,
+  StageClass,
+} from "./exec/index.js";
+
+// The host-dispatched system tools (Tier R + run_command) and the secret scrubber.
+export {
+  SYSTEM_FS_WRITE_TOOLS,
+  SYSTEM_FS_WRITE_TOOL_NAMES,
+  DELETE_FILE_TOOL,
+  MOVE_FILE_TOOL,
+  MKDIR_TOOL,
+  isFsWriteTool,
+  SYSTEM_TOOLS,
+  PROPOSE_ELEVATED_TOOL,
+  checkElevated,
+  elevatedCommandLine,
+  renderElevated,
+  SYSTEM_READ_TOOLS,
+  RUN_COMMAND_TOOL,
+  ENV_ALLOWLIST,
+  isEnvReadable,
+  redactSecrets,
+  isSecretPath,
+} from "./system/index.js";
+
+/**
+ * How a model is TOLD about tools and how its calls are read back — schema rendering, the
+ * budgeted prompt preamble, the text call protocol, and transport negotiation.
+ *
+ * Namespaced rather than flattened: `parseToolCalls` beside this file's existing `parseHunks`
+ * reads as two halves of one thing when they are unrelated, and the surfaces that consume
+ * this reach for the whole group at once (`agent.protocol.renderToolPreamble`).
+ */
+export * as protocol from "./protocol/index.js";
+
+// The structured task list the agent works to. `modes.ts` declared `todowrite`/`todoread`
+// descriptors with no schema, no state and no dispatch; these are the real thing.
+// Delegate a subtask to a scoped worker. The guards ARE the design — see the module header.
+export type {
+  SpawnDecision,
+  SubagentBudget,
+  SubagentOutcome,
+  SubagentRole,
+  RunTurn,
+} from "./subagent.js";
+export {
+  DEFAULT_CHILD_ROUNDS,
+  DEFAULT_MAX_DEPTH,
+  DEFAULT_MAX_SPAWNS,
+  SPAWN_AGENT_TOOL,
+  SUBAGENT_ROLES,
+  canSpawn,
+  childTuning,
+  initialBudget,
+  isSubagentRole,
+  runSubagent,
+} from "./subagent.js";
+
+// web_search behind a provider seam — no provider means an honest failure, never a fake list.
+export type {
+  ProviderChoice,
+  SearchProvider,
+  SearchRequest,
+  SearchResult,
+} from "./search.js";
+export {
+  BRAVE,
+  DDG_INSTANT,
+  MAX_RESULTS,
+  NO_PROVIDER_MESSAGE,
+  SEARCH_KEY_ENV,
+  SEARCH_PROVIDERS,
+  TAVILY,
+  WEB_SEARCH_TOOL,
+  clampLimit,
+  defaultProvider,
+  findProvider,
+  needsKey,
+  renderResults,
+  selectProvider,
+} from "./search.js";
+
+// User-defined sub-agent personas from markdown — clamped by SCOPE, not by trust.
+export type { AgentFileScope, AgentFileRejection, LoadedAgent } from "./agent-files.js";
+export {
+  MAX_PERSONA_CHARS,
+  agentNameFromFile,
+  loadAgentFile,
+  personaDeny,
+  personaSystemPrompt,
+} from "./agent-files.js";
+
+// The agent asks the user instead of guessing — budgeted, and honest when nobody can answer.
+export type { QuestionBudget } from "./question.js";
+export {
+  DEFAULT_MAX_QUESTIONS,
+  NO_ASKER_MESSAGE,
+  QUESTION_TOOL,
+  canAsk,
+  initialQuestionBudget,
+  renderAnswer,
+  renderQuestion,
+} from "./question.js";
+
+// One edit across N files, all of it or none of it.
+export type { PatchFile, PatchResult, ResolvedFile, ReadFile } from "./patch.js";
+export {
+  APPLY_PATCH_TOOL,
+  describePatch,
+  parsePatchFiles,
+  resolvePatch,
+} from "./patch.js";
+
+export type { TodoItem, TodoStatus } from "./todo.js";
+export {
+  MAX_TODOS,
+  TODO_GLYPH,
+  TODO_READ_TOOL,
+  TODO_TOOLS,
+  TODO_WRITE_TOOL,
+  TodoStore,
+  parseTodos,
+  renderTodos,
+  runTodoTool,
+  todoSummary,
+} from "./todo.js";

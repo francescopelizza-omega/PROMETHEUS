@@ -44,15 +44,15 @@ interface FormState {
   python: string;
 }
 
-const secondary = "var(--text-secondary, #9a9aa3)";
+const secondary = "var(--text-secondary)";
 const mono = "var(--font-mono, ui-monospace, monospace)";
 
 const inputStyle = {
   width: "100%",
   boxSizing: "border-box" as const,
-  background: "var(--bg-surface-2, #16161b)",
-  color: "var(--text-primary, #e7e7ea)",
-  border: "1px solid var(--border-subtle, #2a2a33)",
+  background: "var(--bg-surface-2)",
+  color: "var(--text-primary)",
+  border: "1px solid var(--border-subtle)",
   borderRadius: 4,
   padding: "2px 6px",
   fontSize: "0.72rem",
@@ -197,10 +197,7 @@ export function RunConfigEditor({
         </Button>
       </div>
       {error && !form && (
-        <p
-          role="alert"
-          style={{ margin: "4px 0 0", color: "var(--danger, #ef5a5a)", fontSize: "0.72rem" }}
-        >
+        <p role="alert" style={{ margin: "4px 0 0", color: "var(--danger)", fontSize: "0.72rem" }}>
           {error}
         </p>
       )}
@@ -341,7 +338,7 @@ export function RunConfigEditor({
             {error && (
               <p
                 role="alert"
-                style={{ margin: "0 0 6px", color: "var(--danger, #ef5a5a)", fontSize: "0.72rem" }}
+                style={{ margin: "0 0 6px", color: "var(--danger)", fontSize: "0.72rem" }}
               >
                 {error}
               </p>

@@ -83,3 +83,64 @@ test("api backend throws a helpful error when no key is set", async () => {
     if (prev !== undefined) process.env.FIREWORKS_API_KEY = prev;
   }
 });
+
+/* ── the run budget can only count what the invoker reports ────────────────*/
+
+/**
+ * `Coordinator` has always called `budget.addCost(out.costUsd)` — but this invoker returned a
+ * bare `{ text }`, so `costUsd` was never a number, the counter never moved, and `overBudget()`
+ * compared a permanent 0 against `RunLimits.maxCostUsd`. The ceiling read as enforced in review
+ * and enforced nothing. This is the lane that spends real money, so both halves matter.
+ */
+
+/** A client that reports a usage frame, as a real provider does on the terminal chunk. */
+function usageClientFactory(usage: { inputTokens: number; outputTokens: number }) {
+  return ((endpoint, _policy, deps) => ({
+    async *chat() {
+      if (deps?.resolveKey) await deps.resolveKey(endpoint.apiKeyRef ?? "");
+      yield { delta: "out" };
+      yield { delta: "", done: true, usage: { ...usage, totalTokens: 0 } };
+    },
+  })) as unknown as NonNullable<InvokerDeps["aiClientFactory"]>;
+}
+
+const apiBackend = (model: string): orch.BackendRef => ({
+  kind: "api",
+  service: "groq",
+  baseUrl: "https://api.example/v1",
+  apiKeyEnv: "TEST_API_KEY",
+  model,
+});
+
+test("a priced api call reports costUsd, so the run budget can count it", async () => {
+  process.env.TEST_API_KEY = "k";
+  try {
+    const invoke = makeInvoker({
+      client: fakeEngine(),
+      // 1M in + 1M out on a model the shipped pricing table knows.
+      aiClientFactory: usageClientFactory({ inputTokens: 1_000_000, outputTokens: 1_000_000 }),
+    });
+    const out = await invoke(req(apiBackend("claude-opus-4")) as never);
+    assert.equal(out.text, "out");
+    assert.equal(typeof out.costUsd, "number", "the cost was dropped — the budget counts zero");
+    assert.ok((out.costUsd ?? 0) > 0, `expected a positive cost, got ${String(out.costUsd)}`);
+  } finally {
+    Reflect.deleteProperty(process.env, "TEST_API_KEY");
+  }
+});
+
+test("an UNPRICED model reports no cost rather than a free one", async () => {
+  // Reporting 0 would be a measurement — "this call cost nothing". Absent keeps the counter
+  // honest about what it cannot price.
+  process.env.TEST_API_KEY = "k";
+  try {
+    const invoke = makeInvoker({
+      client: fakeEngine(),
+      aiClientFactory: usageClientFactory({ inputTokens: 100, outputTokens: 100 }),
+    });
+    const out = await invoke(req(apiBackend("some-model-nobody-priced")) as never);
+    assert.equal(out.costUsd, undefined);
+  } finally {
+    Reflect.deleteProperty(process.env, "TEST_API_KEY");
+  }
+});

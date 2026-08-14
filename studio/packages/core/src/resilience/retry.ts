@@ -29,6 +29,17 @@ export interface RetryOptions {
   rng?: () => number;
   /** observe each scheduled retry (for logging/telemetry). */
   onRetry?: (err: unknown, attempt: number, delayMs: number) => void;
+  /**
+   * Override the computed delay for THIS error.
+   *
+   * Exists because some failures carry their own advice — an HTTP `Retry-After` is the
+   * canonical case — and a backoff curve is a guess competing with a fact. Without this hook a
+   * caller has to either abandon this primitive and write its own loop, or smuggle the real
+   * delay through the injected `sleep`, which makes `sleep` mean two things.
+   *
+   * Receives the error, the 0-based attempt, and the delay the curve produced (post-jitter).
+   */
+  delayFor?: (err: unknown, attempt: number, computedMs: number) => number;
 }
 
 /** Raised when a retry loop is aborted via its AbortSignal. */
@@ -74,7 +85,9 @@ export async function retry<T>(
       const hasMore = attempt < retries;
       if (!hasMore || !retryOn(err, attempt) || opts.signal?.aborted) break;
       const raw = backoffDelay(attempt, opts);
-      const delay = jitter ? Math.round(rng() * raw) : raw;
+      const curve = jitter ? Math.round(rng() * raw) : raw;
+      // The error's own advice, when it has any, overrides the curve — see `delayFor`.
+      const delay = Math.max(0, opts.delayFor?.(err, attempt, curve) ?? curve);
       opts.onRetry?.(err, attempt, delay);
       await sleep(delay);
     }

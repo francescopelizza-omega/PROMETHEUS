@@ -57,6 +57,20 @@ export interface PrOpResult {
   ok: boolean;
   error?: string;
 }
+export interface PrCreateResult extends PrOpResult {
+  /** the new PR/MR number (GitHub `number`, GitLab `iid`) when creation succeeded. */
+  number?: number;
+  /** the forge's web URL for the new PR/MR when creation succeeded. */
+  url?: string;
+}
+export interface CreatePrParams {
+  title: string;
+  /** the source branch (GitHub `head`, GitLab `source_branch`). */
+  head: string;
+  /** the target branch (GitHub `base`, GitLab `target_branch`). */
+  base: string;
+  body?: string;
+}
 
 /** The injected safe-fetch (bound to the real L6 proxy in MAIN; a fake in tests). */
 export type SafeFetchFn = (url: string, opts?: SafeFetchOptions) => Promise<SafeFetchResult>;
@@ -279,6 +293,66 @@ export async function getPullRequest(
       diff: diffR.ok ? assembleGitlabDiff(diffR.data) : "",
     },
   };
+}
+
+/* ── create ─────────────────────────────────────────────────────────────────── */
+
+export async function createPullRequest(
+  remote: ForgeRemote,
+  params: CreatePrParams,
+  fetch: SafeFetchFn,
+  token: string,
+): Promise<PrCreateResult> {
+  if (!params.title.trim()) return { ok: false, error: "empty title" };
+  if (!params.head.trim() || !params.base.trim()) {
+    return { ok: false, error: "missing head/base branch" };
+  }
+  if (!token) return { ok: false, error: "no auth token (set one in settings)" };
+  const auth = forgeAuth(remote.provider, token);
+  const host = apiHost(remote);
+  const url =
+    remote.provider === "github"
+      ? `https://api.github.com/repos/${remote.owner}/${remote.repo}/pulls`
+      : `https://${remote.host}/api/v4/projects/${encodeURIComponent(remote.slug)}/merge_requests`;
+  const payload =
+    remote.provider === "github"
+      ? { title: params.title, head: params.head, base: params.base, body: params.body ?? "" }
+      : {
+          source_branch: params.head,
+          target_branch: params.base,
+          title: params.title,
+          description: params.body ?? "",
+        };
+  const r = await fetch(
+    url,
+    buildOpts(auth, host, {
+      method: "POST",
+      headers: { ...auth.headers, "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    }),
+  );
+  if (r.blocked || r.data == null) {
+    return { ok: false, error: r.reason ?? "create blocked by safeFetch (fail-closed)" };
+  }
+  // a 2xx create returns the new PR/MR JSON; a 4xx returns an error object — surface it.
+  const parsed = parseJson(r.data) as {
+    message?: unknown;
+    error?: unknown;
+    number?: unknown;
+    iid?: unknown;
+    html_url?: unknown;
+    web_url?: unknown;
+  } | null;
+  const n = remote.provider === "github" ? num(parsed?.number) : num(parsed?.iid);
+  if (!Number.isNaN(n)) {
+    return {
+      ok: true,
+      number: n,
+      url: str(remote.provider === "github" ? parsed?.html_url : parsed?.web_url),
+    };
+  }
+  const apiErr = str(parsed?.message) || str(parsed?.error);
+  return apiErr ? { ok: false, error: apiErr } : { ok: true };
 }
 
 /* ── post a review comment ─────────────────────────────────────────────────── */

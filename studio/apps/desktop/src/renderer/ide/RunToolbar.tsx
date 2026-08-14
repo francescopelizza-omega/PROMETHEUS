@@ -74,8 +74,8 @@ export function RunToolbar({
         alignItems: "center",
         gap: 6,
         padding: "3px 8px",
-        borderBottom: "1px solid var(--border-subtle, #232329)",
-        background: "var(--bg-surface-2, #16161b)",
+        borderBottom: "1px solid var(--border-subtle)",
+        background: "var(--bg-surface-2)",
       }}
     >
       <select
@@ -84,9 +84,9 @@ export function RunToolbar({
         aria-label="toolbar run configuration"
         title="Run/Debug configuration (launch.json)"
         style={{
-          background: "var(--bg-inset, #0b0b0f)",
-          color: "var(--text-primary, #e7e7ea)",
-          border: "1px solid var(--border-subtle, #2a2a33)",
+          background: "var(--bg-inset)",
+          color: "var(--text-primary)",
+          border: "1px solid var(--border-subtle)",
           borderRadius: 4,
           padding: "2px 4px",
           fontSize: "0.74rem",
@@ -130,7 +130,7 @@ export function RunToolbar({
       <span
         style={{
           fontSize: "0.7rem",
-          color: "var(--text-secondary, #9a9aa3)",
+          color: "var(--text-secondary)",
           overflow: "hidden",
           textOverflow: "ellipsis",
           whiteSpace: "nowrap",

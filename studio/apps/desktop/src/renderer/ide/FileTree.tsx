@@ -20,6 +20,7 @@ import {
   useState,
 } from "react";
 
+import { Z, clampToViewport, useFocusTrap } from "@prometheus/ui";
 import type { IdeTreeNode } from "../../shared/ipc-contract.js";
 import { detectLanguage } from "./state/lang-detect.js";
 import { useTabsStore } from "./state/stores.js";
@@ -81,6 +82,20 @@ export function FileTree({ root }: { root: string }): ReactElement {
     value: string;
   } | null>(null);
   const [crudError, setCrudError] = useState<string | null>(null);
+  // The context menu and the name popover are real overlays, so they get the house overlay
+  // contract (§9.2) rather than a hand-rolled one. What was here before: an `onKeyDown` on a
+  // `role="presentation"` backdrop that has no tabIndex and is therefore never focused — so
+  // it could never BE the keydown target, and nothing bubbled to it either. Escape was dead
+  // on both. useFocusTrap listens on the document in CAPTURE, which no focus accident can
+  // defeat, moves focus into the surface, and restores it to the tree row on close.
+  const menuRef = useRef<HTMLDivElement | null>(null);
+  const namePopoverRef = useRef<HTMLDivElement | null>(null);
+  const closeMenu = useCallback(() => setMenu(null), []);
+  const closeNamePopover = useCallback(() => setNamePopover(null), []);
+  useFocusTrap(menuRef, menu !== null, closeMenu);
+  // the name popover autofocuses its own text input, and Tab inside it should reach the
+  // Cancel/OK buttons normally — so no initial focus from the trap, no Tab deferral.
+  useFocusTrap(namePopoverRef, namePopover !== null, closeNamePopover);
 
   // load the root listing.
   useEffect(() => {
@@ -309,25 +324,30 @@ export function FileTree({ root }: { root: string }): ReactElement {
 
       {menu && (
         <>
+          {/* biome-ignore lint/a11y/useKeyWithClickEvents: the keyboard path is Escape,
+              owned by useFocusTrap on the document in capture. The onKeyDown this rule
+              asks for is what USED to be here, on a never-focused presentation div —
+              it satisfied the lint and did nothing. */}
           <div
             role="presentation"
-            onClick={() => setMenu(null)}
+            onClick={closeMenu}
             onContextMenu={(e) => {
               e.preventDefault();
-              setMenu(null);
+              closeMenu();
             }}
-            onKeyDown={(e) => {
-              if (e.key === "Escape") setMenu(null);
-            }}
-            style={{ position: "fixed", inset: 0, zIndex: 80 }}
+            style={{ position: "fixed", inset: 0, zIndex: Z.modal }}
           />
           <div
             role="menu"
+            ref={menuRef}
             style={{
               position: "fixed",
-              top: menu.y,
-              left: menu.x,
-              zIndex: 81,
+              // Clamp, or a right-click near the bottom/right edge paints the menu — and
+              // its destructive `Delete` item — off-window where it cannot be reached.
+              // MENU_H over-estimates the four rows on purpose: erring large only pushes
+              // the menu further inside the viewport, which is the safe direction.
+              ...(({ x, y }) => ({ left: x, top: y }))(clampToViewport(menu.x, menu.y, 170, 128)),
+              zIndex: Z.modal,
               background: "var(--bg-surface-2)",
               border: "1px solid var(--border-strong)",
               borderRadius: "var(--radius-md, 6px)",
@@ -374,21 +394,26 @@ export function FileTree({ root }: { root: string }): ReactElement {
 
       {namePopover && (
         <>
+          {/* biome-ignore lint/a11y/useKeyWithClickEvents: the keyboard path is Escape,
+              owned by useFocusTrap on the document in capture. The onKeyDown this rule
+              asks for is what USED to be here, on a never-focused presentation div —
+              it satisfied the lint and did nothing. */}
           <div
             role="presentation"
-            onClick={() => setNamePopover(null)}
-            onKeyDown={(e) => {
-              if (e.key === "Escape") setNamePopover(null);
-            }}
-            style={{ position: "fixed", inset: 0, zIndex: 82, background: "rgba(0,0,0,.3)" }}
+            onClick={closeNamePopover}
+            style={{ position: "fixed", inset: 0, zIndex: Z.modal, background: "rgba(0,0,0,.3)" }}
           />
           <div
+            ref={namePopoverRef}
+            role="dialog"
+            aria-modal="true"
+            aria-label={namePopover.mode === "rename" ? "Rename" : "New name"}
             style={{
               position: "fixed",
               top: "30%",
               left: "50%",
               transform: "translateX(-50%)",
-              zIndex: 83,
+              zIndex: Z.modal,
               background: "var(--bg-surface-2)",
               border: "1px solid var(--border-strong)",
               borderRadius: "var(--radius-md, 6px)",

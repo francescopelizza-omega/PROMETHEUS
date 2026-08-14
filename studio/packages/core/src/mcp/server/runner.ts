@@ -53,6 +53,28 @@ export function validateArgs(schema: ToolSchema, args: Record<string, unknown>):
         errors.push(`arg "${key}" must be a finite number`);
         continue;
       }
+    } else if (spec.type === "array") {
+      // A JSON STRING that parses to an array is accepted, because that is what models
+      // actually send — `parseHunks` has tolerated exactly this since before there was an
+      // array type to declare. Rejecting it here would break the calls that work today.
+      if (typeof raw === "string") {
+        try {
+          const parsed: unknown = JSON.parse(raw);
+          if (!Array.isArray(parsed)) {
+            errors.push(`arg "${key}" must be an array`);
+            continue;
+          }
+          value[key] = parsed;
+          continue;
+        } catch {
+          errors.push(`arg "${key}" must be an array (or a JSON string holding one)`);
+          continue;
+        }
+      }
+      if (!Array.isArray(raw)) {
+        errors.push(`arg "${key}" must be an array`);
+        continue;
+      }
     }
     value[key] = raw;
   }

@@ -17,6 +17,7 @@ import {
   useRef,
   useState,
 } from "react";
+import { Z } from "../../tokens/layers.js";
 import { useDismiss } from "./overlay.js";
 import { fs, rad, sp, v } from "./styles.js";
 
@@ -87,7 +88,7 @@ export function Popover({
           className={className}
           style={{
             ...anchorStyle(side, align),
-            zIndex: 900,
+            zIndex: Z.dropdown,
             minWidth: "200px",
             background: v("bg-surface-2"),
             border: `1px solid ${v("border-strong")}`,
@@ -150,7 +151,7 @@ export function Tooltip({ label, side = "top", children }: TooltipProps): ReactN
           role="tooltip"
           style={{
             ...anchorStyle(side, "center"),
-            zIndex: 1200,
+            zIndex: Z.modal,
             whiteSpace: "nowrap",
             background: v("bg-surface-2"),
             border: `1px solid ${v("border-strong")}`,

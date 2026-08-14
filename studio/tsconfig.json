@@ -8,6 +8,7 @@
     { "path": "packages/engine-bridge" },
     { "path": "packages/core" },
     { "path": "packages/ui" },
-    { "path": "apps/cli" }
+    { "path": "apps/cli" },
+    { "path": "apps/mcp-server" }
   ]
 }

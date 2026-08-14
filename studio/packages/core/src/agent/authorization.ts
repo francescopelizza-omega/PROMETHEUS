@@ -41,6 +41,12 @@ export interface AuthLevelMeta {
   name: string;
   /** short status label. */
   label: string;
+  /**
+   * The GUI wording (Prometheus Studio handoff §5). A parallel DISPLAY string — `name`
+   * stays the CLI parse token (`--authorisation readonly`, `/auth runall`) and `label`
+   * stays the TUI chip, so the GUI can speak plain English without breaking either.
+   */
+  uiLabel: string;
   description: string;
   /** categories auto-approved WITHOUT asking (everything else prompts the human). */
   auto: readonly AuthCategory[];
@@ -69,6 +75,7 @@ export const AUTH_LEVELS: readonly AuthLevelMeta[] = Object.freeze([
     level: 0,
     name: "paranoid",
     label: "paranoid",
+    uiLabel: "ask everything",
     description: "Ask before EVERY action — even reading a file. Maximum control.",
     auto: [],
     runToDone: false,
@@ -77,6 +84,7 @@ export const AUTH_LEVELS: readonly AuthLevelMeta[] = Object.freeze([
     level: 1,
     name: "readonly",
     label: "read-only",
+    uiLabel: "read freely",
     description: "Auto-approve reads/scans; ask before every change. The safe default.",
     auto: cumulative(1),
     runToDone: false,
@@ -85,6 +93,7 @@ export const AUTH_LEVELS: readonly AuthLevelMeta[] = Object.freeze([
     level: 2,
     name: "edits",
     label: "edits",
+    uiLabel: "accept edits",
     description: "Auto reads + file writes/edits; ask before commands and installs.",
     auto: cumulative(2),
     runToDone: false,
@@ -93,6 +102,7 @@ export const AUTH_LEVELS: readonly AuthLevelMeta[] = Object.freeze([
     level: 3,
     name: "config",
     label: "config",
+    uiLabel: "edits + safe cmds",
     description: "Auto reads + edits + local config changes; ask before commands and installs.",
     auto: cumulative(3),
     runToDone: false,
@@ -101,6 +111,7 @@ export const AUTH_LEVELS: readonly AuthLevelMeta[] = Object.freeze([
     level: 4,
     name: "commands",
     label: "commands",
+    uiLabel: "project-wide",
     description: "Auto reads + edits + config + shell commands; ask before installs/fetches.",
     auto: cumulative(4),
     runToDone: false,
@@ -109,6 +120,7 @@ export const AUTH_LEVELS: readonly AuthLevelMeta[] = Object.freeze([
     level: 5,
     name: "installs",
     label: "installs",
+    uiLabel: "network allowed",
     description: "Auto reads + edits + config + commands + installs; ask only before destructive.",
     auto: cumulative(5),
     runToDone: false,
@@ -117,6 +129,7 @@ export const AUTH_LEVELS: readonly AuthLevelMeta[] = Object.freeze([
     level: 6,
     name: "trusted",
     label: "trusted",
+    uiLabel: "system-wide",
     description: "Auto-run EVERYTHING the engine allows. The nemesis gate still BLOCKs danger.",
     auto: cumulative(6),
     runToDone: false,
@@ -125,6 +138,7 @@ export const AUTH_LEVELS: readonly AuthLevelMeta[] = Object.freeze([
     level: 7,
     name: "runall",
     label: "RUN ALL",
+    uiLabel: "run all",
     description:
       "Run everything with NO prompts and no pauses (run-to-done). Nemesis still hard-stops danger.",
     auto: cumulative(6),
@@ -170,11 +184,26 @@ export function classifyAuth(ref: string, ann: AuthToolEffect | undefined): Auth
  * (prompt the human). There is no "deny" — the scale is purely about prompt frequency
  * (plan-mode's read-only DENY lives in permission-modes, orthogonal to this).
  */
+/**
+ * Tools that ALWAYS prompt — including at A7 ("run everything with NO prompts").
+ *
+ * A7 is a statement about the agent's own actions: run them unattended, nemesis still
+ * hard-stops danger. `propose_elevated` is not one of the agent's actions. It renders an
+ * authoritative "run this as root" block addressed to the human, and its entire safety
+ * argument is that a person read it and chose to paste it. An agent that could emit those
+ * silently — under prompt injection, at volume — would be manufacturing exactly the
+ * mis-click §7 exists to prevent. So the one tool that cannot execute anything is also the
+ * one tool no authorization level auto-approves.
+ */
+export const NEVER_AUTO_TOOLS: ReadonlySet<string> = new Set(["propose_elevated"]);
+
 export function authDecision(
   level: number,
   ref: string,
   ann: AuthToolEffect | undefined,
 ): "allow" | "ask" {
+  const base = ref.includes(":") ? (ref.split(":").pop() ?? ref) : ref;
+  if (NEVER_AUTO_TOOLS.has(ref) || NEVER_AUTO_TOOLS.has(base)) return "ask";
   const meta = authLevelMeta(level);
   return meta.auto.includes(classifyAuth(ref, ann)) ? "allow" : "ask";
 }
