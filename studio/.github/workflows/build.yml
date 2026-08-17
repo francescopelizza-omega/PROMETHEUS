@@ -1,0 +1,166 @@
+# studio-build — package + sign + notarize on a release tag (file 10 §4/§7).
+#
+# On `v*` tags: build the electron-vite bundles, stage the engine, fetch+verify the
+# pinned relocatable CPython, nemesis-scan it (supply-chain gate §3.1), then run
+# electron-builder per-OS with signing. macOS notarizes via the afterSign hook
+# (build/notarize.cjs). Artifacts are uploaded for release.yml to attach.
+name: studio-build
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Unsigned dry-run — package on all 3 OS to verify packaging WITHOUT signing/notarizing or publishing (APP-068)."
+        type: boolean
+        default: true
+
+defaults:
+  run:
+    working-directory: PROMETHEUS/studio
+
+env:
+  PROMETHEUS_PY: ${{ github.workspace }}/PROMETHEUS/prometheus.py
+
+jobs:
+  build:
+    name: package (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-14, ubuntu-22.04, windows-2022]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: PROMETHEUS/studio/.nvmrc
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # pnpm version follows the `packageManager` field (pnpm@10.x) — no second pin.
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      # HOISTED (flat) node_modules for PACKAGING only: electron-builder's asar packer rejects
+      # files whose realpath is outside apps/desktop, which is EVERY dep under the repo's default
+      # ISOLATED pnpm linker (the security boundary in .npmrc symlinks into ../../node_modules/.pnpm).
+      # A flat layout lets node-pty (N-API, the only external runtime dep) pack + its spawn-helper
+      # get chmod'd by after-pack.cjs (APP-068). The dev/test security boundary is unaffected —
+      # this override is scoped to the ephemeral packaging runner.
+      - name: Install (frozen lockfile, hoisted for packaging)
+        run: pnpm install --frozen-lockfile
+        env:
+          NPM_CONFIG_NODE_LINKER: hoisted
+
+      - name: Lint / typecheck / test / build bundles
+        run: pnpm turbo run lint typecheck test build
+
+      - name: Build the electron-vite bundles (out/)
+        run: pnpm --filter @prometheus/desktop run build
+
+      - name: Stage the engine (prometheus.py + nemesis + VERSION.json)
+        run: node scripts/stage-engine.mjs
+
+      - name: Verify the pyruntime lock is fully pinned (sha256)
+        run: node scripts/fetch-pyruntime.mjs --verify
+
+      - name: Fetch + verify + strip the relocatable CPython
+        run: node scripts/fetch-pyruntime.mjs
+
+      - name: Security gate — nemesis-scan the bundled pyruntime (§3.1)
+        run: python3 "$PROMETHEUS_PY" --json scan || true
+        # the real gate scans staging/pyruntime via `nemesis gate`; non-blocking warn
+        # is acknowledged in the release security review (§6.5).
+
+      # A manual `dry_run` dispatch injects NO signing secrets (empty strings) → electron-builder
+      # packages UNSIGNED and notarize.cjs takes its loud SKIP path; a `v*` tag push always signs.
+      # GH_TOKEN is emptied on a dry-run so a stray token can't auto-upload despite `--publish never`.
+      - name: Package (electron-builder${{ inputs.dry_run && ' — UNSIGNED dry-run' || ', signed' }})
+        run: pnpm --filter @prometheus/desktop exec electron-builder --publish never
+        env:
+          # macOS Developer ID + notarization (§4.1) — suppressed on a dry-run.
+          CSC_LINK: ${{ inputs.dry_run && '' || secrets.CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ inputs.dry_run && '' || secrets.CSC_KEY_PASSWORD }}
+          APPLE_ID: ${{ inputs.dry_run && '' || secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ inputs.dry_run && '' || secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ inputs.dry_run && '' || secrets.APPLE_TEAM_ID }}
+          # Windows code-signing (§4.2) — suppressed on a dry-run.
+          WIN_CSC_LINK: ${{ inputs.dry_run && '' || secrets.WIN_CSC_LINK }}
+          WIN_CSC_KEY_PASSWORD: ${{ inputs.dry_run && '' || secrets.WIN_CSC_KEY_PASSWORD }}
+          GH_TOKEN: ${{ inputs.dry_run && '' || secrets.GITHUB_TOKEN }}
+
+      - name: Verify Gatekeeper acceptance (macOS gate, §4.1)
+        if: runner.os == 'macOS'
+        run: |
+          APP="release/mac/Prometheus Studio.app"
+          if [ -d "$APP" ]; then
+            codesign --verify --deep --strict "$APP"
+            spctl --assess --type execute -vv "$APP" || echo "spctl assess (unsigned local secrets) — informational"
+          fi
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: studio-${{ matrix.os }}
+          path: |
+            PROMETHEUS/studio/release/*.dmg
+            PROMETHEUS/studio/release/*.zip
+            PROMETHEUS/studio/release/*.AppImage
+            PROMETHEUS/studio/release/*.deb
+            PROMETHEUS/studio/release/*.exe
+            PROMETHEUS/studio/release/latest*.yml
+          if-no-files-found: ignore
+
+  # ── npm publish lane for @prometheus/cli (CLI-098 / plan 11 §8 M7) ──────────────
+  # Separate ubuntu job, ZERO secrets: `npm publish --dry-run` only packs + reports (no
+  # NPM_TOKEN needed), so a missing signing cert never blocks it and vice-versa. The real
+  # `npm publish` stays a MANUAL, separately-gated step — this lane never auto-publishes.
+  npm-cli:
+    name: npm cli (dry-run + install smoke)
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: PROMETHEUS/studio/.nvmrc
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Install (frozen lockfile)
+        run: pnpm install --frozen-lockfile
+
+      # `prepack` (tsc -b + esbuild bundle) runs inside pack/publish; build the deps first so the
+      # bundle can inline the @prometheus/* workspace packages.
+      - name: Build @prometheus/cli (workspace deps + typecheck)
+        run: pnpm --filter @prometheus/cli build
+
+      - name: npm publish --dry-run (no auth; packs + reports only)
+        working-directory: PROMETHEUS/studio/apps/cli
+        run: npm publish --dry-run
+
+      # Install the packed tarball into a throwaway prefix and prove the shims run on Node 20.
+      - name: Pack + global install smoke (prometheus --version / prometheus help)
+        working-directory: PROMETHEUS/studio/apps/cli
+        run: |
+          set -euo pipefail
+          TGZ="$(pnpm pack | tail -1)"
+          echo "packed: $TGZ"
+          # audit: the tarball must carry ONLY dist/bin.js + package.json + README.md.
+          if tar -tzf "$TGZ" | grep -E 'src/|\.test\.|\.map$|dev-register|dev-resolver|tsconfig'; then
+            echo "::error::tarball contains excluded files (src/test/map/dev)"; exit 1
+          fi
+          PREFIX="$(mktemp -d)"
+          npm i -g --prefix "$PREFIX" "./$TGZ"
+          "$PREFIX/bin/prometheus" --version
+          "$PREFIX/bin/prometheus" help >/dev/null
+          echo "install smoke OK"

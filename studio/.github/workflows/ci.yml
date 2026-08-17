@@ -1,0 +1,185 @@
+# Prometheus Studio — CI (file 02 §7.4, full detail in [[10-build-dist-test-roadmap.md]]).
+#
+# A thin wrapper over the Turbo graph: install (frozen) -> lint -> typecheck ->
+# test -> build, PLUS the load-bearing CONTRACT TEST that spawns the REAL
+# `python3 prometheus.py --json scan` and asserts the engine-bridge parses a
+# valid ScanEnvelope. That contract test is the canary for the whole trinity:
+# it catches engine<->bridge drift in CI before it ships (C2 / file 02 §3.1).
+#
+# Runs on ubuntu + macos + windows because the engine is cross-platform and the
+# bridge must be too. The git repo root is the ALPHA tree, so both the engine
+# (PROMETHEUS/prometheus.py) and this monorepo (PROMETHEUS/studio) are present
+# in a single checkout — we point PROMETHEUS_PY at the checked-out engine.
+
+name: studio-ci
+
+on:
+  push:
+    paths:
+      - "PROMETHEUS/studio/**"
+      - "PROMETHEUS/prometheus.py"
+      - "PROMETHEUS/nemesis"
+  pull_request:
+    paths:
+      - "PROMETHEUS/studio/**"
+      - "PROMETHEUS/prometheus.py"
+      - "PROMETHEUS/nemesis"
+  workflow_dispatch:
+
+# The desktop electron-vite build pulls the Electron binary; CI does not need the
+# runtime download to TYPE-CHECK / BUILD the bundles, so we skip it for speed and
+# to keep ubuntu/windows runners from fetching a ~100MB binary they never launch.
+# (Playwright-for-Electron e2e — which DOES need the binary — lives in [[10]].)
+env:
+  ELECTRON_SKIP_BINARY_DOWNLOAD: "1"
+  # The engine ships beside this monorepo in the same checkout; the bridge's
+  # config.ts also walks up to find it, but we pin it explicitly so the contract
+  # test never falls back to t.skip() on a clean runner.
+  PROMETHEUS_PY: ${{ github.workspace }}/PROMETHEUS/prometheus.py
+
+defaults:
+  run:
+    # All steps execute from the monorepo root (the ALPHA repo checks out whole).
+    working-directory: PROMETHEUS/studio
+
+jobs:
+  build:
+    name: lint · typecheck · test · build (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # Node 20 — matches Electron 33's bundled Node ABI (.nvmrc / C10).
+      - name: Setup Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: PROMETHEUS/studio/.nvmrc
+
+      # Python 3.12 — the engine is stdlib-only; the contract test shells it out.
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # pnpm version is the single source of truth = the `packageManager` field in
+      # package.json (pnpm@10.x). action-setup@v4 reads it when no version is given, so
+      # `pnpm install --frozen-lockfile` is reproducible without a second pin to drift.
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Install (frozen lockfile)
+        run: pnpm install --frozen-lockfile
+
+      # The Turbo graph: lint -> typecheck -> test -> build, content-hash cached.
+      # `test` is wired to the working node:test runner (node --test via
+      # dev-register), NOT vitest, so the node:test suites gate CI exactly as
+      # they gate locally. (Vitest is the documented FUTURE unit runner — §2.)
+      - name: Lint / typecheck / test / build
+        run: pnpm turbo run lint typecheck test build
+
+      # ---- LIVE SANDBOX CHECK (ubuntu only) ---------------------------------- #
+      # The macOS exec sandbox (Seatbelt) is live-verified on every dev machine and on the
+      # macos-latest runner, because `sandbox-exec` ships with the OS. The LINUX half —
+      # bubblewrap — cannot be live-verified on a Mac at all, so without this step the whole
+      # Linux confinement path would be unit-tested only, forever: argv assertions that prove
+      # this module builds the command it meant to, and nothing about whether a kernel honours
+      # it. Installing bubblewrap here is what turns the `LIVE(linux)` cases in
+      # exec-sandbox.test.ts from skipped into real evidence.
+      #
+      # It runs AFTER the turbo graph rather than inside it: the package `test` script must
+      # keep passing on a machine with no bwrap (that is the honest-absence case the module is
+      # built around), so bubblewrap is deliberately NOT a prerequisite of the normal run.
+      - name: Install bubblewrap (ubuntu — makes the Linux sandbox checks live)
+        if: matrix.os == 'ubuntu-latest'
+        run: sudo apt-get update && sudo apt-get install -y bubblewrap
+
+      - name: Live check — the Linux exec sandbox is enforced by the kernel
+        if: matrix.os == 'ubuntu-latest'
+        run: node --import ./apps/cli/dev-register.mjs --test packages/core/src/agent/system/host/exec-sandbox.test.ts
+
+      # ---- CONTRACT TEST (the canary, file 02 §7.4) -------------------------- #
+      # Spawn the REAL engine and assert the bridge parses a valid ScanEnvelope.
+      # We reuse the engine-bridge contract test in run.test.ts (the
+      # "CONTRACT: real prometheus.py --json scan ..." case) by running that one
+      # suite through the same dev-register node:test runner CI already uses, with
+      # PROMETHEUS_PY pointed at the checked-out engine so it does NOT skip.
+      - name: Sanity — engine emits a scan envelope on this runner
+        shell: bash
+        run: |
+          python3 "$PROMETHEUS_PY" --json scan \
+            | python3 -c "import sys, json; o=json.load(sys.stdin); assert o.get('command')=='scan' and o.get('ok') is True and isinstance(o.get('agents'), list), o; print('engine scan envelope OK')"
+
+      - name: Contract test — bridge parses a real ScanEnvelope
+        run: node --import ./apps/cli/dev-register.mjs --test packages/engine-bridge/src/run.test.ts
+
+  # ---- E2E (APP-069) — launch the REAL built Electron app + visual snapshots ---- #
+  # Split from `build` because it MUST download the Electron binary (the driven app) and
+  # needs a display; ubuntu is the SNAPSHOT AUTHORITY (mac-local baselines would always fail
+  # on linux font hinting — see playwright.config.ts). Failure artifacts (trace + screenshots)
+  # are uploaded for the "verify UI visually" workflow.
+  #
+  # windows-latest runs the SAME functional smoke flow (real desktop-boot coverage for the
+  # win32 node-pty / keychain fallback paths — apps/desktop/src/main/ide/pty-host.ts,
+  # packages/core/src/agent/system/host/os-keychain.ts), but NOT the pixel `toHaveScreenshot`
+  # baselines: Playwright auto-suffixes snapshots per platform (`-darwin`/`-linux`/`-win32`)
+  # and no `-win32` baseline has ever been recorded, so a naive `playwright test` would fail
+  # on the very first run with "no such snapshot" rather than a real regression. The one
+  # visual assertion in smoke.spec.ts is skipped on win32 for that reason (see the spec).
+  # `shell: bash` is forced job-wide: `pnpm --filter @prometheus/desktop` is otherwise parsed
+  # by the Windows-runner default shell (pwsh) as an attempt to SPLAT a `$prometheus`
+  # variable (bare `@name` tokens are pwsh's splatting operator), which is a parser error,
+  # not a normal command failure — Git-Bash-on-Windows (the `shell: bash` runtime) has no
+  # such special-case for `@`.
+  e2e:
+    name: e2e (playwright · electron · ${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: PROMETHEUS/studio/.nvmrc
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+      # e2e DOES launch Electron → do NOT skip the binary download here.
+      - name: Install (frozen lockfile)
+        run: pnpm install --frozen-lockfile
+        env:
+          ELECTRON_SKIP_BINARY_DOWNLOAD: "0"
+      # Electron links system libs (libnss3/libgtk-3/libgbm/…) ONLY on Linux; playwright
+      # install-deps is an apt-based Linux concept — windows-latest already ships everything
+      # Electron needs (same reason macos-latest never ran this step either).
+      - name: Install OS libs for Electron (ubuntu only)
+        if: matrix.os == 'ubuntu-latest'
+        run: pnpm --filter @prometheus/desktop exec playwright install-deps
+      - name: Build the electron-vite bundles (out/)
+        run: pnpm --filter @prometheus/desktop run build
+      # xvfb gives the headless LINUX runner a display; --no-sandbox is passed via app args
+      # (fixture, linux-only branch). windows-latest ships a real interactive desktop
+      # session already (same as macos-latest), so Electron launches with no wrapper needed.
+      - name: Run e2e (xvfb, ubuntu)
+        if: matrix.os == 'ubuntu-latest'
+        run: xvfb-run -a pnpm --filter @prometheus/desktop exec playwright test
+      - name: Run e2e (windows)
+        if: matrix.os == 'windows-latest'
+        run: pnpm --filter @prometheus/desktop exec playwright test
+      - name: Upload failure artifacts (trace + screenshots)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-artifacts-${{ matrix.os }}
+          path: |
+            PROMETHEUS/studio/apps/desktop/e2e/.artifacts/**
+            PROMETHEUS/studio/apps/desktop/playwright-report/**
+          if-no-files-found: ignore
