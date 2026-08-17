@@ -122,7 +122,7 @@ export type Modality =
 /**
  * Precomputed compute-demand (open-models.json `resource`, from the model-resource
  * investigation) — surfaced beside the descriptor so users see "can my machine run
- * this?" at a glance. All GiB, computed at Q4_K_M (see MDS/model-resource-methodology.md).
+ * this?" at a glance. All GiB, computed at Q4_K_M.
  */
 export interface ModelResource {
   q4Gb?: number;
@@ -175,6 +175,25 @@ export interface Model {
   installed: boolean;
   /** where the file(s) live once downloaded. */
   localPath?: string;
+
+  /* ── local-library facts (`model.list` only) ──────────────────────────────
+   * The sidecar's `model.list` measures what is actually ON DISK — the file size, the
+   * quantization it could infer, the container format — and, for Ollama-indexed rows, whether
+   * the daemon is already serving it and at which endpoint. `quants` is empty for those rows
+   * (there is nothing to rank: the bytes are already here), so `totalBytes` cannot carry the
+   * size and these fields exist instead of guessing from a catalog entry that may not match
+   * the file the user actually has. All optional: a CATALOG row has none of them.
+   */
+  /** on-disk size in bytes (`size_bytes`). */
+  sizeBytes?: number;
+  /** the quantization read off the file / Ollama details (`quant`), e.g. "Q4_K_M". */
+  quant?: string;
+  /** container format (`format`), e.g. "gguf" | "safetensors". */
+  format?: string;
+  /** the Ollama daemon already serves this one. */
+  served?: boolean;
+  /** the OpenAI-compatible endpoint it is served at, when `served`. */
+  endpoint?: string;
 }
 
 // ── §2.4 ServeProfile ─────────────────────────────────────────────────────────

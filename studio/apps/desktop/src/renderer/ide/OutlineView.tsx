@@ -97,7 +97,7 @@ function SymbolRows({
                   style={{
                     background: "transparent",
                     border: "none",
-                    color: "var(--text-secondary, #9a9aa3)",
+                    color: "var(--text-secondary)",
                     cursor: "pointer",
                     width: 12,
                     padding: 0,
@@ -108,7 +108,7 @@ function SymbolRows({
               ) : (
                 <span style={{ width: 12 }} />
               )}
-              <span style={{ color: "var(--accent, #22d3ee)", width: 12, textAlign: "center" }}>
+              <span style={{ color: "var(--accent)", width: 12, textAlign: "center" }}>
                 {kindGlyph(s.kind)}
               </span>
               <button
@@ -119,7 +119,7 @@ function SymbolRows({
                   textAlign: "left",
                   background: "transparent",
                   border: "none",
-                  color: "var(--text-primary, #e7e7ea)",
+                  color: "var(--text-primary)",
                   cursor: "pointer",
                   fontFamily: "var(--font-mono, monospace)",
                   fontSize: "0.74rem",
@@ -131,7 +131,7 @@ function SymbolRows({
               >
                 {s.name}
                 {s.detail ? (
-                  <span style={{ color: "var(--text-secondary, #9a9aa3)" }}> {s.detail}</span>
+                  <span style={{ color: "var(--text-secondary)" }}> {s.detail}</span>
                 ) : null}
               </button>
             </div>
@@ -218,7 +218,7 @@ export function OutlineView({ root }: { root: string }): ReactElement {
         <span
           style={{
             flex: 1,
-            color: "var(--text-secondary, #9a9aa3)",
+            color: "var(--text-secondary)",
             fontFamily: "var(--font-mono, monospace)",
             overflow: "hidden",
             textOverflow: "ellipsis",
@@ -238,17 +238,17 @@ export function OutlineView({ root }: { root: string }): ReactElement {
       </div>
 
       {status === "none" && (
-        <p style={{ color: "var(--text-secondary, #9a9aa3)", fontSize: "0.72rem" }}>
+        <p style={{ color: "var(--text-secondary)", fontSize: "0.72rem" }}>
           Open a file to see its structure.
         </p>
       )}
       {status === "unsupported" && (
-        <p style={{ color: "var(--text-secondary, #9a9aa3)", fontSize: "0.72rem" }}>
+        <p style={{ color: "var(--text-secondary)", fontSize: "0.72rem" }}>
           No language server for this file type.
         </p>
       )}
       {status === "empty" && (
-        <p style={{ color: "var(--text-secondary, #9a9aa3)", fontSize: "0.72rem" }}>
+        <p style={{ color: "var(--text-secondary)", fontSize: "0.72rem" }}>
           No symbols (the server may still be indexing — press ⟳).
         </p>
       )}

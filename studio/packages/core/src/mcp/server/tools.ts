@@ -24,13 +24,29 @@ export interface ToolAnnotations {
   openWorldHint?: boolean;
 }
 
-/** A single argument's type + constraints (dependency-free; mirrors a zod field). */
+/**
+ * A single argument's type + constraints (dependency-free; mirrors a zod field).
+ *
+ * `array` was added because two tools were LYING about their arguments. `propose_edit.hunks`
+ * is `Array<{old,new}>` and `propose_elevated.argv` is `string[]`, but with no array type to
+ * declare, both were typed `string` with a description that contradicted it. That reached the
+ * model as `hunks*: string` on the single most important tool for editing code — so the model
+ * dutifully sent a string, and only `parseHunks`' array-or-JSON-string tolerance kept it
+ * working at all. A schema that disagrees with its own description is a schema the model
+ * cannot follow.
+ *
+ * `items` describes the ELEMENT type. It is deliberately shallow: nothing here needs a full
+ * recursive JSON Schema, and a shallow hint plus a precise description is what actually
+ * lands with a small local model.
+ */
 export interface FieldSpec {
-  type: "string" | "boolean" | "number" | "enum";
+  type: "string" | "boolean" | "number" | "enum" | "array";
   required?: boolean;
   default?: string | boolean | number;
   enum?: readonly string[];
   description?: string;
+  /** for `type:"array"` — the element type, and optionally a shape note for the prompt. */
+  items?: { type: "string" | "boolean" | "number" | "object"; shape?: string };
 }
 
 /** A tool's argument schema: field name → spec. */

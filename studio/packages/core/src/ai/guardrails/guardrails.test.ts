@@ -223,11 +223,52 @@ test("evaluateBudgets: below warn threshold → ok", () => {
   assert.equal(d.action, "ok");
 });
 
-test("evaluateBudgets: local/free model spend is $0 (never trips a cap)", () => {
+test("a KNOWN-FREE model spends $0 and never trips a cap", () => {
+  // `{null, null}` is the caller saying "this is free" — a local model on the user's own
+  // hardware. That is a different fact from `undefined`, which says "I have no price for
+  // this", and the two must not be conflated: see the next test.
+  const freePrice = () => ({ pricePerMTokIn: null, pricePerMTokOut: null });
   const recs = Array.from({ length: 50 }, () => rec({ model: "local-qwen" }));
-  const d = evaluateBudgets(recs, { sessionUsd: 1 }, "2026-07-17T13:00:00Z", priceFor);
+  const d = evaluateBudgets(recs, { sessionUsd: 1 }, "2026-07-17T13:00:00Z", freePrice);
   assert.equal(d.action, "ok");
   assert.equal(d.spentUsd, 0);
+});
+
+test("an UNPRICED metered model FAILS CLOSED — a cap that cannot be enforced must not pass", () => {
+  // Thirteen of the eighteen cloud providers have no price entry, and an unpriced record used
+  // to contribute exactly $0. So `session_usd = 1` let an enormous Groq session through
+  // reporting `spentUsd: 0`, while the identical tokens on Claude blocked at $1800. A cap that
+  // silently does not apply is worse than no cap: the user believes they are protected.
+  const noPrice = () => undefined;
+  const recs = Array.from({ length: 50 }, () => rec({ model: "llama-3.3-70b-versatile" }));
+  const d = evaluateBudgets(recs, { sessionUsd: 1 }, "2026-07-17T13:00:00Z", noPrice);
+  assert.equal(d.action, "block");
+  assert.equal(d.cause, "unpriced");
+  assert.deepEqual(d.unpriced, ["llama-3.3-70b-versatile"]);
+  // …and it names the two ways out rather than just refusing.
+  assert.match(d.reason ?? "", /--force-budget/);
+  assert.match(d.reason ?? "", /unpriced_policy/);
+});
+
+test("with NO cap set, an unpriced model changes nothing", () => {
+  // The blast radius is exactly the population that asked for the guarantee.
+  const d = evaluateBudgets(
+    [rec({ model: "unknown" })],
+    {},
+    "2026-07-17T13:00:00Z",
+    () => undefined,
+  );
+  assert.equal(d.action, "ok");
+});
+
+test('`unpriced_policy = "warn"` is an explicit opt-in to spend uncapped', () => {
+  const d = evaluateBudgets(
+    [rec({ model: "unknown" })],
+    { sessionUsd: 1, unpricedPolicy: "warn" },
+    "2026-07-17T13:00:00Z",
+    () => undefined,
+  );
+  assert.notEqual(d.action, "block");
 });
 
 test("evaluateBudgets: daily window counts only the local calendar day", () => {

@@ -10,7 +10,7 @@
  * hooks: `onZoom(path)` to re-root, `highlightNames` to dim non-matches, and a controlled
  * hover overlay for the name·total·self·% tooltip (native title has a fixed OS delay).
  */
-import { Panel } from "@prometheus/ui";
+import { Panel, Z, clampToViewport } from "@prometheus/ui";
 import { type ReactElement, useMemo, useState } from "react";
 
 import {
@@ -194,19 +194,15 @@ export function FlameView({
             role="tooltip"
             style={{
               position: "fixed",
-              // clamp into the viewport so an edge-of-window hover isn't painted off-screen
-              left: Math.min(
-                hover.x + 12,
-                (typeof window !== "undefined" ? window.innerWidth : 9999) - 300,
-              ),
-              top: Math.min(
-                hover.y + 12,
-                (typeof window !== "undefined" ? window.innerHeight : 9999) - 64,
+              // clamp into the viewport so an edge-of-window hover isn't painted off-screen.
+              // +12 keeps the tooltip off the cursor so it never eats its own hover.
+              ...(({ x, y }) => ({ left: x, top: y }))(
+                clampToViewport(hover.x + 12, hover.y + 12, 300, 64),
               ),
               maxWidth: "min(300px, 90vw)",
               overflow: "hidden",
               textOverflow: "ellipsis",
-              zIndex: 50,
+              zIndex: Z.dropdown,
               pointerEvents: "none",
               padding: "var(--space-2, 4px) var(--space-3, 6px)",
               borderRadius: "var(--radius-sm, 4px)",

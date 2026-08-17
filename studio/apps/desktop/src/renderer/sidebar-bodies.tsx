@@ -4,7 +4,7 @@
  * One body per SIDEBAR_BODY_ACTIVITIES entry (shell/sidebar-view.ts is the single
  * source for WHICH activities have one — the Record type here enforces the match):
  *   home   → the workspace file explorer (reuses ide/FileTree verbatim);
- *   repos  → a compact git working-tree summary (thin `ide.gitStatus` view — the
+ *   workspace → a compact git working-tree summary (thin `ide.gitStatus` view — the
  *            full GitPanel is an editor tool-window and far too heavy here);
  *   editor → the OPEN EDITORS list. Deliberately NOT a second file tree: the
  *            editor route owns its own explorer/search/git tool-windows, and a
@@ -103,7 +103,7 @@ function OpenEditorsBody(): ReactElement {
   );
 }
 
-/* ── repos: compact git working-tree summary ────────────────────────────────*/
+/* ── workspace: compact git working-tree summary ────────────────────────────*/
 
 function VcsBody(): ReactElement {
   const root = useTabsStore((s) => s.workspaceRoot);
@@ -184,7 +184,7 @@ function VcsBody(): ReactElement {
 const SIDEBAR_BODIES: Readonly<Record<SidebarBodyActivity, () => ReactNode>> = {
   home: () => <ExplorerBody />,
   editor: () => <OpenEditorsBody />,
-  repos: () => <VcsBody />,
+  workspace: () => <VcsBody />,
 };
 
 /** The registered body for an activity, or null (Sidebar then shows its fallback). */

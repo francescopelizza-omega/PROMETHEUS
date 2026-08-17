@@ -15,6 +15,18 @@ export {
 export type { Profile } from "./profiles.js";
 export { BUILTIN_PROFILES, DEFAULT_PROFILE_ID, getProfile, applyProfile } from "./profiles.js";
 
+// The four security settings, turned into decisions something can actually enforce.
+export type { EgressKind, NetworkPolicy, SecurityPosture } from "./posture.js";
+export {
+  cloudAllowed,
+  describePosture,
+  effectiveGateMode,
+  egressAllowed,
+  isRestrictive,
+  sanitizeWorkspaceLayer,
+  securityPosture,
+} from "./posture.js";
+
 // --- keymap (file 13 §2.2): presets + conflict detection ------------------- //
 export type {
   BindableCommand,

@@ -61,7 +61,14 @@ test("option-shaped account is refused (argv-injection guard)", async () => {
   await assert.rejects(() => store.set("svc", "-a-evil", "k"), /option-shaped/);
 });
 
-test("unsupported platform fails closed naming the missing tool", async () => {
+test("unsupported platform fails closed with a remedy that actually works", async () => {
   const store = createCliSecretsStore({ platform: "win32" });
-  await assert.rejects(() => store.get("s", "a"), /no CLI keychain tool/);
+  await assert.rejects(() => store.get("s", "a"), /no keychain tool for platform 'win32'/);
+  // The old message ended "…or use the desktop app". The desktop resolves provider keys
+  // through this same function, so that remedy sent a Windows user to the same wall.
+  await assert.rejects(() => store.get("s", "a"), /environment variable/);
+  await assert.rejects(
+    () => store.get("s", "a"),
+    (e) => !/use the desktop app/.test(String(e)),
+  );
 });

@@ -17,8 +17,16 @@
  */
 
 import { Button } from "@prometheus/ui";
-import { type CSSProperties, type ReactElement, useCallback, useEffect, useState } from "react";
+import {
+  type CSSProperties,
+  type ReactElement,
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+} from "react";
 
+import { Z, useFocusTrap } from "@prometheus/ui";
 import {
   type ParsedMerge,
   acceptBoth,
@@ -54,8 +62,8 @@ const PANE: CSSProperties = {
   fontFamily: "var(--font-mono, monospace)",
   fontSize: "0.7rem",
   whiteSpace: "pre",
-  background: "var(--bg-inset, #0b0b0f)",
-  border: "1px solid var(--border-subtle, #2a2a33)",
+  background: "var(--bg-inset)",
+  border: "1px solid var(--border-subtle)",
   borderRadius: "var(--radius-sm, 3px)",
 };
 
@@ -121,14 +129,22 @@ export function MergeView({ root, file, onResolved, onClose }: MergeViewProps): 
     onResolved();
   }, [merge, root, file, onResolved]);
 
+  // §9.2: it covers the whole viewport at Z.modal and has no click-outside, so Escape and a
+  // focus trap are the ONLY keyboard exits. It had neither — the ✕ was mouse-only.
+  const rootRef = useRef<HTMLDivElement | null>(null);
+  useFocusTrap(rootRef, true, onClose);
+
   let conflictIndex = -1;
   return (
     <div
+      ref={rootRef}
+      role="dialog"
+      aria-modal="true"
       style={{
         position: "fixed",
         inset: 0,
-        zIndex: 1200,
-        background: "var(--bg-app, #0b0d10)",
+        zIndex: Z.modal,
+        background: "var(--bg-app)",
         display: "flex",
         flexDirection: "column",
         padding: 10,
@@ -136,11 +152,9 @@ export function MergeView({ root, file, onResolved, onClose }: MergeViewProps): 
       aria-label={`merge ${file}`}
     >
       <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
-        <strong style={{ fontSize: "0.8rem", color: "var(--text-primary, #e7e7ea)" }}>
-          Merge · {file}
-        </strong>
+        <strong style={{ fontSize: "0.8rem", color: "var(--text-primary)" }}>Merge · {file}</strong>
         <span style={{ flex: 1 }} />
-        <span style={{ fontSize: "0.72rem", color: "var(--text-secondary, #9a9aa3)" }}>
+        <span style={{ fontSize: "0.72rem", color: "var(--text-secondary)" }}>
           {unresolved > 0 ? `${unresolved} unresolved` : "all resolved"}
         </span>
         <Button
@@ -156,17 +170,15 @@ export function MergeView({ root, file, onResolved, onClose }: MergeViewProps): 
       </div>
 
       {error && (
-        <p style={{ color: "var(--danger, #e5534b)", fontSize: "0.74rem", margin: "0 0 6px" }}>
-          {error}
-        </p>
+        <p style={{ color: "var(--danger)", fontSize: "0.74rem", margin: "0 0 6px" }}>{error}</p>
       )}
 
       {phase === "loading" && (
-        <p style={{ color: "var(--text-secondary, #9a9aa3)" }}>loading conflict versions…</p>
+        <p style={{ color: "var(--text-secondary)" }}>loading conflict versions…</p>
       )}
 
       {phase === "binary" && (
-        <p style={{ color: "var(--text-secondary, #9a9aa3)", fontSize: "0.78rem" }}>
+        <p style={{ color: "var(--text-secondary)", fontSize: "0.78rem" }}>
           This is a binary file — a 3-way text merge is meaningless. Close this and use the quick
           "ours"/"theirs" buttons in the Git panel.
         </p>
@@ -192,7 +204,7 @@ export function MergeView({ root, file, onResolved, onClose }: MergeViewProps): 
           <div style={LABEL}>result</div>
           <div
             style={{
-              border: "1px solid var(--border-subtle, #2a2a33)",
+              border: "1px solid var(--border-subtle)",
               borderRadius: "var(--radius-sm, 3px)",
             }}
           >
@@ -208,7 +220,7 @@ export function MergeView({ root, file, onResolved, onClose }: MergeViewProps): 
                       fontFamily: "var(--font-mono, monospace)",
                       fontSize: "0.72rem",
                       whiteSpace: "pre-wrap",
-                      color: "var(--text-secondary, #9a9aa3)",
+                      color: "var(--text-secondary)",
                     }}
                   >
                     {seg.lines.join("\n")}
@@ -223,14 +235,14 @@ export function MergeView({ root, file, onResolved, onClose }: MergeViewProps): 
                   // biome-ignore lint/suspicious/noArrayIndexKey: segments are positionally stable
                   key={`x${si}`}
                   style={{
-                    borderTop: "1px solid var(--border-subtle, #2a2a33)",
-                    borderBottom: "1px solid var(--border-subtle, #2a2a33)",
+                    borderTop: "1px solid var(--border-subtle)",
+                    borderBottom: "1px solid var(--border-subtle)",
                     padding: 4,
-                    background: "var(--bg-surface-2, #16161b)",
+                    background: "var(--bg-surface-2)",
                   }}
                 >
                   <div style={{ display: "flex", alignItems: "center", gap: 4, marginBottom: 2 }}>
-                    <span style={{ fontSize: "0.68rem", color: "var(--text-secondary, #9a9aa3)" }}>
+                    <span style={{ fontSize: "0.68rem", color: "var(--text-secondary)" }}>
                       conflict {idx + 1}
                       {active !== "unresolved" ? ` · ${active}` : ""}
                     </span>
@@ -266,12 +278,12 @@ export function MergeView({ root, file, onResolved, onClose }: MergeViewProps): 
                       width: "100%",
                       minHeight: 48,
                       resize: "vertical",
-                      background: "var(--bg-inset, #0b0b0f)",
-                      color: "var(--text-primary, #e7e7ea)",
+                      background: "var(--bg-inset)",
+                      color: "var(--text-primary)",
                       border:
                         active === "unresolved"
-                          ? "1px solid var(--danger, #e5534b)"
-                          : "1px solid var(--border-subtle, #2a2a33)",
+                          ? "1px solid var(--danger)"
+                          : "1px solid var(--border-subtle)",
                       borderRadius: "var(--radius-sm, 3px)",
                       fontFamily: "var(--font-mono, monospace)",
                       fontSize: "0.72rem",
@@ -291,7 +303,7 @@ const LABEL: CSSProperties = {
   fontSize: "0.66rem",
   textTransform: "uppercase",
   letterSpacing: "0.04em",
-  color: "var(--text-secondary, #9a9aa3)",
+  color: "var(--text-secondary)",
   marginBottom: 2,
 };
 

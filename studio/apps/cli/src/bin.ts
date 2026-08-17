@@ -12,7 +12,10 @@ import { createInterface } from "node:readline";
 
 import { createEngineClient } from "@prometheus/engine-bridge";
 
+import { installChildReaper } from "./child-reaper.js";
+import { prometheusHome } from "./home.js";
 import { dispatch } from "./index.js";
+import { bootOrphanGuard, stopSentinel } from "./orphan-guard-boot.js";
 import { type ParsedArgs, parseArgs } from "./parse.js";
 import {
   defaultColorEnabled,
@@ -21,6 +24,13 @@ import {
   setColorEnabled,
   setUnicodeEnabled,
 } from "./render.js";
+import {
+  chatPrompt,
+  oneShotNotes,
+  oneShotPrompt,
+  renderOneShot,
+  runOneShot,
+} from "./session/one-shot.js";
 import { readStdinPrompt, shouldReadStdinPrompt } from "./stdin.js";
 import { isTerminalChatLaunch, routeTerminalChat } from "./terminal/chat-route.js";
 import { launchTmuxSession } from "./tmux/multiplexer.js";
@@ -112,6 +122,66 @@ async function main(): Promise<void> {
     parsed.positionals.push(piped.text as string);
   }
 
+  /**
+   * `prometheus -p "<prompt>"` — ONE agent turn, headless, then exit.
+   *
+   * Intercepted HERE, before the interactive check, for a parser reason: `-p` is not a boolean
+   * flag, so the prompt is swallowed as its value and the command comes back EMPTY — which sets
+   * `repl: true` and would launch the full-screen TUI with the prompt silently discarded.
+   *
+   * It also has to bypass `dispatch()` entirely: a bare `chat` there routes to the python
+   * engine's chat verb, which has no tools and no broker. That route is why there was no way to
+   * get a tool-using turn without a TTY at all.
+   */
+  {
+    /**
+     * `prometheus chat "<message>"` joins `-p` here, rather than falling through to dispatch.
+     *
+     * There it reached the engine's chat verb, which printed a static capability blurb and
+     * exited 0 with the message discarded — see `chatPrompt`. It must be intercepted in THIS
+     * file for the same reason `-p` is: dispatch() is a pure, non-streaming path, so an
+     * agentic turn cannot run from inside it.
+     */
+    const prompt = oneShotPrompt(parsed) ?? chatPrompt(parsed);
+    if (prompt) {
+      /**
+       * STDOUT carries the RESULT. Everything else is progress and goes to stderr.
+       *
+       * The turn streams status lines ("→ model: sending request…"), reasoning and reply
+       * text through `write` as it arrives, and every one of those went to stdout — followed
+       * by `renderOneShot`, which begins with the whole reply AGAIN. Two consequences, both
+       * fatal to using this from a script: `prometheus -p x --json | jq` died on the first
+       * line because the stream preceded the JSON document, and `prometheus -p x > out.txt`
+       * captured the watchdog chatter, the model's thinking, and the answer twice.
+       *
+       * A headless run is read by a program. So the contract is the one every comparable CLI
+       * offers: stdout is exactly the answer (or exactly one JSON document), stderr is
+       * everything a human might want to watch, and the two never interleave.
+       */
+      const res = await runOneShot(parsed, prompt, {
+        write: (l) => process.stderr.write(`${l}\n`),
+      });
+      if (parsed.json) {
+        emitJson({
+          ok: res.ok,
+          reply: res.reply,
+          toolCalls: res.toolCalls,
+          capped: res.capped,
+          ...(res.error ? { error: res.error } : {}),
+        });
+      } else if (res.ok) {
+        if (res.reply.trim()) process.stdout.write(`${res.reply.trim()}\n`);
+        // The notes say what it DID; they are commentary on the answer, not the answer.
+        const notes = oneShotNotes(res);
+        if (notes) process.stderr.write(`${notes}\n`);
+      } else {
+        process.stderr.write(`${renderOneShot(res)}\n`);
+      }
+      process.exitCode = res.ok ? 0 : 1;
+      return;
+    }
+  }
+
   // Interactive single-window session (§1): bare `prometheus`, `prometheus repl|tui`, bare `chat`.
   // Needs a TTY; without one we fall through to dispatch() (json/stub contract intact).
   if (wantsInteractiveSession(parsed) && process.stdin.isTTY === true) {
@@ -188,6 +258,27 @@ async function main(): Promise<void> {
 function friendly(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
+
+// Kill every child we spawned on EVERY exit path — normal return, Ctrl-C, SIGTERM, crash.
+// Installed FIRST, before the crash guards and before the TUI registers its own signal
+// handlers, so it runs before them: agents die, then the terminal is restored, then we exit.
+// Without this the swarm's `detached` agent CLIs (all Node) simply keep running after the
+// CLI quits — a handful of start/stop cycles leaves a fleet of orphans eating the machine.
+installChildReaper();
+
+// Defence in depth for the one case the reaper cannot cover: SIGKILL / panic / power loss,
+// where no handler of ours runs at all. Three independent layers — a durable registry of
+// spawned children, a detached `sh` sentinel watching this pid, and a sweep that adopts the
+// leftovers of any previous run whose owner is dead. The sweep runs FIRST, so a fleet left
+// by a killed run is cleaned at the start of the next launch. All fail-soft.
+const guard = bootOrphanGuard(prometheusHome());
+if (guard.sweep.killed.length > 0 && !process.argv.includes("--json")) {
+  process.stderr.write(
+    `prometheus: cleaned up ${guard.sweep.killed.length} orphaned process(es) from a previous run\n`,
+  );
+}
+// A clean exit means the children were already reaped; the sentinel has nothing left to do.
+process.on("exit", stopSentinel);
 
 // Process-level crash guards (§6 crash-free): a stray rejection or a late async
 // throw renders an actionable one-liner + a nonzero exit, never a raw stack trace.

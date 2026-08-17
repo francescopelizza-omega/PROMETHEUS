@@ -98,7 +98,33 @@ export function nodePtyBackend(): PtyBackend {
     spawn(opts: PtySpawnOptions): PtyProcess {
       // Lazy require so a missing native addon does not break module import / tests.
       const req = resolveNodeRequire();
-      const pty = req("node-pty") as {
+      /**
+       * Name the failure, rather than letting a raw MODULE_NOT_FOUND out.
+       *
+       * `node-pty` is an OPTIONAL dependency, so a perfectly successful install can leave it
+       * absent — and when it is, this is not only the terminal that breaks: run configurations
+       * go through this same backend, so "Run" stops working too. The renderer's fallback text
+       * ("No terminal backend … in this build") is honest but tells the user nothing they can
+       * act on, and the raw require error underneath reads like a packaging bug.
+       *
+       * The CLI has degraded gracefully here from the start — it falls back to a piped
+       * child_process and says what is lost. The desktop has no such fallback (a GUI terminal
+       * without a pty is not a terminal), so the least it can do is say what to run.
+       */
+      let pty: unknown;
+      try {
+        pty = req("node-pty");
+      } catch (err) {
+        const detail = err instanceof Error ? err.message : String(err);
+        throw new Error(
+          [
+            "the terminal and run configurations need the native `node-pty` module, which is",
+            "not installed. In a dev checkout run `pnpm install` from studio/; in a packaged",
+            `app this indicates an incomplete build. (${detail})`,
+          ].join(" "),
+        );
+      }
+      const typedPty = pty as {
         spawn(
           shell: string,
           args: string[],
@@ -118,7 +144,7 @@ export function nodePtyBackend(): PtyBackend {
           kill(s?: string): void;
         };
       };
-      const proc = pty.spawn(opts.shell, opts.args ?? [], {
+      const proc = typedPty.spawn(opts.shell, opts.args ?? [], {
         // APP-073: an empty cwd (no workspace folder open) spawns the shell in the user's HOME,
         // never the Electron process cwd (the app-bundle dir in a packaged build).
         cwd: opts.cwd || homedir(),

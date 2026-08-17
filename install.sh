@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Francesco Pelizza
 # install.sh — one-command install for Prometheus (CLI + engine, optionally the desktop app).
 #
 #   curl -fsSL https://gitlab.com/red-beard-phoenix/PROMETHEUS/-/raw/main/install.sh | bash
@@ -216,12 +218,26 @@ if [ -z "$FROM_LOCAL" ]; then
   else
     step "cloning $REPO @ $REF"
     [ -e "$SRC" ] && [ ! -d "$SRC/.git" ] && die "$SRC exists and is not a git checkout — move it aside first"
-    run git clone --depth 1 --branch "$REF" "$REPO" "$SRC" 2>/dev/null ||
+    # The clone's stderr is CAPTURED, not discarded.
+    #
+    # It used to be `2>/dev/null`, for a good reason — `--branch` does not accept a raw sha, so
+    # a sha ref always fails here and falls through to the explicit fetch below, and that
+    # expected failure should stay quiet. But discarding stderr also discarded every REAL
+    # failure: a private repo, a wrong ref, a network block, an auth prompt. The user saw the
+    # fallback fail with git's terse message and never learned the URL had been rejected.
+    _clone_err=$(mktemp 2>/dev/null || printf '/tmp/prometheus-clone-%s' "$$")
+    if ! run git clone --depth 1 --branch "$REF" "$REPO" "$SRC" 2>"$_clone_err"; then
       # --branch does not accept a raw sha; fall back to fetching one explicitly.
-      { run git init "$SRC" &&
-        run git -C "$SRC" remote add origin "$REPO" &&
-        run git -C "$SRC" fetch --depth 1 origin "$REF" &&
-        run git -C "$SRC" checkout --force FETCH_HEAD; }
+      if ! { run git init "$SRC" &&
+             run git -C "$SRC" remote add origin "$REPO" &&
+             run git -C "$SRC" fetch --depth 1 origin "$REF" &&
+             run git -C "$SRC" checkout --force FETCH_HEAD; }; then
+        [ -s "$_clone_err" ] && cat "$_clone_err" >&2
+        rm -f "$_clone_err"
+        die "could not fetch $REPO @ $REF — see the git error above. A 403/404 here usually means the ref does not exist on that remote, or the repository is private."
+      fi
+    fi
+    rm -f "$_clone_err"
   fi
   if [ "$DRY_RUN" -eq 0 ]; then
     say "  at $(git -C "$SRC" rev-parse --short HEAD 2>/dev/null || echo '?')"

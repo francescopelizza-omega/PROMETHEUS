@@ -437,11 +437,23 @@ export type {
   AiClient,
   SseTokenUsage,
 } from "./ai/client.js";
+export type { ContextWindowResult, ContextWindowSource } from "./ai/context-window.js";
+export {
+  DEFAULT_CONTEXT_WINDOW,
+  probeContextWindow,
+  contextFromOllamaShow,
+  contextFromModelsEntry,
+} from "./ai/context-window.js";
 export {
   createAiClient,
   CloudPolicyError,
   parseSseChunk,
   deltaFromPayload,
+  // Exported so a host driving its OWN SSE loop (the CLI's native tool transport does, to
+  // reassemble `delta.tool_calls`) accounts tokens with the SAME parser as `createAiClient`
+  // instead of a second copy that drifts. Its absence here is why agentic turns were the only
+  // turns with no cost accounting at all.
+  usageFromPayload,
   joinUrl,
   endpointAllowed,
 } from "./ai/client.js";
@@ -578,8 +590,15 @@ export * as scopes from "./scopes/index.js";
 // precedence chain + /init (§3.3), and the formatter registry + format-on-save policy
 // (§3.5). Namespaced; each exec/fetch sink the caller wires still crosses the gate (C12).
 export * as commandLoader from "./commands/loader.js";
+// The gate that decides what a user-defined command file may READ and RUN, keyed on provenance.
+export * as commandGate from "./commands/gate.js";
 export * as rules from "./rules/index.js";
 export * as format from "./format/index.js";
+
+// --- Agent memory: durable cross-session facts, project-scoped -------------- //
+// PURE parse/validate/assemble for `~/.prometheus/memory/<project-key>/*.md`; the host
+// (agent/system/host/memory-store.ts) owns discovery + fs + the project-key derivation.
+export * as memory from "./memory/index.js";
 
 // --- /demos multi-CLI agent orchestration (the swarm) ---------------------- //
 // PURE engine: topology + message bus + directive protocol + runaway guards + the

@@ -24,6 +24,10 @@
 import { ipcRenderer } from "electron";
 
 import {
+  type AiProbeModelsResult,
+  type AiProgressEvent,
+  type AiStreamRequest,
+  type AiStreamResult,
   type CatalogApi,
   type CatalogAppLifecycleRequest,
   type CatalogBrowseResult,
@@ -65,7 +69,9 @@ import {
   IPC_UPDATE_EVENTS,
   type IdeAckResult,
   type IdeActiveVenv,
+  type IdeAgentFilesListResult,
   type IdeApi,
+  type IdeCommandFilesListResult,
   type IdeCoverageResult,
   type IdeDapDetectAdapterResult,
   type IdeDapInstallAdapterResult,
@@ -151,6 +157,8 @@ import {
   type IdeTestRunResult,
   type IdeTreeNode,
   type IdeWorkspaceIndexResult,
+  type IdeWorktreeListResult,
+  type IdeWorktreeOpResult,
   type InstallOptions,
   type McpAddRequest,
   type McpApi,
@@ -239,6 +247,17 @@ import {
   type UpdateProgressInfo,
   type UpdatesApi,
   type VersionResult,
+} from "../shared/ipc-contract.js";
+import type {
+  AgentEngineToolRequest,
+  AgentGrant,
+  AgentGrantsResult,
+  AgentHookRunRequest,
+  AgentHookRunResult,
+  AgentSystemToolRequest,
+  AgentSystemToolResult,
+  McpAgentCallRequest,
+  McpAgentToolsResult,
 } from "../shared/ipc-contract.js";
 
 /**
@@ -370,6 +389,10 @@ function createMcpApi(): McpApi {
     setEnabled: (id: string, enabled: boolean): Promise<McpOpResult> =>
       ipcRenderer.invoke(IPC.mcpSetEnabled, { id, enabled }),
     import: (): Promise<McpImportResult> => ipcRenderer.invoke(IPC.mcpImport),
+    // The agent pane as an MCP client: descriptors in, one call out.
+    agentTools: (): Promise<McpAgentToolsResult> => ipcRenderer.invoke(IPC.mcpAgentTools),
+    agentCall: (req: McpAgentCallRequest): Promise<AgentSystemToolResult> =>
+      ipcRenderer.invoke(IPC.mcpAgentCall, req),
   };
 }
 
@@ -592,6 +615,13 @@ function createIdeApi(): IdeApi {
   return {
     // ── fs ────────────────────────────────────────────────────────────────
     fsRead: (uri: string): Promise<IdeFsReadResult> => ipcRenderer.invoke(IPC.ideFsRead, { uri }),
+    setWorkingSet: (roots: readonly string[]): Promise<IdeOkResult> =>
+      ipcRenderer.invoke(IPC.ideSetWorkingSet, { roots: [...roots] }),
+    approveOutsideWorkingSet: (
+      path: string,
+      scope?: "once" | "session" | "clear",
+    ): Promise<IdeOkResult> =>
+      ipcRenderer.invoke(IPC.ideApproveOutside, { path, scope: scope ?? "once" }),
     fsWrite: (uri: string, text: string): Promise<IdeOkResult> =>
       ipcRenderer.invoke(IPC.ideFsWrite, { uri, text }),
     fsTree: (dir: string): Promise<IdeTreeNode[]> => ipcRenderer.invoke(IPC.ideFsTree, { dir }),
@@ -925,10 +955,39 @@ function createIdeApi(): IdeApi {
       ipcRenderer.invoke(IPC.ideGitPrComment, { root, number, body }),
     gitPrSetToken: (root: string, token: string): Promise<IdePrOpResult> =>
       ipcRenderer.invoke(IPC.ideGitPrSetToken, { root, token }),
+    // ── worktrees (Task #5, desktop parity): the SAME `@prometheus/core/git-worktree`
+    // functions the CLI's `/worktree` slash calls ──────────────────────────
+    worktreeList: (root: string): Promise<IdeWorktreeListResult> =>
+      ipcRenderer.invoke(IPC.ideWorktreeList, { root }),
+    worktreeCreate: (root: string, branch: string, path?: string): Promise<IdeWorktreeOpResult> =>
+      ipcRenderer.invoke(IPC.ideWorktreeCreate, { root, branch, path }),
+    worktreeRemove: (root: string, path: string): Promise<IdeWorktreeOpResult> =>
+      ipcRenderer.invoke(IPC.ideWorktreeRemove, { root, path }),
+    // ── sub-agent personas (Task #5, desktop parity): the SAME `@prometheus/core/agent-files`
+    // clamping the CLI's `spawn_agent` applies ──────────────────────────────
+    agentFilesList: (root: string): Promise<IdeAgentFilesListResult> =>
+      ipcRenderer.invoke(IPC.ideAgentFilesList, { root }),
+    // ── custom slash commands (Task #5, desktop parity): the SAME
+    // `@prometheus/core/command-loader` the CLI's `/command` loader uses ──────
+    commandFilesList: (root: string): Promise<IdeCommandFilesListResult> =>
+      ipcRenderer.invoke(IPC.ideCommandFilesList, { root }),
     // ── the RUN-GATE (§5.2/§9) ──────────────────────────────────────────────
     gate: (req: IdeGateRequest): Promise<IdeGateResult> => ipcRenderer.invoke(IPC.ideGate, req),
     // ── gated command exec (§7.3): user-approved, screened in main ──────────
     exec: (req: IdeExecRequest): Promise<IdeExecResult> => ipcRenderer.invoke(IPC.ideExec, req),
+    // ── Phase 6: core's shared system tools — the same six-layer path the CLI runs ──
+    // Lifecycle hooks: the renderer never spawns — it lists and proxies, MAIN runs.
+    hookRun: (req: AgentHookRunRequest): Promise<AgentHookRunResult> =>
+      ipcRenderer.invoke(IPC.agentHookRun, req),
+    systemTool: (req: AgentSystemToolRequest): Promise<AgentSystemToolResult> =>
+      ipcRenderer.invoke(IPC.agentSystemTool, req),
+    // ── the `prometheus_*` verbs: the product's own surface, run by the engine ──
+    engineTool: (req: AgentEngineToolRequest): Promise<AgentSystemToolResult> =>
+      ipcRenderer.invoke(IPC.agentEngineTool, req),
+    // ── remembered grants: the same <config>/grants.json the CLI reads ──────
+    grantsList: (): Promise<AgentGrantsResult> => ipcRenderer.invoke(IPC.agentGrantsList),
+    grantsAdd: (grant: AgentGrant): Promise<AgentGrantsResult> =>
+      ipcRenderer.invoke(IPC.agentGrantsAdd, grant),
     // ── workspace search (§6.3): bounded gitignore-aware walk in main ───────
     search: (req: IdeSearchRequest): Promise<IdeSearchResult> =>
       ipcRenderer.invoke(IPC.ideSearch, req),
@@ -1056,6 +1115,24 @@ export function createPrometheusApi(): PrometheusApi {
       return () => {
         ipcRenderer.removeListener(IPC_EVENTS.progress, wrapped);
       };
+    },
+
+    // ── §9c: model chat streaming (runs in MAIN — the prod CSP forbids it here) ──
+    ai: {
+      stream: (req: AiStreamRequest): Promise<AiStreamResult> =>
+        ipcRenderer.invoke(IPC.aiStream, req),
+      cancel: (runId: string): Promise<boolean> => ipcRenderer.invoke(IPC.aiCancel, { runId }),
+      onProgress: (listener: (event: AiProgressEvent) => void): (() => void) => {
+        const wrapped = (_evt: unknown, payload: AiProgressEvent): void => listener(payload);
+        ipcRenderer.on(IPC_EVENTS.aiProgress, wrapped);
+        return () => {
+          ipcRenderer.removeListener(IPC_EVENTS.aiProgress, wrapped);
+        };
+      },
+      // Task #18: the local-runner model probe, moved to MAIN for the same CSP reason `stream`
+      // is above — a renderer `fetch` to `http://127.0.0.1:<port>/models` is refused in prod.
+      probeModels: (baseUrl: string): Promise<AiProbeModelsResult> =>
+        ipcRenderer.invoke(IPC.aiProbeModels, { baseUrl }),
     },
 
     // ── the FULL security surface (file 03 §5,§7) ────────────────────────────

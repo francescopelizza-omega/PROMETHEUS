@@ -274,34 +274,34 @@ export function TypeHierarchyView({ root }: { root: string }): ReactElement {
       {targetName && status === "ready" && (
         <div
           style={{
-            color: "var(--text-secondary, #9a9aa3)",
+            color: "var(--text-secondary)",
             fontFamily: "var(--font-mono, monospace)",
             fontSize: "0.72rem",
             marginBottom: 6,
           }}
         >
           {mode === "supertypes" ? "Supertypes of" : "Subtypes of"}{" "}
-          <span style={{ color: "var(--text-primary, #e7e7ea)" }}>{targetName}</span>
+          <span style={{ color: "var(--text-primary)" }}>{targetName}</span>
         </div>
       )}
 
       {status === "idle" && (
-        <p style={{ color: "var(--text-secondary, #9a9aa3)", fontSize: "0.72rem" }}>
+        <p style={{ color: "var(--text-secondary)", fontSize: "0.72rem" }}>
           Put the caret on a class/interface, then press ⟳.
         </p>
       )}
       {status === "nocaret" && (
-        <p style={{ color: "var(--text-secondary, #9a9aa3)", fontSize: "0.72rem" }}>
+        <p style={{ color: "var(--text-secondary)", fontSize: "0.72rem" }}>
           No caret yet — click into an editor first.
         </p>
       )}
       {status === "unsupported" && (
-        <p style={{ color: "var(--text-secondary, #9a9aa3)", fontSize: "0.72rem" }}>
+        <p style={{ color: "var(--text-secondary)", fontSize: "0.72rem" }}>
           No type-hierarchy server for this file type.
         </p>
       )}
       {status === "empty" && (
-        <p style={{ color: "var(--text-secondary, #9a9aa3)", fontSize: "0.72rem" }}>
+        <p style={{ color: "var(--text-secondary)", fontSize: "0.72rem" }}>
           No type at the caret (the server may still be indexing — press ⟳).
         </p>
       )}
@@ -339,7 +339,7 @@ function HierRows({
               style={{
                 background: "transparent",
                 border: "none",
-                color: "var(--text-secondary, #9a9aa3)",
+                color: "var(--text-secondary)",
                 cursor: "pointer",
                 width: 12,
                 padding: 0,
@@ -347,7 +347,7 @@ function HierRows({
             >
               {n.loading ? "…" : n.expanded ? "▾" : "▸"}
             </button>
-            <span style={{ color: "var(--accent, #22d3ee)", width: 12, textAlign: "center" }}>
+            <span style={{ color: "var(--accent)", width: 12, textAlign: "center" }}>
               {kindGlyph(n.item.kind)}
             </span>
             <button
@@ -359,7 +359,7 @@ function HierRows({
                 textAlign: "left",
                 background: "transparent",
                 border: "none",
-                color: "var(--text-primary, #e7e7ea)",
+                color: "var(--text-primary)",
                 cursor: "pointer",
                 fontFamily: "var(--font-mono, monospace)",
                 fontSize: "0.74rem",
@@ -370,10 +370,7 @@ function HierRows({
               }}
             >
               {n.item.name}
-              <span style={{ color: "var(--text-secondary, #9a9aa3)" }}>
-                {" "}
-                {basename(n.item.uri)}
-              </span>
+              <span style={{ color: "var(--text-secondary)" }}> {basename(n.item.uri)}</span>
             </button>
           </div>
           {n.expanded && n.children && n.children.length > 0 && (
@@ -383,7 +380,7 @@ function HierRows({
             <div
               style={{
                 paddingLeft: (depth + 1) * 12 + 12,
-                color: "var(--text-secondary, #9a9aa3)",
+                color: "var(--text-secondary)",
                 fontSize: "0.7rem",
               }}
             >

@@ -18,6 +18,7 @@
  */
 
 import { type ChildProcess, spawn as nodeSpawn } from "node:child_process";
+import { existsSync } from "node:fs";
 import { connect as netConnect } from "node:net";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -26,13 +27,14 @@ import {
   type UtilityProcess,
   app,
   dialog,
+  ipcMain,
   nativeImage,
   safeStorage,
   shell,
   utilityProcess,
 } from "electron";
 
-import { ServerSupervisor } from "@prometheus/core";
+import { ServerSupervisor, ai } from "@prometheus/core";
 import {
   createEngineClient,
   gateFull as engineGateFull,
@@ -48,6 +50,15 @@ import {
   type ModelProgressEvent,
 } from "../shared/ipc-contract.js";
 import { runTask } from "../worker/tasks.js";
+import { setHookSettings } from "./agent-hooks.js";
+import {
+  adoptSecurityPosture,
+  freeLocalModels,
+  registerAiIpc,
+  setSecurityPosture,
+} from "./ai-ipc.js";
+import { destroyAgentBrowser } from "./browser-tool-host.js";
+import { initBudgetGate, setBudgetSettings } from "./budget-gate.js";
 import { registerCatalogIpcHandlers } from "./catalog-ipc.js";
 import { registerEnvIpcHandlers } from "./env-ipc.js";
 import { registerExtIpcHandlers } from "./ext-ipc.js";
@@ -85,6 +96,23 @@ import { type WorkerHandle, WorkerHost } from "./worker-host.js";
 import { makeWorkerTaskSeam } from "./worker-task-seam.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
+
+/**
+ * A file under `studio/config/`, resolved RELATIVE to this module — packaged app first
+ * (`Resources/config/`), else the dev tree (`out/main` → up 4 = `studio`).
+ *
+ * Never hard-code an absolute path here. These strings are compiled into `app.asar`, so a
+ * developer's home directory becomes part of every published release — it identifies the
+ * author and maps their filesystem, and it resolves on exactly one machine besides.
+ */
+function bundledConfig(file: string): string {
+  const res = (process as unknown as { resourcesPath?: string }).resourcesPath;
+  if (res) {
+    const packaged = join(res, "config", file);
+    if (existsSync(packaged)) return packaged;
+  }
+  return join(__dirname, "..", "..", "..", "..", "config", file);
+}
 
 // APP-PATH: repair PATH for GUI (Finder/Dock) launches BEFORE any engine/sidecar/
 // detection spawn. A launchd-inherited PATH omits /opt/homebrew/bin, ~/.local/bin,
@@ -349,8 +377,7 @@ const testRunSpawn: TestRunSpawn = (cmd, args, opts) =>
 
 /** serve-profiles.json location (next to the bundled config). */
 const SERVE_PROFILES_PATH =
-  process.env.PROMETHEUS_SERVE_PROFILES ??
-  join("/Users/dev/ALPHA/PROMETHEUS/studio", "config", "serve-profiles.json");
+  process.env.PROMETHEUS_SERVE_PROFILES ?? bundledConfig("serve-profiles.json");
 
 /** Vite dev server URL injected by electron-vite in dev; absent in production. */
 const RENDERER_DEV_URL = process.env.ELECTRON_RENDERER_URL;
@@ -366,8 +393,10 @@ app.setName("Prometheus Studio");
 app.setAppUserModelId("ai.prometheus.studio");
 
 /**
- * The branded app icon (the Prometheus flame, build/icon.png — replace with the
- * final artwork; electron-builder derives .icns/.ico from it for packaging).
+ * The branded app icon (HANDOFF_2 §8): the pixel-art human Prometheus, build/icon.png.
+ * This IS the final artwork — regenerate the platform set with
+ * `node scripts/build-app-icon.mjs`, never hand-edit build/icon.*.
+ * electron-builder derives the packaged formats from build/ (buildResources).
  *
  * A PACKAGED macOS app uses the bundle's .icns and ignores a window/dock icon; but
  * in DEV (and for Win/Linux window chrome) we load this PNG so the dock / taskbar /
@@ -468,15 +497,38 @@ function applyWindowHardening(win: BrowserWindow): void {
   });
 }
 
+/** A positive integer from the environment, or `fallback`. Used only by the e2e pins. */
+function envInt(name: string, fallback: number): number {
+  const n = Number(process.env[name]);
+  return Number.isFinite(n) && n > 0 ? Math.trunc(n) : fallback;
+}
+
 function createMainWindow(): BrowserWindow {
+  // e2e pins the window so screenshots are comparable run-to-run (e2e/electron-app.ts sets
+  // PROM_E2E_WIDTH/HEIGHT). Outside e2e these resolve to the shipped defaults.
   const win = new BrowserWindow({
-    width: 1280,
-    height: 820,
-    minWidth: 940,
-    minHeight: 600,
+    width: envInt("PROM_E2E_WIDTH", 1280),
+    height: envInt("PROM_E2E_HEIGHT", 820),
+    // handoff §2: the island shell needs room — a 46px rail + a 330px chat rail + a
+    // usable centre column stop being usable below this.
+    minWidth: 1100,
+    minHeight: 680,
     show: false,
-    backgroundColor: "#0b0b0e",
+    // the §1 navy ground — this is what paints during the pre-first-paint frame, so it
+    // must match --bg-app or the window flashes the old near-black.
+    backgroundColor: "#070d18",
     title: "Prometheus Studio",
+    // handoff §2.1: the renderer draws its own 42px TopBar, and the macOS traffic lights
+    // sit INSIDE it. `hiddenInset` keeps the native buttons (and their OS behaviour) while
+    // handing the whole client area to us; the y centres the 12px buttons in the 42px bar.
+    // Windows/Linux keep the native frame — there are no OS-drawn controls to inset there,
+    // and drawing our own would mean re-implementing minimise/maximise/close.
+    ...(process.platform === "darwin"
+      ? {
+          titleBarStyle: "hiddenInset" as const,
+          trafficLightPosition: { x: 13, y: 15 },
+        }
+      : {}),
     // Win/Linux window + taskbar icon (macOS ignores this and uses the bundle icon).
     // Skipped when the image is empty (packaged build — the OS uses the real icon).
     ...(appIcon.isEmpty() ? {} : { icon: appIcon }),
@@ -536,7 +588,9 @@ function createFloatingTerminalWindow(req: {
     minWidth: 320,
     minHeight: 200,
     show: false,
-    backgroundColor: "#0b0b0e",
+    // the §1 navy ground — matches --bg-app, so a torn-out terminal does not flash the
+    // pre-redesign near-black before its renderer paints.
+    backgroundColor: "#070d18",
     title: req.title,
     ...(appIcon.isEmpty() ? {} : { icon: appIcon }),
     webPreferences: hardenedWebPreferences(),
@@ -596,11 +650,27 @@ async function runHeadlessSmoke(): Promise<void> {
   disposeIpc = registerIpcHandlers({
     supervisor,
     sidecarSupervisor,
-    providersConfigPath:
-      "/Users/dev/ALPHA/PROMETHEUS/studio/config/providers.config.json",
+    providersConfigPath: bundledConfig("providers.config.json"),
     serveProfilesPath: SERVE_PROFILES_PATH,
   });
   // The FULL security surface (file 03 §5,§7) — its own handler set + disposer.
+  //
+  // The posture is adopted BEFORE the AI handlers exist, and awaited. `registerSettingsIpcHandlers`
+  // also publishes it, but it registers later and publishes asynchronously — which would leave a
+  // window, however brief, in which a model call could be served under the permissive default
+  // while a locked-down profile sat on disk. A security control with a startup race is a
+  // security control with a bypass.
+  await adoptSecurityPosture(`${app.getPath("userData")}/settings.json`);
+  /**
+   * The SPEND CAP, armed for the same reason and in the same place as the posture.
+   *
+   * It must exist before `registerAiIpc` can serve a model call, or the first turn of a
+   * session runs uncapped — the same startup race the comment above describes, with money
+   * instead of egress. `initBudgetGate` only arms the gate; an unconfigured cap still costs
+   * nothing (it never reads the accounting store).
+   */
+  initBudgetGate(app.getPath("userData"), ai.loadPricing());
+  registerAiIpc(ipcMain);
   disposeSecurityIpc = registerSecurityIpcHandlers();
   // The Package & Environment Manager surface (file 04 §1,§3) — its own handler set.
   disposeEnvIpc = registerEnvIpcHandlers();
@@ -649,6 +719,17 @@ async function runHeadlessSmoke(): Promise<void> {
   // the workspace layer (if any) is resolved per-call from the renderer's workspaceRoot.
   disposeSettingsIpc = registerSettingsIpcHandlers({
     globalPath: `${app.getPath("userData")}/settings.json`,
+    // The four security settings become ENFORCED here. Without this the profile a user picks
+    // ("Local-only", "Security-strict") is a label: `cloudModelsEnabled` and `defaultNetwork`
+    // had no consumer anywhere, so selecting a locked-down profile changed nothing at all.
+    onEffective: (effective) => {
+      setSecurityPosture(effective);
+      // The budget windows ride the SAME publish as the posture, so editing a cap in settings
+      // takes effect on the next turn rather than on the next app launch.
+      setBudgetSettings(effective);
+      // …and the user's lifecycle hooks, so editing one takes effect on the next turn.
+      setHookSettings(effective);
+    },
   });
 
   let code = 0;
@@ -777,10 +858,28 @@ async function bootstrap(): Promise<void> {
   disposeIpc = registerIpcHandlers({
     supervisor,
     sidecarSupervisor,
-    providersConfigPath:
-      "/Users/dev/ALPHA/PROMETHEUS/studio/config/providers.config.json",
+    providersConfigPath: bundledConfig("providers.config.json"),
     serveProfilesPath: SERVE_PROFILES_PATH,
   });
+  /**
+   * The SPEND CAP, armed BEFORE `registerAiIpc` for the same reason `runHeadlessSmoke` arms it
+   * first: an unconfigured cap still costs nothing (it never reads the accounting store), but
+   * `registerAiIpc` calling `getBudgetGate()` before this ever ran would serve the whole
+   * session uncapped rather than merely defaulted-open.
+   */
+  initBudgetGate(app.getPath("userData"), ai.loadPricing());
+  /**
+   * `ai:stream` / `ai:cancel` (file 07 §7/§9c) — the desktop's model-streaming transport.
+   *
+   * REAL BUG (found live, by an e2e chat-turn test that actually clicked Send in the built
+   * app rather than calling `runAiStream` directly the way the unit tests do): this call was
+   * present in `runHeadlessSmoke` but never made it into the normal windowed boot path, so
+   * a packaged app's AI pane could not complete a single turn — every send failed immediately
+   * with "No handler registered for 'ai:stream'". Registered here, before the window, for the
+   * same reason every other handler above is: the renderer's on-mount calls must always find
+   * a live handler.
+   */
+  registerAiIpc(ipcMain);
   // The FULL security surface (file 03 §5,§7) — registered alongside the main
   // ipc so the renderer's security panels find a live handler from boot.
   disposeSecurityIpc = registerSecurityIpcHandlers();
@@ -836,6 +935,17 @@ async function bootstrap(): Promise<void> {
   // the workspace layer (if any) is resolved per-call from the renderer's workspaceRoot.
   disposeSettingsIpc = registerSettingsIpcHandlers({
     globalPath: `${app.getPath("userData")}/settings.json`,
+    // The four security settings become ENFORCED here. Without this the profile a user picks
+    // ("Local-only", "Security-strict") is a label: `cloudModelsEnabled` and `defaultNetwork`
+    // had no consumer anywhere, so selecting a locked-down profile changed nothing at all.
+    onEffective: (effective) => {
+      setSecurityPosture(effective);
+      // The budget windows ride the SAME publish as the posture, so editing a cap in settings
+      // takes effect on the next turn rather than on the next app launch.
+      setBudgetSettings(effective);
+      // …and the user's lifecycle hooks, so editing one takes effect on the next turn.
+      setHookSettings(effective);
+    },
   });
   // Extension host (file 09 §5, APP-059): the .promext pipeline + the utility-process runner.
   // The Electron seams the PURE host injects are wired HERE (the plan gotcha): the nemesis
@@ -914,10 +1024,17 @@ app.on("before-quit", (event) => {
 
   // Always tear down the worker host (no async needed — it kills synchronously).
   workerHost.dispose();
+  // The agent's own hidden browser tab (browser_navigate/_screenshot/_extract_text) — nothing
+  // this process started outlives it, same rule as every other host.
+  destroyAgentBrowser();
   // APP-090: close any torn-out terminal floats so they never orphan the quit.
   closeAllFloatingTerminals();
   // APP-063: flush any pending Local History write-behind so no revision is lost on quit.
   void localHistoryManager?.flush();
+  // §9c: release any local model we pinned with `keep_alive` — quitting Studio should not
+  // leave several GB resident for the next half hour. Fire-and-forget: it is self-deadlined
+  // and must never be able to hold up the quit.
+  void freeLocalModels();
   // Tear down the IDE hosts (kill LSP/DAP/PTY children + stop the fs watcher).
   lspHost.dispose();
   void dapHost.dispose().catch(() => {});

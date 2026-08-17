@@ -27,6 +27,7 @@ import type {
   ProviderTier,
   RepoStatus,
   ServerStatus,
+  agent,
 } from "@prometheus/core";
 import type {
   AuditLogEntry,
@@ -74,6 +75,12 @@ export const IPC = {
   securityGateFull: "security:gateFull",
   securityAudit: "security:audit",
   securityInstall: "security:install",
+  /** §9c: run ONE model chat turn in MAIN (see AiStreamRequest for why not the renderer). */
+  aiStream: "ai:stream",
+  /** cancel an in-flight `ai:stream` by runId. */
+  aiCancel: "ai:cancel",
+  /** Task #18: probe a LOCAL runner's served models in MAIN (see AiProbeModelsResult). */
+  aiProbeModels: "ai:probeModels",
   securityRemediate: "security:remediate",
   securityThreatdb: "security:threatdb",
   securityTrust: "security:trust",
@@ -204,6 +211,10 @@ export const IPC = {
   // never decides "safe" (C5). fs read/write/tree are the MAIN-owned fs path.
   ideFsRead: "ide:fs.read",
   ideFsWrite: "ide:fs.write",
+  /** handoff §3: declare the workspace roots MAIN gates every write against. */
+  ideSetWorkingSet: "ide:workingSet.set",
+  /** handoff §3: register ONE human-approved out-of-scope path (never a wildcard). */
+  ideApproveOutside: "ide:workingSet.approve",
   ideFsTree: "ide:fs.tree",
   ideFsWatch: "ide:fs.watch",
   ideFsUnwatch: "ide:fs.unwatch",
@@ -273,8 +284,26 @@ export const IPC = {
   ideGitPrGet: "ide:git.prGet",
   ideGitPrComment: "ide:git.prComment",
   ideGitPrSetToken: "ide:git.prSetToken",
+  // Task #5 (desktop parity): worktree isolation, backed by the SAME
+  // `@prometheus/core/git-worktree` functions the CLI's `/worktree` slash calls.
+  ideWorktreeList: "ide:worktree.list",
+  ideWorktreeCreate: "ide:worktree.create",
+  ideWorktreeRemove: "ide:worktree.remove",
+  // Task #5 (desktop parity): sub-agent personas from markdown, via the SAME
+  // `@prometheus/core/agent-files` `loadAgentFile` clamping the CLI's `spawn_agent` uses.
+  ideAgentFilesList: "ide:agentFiles.list",
+  // Task #5 (desktop parity): custom slash commands from markdown, via the SAME
+  // `@prometheus/core/command-loader`/`command-gate` the CLI's `/command` loader uses.
+  ideCommandFilesList: "ide:commandFiles.list",
   ideGate: "ide:gate",
   ideExec: "ide:exec",
+  agentSystemTool: "agent:systemTool",
+  agentEngineTool: "agent:engineTool",
+  /** run ONE user-configured lifecycle hook (PreToolUse/PostToolUse/SessionStart) in MAIN. */
+  agentHookRun: "agent:hookRun",
+  // Remembered "don't ask again" grants, on the SAME disk file the CLI uses.
+  agentGrantsList: "agent:grants.list",
+  agentGrantsAdd: "agent:grants.add",
   ideDetectBins: "ide:detect-bins",
   ideSearch: "ide:search",
   // APP-066: cancel an in-flight worker search + a worker-offloaded repo index walk.
@@ -323,6 +352,10 @@ export const IPC = {
   mcpRemove: "mcp:remove",
   mcpSetEnabled: "mcp:set-enabled",
   mcpImport: "mcp:import",
+  // The agent pane as an MCP CLIENT: the descriptors it needs to build tool defs, and the
+  // one channel that actually calls a tool.
+  mcpAgentTools: "mcp:agent-tools",
+  mcpAgentCall: "mcp:agent-call",
   // APP-095: git-backed settings sync (keymap/themes/connectors, secrets redacted).
   settingsSyncPush: "settings-sync:push",
   settingsSyncPull: "settings-sync:pull",
@@ -364,6 +397,13 @@ export const IPC_EVENTS = {
    * without seeing every install line. Cosmetic only — NO verdict crosses (C5).
    */
   securityProgress: "security:progress",
+  /**
+   * The model-streaming feed (§9c): text, thinking, and watchdog status deltas for one
+   * `ai:stream` turn, tagged with its runId. Purely presentational — the turn's RESULT
+   * (final text, tool calls, usage, timing) rides back in the invoke's typed reply, so a
+   * dropped or duplicated delta can never change what the agent loop acts on.
+   */
+  aiProgress: "ai:progress",
   /**
    * The env/package progress feed (file 04 §8): long ops (upgrade, big template
    * installs, cuda.torch) stream their per-package progress lines here, tagged
@@ -691,11 +731,113 @@ export interface SecurityGateOptions {
 }
 
 /** Options the renderer passes to the gated security install (§5). */
+/* ── §9c: model streaming, in MAIN ──────────────────────────────────────────── */
+
+/**
+ * One chat turn for `ai:stream`.
+ *
+ * Why this lives in MAIN and not the renderer: the production CSP is
+ * `connect-src 'self'` (main/index.ts), so a renderer `fetch` to a model endpoint —
+ * `http://localhost:11434/v1/chat/completions`, or any cloud provider — is REFUSED in the
+ * packaged app. The renderer streamed models directly, which worked under the dev CSP
+ * (`http://localhost:*`) and silently did not work in a build. Routing the request through
+ * main both fixes that and restores the C5 rule the rest of the app follows: the renderer
+ * reaches the outside world across the contextBridge, never on its own.
+ *
+ * The cloud policy is re-checked in main. The renderer checks it too, for a fast, local
+ * error message — but the renderer's check is a courtesy and main's is the enforcement.
+ */
+export interface AiStreamRequest {
+  /** correlates the invoke with its `ai:progress` deltas and with `ai:cancel`. */
+  runId: string;
+  endpoint: {
+    id: string;
+    baseUrl: string;
+    model?: string;
+    locality: "local" | "cloud";
+    /**
+     * The model's context window, so main can refuse an impossible request instead of paying
+     * a provider 400 for it. The renderer has derived this from the catalogue all along (it
+     * sizes the tool preamble); it simply never crossed the wire.
+     */
+    contextWindow?: number;
+  };
+  messages: Array<{ role: "system" | "user" | "assistant" | "tool"; content: string }>;
+  /** OpenAI-shaped tool schemas; omitted/empty → a plain completion. */
+  tools?: unknown[];
+  /** the resolved reasoning-effort patch (`@prometheus/core/ai-effort`), already resolved. */
+  effort?: unknown;
+  /** the workspace "never send to cloud" policy (§7.5). */
+  neverSendToCloud?: boolean;
+}
+
+/** One presentational delta on the `ai:progress` feed. */
+export interface AiProgressEvent {
+  runId: string;
+  /** `text` = answer tokens · `reasoning` = thinking · `status` = watchdog heartbeat. */
+  kind: "text" | "reasoning" | "status";
+  text: string;
+}
+
+/** A tool call the model asked for, accumulated across SSE fragments. */
+export interface AiToolCall {
+  id: string;
+  name: string;
+  /** raw JSON string exactly as the model emitted it — parsed by the caller. */
+  arguments: string;
+}
+
+/** The typed reply to `ai:stream` — the authoritative result of the turn. */
+export interface AiStreamResult {
+  ok: boolean;
+  error?: string;
+  /** the full assistant text (the same bytes the `text` deltas carried). */
+  text: string;
+  toolCalls: AiToolCall[];
+  usage?: { inputTokens: number; outputTokens: number; totalTokens: number };
+  timing?: { requestAt: number; firstByteAt?: number; firstTokenAt?: number; lastByteAt: number };
+}
+
+/**
+ * `ai:probeModels` (Task #18) — probe a LOCAL OpenAI-compatible runner (Ollama, llama.cpp, …)
+ * for its served models: `GET {baseUrl}/models`.
+ *
+ * This used to be a direct renderer `fetch` (`endpoint-hook.ts`'s `probeServedModels`) — the
+ * SAME production-CSP problem `ai:stream` above exists to fix (`connect-src 'self'` refuses
+ * `fetch("http://127.0.0.1:<port>/models")` with `TypeError: Failed to fetch` in the packaged
+ * app), except this one had no IPC hop at all, so every local runner silently vanished from the
+ * Model Hub picker in a real build while working fine under the looser dev CSP. Moved to MAIN
+ * for the same reason `ai:stream` is: the renderer reaches the outside world across the
+ * contextBridge, never on its own (C5) — `connect-src` stays `'self'`, unchanged.
+ */
+export interface AiProbeModelsRequest {
+  /** the local runner's base URL, e.g. `http://127.0.0.1:11434/v1`. */
+  baseUrl: string;
+}
+
+/** Fail-soft by design: an unreachable/down/empty runner is `{ok:true, models:[]}`, never an
+ *  error — the caller (`expandServedModels`) reads an empty list as "drop this endpoint". */
+export interface AiProbeModelsResult {
+  ok: boolean;
+  models: string[];
+  error?: string;
+}
+
 export interface SecurityInstallOptions {
   /** preview-first (`--dry-run`) — defaults true (§2.1/§5.1). */
   dryRun?: boolean;
   /** the §5.3 deep-red BLOCK override (`--force`), gated behind the typed token. */
   forced?: boolean;
+  /**
+   * Proof the user typed the FORCE_TOKEN into ForceGate for THIS install (§9a).
+   *
+   * `forced` alone is not enough: a renderer bug — or anything that reaches the
+   * preload bridge — could set it and turn a deep-red BLOCK into a one-click
+   * bypass. Main drops `forced` unless this is `true`, so the pair travels
+   * together or the override does not happen. Never set it anywhere but the
+   * ForceGate confirm handler.
+   */
+  confirmForce?: boolean;
   /** correlation id for the security progress feed + cancellation (§4.3). */
   runId?: string;
 }
@@ -833,6 +975,12 @@ export interface EnvCloneRequest {
   to: string;
   confirm?: boolean;
   force?: boolean;
+  /**
+   * Proof the user typed the FORCE_TOKEN into ForceGate for THIS action (§9a).
+   * Main drops `force` without it — the pair travels together or the nemesis BLOCK
+   * override does not happen.
+   */
+  confirmForce?: boolean;
 }
 
 /** Options the renderer passes to `env.import` (GATED installs). */
@@ -842,6 +990,12 @@ export interface EnvImportRequest {
   python?: string;
   confirm?: boolean;
   force?: boolean;
+  /**
+   * Proof the user typed the FORCE_TOKEN into ForceGate for THIS action (§9a).
+   * Main drops `force` without it — the pair travels together or the nemesis BLOCK
+   * override does not happen.
+   */
+  confirmForce?: boolean;
 }
 
 /** Options the renderer passes to a gated `pkg.install` / `pkg.update`. */
@@ -851,6 +1005,12 @@ export interface PkgInstallRequest {
   scope?: "venv" | "global" | "conda" | "project" | "engine";
   confirm?: boolean;
   force?: boolean;
+  /**
+   * Proof the user typed the FORCE_TOKEN into ForceGate for THIS action (§9a).
+   * Main drops `force` without it — the pair travels together or the nemesis BLOCK
+   * override does not happen.
+   */
+  confirmForce?: boolean;
   runId?: string;
 }
 
@@ -860,6 +1020,12 @@ export interface PkgUpgradeRequest {
   spec?: string | string[];
   confirm?: boolean;
   force?: boolean;
+  /**
+   * Proof the user typed the FORCE_TOKEN into ForceGate for THIS action (§9a).
+   * Main drops `force` without it — the pair travels together or the nemesis BLOCK
+   * override does not happen.
+   */
+  confirmForce?: boolean;
   runId?: string;
 }
 
@@ -869,6 +1035,12 @@ export interface CudaTorchRequest {
   index?: string;
   confirm?: boolean;
   force?: boolean;
+  /**
+   * Proof the user typed the FORCE_TOKEN into ForceGate for THIS action (§9a).
+   * Main drops `force` without it — the pair travels together or the nemesis BLOCK
+   * override does not happen.
+   */
+  confirmForce?: boolean;
   runId?: string;
 }
 
@@ -877,6 +1049,12 @@ export interface CudaInstallRequest {
   toolkit?: string;
   confirm?: boolean;
   force?: boolean;
+  /**
+   * Proof the user typed the FORCE_TOKEN into ForceGate for THIS action (§9a).
+   * Main drops `force` without it — the pair travels together or the nemesis BLOCK
+   * override does not happen.
+   */
+  confirmForce?: boolean;
   runId?: string;
 }
 
@@ -1014,6 +1192,21 @@ export interface SystemTelemetry {
  * ipcRenderer.invoke; window.d.ts declares it on `window`. Keeping it here means
  * preload and the renderer can never drift.
  */
+/** The renderer-facing model-streaming surface (§9c). */
+export interface AiApi {
+  /**
+   * Run ONE chat turn. Resolves with the turn's authoritative result; live deltas arrive on
+   * `onProgress`, keyed by the same `runId`.
+   */
+  stream(req: AiStreamRequest): Promise<AiStreamResult>;
+  /** Abort an in-flight turn (the user hit stop, or re-prompted). */
+  cancel(runId: string): Promise<boolean>;
+  /** Subscribe to the delta feed for ALL runs; filter by `runId`. Returns an unsubscribe. */
+  onProgress(listener: (event: AiProgressEvent) => void): () => void;
+  /** Task #18: probe a LOCAL runner's served models (see AiProbeModelsResult for why in MAIN). */
+  probeModels(baseUrl: string): Promise<AiProbeModelsResult>;
+}
+
 export interface PrometheusApi {
   /**
    * Whole-machine resource telemetry (CPU/GPU/NPU/RAM/DISK free+occupied) plus the
@@ -1115,6 +1308,8 @@ export interface PrometheusApi {
    * renders. Every answer is engine-computed — the renderer never decides safe.
    */
   security: SecurityApi;
+  /** §9c: model chat streaming, run in MAIN (see AiStreamRequest). */
+  ai: AiApi;
 
   /**
    * The Package & Environment Manager surface (file 04 §1,§3): venv/conda CRUD,
@@ -1438,6 +1633,12 @@ export interface ModelDownloadRequest {
   sha256?: Record<string, string>;
   /** the deep-red BLOCK override (typed-confirm collected by the renderer first). */
   force?: boolean;
+  /**
+   * Proof the user typed the FORCE_TOKEN into ForceGate for THIS action (§9a).
+   * Main drops `force` without it — the pair travels together or the nemesis BLOCK
+   * override does not happen.
+   */
+  confirmForce?: boolean;
   runId?: string;
 }
 
@@ -2355,6 +2556,82 @@ export interface IdeGitLogResult {
   error?: string;
 }
 
+/* ── worktrees (Task #5, desktop parity) — the SAME `@prometheus/core/git-worktree` shapes
+ * the CLI's `/worktree` slash renders, projected here so the renderer never imports core's
+ * node-only `GitSpawn` machinery directly (C5: git only spawns in MAIN). */
+
+/** One worktree row (mirrors core's `Worktree`). */
+export interface IdeWorktreeEntry {
+  path: string;
+  head: string;
+  branch?: string;
+  detached: boolean;
+  bare: boolean;
+  locked?: string | boolean;
+  prunable?: string;
+}
+
+/** Response to `ide:worktree.list`. */
+export interface IdeWorktreeListResult {
+  ok: boolean;
+  worktrees: IdeWorktreeEntry[];
+  error?: string;
+}
+
+/** Response to `ide:worktree.create` / `ide:worktree.remove`. */
+export interface IdeWorktreeOpResult {
+  ok: boolean;
+  path?: string;
+  message: string;
+}
+
+/* ── sub-agent personas (Task #5, desktop parity) — the SAME `@prometheus/core/agent-files`
+ * `LoadedAgent` shape the CLI's `spawn_agent` uses, already CLAMPED by scope in MAIN before it
+ * ever crosses IPC (a project persona is already forced read-only, model-refused, etc.). */
+export type IdeAgentFilePersona = agent.LoadedAgent;
+
+/** Response to `ide:agentFiles.list`. */
+export interface IdeAgentFilesListResult {
+  ok: boolean;
+  personas: IdeAgentFilePersona[];
+  error?: string;
+}
+
+/* ── custom slash commands from markdown (Task #5, desktop parity) — the SAME
+ * `@prometheus/core/command-loader` `CommandFile` shape the CLI's `command-files.ts` parses;
+ * the renderer expands it with `@prometheus/core/command-gate` (both node-free, so this
+ * crosses IPC only to get the raw parsed file — expansion happens client-side). */
+export interface IdeCommandFileArg {
+  name: string;
+  description?: string;
+  required?: boolean;
+}
+export interface IdeCommandFile {
+  name: string;
+  description?: string;
+  agent?: string;
+  model?: string;
+  subtask?: boolean;
+  args: IdeCommandFileArg[];
+  template: string;
+  fileRefs: string[];
+  shellInjections: string[];
+}
+export type IdeCommandFileScope = "user" | "project";
+export interface IdeLoadedCommandFile {
+  file: IdeCommandFile;
+  scope: IdeCommandFileScope;
+  /** absolute path, for a "where did this come from" line. */
+  path: string;
+}
+
+/** Response to `ide:commandFiles.list`. */
+export interface IdeCommandFilesListResult {
+  ok: boolean;
+  commands: IdeLoadedCommandFile[];
+  error?: string;
+}
+
 /** APP-082 interactive rebase: the todo action whitelist (mirrors the host + validator). */
 export type IdeRebaseAction = "pick" | "reword" | "squash" | "fixup" | "drop";
 /** One editable rebase todo row. `message` is used only for reword/squash. */
@@ -2509,6 +2786,161 @@ export interface IdeExecRequest {
   command: string;
   /** the working directory (the workspace root); validated + non-sensitive in main. */
   cwd: string;
+}
+
+/**
+ * A request to `agent:systemTool` — run ONE of core's shared system tools (Phase 6).
+ *
+ * This is the channel that ended the CLI/GUI split. `ide:exec` runs `shell -c <command>`
+ * behind a regex denylist; this runs core's `runSystemTool`, which is the same six-layer
+ * path the CLI uses (parse → registry → classify → nemesis → ladder → screen) and spawns
+ * each program directly with NO shell anywhere.
+ *
+ * `name` is validated in main against core's own tool list, so the renderer cannot invent
+ * a tool name, and the args are passed through for the tool's own validation.
+ */
+export interface AgentSystemToolRequest {
+  name: string;
+  args: Record<string, unknown>;
+  /** the workspace root; the tool's default cwd and the root of its read scope. */
+  cwd: string;
+  /**
+   * The operator's A0–A7 level, from the renderer's authorisation store.
+   *
+   * Needed because `run_command`'s OS sandbox (macOS Seatbelt) opens the network only at A5+,
+   * the same ladder bit that already governs the `install` category. Omitting it means the
+   * sandbox assumes the safe default and the pane's `curl` / `npm install` are refused by the
+   * kernel however the pill is set — so the level has to travel with the call.
+   *
+   * Main CLAMPS it (`clampAuthLevel`) rather than trusting the number: the renderer is the
+   * sandboxed side, and a level is an input like any other. Note this does NOT decide whether
+   * a tool runs — the renderer's broker and the human's task card already did that — it only
+   * tells main how tightly to confine a call that was already approved.
+   */
+  authLevel?: number;
+}
+
+/**
+ * `agent:hookRun` — the renderer's proxy to the user's LIFECYCLE HOOKS, which only MAIN runs.
+ *
+ * Two ops on one channel because they are one capability with one guard: `"list"` returns the
+ * hooks main resolved from settings (the renderer needs them for `tuning.hooks`, since core's
+ * loop does the matching), and `"run"` executes ONE of them.
+ *
+ * `command` is checked in main against the configured list for the same `event`, verbatim. The
+ * renderer therefore cannot use this channel to run a shell string of its own choosing — which
+ * it otherwise trivially could, since a hook command IS a shell line by design.
+ */
+export interface AgentHookRunRequest {
+  op: "list" | "run";
+  /** required for `op:"run"`. */
+  event?: "PreToolUse" | "PostToolUse" | "SessionStart";
+  /** required for `op:"run"` — must match a configured command for `event` exactly. */
+  command?: string;
+  /** the event's JSON payload, written to the hook's stdin. */
+  stdin?: string;
+  timeoutMs?: number;
+  /** the workspace root — the hook's working directory. */
+  cwd?: string;
+}
+
+/** The result of `agent:hookRun`. `hooks` answers `op:"list"`; `outcome` answers `op:"run"`. */
+export interface AgentHookRunResult {
+  ok: boolean;
+  error?: string;
+  hooks?: {
+    event: "PreToolUse" | "PostToolUse" | "SessionStart";
+    matcher?: string;
+    command: string;
+  }[];
+  outcome?: {
+    exitCode: number;
+    stdout: string;
+    stderr: string;
+    timedOut?: boolean;
+    error?: string;
+  };
+}
+
+/** The result of `agent:systemTool` — core's `ToolOutcome`, flattened for IPC. */
+export interface AgentSystemToolResult {
+  ok: boolean;
+  summary: string;
+  data?: Record<string, unknown>;
+  /** set when the nemesis gate refused it, so the pane can abort the round like the CLI. */
+  verdict?: { verdict: "block" | "error"; riskScore: number };
+}
+
+/**
+ * `agent:engineTool` — run one `prometheus_*` verb through the engine (prometheus.py).
+ *
+ * A SEPARATE channel from `agent:systemTool` rather than another branch inside it, because the
+ * two admit different things and are guarded by different lists: the system channel runs core's
+ * host implementations against a workspace path, while this one hands argv to the engine and has
+ * no cwd scope at all — the verbs are machine-global (they rewrite other agent CLIs' configs).
+ * Folding them together would mean one guard deciding two unrelated questions.
+ *
+ * `name` is looked up in core's catalogue INSIDE main; the renderer supplies a name and args and
+ * nothing else. It cannot supply argv, and it cannot supply a ToolDef whose `toArgv` it chose.
+ */
+/**
+ * One connected server's live tool descriptors, as plain JSON.
+ *
+ * `McpConnectorView` carries only a `toolCount`, so the renderer knew HOW MANY tools a server
+ * published and nothing about them — it could not build a single `ToolDef`, which is why the
+ * pane could not call one. A `ToolDef` cannot cross IPC (it holds a function), so the
+ * DESCRIPTORS cross and the renderer builds the defs with core's own `allMcpToolDefs`.
+ */
+export interface McpAgentServer {
+  id: string;
+  label: string;
+  enabled: boolean;
+  health: string;
+  /** the nemesis verdict recorded when the server was added, if any. */
+  verdict?: string;
+  /** the raw MCP tool descriptors: `{name, title?, description?, inputSchema?, annotations?}`. */
+  tools: Record<string, unknown>[];
+}
+
+export interface McpAgentToolsResult {
+  ok: boolean;
+  servers: McpAgentServer[];
+  error?: string;
+}
+
+/** Call one tool on one connected MCP server. */
+export interface McpAgentCallRequest {
+  serverId: string;
+  tool: string;
+  args: Record<string, unknown>;
+}
+
+/**
+ * One remembered permission grant, as it crosses IPC.
+ *
+ * Deliberately the same shape as core's `Grant`, and deliberately NOT re-derived in main: the
+ * store's own `add()` is what refuses an over-broad subject (`*`, `engine:*`, anything carrying
+ * `--force`), and rehydrating around that door would let a hand-edited file express a grant the
+ * UI would have refused.
+ */
+export interface AgentGrant {
+  subject: string;
+  decision: "allow" | "deny";
+  scope: "project" | "user";
+  /** a project grant binds to this workspace root. */
+  root?: string;
+  paths?: string[];
+}
+
+export interface AgentGrantsResult {
+  ok: boolean;
+  grants: AgentGrant[];
+  error?: string;
+}
+
+export interface AgentEngineToolRequest {
+  name: string;
+  args: Record<string, unknown>;
 }
 
 /** The captured result of `ide:exec`. `blocked` ⇒ the screen/validator refused it. */
@@ -3200,6 +3632,20 @@ export interface IdeApi {
   // ── fs (MAIN owns the filesystem; renderer never touches node:fs) ─────────
   fsRead(uri: string): Promise<IdeFsReadResult>;
   fsWrite(uri: string, text: string): Promise<IdeOkResult>;
+  /**
+   * handoff §3: declare the workspace roots MAIN gates every mutating fs call against.
+   * An EMPTY list disables the scope check (no folder open ⇒ no working set).
+   */
+  setWorkingSet(roots: readonly string[]): Promise<IdeOkResult>;
+  /**
+   * handoff §3: register ONE absolute path the human explicitly approved writing OUTSIDE
+   * the working set. Per-path, never a wildcard; cleared whenever the roots change.
+   * `scope: "clear"` forgets every prior approval.
+   */
+  approveOutsideWorkingSet(
+    path: string,
+    scope?: "once" | "session" | "clear",
+  ): Promise<IdeOkResult>;
   fsTree(dir: string): Promise<IdeTreeNode[]>;
   /** APP-065: walk the whole repo → a flat file list (ignore-pruned, no symlinks). */
   fsWalk(root: string): Promise<IdeFsWalkResult>;
@@ -3399,6 +3845,16 @@ export interface IdeApi {
   gate(req: IdeGateRequest): Promise<IdeGateResult>;
   /** run ONE user-approved, screened shell command in the workspace; capture output. */
   exec(req: IdeExecRequest): Promise<IdeExecResult>;
+  /** Phase 6: run one of core's shared system tools — the same path the CLI runs. */
+  systemTool(req: AgentSystemToolRequest): Promise<AgentSystemToolResult>;
+  /** list, or run, one of the user's configured lifecycle hooks (main owns the spawn). */
+  hookRun(req: AgentHookRunRequest): Promise<AgentHookRunResult>;
+  /** run one `prometheus_*` engine verb — the product's own surface, which the pane lacked. */
+  engineTool(req: AgentEngineToolRequest): Promise<AgentSystemToolResult>;
+  /** the persisted "don't ask again" grants (shared with the CLI). */
+  grantsList(): Promise<AgentGrantsResult>;
+  /** persist one grant. Rejected here if the store considers the subject too broad. */
+  grantsAdd(grant: AgentGrant): Promise<AgentGrantsResult>;
   /** bounded, gitignore-aware workspace search (content grep or path match), offloaded
    *  to the utilityProcess worker with a graceful inline fallback (APP-066). */
   search(req: IdeSearchRequest): Promise<IdeSearchResult>;
@@ -3438,6 +3894,21 @@ export interface IdeApi {
    * unsubscribe fn. Cosmetic/data only — never a security verdict (C5).
    */
   onEvent(listener: (event: IdeEvent) => void): () => void;
+  // ── worktrees (Task #5, desktop parity): create/list/remove git worktrees for parallel
+  // sessions, via the SAME `@prometheus/core/git-worktree` functions the CLI's `/worktree`
+  // slash calls. "switch" has no IPC of its own — the renderer repoints the workspace root
+  // client-side against a `list()` row, mirroring the CLI's `ctx.setCwd`.
+  worktreeList(root: string): Promise<IdeWorktreeListResult>;
+  /** Create a worktree for `branch` (new or existing); `path` defaults to a repo-sibling dir. */
+  worktreeCreate(root: string, branch: string, path?: string): Promise<IdeWorktreeOpResult>;
+  /** Remove a worktree by path. Refuses a dirty or locked worktree (never `--force`). */
+  worktreeRemove(root: string, path: string): Promise<IdeWorktreeOpResult>;
+  // ── sub-agent personas (Task #5, desktop parity): markdown personas for `spawn_agent`,
+  // via the SAME `@prometheus/core/agent-files` clamping the CLI applies.
+  agentFilesList(root: string): Promise<IdeAgentFilesListResult>;
+  // ── custom slash commands (Task #5, desktop parity): markdown commands, parsed by the
+  // SAME `@prometheus/core/command-loader` the CLI's `/command` loader uses.
+  commandFilesList(root: string): Promise<IdeCommandFilesListResult>;
 }
 
 /* ── metadata: atomic file-metadata control (file 0C — privacy protection) ───
@@ -3766,6 +4237,10 @@ export interface McpApi {
   setEnabled(id: string, enabled: boolean): Promise<McpOpResult>;
   /** Import connectors from other agents' on-disk configs (Claude/Cursor/Codex/…). */
   import(): Promise<McpImportResult>;
+  /** The live tool DESCRIPTORS the agent pane turns into tool defs (it had only a count). */
+  agentTools(): Promise<McpAgentToolsResult>;
+  /** Call one tool on one connected server, already approved upstream by the pane's broker. */
+  agentCall(req: McpAgentCallRequest): Promise<AgentSystemToolResult>;
 }
 
 /* ── APP-095: git-backed settings sync ─────────────────────────────────────────*/

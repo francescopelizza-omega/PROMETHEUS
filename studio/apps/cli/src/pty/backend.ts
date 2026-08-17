@@ -24,6 +24,7 @@
  * Node built-ins only (lazy): node:child_process for the fallback; node-pty is the
  * optional native addon, required lazily and only when present.
  */
+import { trackChild } from "../child-reaper.js";
 
 /* ------------------------------------------------------------------------- *
  * The PtyBackend contract (re-declared locally — NOT imported from desktop)
@@ -162,6 +163,14 @@ function nodePtyBackend(pty: NodePtyModule): PtyBackend {
         rows: opts.rows ?? 24,
         name: "xterm-color",
       });
+      // A terminal pane's shell is a child like any other: if the CLI exits without the
+      // pane being closed first, the shell (and everything running in it) is orphaned.
+      const untrack = trackChild({
+        pid: proc.pid,
+        label: `pty:${opts.shell}`,
+        command: [opts.shell, ...(opts.args ?? [])].join(" "),
+      });
+      proc.onExit(() => untrack());
       return {
         pid: proc.pid,
         write: (d) => proc.write(d),
@@ -306,6 +315,14 @@ function childProcessBackend(spawnFn: SpawnFn): PtyBackend {
         env: opts.env,
         stdio: ["pipe", "pipe", "pipe"],
       });
+      // `on`, not `once` — the minimal SpawnedChild contract has no `once`, and untrack is
+      // idempotent (deleting an absent key is a no-op), so a repeat call is harmless.
+      const untrack = trackChild({
+        pid: child.pid,
+        label: `pty:${opts.shell}`,
+        command: [opts.shell, ...(opts.args ?? [])].join(" "),
+      });
+      child.on("exit", () => untrack());
       return new ChildProcessPty(child);
     },
   };

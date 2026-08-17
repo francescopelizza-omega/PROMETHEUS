@@ -11,8 +11,18 @@
  * Renderer-SANDBOXED (C5): react + @prometheus/ui + ThemeProvider + window.prometheus only.
  */
 import { themes } from "@prometheus/ui";
-import { type CSSProperties, type ReactElement, useEffect, useMemo, useState } from "react";
+import {
+  type CSSProperties,
+  type ReactElement,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 
+import { Z, useFocusTrap } from "@prometheus/ui";
+import { PrometheusMark } from "../shell/PrometheusMark.js";
 import { useTheme } from "../shell/ThemeProvider.js";
 import {
   type ModelChoice,
@@ -78,6 +88,18 @@ export function OnboardingWizard({
   });
 
   const finish = (skipped: boolean): void => onComplete(collect(), skipped);
+  // §9.2: this is the only surface in the app that DECLARES `aria-modal="true"`, and it was
+  // the only one with no trap at all — so assistive tech was told the workbench behind it
+  // was inert while Tab still walked straight into it. There is no click-outside and no ✕
+  // either, which made it dismiss-proof from the keyboard; Escape now skips the wizard,
+  // matching the visible "Skip" button rather than inventing a third outcome.
+  const rootRef = useRef<HTMLDivElement | null>(null);
+  // read `finish` through a ref so the trap's effect does not re-run — and re-move focus —
+  // on every keystroke that changes the wizard's state.
+  const finishRef = useRef(finish);
+  finishRef.current = finish;
+  const skip = useCallback(() => finishRef.current(true), []);
+  useFocusTrap(rootRef, true, skip);
   const advance = (): void => {
     const next = nextStep(step);
     if (next === "done") finish(false);
@@ -108,6 +130,7 @@ export function OnboardingWizard({
 
   return (
     <div
+      ref={rootRef}
       role="dialog"
       aria-label="First-run setup"
       aria-modal="true"
@@ -118,7 +141,7 @@ export function OnboardingWizard({
         alignItems: "center",
         justifyContent: "center",
         background: "color-mix(in srgb, var(--bg-app) 70%, transparent)",
-        zIndex: 100,
+        zIndex: Z.modal,
       }}
     >
       <div
@@ -140,7 +163,11 @@ export function OnboardingWizard({
       >
         {step === "welcome" && (
           <>
-            <h2 style={{ margin: 0 }}>Welcome to Prometheus Studio</h2>
+            {/* §8.2: the brand mark leads the first thing anyone ever sees of the app. */}
+            <span style={{ display: "flex", alignItems: "center", gap: 10 }}>
+              <PrometheusMark height={28} />
+              <h2 style={{ margin: 0 }}>Welcome to Prometheus Studio</h2>
+            </span>
             <p style={{ color: "var(--text-secondary)" }}>
               A quick setup: pick a Python interpreter, choose how you'll run models, set a theme,
               and (optionally) enable the token-economy toolkit. You can skip any step.

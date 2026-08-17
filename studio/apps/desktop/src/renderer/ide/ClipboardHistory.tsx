@@ -13,6 +13,7 @@
 
 import { type ReactElement, useEffect, useMemo, useRef, useState } from "react";
 
+import { Z } from "@prometheus/ui";
 import { useClipboardStore } from "./state/clipboard-store.js";
 
 /** A single-line, whitespace-collapsed preview of a (possibly multi-line) entry. */
@@ -62,7 +63,7 @@ export function ClipboardHistory({ onClose }: { onClose: () => void }): ReactEle
         position: "fixed",
         inset: 0,
         background: "rgba(0,0,0,0.4)",
-        zIndex: 1100,
+        zIndex: Z.palette,
         display: "flex",
         justifyContent: "center",
         alignItems: "flex-start",
@@ -75,8 +76,8 @@ export function ClipboardHistory({ onClose }: { onClose: () => void }): ReactEle
         aria-label="paste from history"
         style={{
           width: "min(560px, 90vw)",
-          background: "var(--bg-surface-2, #16161b)",
-          border: "1px solid var(--border-subtle, #232329)",
+          background: "var(--bg-surface-2)",
+          border: "1px solid var(--border-subtle)",
           borderRadius: "var(--radius-md, 8px)",
           boxShadow: "0 12px 48px rgba(0,0,0,0.5)",
           overflow: "hidden",
@@ -108,17 +109,15 @@ export function ClipboardHistory({ onClose }: { onClose: () => void }): ReactEle
             padding: "10px 12px",
             background: "transparent",
             border: "none",
-            borderBottom: "1px solid var(--border-subtle, #232329)",
-            color: "var(--text-primary, #e7e7ea)",
+            borderBottom: "1px solid var(--border-subtle)",
+            color: "var(--text-primary)",
             fontSize: "0.9rem",
             outline: "none",
           }}
         />
         <div style={{ maxHeight: 360, overflow: "auto" }}>
           {filtered.length === 0 && (
-            <p
-              style={{ padding: 12, color: "var(--text-secondary, #9a9aa3)", fontSize: "0.82rem" }}
-            >
+            <p style={{ padding: 12, color: "var(--text-secondary)", fontSize: "0.82rem" }}>
               {entries.length === 0 ? "Clipboard history is empty." : "No matches."}
             </p>
           )}
@@ -136,7 +135,7 @@ export function ClipboardHistory({ onClose }: { onClose: () => void }): ReactEle
                 border: "none",
                 padding: "6px 12px",
                 cursor: "pointer",
-                background: i === active ? "var(--bg-surface-2, #1d1d24)" : "transparent",
+                background: i === active ? "var(--bg-surface-2)" : "transparent",
                 display: "flex",
                 alignItems: "center",
                 gap: 8,
@@ -145,7 +144,7 @@ export function ClipboardHistory({ onClose }: { onClose: () => void }): ReactEle
             >
               <span
                 style={{
-                  color: "var(--text-secondary, #9a9aa3)",
+                  color: "var(--text-secondary)",
                   fontSize: "0.68rem",
                   width: 16,
                   textAlign: "right",
@@ -157,7 +156,7 @@ export function ClipboardHistory({ onClose }: { onClose: () => void }): ReactEle
                 style={{
                   flex: 1,
                   fontSize: "0.8rem",
-                  color: "var(--text-primary, #e7e7ea)",
+                  color: "var(--text-primary)",
                   fontFamily: "var(--font-mono, monospace)",
                   overflow: "hidden",
                   textOverflow: "ellipsis",
@@ -175,7 +174,7 @@ export function ClipboardHistory({ onClose }: { onClose: () => void }): ReactEle
               display: "flex",
               justifyContent: "flex-end",
               padding: "4px 8px",
-              borderTop: "1px solid var(--border-subtle, #232329)",
+              borderTop: "1px solid var(--border-subtle)",
             }}
           >
             <button
@@ -184,7 +183,7 @@ export function ClipboardHistory({ onClose }: { onClose: () => void }): ReactEle
               style={{
                 background: "transparent",
                 border: "none",
-                color: "var(--text-secondary, #9a9aa3)",
+                color: "var(--text-secondary)",
                 cursor: "pointer",
                 fontSize: "0.72rem",
                 padding: "2px 6px",

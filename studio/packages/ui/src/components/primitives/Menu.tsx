@@ -16,7 +16,8 @@ import {
   useRef,
   useState,
 } from "react";
-import { menuKeyHandler, useDismiss } from "./overlay.js";
+import { Z } from "../../tokens/layers.js";
+import { clampToViewport, menuKeyHandler, useDismiss } from "./overlay.js";
 import { fs, FOCUS_RING, rad, sp, v } from "./styles.js";
 
 /** A single menu entry (a separator carries no `onSelect`). */
@@ -203,7 +204,7 @@ export function DropdownMenu({
             position: "absolute",
             top: "calc(100% + 4px)",
             [align === "end" ? "right" : "left"]: 0,
-            zIndex: 950,
+            zIndex: Z.dropdown,
           }}
         >
           <MenuList items={items} onClose={() => setOpen(false)} listRef={listRef} />
@@ -238,12 +239,7 @@ export function ContextMenu({ items, children, className }: ContextMenuProps): R
         // render the menu partly off-screen and unclickable (no collision flip here).
         const MENU_W = 200;
         const MENU_H = 40 + items.length * 32;
-        const vw = typeof window !== "undefined" ? window.innerWidth : e.clientX + MENU_W;
-        const vh = typeof window !== "undefined" ? window.innerHeight : e.clientY + MENU_H;
-        setPos({
-          x: Math.max(4, Math.min(e.clientX, vw - MENU_W)),
-          y: Math.max(4, Math.min(e.clientY, vh - MENU_H)),
-        });
+        setPos(clampToViewport(e.clientX, e.clientY, MENU_W, MENU_H));
       }}
       style={{ display: "contents" }}
     >
@@ -254,7 +250,7 @@ export function ContextMenu({ items, children, className }: ContextMenuProps): R
             position: "fixed",
             top: pos.y,
             left: pos.x,
-            zIndex: 1300,
+            zIndex: Z.dropdown,
           }}
           onFocus={(e) => {
             e.currentTarget.style.boxShadow = FOCUS_RING;

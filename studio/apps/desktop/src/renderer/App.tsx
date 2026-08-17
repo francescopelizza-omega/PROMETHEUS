@@ -28,20 +28,20 @@ import {
   useState,
 } from "react";
 
+import { Z, resolveActivity } from "@prometheus/ui";
 import { CatalogRoute } from "../routes/catalog.js";
 import { ChatRoute } from "../routes/chat.js";
-import { DocsRoute } from "../routes/docs.js";
 import { EditorRoute } from "../routes/editor.js";
-import { EnvironmentsRoute } from "../routes/environments.js";
-import { ExtensionsRoute } from "../routes/extensions.js";
 import { ModelsRoute } from "../routes/models.js";
-import { ReposRoute } from "../routes/repos.js";
+import { requestRouteTab } from "../routes/route-tabs.js";
 import { SecurityRoute } from "../routes/security.js";
+import { WorkspaceRoute } from "../routes/workspace.js";
 import { type CommandContext, executeCommandId, handleChord } from "./commands/registry.js";
 import { HardenPanel } from "./ide/HardenPanel.js";
 import { Problems } from "./ide/Problems.js";
 import { TokenEconomyPanel } from "./ide/TokenEconomyPanel.js";
 import { AgentPane } from "./ide/ai/AgentPane.js";
+import { declareWorkingSet } from "./ide/ai/permission-gate.js";
 import { agentRuns } from "./ide/ai/run-controller.js";
 import { SystemHealthPanel } from "./ide/health/SystemHealthPanel.js";
 import { deriveSystemHealthView } from "./ide/health/health-panel-view.js";
@@ -49,6 +49,7 @@ import { MetadataPanel } from "./ide/metadata/MetadataPanel.js";
 import { countDiagnostics } from "./ide/state/diagnostics.js";
 import { detectLanguage } from "./ide/state/lang-detect.js";
 import { useDiagnosticsStore, useTabsStore } from "./ide/state/stores.js";
+import { useAiSessionStore } from "./ide/state/stores.js";
 import { TelemetryPanel } from "./ide/telemetry/TelemetryPanel.js";
 import { TelemetryStrip } from "./ide/telemetry/TelemetryStrip.js";
 import { useTelemetryPolling } from "./ide/telemetry/useTelemetryPolling.js";
@@ -69,11 +70,14 @@ import {
   overridesToMap,
   parseOverrides,
 } from "./settings/keymap-overrides.js";
+import { AuthPicker } from "./shell/AuthPill.js";
+import { EngineGate } from "./shell/EngineGate.js";
 import { ErrorBoundary } from "./shell/ErrorBoundary.js";
 import { UpdateBanner } from "./shell/UpdateBanner.js";
 import { nextRegion, useFocusTrap } from "./shell/a11y.js";
 import {
   ActivityBar,
+  type AgentActivity,
   BottomPanel,
   type BottomTab,
   CommandPalette,
@@ -81,6 +85,7 @@ import {
   type RightRailMode,
   ShellStatusBar,
   Sidebar,
+  TopBar,
   useTheme,
 } from "./shell/index.js";
 import {
@@ -105,6 +110,7 @@ import { sidebarBodyFor } from "./sidebar-bodies.js";
 import { useEngineStore } from "./stores/engine.js";
 import { useSecurityStore } from "./stores/features.js";
 import { useModelsStore } from "./stores/models.js";
+import { useRecentsStore } from "./stores/recents.js";
 
 /** The bottom-panel tabs the SHELL itself can render bodies for. The Terminal /
  *  Output / Tasks tabs are part of the Editor workbench (routes/editor.tsx), not
@@ -119,6 +125,21 @@ const SHELL_BOTTOM_TABS: readonly { id: BottomTab; label: string }[] = [
   { id: "system", label: "System" },
 ];
 const SHELL_BOTTOM_TAB_IDS = new Set<BottomTab>(SHELL_BOTTOM_TABS.map((t) => t.id));
+
+/**
+ * Routes whose CONTENT comes from the engine — these get the §6 degraded wrapper.
+ *
+ * Catalog and Workspace are deliberately NOT here, and the reason is a bug the §1 merge
+ * introduced. `DegradedState` renders the last-known content under `pointerEvents:"none"`,
+ * which is right for stale data and wrong for navigation: gating the whole route also froze
+ * the segmented control, so with the engine down the user could not switch to Catalog /
+ * Extensions (the MCP connector manager, which runs in MAIN and never touches the engine) or
+ * to Workspace / Docs (local markdown, likewise). Before the merge both were their own rail
+ * routes and stayed usable. Those two routes now apply `EngineGate` to the engine-backed
+ * SEGMENT BODIES themselves, so the chrome stays live and the gate still covers what it
+ * should.
+ */
+const ENGINE_BACKED: ReadonlySet<ActivityId> = new Set<ActivityId>(["models", "security"]);
 
 /* ── workbench layout persistence (leap #13) ──────────────────────────────────
  * The whole layout (active activity, panel collapse states, right-rail mode, bottom
@@ -145,7 +166,19 @@ function loadLayout(): Partial<PersistedLayout> {
     if (!raw) return {};
     const o = JSON.parse(raw) as Record<string, unknown>;
     const out: Partial<PersistedLayout> = {};
-    if (typeof o.activity === "string") out.activity = o.activity as ActivityId;
+    if (typeof o.activity === "string") {
+      // MIGRATE, never cast. handoff_3 §1 retired four activities into two merged routes,
+      // and this blob is on disk for anyone who quit while on Repos/Environments/Docs/
+      // Extensions. A raw cast let a stale id through to `renderActivity`, which fell to
+      // its `default:` branch and silently opened an unrelated route. `resolveActivity`
+      // also latches the segment, so the redirect lands on the right TAB, not just the
+      // right route.
+      const resolved = resolveActivity(o.activity);
+      out.activity = resolved.activity;
+      if (resolved.tab && (resolved.activity === "catalog" || resolved.activity === "workspace")) {
+        requestRouteTab(resolved.activity, resolved.tab);
+      }
+    }
     const sidebarMap = parseSidebarCollapsed(o);
     if (sidebarMap) out.sidebarCollapsedByActivity = sidebarMap;
     if (typeof o.rightCollapsed === "boolean") out.rightCollapsed = o.rightCollapsed;
@@ -174,7 +207,7 @@ function activityForCommand(id: string): ActivityId | null {
   if (id.startsWith("panel.")) return null;
   if (id.startsWith("models.")) return "models";
   if (id.startsWith("prometheus.") || id.startsWith("gate.")) return "security";
-  if (id.startsWith("python.")) return "environments";
+  if (id.startsWith("python.")) return "workspace";
   // ai.* / git.* / debug.* / search.* / editor.* all live in the Editor workbench.
   return "editor";
 }
@@ -187,7 +220,13 @@ function renderActivity(
 ): ReactElement {
   switch (activity) {
     case "home":
-      return <HomeRoute onNavigate={onNavigate} onOpenTokens={() => onOpenPanel("tokens")} />;
+      return (
+        <HomeRoute
+          onNavigate={onNavigate}
+          onOpenTokens={() => onOpenPanel("tokens")}
+          onOpenHealth={() => onOpenPanel("health")}
+        />
+      );
     case "editor":
       // the panel.* palette seam (APP-004): the editor palette opens SHELL bottom tabs.
       return <EditorRoute onNavigate={onNavigate} onOpenShellPanel={onOpenPanel} />;
@@ -197,18 +236,22 @@ function renderActivity(
       return <ChatRoute />;
     case "models":
       return <ModelsRoute />;
-    case "environments":
-      return <EnvironmentsRoute />;
     case "security":
       return <SecurityRoute />;
-    case "repos":
-      return <ReposRoute />;
-    case "docs":
-      return <DocsRoute />;
-    case "extensions":
-      return <ExtensionsRoute />;
+    case "workspace":
+      // handoff_3 §1: Repos + Environments + Docs, segmented.
+      return <WorkspaceRoute />;
     default:
-      return <ExtensionsRoute />;
+      // Home, not a route that happened to be last in the switch. `resolveActivity`
+      // already redirects every retired id, so reaching here means a genuinely unknown
+      // activity — and Mission Control is the honest place to land.
+      return (
+        <HomeRoute
+          onNavigate={onNavigate}
+          onOpenTokens={() => onOpenPanel("tokens")}
+          onOpenHealth={() => onOpenPanel("health")}
+        />
+      );
   }
 }
 
@@ -235,22 +278,21 @@ function SettingsOverlay({
   workspaceRoot?: string;
 }): ReactElement {
   const { preference, setPreference } = useTheme();
-  // focus trap + initial focus + focus-restore on close (parity with CommandPalette) so Tab
-  // stays inside the modal instead of walking the workbench controls behind it.
+  // focus trap + Escape + focus-restore on close (parity with CommandPalette) so Tab stays
+  // inside the modal instead of walking the workbench controls behind it. Escape used to be
+  // a separate window listener here; the trap owns it now, on the document in CAPTURE, so
+  // it fires before anything below can swallow the key.
   const dialogRef = useRef<HTMLElement | null>(null);
-  useFocusTrap(dialogRef, true);
+  useFocusTrap(dialogRef, true, onClose, {
+    deferTabToTextFields: true,
+    // this overlay focuses the SECTION (not its first control) so the screen reader reads
+    // the dialog label before the first setting.
+    skipInitialFocus: true,
+  });
   useEffect(() => {
     const id = requestAnimationFrame(() => dialogRef.current?.focus());
     return () => cancelAnimationFrame(id);
   }, []);
-  // Esc closes the overlay — keyboard parity with the backdrop click + the ✕ button.
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent): void => {
-      if (e.key === "Escape") onClose();
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [onClose]);
   return (
     <div
       role="presentation"
@@ -268,7 +310,7 @@ function SettingsOverlay({
         alignItems: "flex-start",
         justifyContent: "center",
         paddingTop: "8vh",
-        zIndex: 60,
+        zIndex: Z.dropdown,
       }}
     >
       <section
@@ -365,6 +407,19 @@ function App(): ReactElement {
   // run controller (NOT any pane), so it stays correct while the AI pane is collapsed/unmounted.
   const [aiRunningCount, setAiRunningCount] = useState(0);
   useEffect(() => agentRuns.subscribe(() => setAiRunningCount(agentRuns.runningIds().length)), []);
+  // §2.5: the rail header's session chip + the tray's status dot. Both read the SAME
+  // module-level run controller the ✦ badge does, so a minimised rail still tells the
+  // truth about a background run (and about one that is blocked awaiting approval).
+  const activeSessionTitle = useAiSessionStore((s) =>
+    s.activeId ? s.sessions[s.activeId]?.title : undefined,
+  );
+  const activeSessionId = useAiSessionStore((s) => s.activeId);
+  const agentActivity: AgentActivity =
+    aiRunningCount > 0
+      ? "running"
+      : activeSessionId && agentRuns.isAwaiting(activeSessionId)
+        ? "attention"
+        : "idle";
   // APP-057: the user keymap override map (command id → keys) the LIVE chord matcher reads.
   // Loaded from persistence + reloaded on the same-tab change signal (SettingsPanel) and the
   // cross-tab 'storage' event, so a rebind takes effect immediately + survives relaunch.
@@ -388,6 +443,8 @@ function App(): ReactElement {
   const [bottomTab, setBottomTab] = useState<BottomTab>(saved.bottomTab ?? "health");
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  /** §7: the StatusBar's auth entry opens the §5 picker upward. */
+  const [authPickerOpen, setAuthPickerOpen] = useState(false);
   // APP-064: the first-run wizard shows ONLY when the flag is absent; a re-entry action
   // (`prometheus:run-onboarding` from Home / Settings) relaunches it with the flag already set.
   const [showWizard, setShowWizard] = useState(() => {
@@ -594,6 +651,40 @@ function App(): ReactElement {
     return () => window.removeEventListener("ide:run-shell-command", onRun);
   }, [cmdCtx]);
 
+  // §2.3.4: record EVERY workspace root the app opens into the recent-projects MRU.
+  // Subscribing to the tabs store (rather than patching each opener) means the picker,
+  // a deep link, a recents click and a drag-drop all land in the list the same way.
+  useEffect(() => {
+    if (workspaceRoot) useRecentsStore.getState().record(workspaceRoot);
+  }, [workspaceRoot]);
+
+  // handoff §3: tell MAIN which roots the applier guard should gate writes against.
+  // Re-declared on every workspace change (which also drops any prior out-of-scope
+  // approvals — they were granted against the old scope). With no folder open the list
+  // is empty, which disables the scope check rather than refusing every save.
+  useEffect(() => {
+    void declareWorkingSet(workspaceRoot ? [workspaceRoot] : []);
+  }, [workspaceRoot]);
+
+  // §2.3.2: Home's ask bar hands its draft to the AGENT RAIL (which is always present)
+  // instead of navigating away. Open the rail, seed the composer, and let the pane read
+  // the seeded prompt on mount.
+  useEffect(() => {
+    const onOpenAgent = (e: Event): void => {
+      const prompt = (e as CustomEvent<{ prompt?: string }>).detail?.prompt;
+      setRightCollapsed(false);
+      setRightMode("agent");
+      if (prompt) {
+        // defer past the commit so the (possibly just-mounted) pane is listening.
+        requestAnimationFrame(() =>
+          window.dispatchEvent(new CustomEvent("prometheus:seed-agent-prompt", { detail: prompt })),
+        );
+      }
+    };
+    window.addEventListener("prometheus:open-agent", onOpenAgent);
+    return () => window.removeEventListener("prometheus:open-agent", onOpenAgent);
+  }, []);
+
   // Open-resource bus: any surface can dispatch prometheus:open-file / open-folder and
   // we route it to the editor (a tab for a file, the workspace root for a folder) — so a
   // double-clicked path anywhere lands in the editor without that component knowing the
@@ -642,13 +733,30 @@ function App(): ReactElement {
   const sidebarCollapsedForRoute = !hasSidebarBody(activity)
     ? true
     : effectiveSidebarCollapsed(sidebarCollapsedMap, activity);
-  // The editor is full-bleed; discovery surfaces get calm padding (08 §2.4 density).
+  // The editor owns its own island gaps; discovery surfaces get calm padding (08 §2.4).
   const workMainStyle: CSSProperties =
     // minWidth:0 lets the editor/main flex child shrink below its content width so a narrow
-    // (900px) window never overflows/clips the shell chrome (APP-100 responsive sweep).
+    // window never overflows/clips the shell chrome (APP-100 responsive sweep).
+    // Editor owns its own 8px island gaps; Home owns its own 26/30px mission-control
+    // padding; every other route gets the calm default (08 §2.4 density).
     activity === "editor"
       ? { flex: 1, minWidth: 0, minHeight: 0, overflow: "hidden" }
-      : { flex: 1, minWidth: 0, minHeight: 0, overflow: "auto", padding: "var(--space-12, 24px)" };
+      : activity === "home"
+        ? { flex: 1, minWidth: 0, minHeight: 0, overflow: "auto" }
+        : { flex: 1, minWidth: 0, minHeight: 0, overflow: "auto", padding: "18px 20px" };
+
+  // The project chip's display name — the workspace folder's basename (§2.1).
+  const projectName = workspaceRoot
+    ? (workspaceRoot
+        .replace(/[/\\]+$/, "")
+        .split(/[/\\]/)
+        .pop() ?? undefined)
+    : undefined;
+
+  const openHealth = (): void => {
+    setBottomTab("health");
+    setBottomCollapsed(false);
+  };
 
   return (
     <div
@@ -656,25 +764,46 @@ function App(): ReactElement {
         height: "100vh",
         display: "flex",
         flexDirection: "column",
-        background: "var(--bg-app)",
+        // §2: the app ROOT carries the radial wash; every panel is an island floating on it.
+        background: "var(--gradient-app)",
         color: "var(--text-primary)",
         fontFamily: "var(--font-ui)",
+        overflow: "hidden",
       }}
     >
-      <div style={{ flex: 1, display: "flex", minHeight: 0, minWidth: 0, overflow: "hidden" }}>
+      <TopBar
+        {...(projectName ? { project: projectName } : {})}
+        {...(branch ? { branch } : {})}
+        onCommandPalette={() => setPaletteOpen(true)}
+        enginePill={enginePill}
+        onEngineStatus={openHealth}
+        onRun={() => executeCommandId("debug.start", cmdCtx)}
+        onDebug={() => executeCommandId("debug.start", cmdCtx)}
+        onStop={() => executeCommandId("debug.stop", cmdCtx)}
+        running={aiRunningCount > 0}
+        onOpenProject={() => setActivity("editor")}
+      />
+      {/* §2: the main row lays islands out with 8px gaps on the inset ground. */}
+      <div
+        style={{
+          flex: 1,
+          display: "flex",
+          minHeight: 0,
+          minWidth: 0,
+          overflow: "hidden",
+          gap: 8,
+          padding: 8,
+          paddingLeft: 0,
+        }}
+      >
         <ActivityBar
           active={activity}
           sidebarOpen={!sidebarCollapsedForRoute}
           onSelect={handleSelectActivity}
-          enginePill={enginePill}
           aiOpen={!rightCollapsed}
           aiRunningCount={aiRunningCount}
           onToggleAI={() => setRightCollapsed((v) => !v)}
           onSettings={() => setSettingsOpen(true)}
-          onEngineStatus={() => {
-            setBottomCollapsed(false);
-            setBottomTab("health");
-          }}
         />
         <Sidebar
           activity={activity}
@@ -684,69 +813,105 @@ function App(): ReactElement {
           {hasSidebarBody(activity) ? sidebarBodyFor(activity) : null}
         </Sidebar>
         <div
-          style={{ flex: 1, display: "flex", flexDirection: "column", minWidth: 0, minHeight: 0 }}
+          style={{
+            flex: 1,
+            display: "flex",
+            flexDirection: "column",
+            minWidth: 0,
+            minHeight: 0,
+            gap: 8,
+          }}
         >
           <main style={workMainStyle} data-shell-region="editor" aria-label="Editor" tabIndex={-1}>
             {/* per-route boundary: a crash in one route shows a fallback there and
                 keeps the rail / palette / status bar alive (resets on navigation). */}
             <ErrorBoundary label={activity} resetKey={activity}>
-              {renderActivity(activity, setActivity, (tab) => {
-                setBottomTab(tab);
-                setBottomCollapsed(false);
-              })}
+              {/* §6: DEGRADED wraps every ENGINE-BACKED route — the engine being down is a
+                  fact about the whole route, not about one panel inside it. Home has its
+                  own per-island degraded states (its islands degrade independently), and
+                  Editor/Docs/Chat do not read the engine at all. */}
+              {ENGINE_BACKED.has(activity) ? (
+                <EngineGate>
+                  {renderActivity(activity, setActivity, (tab) => {
+                    setBottomTab(tab);
+                    setBottomCollapsed(false);
+                  })}
+                </EngineGate>
+              ) : (
+                renderActivity(activity, setActivity, (tab) => {
+                  setBottomTab(tab);
+                  setBottomCollapsed(false);
+                })
+              )}
             </ErrorBoundary>
           </main>
-          <BottomPanel
-            collapsed={bottomCollapsed}
-            active={bottomTab}
-            tabs={SHELL_BOTTOM_TABS}
-            onSelect={setBottomTab}
-            onToggle={() => setBottomCollapsed((v) => !v)}
-            counts={{ problems: diagCounts.errors + diagCounts.warnings, security: securityCount }}
-            rightSlot={
-              <TelemetryStrip
-                onOpen={() => {
-                  setBottomTab("system");
-                  setBottomCollapsed(false);
-                }}
-              />
-            }
-          >
-            {bottomTab === "problems" ? (
-              <Problems />
-            ) : bottomTab === "health" ? (
-              <SystemHealthPanel
-                view={deriveSystemHealthView(engineHealth, enginePill)}
-                onRefresh={() => void refreshHealth()}
-              />
-            ) : bottomTab === "metadata" ? (
-              <MetadataPanel />
-            ) : bottomTab === "security" ? (
-              <HardenPanel />
-            ) : bottomTab === "tokens" ? (
-              <TokenEconomyPanel onNavigate={setActivity} />
-            ) : bottomTab === "system" ? (
-              <TelemetryPanel />
-            ) : null}
-          </BottomPanel>
+          {/* The EDITOR route owns its own bottom island (Terminal/Claude/Problems/Health/
+              …), so the shell must not stack a second one under it — that was two panels
+              deep on the one route that needs the vertical space most. */}
+          {activity !== "editor" && (
+            <BottomPanel
+              collapsed={bottomCollapsed}
+              active={bottomTab}
+              tabs={SHELL_BOTTOM_TABS}
+              onSelect={setBottomTab}
+              onToggle={() => setBottomCollapsed((v) => !v)}
+              counts={{
+                problems: diagCounts.errors + diagCounts.warnings,
+                security: securityCount,
+              }}
+              rightSlot={
+                <TelemetryStrip
+                  onOpen={() => {
+                    setBottomTab("system");
+                    setBottomCollapsed(false);
+                  }}
+                />
+              }
+            >
+              {bottomTab === "problems" ? (
+                <Problems />
+              ) : bottomTab === "health" ? (
+                <SystemHealthPanel
+                  view={deriveSystemHealthView(engineHealth, enginePill)}
+                  onRefresh={() => void refreshHealth()}
+                />
+              ) : bottomTab === "metadata" ? (
+                <MetadataPanel />
+              ) : bottomTab === "security" ? (
+                <HardenPanel />
+              ) : bottomTab === "tokens" ? (
+                <TokenEconomyPanel onNavigate={setActivity} />
+              ) : bottomTab === "system" ? (
+                <TelemetryPanel />
+              ) : null}
+            </BottomPanel>
+          )}
         </div>
         <RightRail
           collapsed={rightCollapsed}
           mode={rightMode}
           onModeChange={setRightMode}
           onToggle={() => setRightCollapsed((v) => !v)}
-          // the Editor route mounts its OWN AgentPane on the right — mounting a second
-          // one here would double-bind the shared AI session store. Only provide the
-          // shell AgentPane for non-editor activities.
+          // §2.5: the rail is GLOBAL and hosts the ONE AgentPane on every route (the editor
+          // no longer mounts its own), so a chat started on Home is the same session you
+          // keep talking to in the editor.
           agent={
-            activity === "editor" ? undefined : (
+            // §6: the agent pane is the busiest surface in the app; a throw in it must not
+            // take the shell with it.
+            <ErrorBoundary label="agent">
               <AgentPane
                 onNavigate={setActivity}
                 onRunCommand={(id) => executeCommandId(id, cmdCtx)}
               />
-            )
+            </ErrorBoundary>
           }
           inspectorJson={inspectorJson}
+          {...(activeSessionTitle ? { sessionLabel: activeSessionTitle } : {})}
+          onNewSession={() => {
+            useAiSessionStore.getState().newSession();
+            setRightCollapsed(false);
+          }}
+          activity={agentActivity}
         />
       </div>
 
@@ -757,29 +922,41 @@ function App(): ReactElement {
         onDismiss={() => setUpdateState(updateOnDismiss)}
       />
 
-      <ShellStatusBar
-        verdict={shieldTier}
-        venv={venvLabel}
-        model={servedModel}
-        branch={branch}
-        problems={{ errors: diagCounts.errors, warnings: diagCounts.warnings }}
-        onProblemsClick={() => {
-          // same mechanics as the TelemetryStrip/engine-status openers: select the
-          // shell Problems tab (real body, APP-009) + uncollapse — works on any route.
-          setBottomTab("problems");
-          setBottomCollapsed(false);
-        }}
-        update={
-          updateState.phase !== "idle"
-            ? {
-                label: updateActionLabel(updateState) ?? "",
-                title: `Update ${updateState.version ?? ""} (${updateState.phase})`,
-              }
-            : undefined
-        }
-        onShieldClick={() => setActivity("security")}
-        onCommandPalette={() => setPaletteOpen(true)}
-      />
+      {/* §5/§7: the StatusBar's `A{n} name` opens the SAME picker as the TopBar pill, but
+          upward — anchored above the 26px bar so it never opens off-screen. */}
+      <div style={{ position: "relative", flex: "none" }}>
+        {authPickerOpen && (
+          <div style={{ position: "absolute", left: 44, bottom: 0, zIndex: Z.modal }}>
+            <AuthPicker placement="above" onClose={() => setAuthPickerOpen(false)} />
+          </div>
+        )}
+        <ShellStatusBar
+          verdict={shieldTier}
+          venv={venvLabel}
+          model={servedModel}
+          branch={branch}
+          enginePill={enginePill}
+          onEngineClick={openHealth}
+          onAuthClick={() => setAuthPickerOpen((v) => !v)}
+          problems={{ errors: diagCounts.errors, warnings: diagCounts.warnings }}
+          onProblemsClick={() => {
+            // same mechanics as the TelemetryStrip/engine-status openers: select the
+            // shell Problems tab (real body, APP-009) + uncollapse — works on any route.
+            setBottomTab("problems");
+            setBottomCollapsed(false);
+          }}
+          update={
+            updateState.phase !== "idle"
+              ? {
+                  label: updateActionLabel(updateState) ?? "",
+                  title: `Update ${updateState.version ?? ""} (${updateState.phase})`,
+                }
+              : undefined
+          }
+          onShieldClick={() => setActivity("security")}
+          onCommandPalette={() => setPaletteOpen(true)}
+        />
+      </div>
 
       <CommandPalette
         open={paletteOpen}
@@ -801,30 +978,34 @@ function App(): ReactElement {
       />
 
       {settingsOpen && (
-        <SettingsOverlay
-          onClose={() => setSettingsOpen(false)}
-          workspaceRoot={workspaceRoot ?? undefined}
-        />
+        <ErrorBoundary label="settings">
+          <SettingsOverlay
+            onClose={() => setSettingsOpen(false)}
+            workspaceRoot={workspaceRoot ?? undefined}
+          />
+        </ErrorBoundary>
       )}
       {showWizard && (
-        <OnboardingWizard
-          workspaceRoot={workspaceRoot ?? undefined}
-          onOpenTokens={() => {
-            setBottomTab("tokens");
-            setBottomCollapsed(false);
-          }}
-          onComplete={(result, skipped) => {
-            try {
-              window.localStorage.setItem(
-                ONBOARDING_KEY,
-                serializeResult(finalizeResult(result, { skipped, ts: Date.now() })),
-              );
-            } catch {
-              /* storage disabled — the wizard just won't persist this session */
-            }
-            setShowWizard(false);
-          }}
-        />
+        <ErrorBoundary label="onboarding">
+          <OnboardingWizard
+            workspaceRoot={workspaceRoot ?? undefined}
+            onOpenTokens={() => {
+              setBottomTab("tokens");
+              setBottomCollapsed(false);
+            }}
+            onComplete={(result, skipped) => {
+              try {
+                window.localStorage.setItem(
+                  ONBOARDING_KEY,
+                  serializeResult(finalizeResult(result, { skipped, ts: Date.now() })),
+                );
+              } catch {
+                /* storage disabled — the wizard just won't persist this session */
+              }
+              setShowWizard(false);
+            }}
+          />
+        </ErrorBoundary>
       )}
     </div>
   );

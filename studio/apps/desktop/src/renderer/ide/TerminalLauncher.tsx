@@ -9,7 +9,7 @@
  * prop (the renderer can't import core — C5). xterm.js (07 §6.1) swaps in for the plain
  * output view later; the data flow is identical. No raw hex.
  */
-import { Button, Panel } from "@prometheus/ui";
+import { Button, Panel, Z } from "@prometheus/ui";
 import { type ReactElement, useCallback, useEffect, useRef, useState } from "react";
 
 import {
@@ -167,8 +167,10 @@ export function TerminalLauncher({ menu, resolve, onFloat }: TerminalLauncherPro
       <div
         style={{
           display: "flex",
-          gap: "var(--space-3, 6px)",
-          height: 320,
+          gap: "var(--space-3)",
+          // §9: no fixed-px pane height — grows with the window instead of pinning the
+          // session list + preview to the same 320px slice on every screen.
+          height: "min(42vh, 560px)",
           fontFamily: "var(--font-ui)",
         }}
       >
@@ -264,7 +266,7 @@ export function TerminalLauncher({ menu, resolve, onFloat }: TerminalLauncherPro
                   borderRadius: "var(--radius-md, 6px)",
                   boxShadow: "var(--elevation-e3)",
                   padding: "var(--space-2, 4px)",
-                  zIndex: 20,
+                  zIndex: Z.raise,
                 }}
               >
                 {menu.map((item) => (

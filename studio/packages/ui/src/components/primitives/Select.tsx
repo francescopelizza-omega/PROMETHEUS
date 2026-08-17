@@ -9,6 +9,7 @@
  */
 
 import { type KeyboardEvent, type ReactNode, useId, useMemo, useRef, useState } from "react";
+import { Z } from "../../tokens/layers.js";
 import { Input } from "./Input.js";
 import { filterItems } from "./filter.js";
 import { menuKeyHandler, useDismiss } from "./overlay.js";
@@ -198,7 +199,13 @@ export function Select({
       {open && (
         <div
           ref={layerRef}
-          style={{ position: "absolute", top: "calc(100% + 4px)", left: 0, right: 0, zIndex: 950 }}
+          style={{
+            position: "absolute",
+            top: "calc(100% + 4px)",
+            left: 0,
+            right: 0,
+            zIndex: Z.dropdown,
+          }}
         >
           <OptionList
             options={options}
@@ -290,7 +297,13 @@ export function Combobox({
       {open && (
         <div
           ref={layerRef}
-          style={{ position: "absolute", top: "calc(100% + 4px)", left: 0, right: 0, zIndex: 950 }}
+          style={{
+            position: "absolute",
+            top: "calc(100% + 4px)",
+            left: 0,
+            right: 0,
+            zIndex: Z.dropdown,
+          }}
         >
           <OptionList
             options={filtered}

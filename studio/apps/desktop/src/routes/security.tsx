@@ -23,6 +23,7 @@ import {
   CostLight,
   DisinfectWizard,
   Panel,
+  Progress,
   PurgeDialog,
   QuarantineVault,
   type SecAuditLogEntry,
@@ -32,13 +33,21 @@ import {
   type SecTrustedSource,
   type SecVerdict,
   type SecVerifyResult,
+  StreamLog,
   ThreatDbPanel,
   TrustedSourcesView,
+  VERDICT_GLYPH,
+  VERDICT_LABEL,
   VerdictBadge,
+  VerdictCard,
+  type VerdictCardFinding,
+  type VerdictTier,
 } from "@prometheus/ui";
 import { type ReactElement, useCallback, useEffect, useRef, useState } from "react";
 
 import { useScan } from "../renderer/query/hooks.js";
+import { DecisionOverlay } from "../renderer/shell/DecisionOverlay.js";
+import { ForceGate, useForceGate } from "../renderer/shell/ForceGate.js";
 import { useSecurityStore } from "../renderer/stores/features.js";
 import type {
   GateResult,
@@ -46,6 +55,13 @@ import type {
   SecurityGateResult,
   SecurityUrlAuditResult,
 } from "../shared/ipc-contract.js";
+import {
+  GATE_BANNER_NOTE,
+  GATE_BANNER_TITLE,
+  gateCounts,
+  historyRows,
+  remediationProgress,
+} from "./security-console-view.js";
 import {
   EMPTY_REMEDIATION_FEED,
   type RemediationFeedState,
@@ -109,6 +125,31 @@ function parseQuarantineListing(listing: string): ParsedQuarantineRecord[] {
   return out;
 }
 
+/**
+ * A GateResult's findings in the §4 card's shape. `detail` is optional on the envelope
+ * and its `findings` array is guarded before mapping — an envelope shape change must
+ * degrade to "no rows", never a render crash.
+ */
+/** The blocking reasons the typed-confirm dialog lists back to the user before an override. */
+function blockingReasonsOf(v: GateResult): string[] {
+  const raw = v.detail?.findings;
+  if (!Array.isArray(raw)) return v.error ? [v.error] : [];
+  return raw
+    .filter((f) => f.severity === "critical" || f.severity === "high")
+    .map((f) => `${f.rule}: ${f.klass}${f.where ? ` (${f.where})` : ""}`);
+}
+
+function verdictCardFindings(v: GateResult): VerdictCardFinding[] {
+  const raw = v.detail?.findings;
+  if (!Array.isArray(raw)) return [];
+  return raw.map((f) => ({
+    rule: f.rule,
+    description: f.klass,
+    where: f.where,
+    severity: f.severity,
+  }));
+}
+
 export function SecurityRoute(): ReactElement {
   const scan = useScan();
   const agents = scan.data?.agents ?? [];
@@ -123,6 +164,15 @@ export function SecurityRoute(): ReactElement {
   const [providers, setProviders] = useState<ProviderRow[]>([]);
   const [target, setTarget] = useState("");
   const [gate, setGate] = useState<GateResult | null>(null);
+  /** §4: the verdict-history row whose card is open, and whether the signed log is shown. */
+  const [historyPick, setHistoryPick] = useState<string | null>(null);
+  const [signedLogOpen, setSignedLogOpen] = useState(false);
+  /** §9: the typed `install-dangerous` confirm that gates the deep-red override here. */
+  const force = useForceGate();
+  /** the outcome line for a forced install (the feed carries the engine's own output). */
+  const [installNote, setInstallNote] = useState<string | null>(null);
+  // §4's Quarantine action routes through the EXISTING force/override store seam — the
+  // console must not invent a second path to a security decision.
   const [gating, setGating] = useState(false);
   const setVerdict = useSecurityStore((s) => s.setVerdict);
 
@@ -164,6 +214,17 @@ export function SecurityRoute(): ReactElement {
   // prior residual — a stale "clean" must never paint over a newer scan (#3).
   const [disinfecting, setDisinfecting] = useState(false);
   const [disinfectResult, setDisinfectResult] = useState<SecVerdict | undefined>(undefined);
+  /**
+   * §4's `2 / 3`: the engine's resolved/unresolved split.
+   *
+   * Kept separately because the route stores only `data.verdict` from the remediate
+   * envelope, and the counts live one level up on `DisinfectResult` — they were being
+   * thrown away, which is why the island had nothing to count.
+   */
+  const [disinfectCounts, setDisinfectCounts] = useState<{
+    resolved?: unknown;
+    unresolved?: unknown;
+  } | null>(null);
   const [disinfectError, setDisinfectError] = useState<string | null>(null);
   const scanThreat = useCallback(
     async (path: string) => {
@@ -175,6 +236,7 @@ export function SecurityRoute(): ReactElement {
       // a new scan invalidates any prior disinfect residual (fail-closed: never
       // show the last target's "clean" re-scan next to this target's findings).
       setDisinfectResult(undefined);
+      setDisinfectCounts(null);
       setDisinfectError(null);
       try {
         const r = await window.prometheus.security.gateFull(t);
@@ -243,7 +305,18 @@ export function SecurityRoute(): ReactElement {
   const loadTrustDb = useCallback(async () => {
     try {
       const s = await window.prometheus.security.threatdb({ op: "status" });
-      if (s.ok && s.status) setThreatDb(s.status as unknown as SecThreatDbStatus);
+      // §6: SHAPE-guard the cast, not just its truthiness. ThreatDbPanel dereferences
+      // `status.db.seeded`; an engine payload without `db` would throw a TypeError and
+      // drop the whole Security route into the error boundary. Normalise instead.
+      if (s.ok && s.status && typeof s.status === "object") {
+        const raw = s.status as unknown as Record<string, unknown>;
+        const db = (raw.db ?? {}) as Record<string, unknown>;
+        setThreatDb({
+          ...raw,
+          db: { seeded: Boolean(db.seeded), stale: Boolean(db.stale), ...db },
+          feeds: Array.isArray(raw.feeds) ? raw.feeds : [],
+        } as unknown as SecThreatDbStatus);
+      }
     } catch {
       /* non-fatal */
     }
@@ -264,18 +337,70 @@ export function SecurityRoute(): ReactElement {
   useEffect(() => {
     void loadTrustDb();
   }, [loadTrustDb]);
+  // Open a remediation run: mint the correlation id, clear the pane, arm the filter.
+  const beginRemediationRun = useCallback((): string => {
+    const runId = mintRemediationRunId();
+    activeRemediationRunRef.current = runId;
+    setRemediationFeed(EMPTY_REMEDIATION_FEED);
+    return runId;
+  }, []);
+  // Close a run: flush the trailing partial line (the summary rarely ends in "\n"),
+  // then disarm so any late/foreign line is ignored (op-end unsubscribe semantics).
+  const endRemediationRun = useCallback((): void => {
+    setRemediationFeed((s) => flushRemediationFeed(s));
+    activeRemediationRunRef.current = null;
+  }, []);
+
+  /**
+   * Run the deep-red override: `security.install` with the force PAIR (§9a).
+   *
+   * Only reachable from the verdict card's "Install anyway…", which itself only renders
+   * for a blocking verdict, and only after `ForceGate` matched the typed token byte-exactly.
+   * `confirmForce` is what makes main honour `forced` at all — it drops a bare one.
+   *
+   * The engine's stderr streams onto the SAME remediation feed the disinfect/threat-db runs
+   * use, so an override is as visible as any other destructive op on this console.
+   */
+  const forceInstall = useCallback(
+    async (target: string): Promise<void> => {
+      const runId = beginRemediationRun();
+      try {
+        const r = await window.prometheus.security.install(target, {
+          dryRun: false,
+          forced: true,
+          confirmForce: true,
+          runId,
+        });
+        setInstallNote(
+          r.ok ? `forced install completed: ${target}` : r.error || "forced install refused.",
+        );
+      } catch (e) {
+        setInstallNote(e instanceof Error ? e.message : String(e));
+      } finally {
+        endRemediationRun();
+      }
+    },
+    [beginRemediationRun, endRemediationRun],
+  );
+
   const updateThreatDb = useCallback(async () => {
     if (dbBusy) return;
     setDbBusy(true);
+    // §9: a threat-DB update is a LONG streaming op — arm a correlation run so its
+    // progress lines survive the `onProgress` filter. Without a runId main omits
+    // `event.runId` and reduceRemediationFeed discards every line, which is why this
+    // op looked silent even though the feed was already subscribed.
+    const runId = beginRemediationRun();
     try {
-      await window.prometheus.security.threatdb({ op: "update" });
+      await window.prometheus.security.threatdb({ op: "update", runId });
       await loadTrustDb();
     } catch {
       /* surfaced via the panel's own status next load */
     } finally {
+      endRemediationRun();
       setDbBusy(false);
     }
-  }, [dbBusy, loadTrustDb]);
+  }, [dbBusy, loadTrustDb, beginRemediationRun, endRemediationRun]);
   const revokeTrust = useCallback(
     async (key: string) => {
       try {
@@ -323,24 +448,13 @@ export function SecurityRoute(): ReactElement {
   const [remediationFeed, setRemediationFeed] =
     useState<RemediationFeedState>(EMPTY_REMEDIATION_FEED);
   const activeRemediationRunRef = useRef<string | null>(null);
+  /** the quarantine-vault form, so the verdict card's Quarantine button can reveal it. */
+  const vaultRef = useRef<HTMLFormElement | null>(null);
   useEffect(() => {
     const off = window.prometheus.security.onProgress((e) =>
       setRemediationFeed((s) => reduceRemediationFeed(s, e, activeRemediationRunRef.current)),
     );
     return off;
-  }, []);
-  // Open a remediation run: mint the correlation id, clear the pane, arm the filter.
-  const beginRemediationRun = useCallback((): string => {
-    const runId = mintRemediationRunId();
-    activeRemediationRunRef.current = runId;
-    setRemediationFeed(EMPTY_REMEDIATION_FEED);
-    return runId;
-  }, []);
-  // Close a run: flush the trailing partial line (the summary rarely ends in "\n"),
-  // then disarm so any late/foreign line is ignored (op-end unsubscribe semantics).
-  const endRemediationRun = useCallback((): void => {
-    setRemediationFeed((s) => flushRemediationFeed(s));
-    activeRemediationRunRef.current = null;
   }, []);
 
   // List a scanned target's in-tree vault (<target>/__nemesis_quarantine__). The
@@ -496,6 +610,7 @@ export function SecurityRoute(): ReactElement {
     const runId = beginRemediationRun();
     setDisinfecting(true);
     setDisinfectResult(undefined);
+    setDisinfectCounts(null);
     setDisinfectError(null);
     try {
       const r = await window.prometheus.security.remediate({
@@ -504,7 +619,13 @@ export function SecurityRoute(): ReactElement {
         out,
         runId,
       });
-      const data = (r.data ?? {}) as { verdict?: SecVerdict; error?: string };
+      const data = (r.data ?? {}) as {
+        verdict?: SecVerdict;
+        error?: string;
+        resolved?: unknown;
+        unresolved?: unknown;
+      };
+      setDisinfectCounts({ resolved: data.resolved, unresolved: data.unresolved });
       if (data.verdict) setDisinfectResult(data.verdict);
       // fail-closed: no residual ⇒ never paint "clean". Surface WHY instead of a
       // perpetual "Waiting…" so a failed disinfect is distinguishable from a hang (#6).
@@ -559,6 +680,24 @@ export function SecurityRoute(): ReactElement {
   }, [target, gating, setVerdict]);
 
   const tierACount = providers.filter((p) => p.tier === "A").length;
+  // §4: the banner's pills and the verdict-history rows are both folds over the gate-audit
+  // log, computed in a PURE module so "an unknown verdict is not an allow" is a test, not a
+  // reading of this file.
+  const counts = gateCounts(auditLog);
+  // §4's `2 / 3`. `disinfectResult` is the post-fix verdict; its resolved/unresolved split is
+  // the only real step count anywhere in the flow, and it does not exist until the run ends.
+  const remediationSteps = remediationProgress(disinfectCounts);
+  const history = historyRows(auditLog, { limit: 12 });
+  // resolve the picked row back to its FULL audit entry — the history row is a projection
+  // (chip / artifact / age) and carries none of the findings the card needs.
+  // Matched on the `at:target:` PREFIX, not the whole key: the key's trailing index is the
+  // row's position in the SORTED history, which is not its position in `auditLog`. Comparing
+  // whole keys would resolve to the wrong entry whenever the engine's order is not already
+  // newest-first — i.e. exactly when `historyRows` had work to do.
+  const historyPicked =
+    historyPick === null
+      ? null
+      : (auditLog.find((r) => historyPick.startsWith(`${r.at}:${r.target}:`)) ?? null);
   const threatFindings = threat
     ? Object.values(threat.verdict?.findings_by_class ?? {})
         .flat()
@@ -575,6 +714,85 @@ export function SecurityRoute(): ReactElement {
         alignContent: "start",
       }}
     >
+      {/* ── §4 gate banner ────────────────────────────────────────────────────
+          Full-width, first, and stating the gate's CONFIGURATION rather than any one
+          result: armed, fail-closed, and what it has decided so far. The counts are of
+          DECISIONS, not of artifacts — see security-console-view.ts. */}
+      <section
+        style={{
+          gridColumn: "1 / -1",
+          display: "flex",
+          flexWrap: "wrap", // §7
+          alignItems: "center",
+          gap: "var(--space-4, 8px)",
+          padding: "10px 14px",
+          borderRadius: "var(--radius-lg, 8px)",
+          background: "var(--bg-surface)",
+          border: "1px solid var(--border-subtle)",
+        }}
+      >
+        <span
+          aria-hidden="true"
+          style={{
+            display: "inline-flex",
+            alignItems: "center",
+            justifyContent: "center",
+            width: 30,
+            height: 30,
+            flex: "none",
+            borderRadius: "var(--radius-md, 6px)",
+            background: "color-mix(in srgb, var(--ok) 12%, transparent)",
+            border: "1px solid color-mix(in srgb, var(--ok) 30%, transparent)",
+            color: "var(--ok)",
+            fontSize: 14,
+          }}
+        >
+          🛡
+        </span>
+        <div style={{ flex: 1, minWidth: 200 }}>
+          <div style={{ color: "var(--text-title)", fontSize: "0.85rem", fontWeight: 700 }}>
+            {GATE_BANNER_TITLE}
+          </div>
+          <div style={{ color: "var(--text-secondary)", fontSize: "0.75rem", lineHeight: 1.45 }}>
+            {GATE_BANNER_NOTE}
+          </div>
+        </div>
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 5 }}>
+          {(
+            [
+              ["allow", counts.allow, "var(--ok)"],
+              ["warn", counts.warn, "var(--warn)"],
+              ["block", counts.block, "var(--danger)"],
+              // shown ONLY when it happened: a permanent "0 error" pill trains the eye to
+              // skip the row, and this is the pill that most needs to be noticed.
+              ...(counts.error > 0 ? ([["error", counts.error, "var(--danger-fg)"]] as const) : []),
+            ] as const
+          ).map(([label, n, color]) => (
+            <span
+              key={label}
+              style={{
+                display: "inline-flex",
+                alignItems: "baseline",
+                gap: 4,
+                flex: "none",
+                padding: "2px 8px",
+                borderRadius: "var(--radius-sm, 4px)",
+                background: `color-mix(in srgb, ${color} 12%, transparent)`,
+                border: `1px solid color-mix(in srgb, ${color} 30%, transparent)`,
+                color,
+                fontFamily: "var(--font-mono)",
+                fontSize: 11,
+                fontWeight: 700,
+                whiteSpace: "nowrap", // §7
+              }}
+            >
+              {n}
+              <span style={{ fontWeight: 500, opacity: 0.85 }}>{label}</span>
+            </span>
+          ))}
+        </div>
+      </section>
+
       <Panel title="Nemesis scan" elevation="e1">
         <p style={{ marginTop: 0, color: "var(--text-secondary)", fontSize: "0.85rem" }}>
           FREE threat scan (backdoors / malware / supply-chain / code threats) of any path, git URL,
@@ -613,23 +831,64 @@ export function SecurityRoute(): ReactElement {
         </form>
 
         {gate && (
-          <div
-            style={{
-              marginTop: "var(--space-4, 8px)",
-              display: "flex",
-              alignItems: "center",
-              gap: "var(--space-4, 8px)",
-              flexWrap: "wrap",
-            }}
-          >
-            <VerdictBadge verdict={gate.verdict} risk_score={gate.riskScore} />
-            <span style={{ color: "var(--text-secondary)", fontSize: "0.85rem" }}>
-              {gate.findingsCount} finding{gate.findingsCount === 1 ? "" : "s"}
-              {gate.severity !== "clean" ? ` · ${gate.severity}` : ""}
-              {gate.signed ? " · signed" : ""}
-            </span>
+          // handoff §4: the security console renders the SAME verdict card as Home, the
+          // catalog install flow and the chat — this is the console, so it also carries
+          // the Quarantine action.
+          <div style={{ marginTop: "var(--space-4, 8px)" }}>
+            <VerdictCard
+              verdict={gate.verdict}
+              artifact={gate.target}
+              sourceKind={gate.signed ? "signed" : "unsigned"}
+              riskScore={gate.riskScore}
+              findings={verdictCardFindings(gate)}
+              // The engine has no "quarantine this artifact" op — `security.remediate`
+              // exposes disinfect/quarantineList/restore/purge/acceptFinding, and an
+              // artifact is moved to the vault by the gate itself, not by a button here.
+              // This used to call `requestForce(gate.target)`, which armed the deep-red
+              // BLOCK-override state and rendered NOTHING: a dead wire that also pointed
+              // at the opposite of what its label promised. Point it at the surface that
+              // actually exists — open the quarantine vault for this artifact, where
+              // restore/purge live.
+              onQuarantine={() => {
+                setQuarantineTarget(gate.target);
+                void loadQuarantine(gate.target);
+                vaultRef.current?.scrollIntoView({ block: "nearest" });
+              }}
+              // §9: the deep-red override, gated by the typed confirm. `security.install`
+              // existed in the preload and in main — with the `forced && confirmForce`
+              // pairing already enforced there — and had ZERO renderer callers, so the
+              // console could show a BLOCK and offer no gated way past it.
+              //
+              // Passed ONLY for a blocking verdict: VerdictCard renders the action whenever
+              // the prop is present, and "Install anyway…" under a clean ALLOW would invite
+              // a gesture that has no meaning.
+              {...(gate.verdict === "block" || gate.verdict === "error"
+                ? {
+                    onInstallAnyway: (): void => {
+                      force.ask({
+                        target: gate.target,
+                        blockingReasons: blockingReasonsOf(gate),
+                        onConfirm: () => void forceInstall(gate.target),
+                      });
+                    },
+                  }
+                : {})}
+            />
+            {installNote && (
+              <span
+                role="status"
+                style={{ color: "var(--text-secondary)", fontSize: "0.8rem", paddingInline: 14 }}
+              >
+                {installNote}
+              </span>
+            )}
             {gate.error && (
-              <span style={{ color: "var(--danger)", fontSize: "0.8rem" }}>{gate.error}</span>
+              <span
+                role="alert"
+                style={{ color: "var(--danger-fg)", fontSize: "0.8rem", paddingInline: 14 }}
+              >
+                {gate.error}
+              </span>
             )}
           </div>
         )}
@@ -979,38 +1238,87 @@ export function SecurityRoute(): ReactElement {
           <div style={{ marginTop: "var(--space-4, 8px)" }}>
             <div
               style={{
+                display: "flex",
+                alignItems: "center",
+                gap: 6,
                 color: "var(--text-secondary)",
                 fontSize: "0.72rem",
                 marginBottom: "var(--space-2, 4px)",
+                minWidth: 0,
               }}
             >
-              Remediation progress{disinfecting ? " — running…" : ""}
+              {disinfecting && (
+                // §4's amber pulsing "running". The dot is the only motion on this island,
+                // which is the point: a long disinfect otherwise looks identical to a hung one.
+                <span
+                  aria-hidden="true"
+                  style={{
+                    width: 7,
+                    height: 7,
+                    flex: "none",
+                    borderRadius: "50%",
+                    background: "var(--warn)",
+                    animation: "prom-pulse 1.4s ease-in-out infinite",
+                  }}
+                />
+              )}
+              <span style={{ whiteSpace: "nowrap" }}>
+                Remediation progress{disinfecting ? " — running…" : ""}
+              </span>
+              {remediationSteps && (
+                <span
+                  style={{
+                    marginLeft: "auto",
+                    fontFamily: "var(--font-mono)",
+                    whiteSpace: "nowrap",
+                    color:
+                      remediationSteps.done === remediationSteps.total
+                        ? "var(--ok)"
+                        : "var(--warn)",
+                  }}
+                >
+                  {remediationSteps.done} / {remediationSteps.total}
+                </span>
+              )}
             </div>
-            <pre
-              aria-label="Remediation progress log"
-              style={{
-                margin: 0,
-                maxHeight: "160px",
-                overflow: "auto",
-                whiteSpace: "pre-wrap",
-                wordBreak: "break-word",
-                padding: "var(--space-3, 6px)",
-                borderRadius: "var(--radius-md, 6px)",
-                border: "1px solid var(--border-subtle)",
-                background: "var(--bg-surface-2)",
-                fontFamily: "var(--font-mono)",
-                fontSize: "0.72rem",
-                color: "var(--text-secondary)",
-              }}
-            >
-              {remediationFeed.lines.length > 0
-                ? remediationFeed.lines.join("\n")
-                : "waiting for engine output…"}
-            </pre>
+            {/* Determinate only once the engine's post-fix re-scan produced the
+                resolved/unresolved split — until then this is an indeterminate sweep rather
+                than a bar climbing on invented steps (see security-console-view.ts). */}
+            <Progress
+              aria-label="Remediation progress"
+              {...(remediationSteps
+                ? {
+                    value: remediationSteps.done,
+                    max: remediationSteps.total,
+                    tone:
+                      remediationSteps.done === remediationSteps.total
+                        ? ("ok" as const)
+                        : ("warn" as const),
+                  }
+                : {})}
+            />
+            {/* §9: the SAME log component as the catalog install stream. One reader for
+                every long-running engine op, so auto-scroll / copy / inert rendering
+                behave identically wherever the user meets them. */}
+            <StreamLog
+              lines={
+                remediationFeed.lines.length > 0
+                  ? remediationFeed.lines.map((text, i) => ({ id: `remediation:${i}`, text }))
+                  : [
+                      {
+                        id: "waiting",
+                        text: "waiting for engine output…",
+                        level: "debug" as const,
+                      },
+                    ]
+              }
+              maxHeight="min(24vh, 280px)"
+            />
           </div>
         )}
 
         <form
+          ref={vaultRef}
           onSubmit={(e) => {
             e.preventDefault();
             void loadQuarantine(quarantineTarget || threatTarget);
@@ -1122,16 +1430,157 @@ export function SecurityRoute(): ReactElement {
         <TrustedSourcesView sources={trusted} onRevoke={(key) => void revokeTrust(key)} />
       </Panel>
 
-      {/* Gate-audit log (newest-first) — prebuilt view, previously unmounted. */}
-      {auditLog.length > 0 && (
-        <Panel title="Gate audit log" elevation="e1">
-          <AuditLogView
-            rows={auditLog}
-            onVerify={(row) => void verifyAuditRow(row)}
-            verifyResults={verifyResults}
-          />
-        </Panel>
-      )}
+      {/* ── §4 verdict history ────────────────────────────────────────────────
+          The compact row list §4 specifies, with the SIGNED log (filters + per-row HMAC
+          verification) kept behind a toggle underneath. Both read the same rows; the
+          difference is that this one is scannable and that one is provable, and dropping
+          either would lose something real. */}
+      <Panel
+        title="Verdict history"
+        elevation="e1"
+        actions={
+          auditLog.length > 0 ? (
+            <button
+              type="button"
+              aria-pressed={signedLogOpen}
+              onClick={() => setSignedLogOpen((v) => !v)}
+              style={{
+                background: signedLogOpen ? "var(--bg-active)" : "transparent",
+                border: `1px solid ${signedLogOpen ? "var(--border-strong)" : "var(--border-subtle)"}`,
+                borderRadius: "var(--radius-md, 6px)",
+                color: signedLogOpen ? "var(--text-title)" : "var(--text-secondary)",
+                cursor: "pointer",
+                fontSize: "0.72rem",
+                padding: "2px 8px",
+                whiteSpace: "nowrap", // §7
+              }}
+            >
+              Signed log
+            </button>
+          ) : null
+        }
+      >
+        {history.length === 0 ? (
+          <p style={{ color: "var(--text-secondary)", margin: 0, fontSize: "0.85rem" }}>
+            No gate decisions recorded yet. Every scan, install and download writes one here.
+          </p>
+        ) : (
+          <ul style={{ listStyle: "none", margin: 0, padding: 0 }}>
+            {history.map((row) => {
+              const tier: VerdictTier =
+                row.verdict === "allow" || row.verdict === "warn" || row.verdict === "block"
+                  ? row.verdict
+                  : "error";
+              const color =
+                tier === "allow" ? "var(--ok)" : tier === "warn" ? "var(--warn)" : "var(--danger)";
+              return (
+                <li key={row.key}>
+                  <button
+                    type="button"
+                    onClick={() => setHistoryPick(row.key)}
+                    style={{
+                      width: "100%",
+                      display: "flex",
+                      alignItems: "center",
+                      gap: 8,
+                      padding: "5px 4px",
+                      background: "transparent",
+                      border: "none",
+                      borderRadius: "var(--radius-md, 6px)",
+                      color: "var(--text-primary)",
+                      cursor: "pointer",
+                      textAlign: "left",
+                      minWidth: 0, // §7
+                    }}
+                  >
+                    {/* §4: a FIXED 74px chip, so the artifact column starts at the same x on
+                        every row and the list reads as a column rather than a ragged edge. */}
+                    <span
+                      style={{
+                        display: "inline-flex",
+                        alignItems: "center",
+                        justifyContent: "center",
+                        gap: 4,
+                        width: 74,
+                        flex: "none",
+                        padding: "1px 0",
+                        borderRadius: "var(--radius-sm, 4px)",
+                        background: `color-mix(in srgb, ${color} 12%, transparent)`,
+                        border: `1px solid color-mix(in srgb, ${color} 33%, transparent)`,
+                        color,
+                        fontFamily: "var(--font-mono)",
+                        fontSize: 10.5,
+                        fontWeight: 700,
+                        letterSpacing: "0.05em",
+                        whiteSpace: "nowrap", // §7
+                      }}
+                    >
+                      <span aria-hidden="true">{VERDICT_GLYPH[tier]}</span>
+                      {VERDICT_LABEL[tier]}
+                    </span>
+                    <span
+                      style={{
+                        flex: 1,
+                        minWidth: 0, // §7
+                        fontFamily: "var(--font-mono)",
+                        fontSize: "0.78rem",
+                        overflow: "hidden",
+                        textOverflow: "ellipsis",
+                        whiteSpace: "nowrap",
+                      }}
+                    >
+                      {row.artifact}
+                    </span>
+                    <span
+                      style={{
+                        flex: "none",
+                        fontSize: "0.7rem",
+                        color: "var(--text-muted)",
+                        whiteSpace: "nowrap",
+                      }}
+                    >
+                      {row.source}
+                    </span>
+                    <span
+                      style={{
+                        flex: "none",
+                        fontSize: "0.7rem",
+                        color: row.findings === "clean" ? "var(--text-muted)" : color,
+                        whiteSpace: "nowrap",
+                      }}
+                    >
+                      {row.findings}
+                    </span>
+                    <span
+                      style={{
+                        flex: "none",
+                        width: 30,
+                        textAlign: "right",
+                        fontFamily: "var(--font-mono)",
+                        fontSize: "0.68rem",
+                        color: "var(--text-muted)",
+                        whiteSpace: "nowrap",
+                      }}
+                    >
+                      {row.age}
+                    </span>
+                  </button>
+                </li>
+              );
+            })}
+          </ul>
+        )}
+
+        {signedLogOpen && auditLog.length > 0 && (
+          <div style={{ marginTop: "var(--space-4, 8px)" }}>
+            <AuditLogView
+              rows={auditLog}
+              onVerify={(row) => void verifyAuditRow(row)}
+              verifyResults={verifyResults}
+            />
+          </div>
+        )}
+      </Panel>
 
       {/* §9.3 irreversible-purge typed-confirm (fixed overlay — placement in the
           grid is irrelevant). The dialog gates the CTA on the file's basename. */}
@@ -1142,6 +1591,37 @@ export function SecurityRoute(): ReactElement {
           onConfirm={(typed) => void purgeFromVault(purgeTarget, typed)}
         />
       )}
+
+      {/* §4: clicking a history row opens the SAME verdict card the scan, the catalog
+          install and the chat render — one card, so a verdict never looks different
+          depending on where you met it. It is read-only here: the decision it describes
+          was made when the row was written, and re-offering the actions would invite
+          re-running a months-old install from a log. */}
+      {historyPicked && (
+        <DecisionOverlay label="Security verdict" onDismiss={() => setHistoryPick(null)}>
+          <VerdictCard
+            verdict={
+              (historyPicked.verdict === "allow" ||
+              historyPicked.verdict === "warn" ||
+              historyPicked.verdict === "block"
+                ? historyPicked.verdict
+                : "error") as VerdictTier
+            }
+            artifact={historyPicked.target}
+            sourceKind={historyPicked.label || historyPicked.tier || "gate audit"}
+            riskScore={historyPicked.risk_score ?? undefined}
+            findings={(historyPicked.blocking_reasons ?? []).map((r, i) => ({
+              rule: `R-${i + 1}`,
+              description: r,
+              severity: historyPicked.verdict === "warn" ? "medium" : "high",
+            }))}
+            actions={false}
+          />
+        </DecisionOverlay>
+      )}
+
+      {/* §9: the typed confirm that gates the deep-red override on this route. */}
+      <ForceGate gate={force} />
     </div>
   );
 }

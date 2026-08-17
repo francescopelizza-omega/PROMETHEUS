@@ -27,13 +27,62 @@ import { defineConfig, externalizeDepsPlugin } from "electron-vite";
 const ROOT = resolve(__dirname, "..", "..");
 const require = createRequire(import.meta.url);
 
-/** Workspace package aliases → each package's TS source entry. The `/mcp-node` subpath entry
- *  MUST precede the bare `@prometheus/core` one: Vite matches alias entries in order and a bare
- *  prefix match would rewrite `@prometheus/core/mcp-node` to `…/src/index.ts/mcp-node` (ENOTDIR).
- *  It maps to the Node-only transport barrel the main bundle imports (stdio+http, CLI-036/037). */
+/**
+ * `@prometheus/core` SUBPATH aliases → the TS source each one maps to.
+ *
+ * Every subpath must be listed. Vite matches alias entries in ORDER and a bare
+ * `@prometheus/core` prefix match rewrites `@prometheus/core/ai-effort` to
+ * `…/src/index.ts/ai-effort` — which fails the build with a confusing `ENOTDIR: not a
+ * directory`. So these MUST precede the bare entry below, and adding a subpath to
+ * `packages/core/package.json` without adding it here breaks the desktop build the moment
+ * main or the renderer imports it.
+ */
+const CORE_SUBPATHS: Record<string, string> = {
+  "@prometheus/core/mcp-node": "packages/core/src/mcp/host/node.ts",
+  "@prometheus/core/agent-authorization": "packages/core/src/agent/authorization.ts",
+  "@prometheus/core/agent-files": "packages/core/src/agent/agent-files.ts",
+  "@prometheus/core/agent-hooks": "packages/core/src/agent/hooks.ts",
+  "@prometheus/core/command-loader": "packages/core/src/commands/loader.ts",
+  "@prometheus/core/command-gate": "packages/core/src/commands/gate.ts",
+  "@prometheus/core/agent-checkpoint": "packages/core/src/agent/checkpoint.ts",
+  "@prometheus/core/agent-events": "packages/core/src/agent/events.ts",
+  "@prometheus/core/agent-exec": "packages/core/src/agent/exec/index.ts",
+  "@prometheus/core/agent-loop": "packages/core/src/agent/loop.ts",
+  "@prometheus/core/agent-protocol": "packages/core/src/agent/protocol/index.ts",
+  "@prometheus/core/agent-session": "packages/core/src/agent/session-store.ts",
+  // ORDER IS LOAD-BEARING: vite matches a string alias by PREFIX, and
+  // `@prometheus/core/agent-system` is a prefix of `@prometheus/core/agent-system-host`.
+  // With the shorter one first, the host specifier rewrites to `…/system/index.ts-host`.
+  "@prometheus/core/agent-system-host": "packages/core/src/agent/system/host/index.ts",
+  "@prometheus/core/agent-system": "packages/core/src/agent/system/index.ts",
+  "@prometheus/core/agent-tools": "packages/core/src/agent/tools.ts",
+  "@prometheus/core/agent-patch": "packages/core/src/agent/patch.ts",
+  "@prometheus/core/agent-compact": "packages/core/src/agent/compact.ts",
+  "@prometheus/core/agent-todo": "packages/core/src/agent/todo.ts",
+  "@prometheus/core/agent-subagent": "packages/core/src/agent/subagent.ts",
+  "@prometheus/core/agent-question": "packages/core/src/agent/question.ts",
+  "@prometheus/core/agent-permissions": "packages/core/src/agent/permissions.ts",
+  "@prometheus/core/agent-permission-modes": "packages/core/src/agent/permission-modes.ts",
+  "@prometheus/core/ai-retry": "packages/core/src/ai/retry-index.ts",
+  "@prometheus/core/ai-effort": "packages/core/src/ai/effort/index.ts",
+  "@prometheus/core/commands": "packages/core/src/commands.ts",
+  "@prometheus/core/editor": "packages/core/src/editor/index.ts",
+  "@prometheus/core/format": "packages/core/src/format/index.ts",
+  "@prometheus/core/git-worktree": "packages/core/src/git/worktree.ts",
+  "@prometheus/core/keymap": "packages/core/src/settings/keymap.ts",
+  "@prometheus/core/memory": "packages/core/src/memory/index.ts",
+  "@prometheus/core/migrations": "packages/core/src/migrations/index.ts",
+  "@prometheus/core/rules": "packages/core/src/rules/index.ts",
+  "@prometheus/core/templates": "packages/core/src/templates/live.ts",
+  "@prometheus/core/token-economy": "packages/core/src/token-economy/index.ts",
+};
+
+/** Workspace package aliases → each package's TS source entry (subpaths FIRST, see above). */
 const alias = {
   "@prometheus/engine-bridge": resolve(ROOT, "packages/engine-bridge/src/index.ts"),
-  "@prometheus/core/mcp-node": resolve(ROOT, "packages/core/src/mcp/host/node.ts"),
+  ...Object.fromEntries(
+    Object.entries(CORE_SUBPATHS).map(([spec, rel]) => [spec, resolve(ROOT, rel)]),
+  ),
   "@prometheus/core": resolve(ROOT, "packages/core/src/index.ts"),
   "@prometheus/ui": resolve(ROOT, "packages/ui/src/index.ts"),
 };

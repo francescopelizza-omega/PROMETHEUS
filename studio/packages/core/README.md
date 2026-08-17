@@ -6,4 +6,4 @@ feature-command surface that the GUI and CLI both render.
 
 Depends on `@prometheus/engine-bridge` for all engine access.
 
-Spec → [`../../../MDS/the_real_prometheus/`](../../../MDS/the_real_prometheus/) (all feature files).
+Feature-level design rationale lives in the maintainer's internal spec set (not part of this repo).

@@ -134,3 +134,78 @@ export function assertNotSensitivePath(uri: string): string {
   }
   return abs;
 }
+
+/* ────────────────────────────────────────────────────────────────────────────
+ * The WORKING-SET guard (handoff §3).
+ *
+ * `assertNotSensitivePath` above is a DENYLIST: it stops ~/.ssh and /etc, and nothing
+ * else. That leaves every other absolute path on the machine writable by an agent
+ * that asks for it — the exact hole the CLI closed on 08-07 with
+ * `isPathAllowed(abs, roots)` in its applier.
+ *
+ * This is the desktop's half of that fix, and it lives in MAIN on purpose: §3 says
+ * "the applier's scope guard stays on regardless" of what the permission card shows.
+ * A renderer that is compromised, buggy, or simply skipped cannot write outside the
+ * working set by not rendering a card.
+ *
+ * Approval is explicit and per-path: the renderer's permission card, once the human
+ * says yes, registers that ONE absolute path here. Nothing grants a wildcard.
+ * ──────────────────────────────────────────────────────────────────────────── */
+
+/** The active workspace roots. Empty = unset, which means "do not gate" (see below). */
+let workingSetRoots: string[] = [];
+
+/** Absolute paths a human explicitly approved for writing outside the working set. */
+const approvedOutside = new Set<string>();
+
+/**
+ * Declare the workspace roots the agent may write inside. Called from the renderer as
+ * the workspace changes. An EMPTY list disables the scope check — that is deliberate:
+ * with no folder open there is no working set to be outside of, and refusing every
+ * write would break "open a loose file and save it".
+ */
+export function setWorkingSetRoots(roots: readonly string[]): void {
+  workingSetRoots = roots
+    .filter((r): r is string => typeof r === "string" && r.length > 0)
+    .map((r) => canonical(uriToFsPath(r)));
+  // a root change invalidates prior approvals — they were granted against the old scope.
+  approvedOutside.clear();
+}
+
+/** The roots currently in force (canonical absolute paths). */
+export function getWorkingSetRoots(): readonly string[] {
+  return workingSetRoots;
+}
+
+/** Whether `uri` resolves inside the working set (true when no roots are set). */
+export function isInsideWorkingSet(uri: string): boolean {
+  if (workingSetRoots.length === 0) return true;
+  const abs = canonical(uriToFsPath(uri));
+  return workingSetRoots.some((root) => isUnder(abs, root));
+}
+
+/** Record a human's explicit approval to write ONE path outside the working set. */
+export function approveOutsideWorkingSet(uri: string): void {
+  approvedOutside.add(canonical(uriToFsPath(uri)));
+}
+
+/** Forget every out-of-scope approval (a new session / a denied prompt). */
+export function clearOutsideApprovals(): void {
+  approvedOutside.clear();
+}
+
+/**
+ * The fail-closed applier check. Throws unless the target is inside the working set or
+ * was explicitly approved. Call it on EVERY mutating fs path in main — write, delete,
+ * create, mkdir, rename (both ends).
+ */
+export function assertInsideWorkingSet(uri: string): string {
+  const abs = canonical(uriToFsPath(uri));
+  if (workingSetRoots.length === 0) return abs;
+  if (workingSetRoots.some((root) => isUnder(abs, root))) return abs;
+  if (approvedOutside.has(abs)) return abs;
+  throw new Error(
+    `refusing to write outside the working set (not approved): ${abs}. ` +
+      `Working set: ${workingSetRoots.join(", ")}`,
+  );
+}

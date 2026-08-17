@@ -102,6 +102,22 @@ const VISION_TAGS = new Set(["vision", "multimodal", "image"]);
 /** Derive the picker metadata for an endpoint from its locality + the matched catalog entry.
  *  Capabilities: tools/vision from catalog tags; FIM from the model family (fim-cache). With
  *  no catalog match, capabilities fall back to name heuristics so a badge still shows. */
+/**
+ * The context window for an endpoint, as a spreadable patch — `{}` when it is unknown.
+ *
+ * A patch rather than a number so a caller can spread it onto an endpoint without deciding what
+ * "unknown" means: an explicit `contextWindow: undefined` would override a value that was
+ * already there, and the preamble's fallback is deliberately a different thing from a measured
+ * small window.
+ */
+export function contextWindowOf(
+  ep: RendererEndpoint,
+  catalog: readonly CatalogModelLite[] = [],
+): { contextWindow?: number } {
+  const w = endpointMeta(ep, catalog).contextWindow;
+  return typeof w === "number" && w > 0 ? { contextWindow: w } : {};
+}
+
 export function endpointMeta(
   ep: RendererEndpoint,
   catalog: readonly CatalogModelLite[] = [],

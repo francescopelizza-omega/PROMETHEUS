@@ -1,0 +1,175 @@
+# .gitlab-ci.yml — the checks that were only ever run by hand.
+#
+# There was no CI of any kind: no .gitlab-ci.yml, no .github/workflows, nothing. Every gate in
+# this repo — two TypeScript projects, biome, two custom guard scripts, ~4500 tests, the Electron
+# bundle and the e2e harness — existed and passed, and passed only when somebody remembered to
+# run them locally, on a Mac, before pushing. A guard nobody runs is a guard that has already
+# stopped working; it just has not been noticed yet.
+#
+# The remote is GitLab (gitlab.com/red-beard-phoenix/PROMETHEUS), hence this file rather than
+# .github/workflows.
+#
+# THERE ARE FOUR GITHUB WORKFLOWS IN THIS REPO AND NONE OF THEM HAS EVER RUN. They live at
+# `studio/.github/workflows/`, and GitHub only reads `.github/workflows/` at the REPOSITORY
+# root — which is one level up. They were also written for a different repository layout
+# (`working-directory: PROMETHEUS/studio`), against a remote that is not this one. Worse, they
+# verify with `turbo run test`, and turbo runs the PER-PACKAGE `test` script: apps/desktop
+# declares none at all and apps/cli declares one that names a single file, so that command
+# exercises roughly a third of the suite and reports green. This file calls the root runner
+# directly for exactly that reason.
+#
+# TWO THINGS ARE DELIBERATELY NOT IN THE BLOCKING PATH, and both are about not shipping a red
+# pipeline on day one:
+#
+#  1. **The pixel-comparison e2e.** Playwright suffixes snapshots per platform, and every
+#     baseline in e2e/__screenshots__ is `-darwin` — they were all generated on a Mac.
+#     `baselines.spec.ts` (9 comparisons) and `smoke.spec.ts` (2) would therefore fail on every
+#     Linux run until Linux baselines are generated ONCE and committed. `shots.spec.ts` makes
+#     ZERO comparisons, so it runs in the blocking job and genuinely proves the app boots and
+#     renders. See the `e2e:baselines` job for how to adopt the rest.
+#  2. **Publishing.** No job here pushes to a registry. Releasing is a human decision with
+#     human credentials, and a pipeline that can publish is a pipeline that can publish by
+#     accident.
+
+stages:
+  - verify
+  - e2e
+
+default:
+  # The Playwright image carries the system libraries Electron needs (nss, atk, gtk, asound).
+  # A bare node image launches the app straight into a linker error that reads like a code bug.
+  image: mcr.microsoft.com/playwright:v1.48.0-jammy
+  interruptible: true
+  before_script:
+    # NODE 22 IS LOAD-BEARING, not a default. `apps/cli/dev-resolver.mjs` resolves sources with
+    # `format: "module-typescript"` — Node's type stripping, which does not exist before 22.6 —
+    # so an older runner fails every suite with ERR_UNKNOWN_MODULE_FORMAT before running one
+    # test. `.nvmrc` said 20 until this file was written. It is also not NEWER than 22 on
+    # purpose: electron's install.js extracts an incomplete app under Node 26.
+    - . "$NVM_DIR/nvm.sh" && nvm install 22 && nvm use 22
+    - node --version
+    - corepack enable
+    # The lockfile is the contract: --frozen-lockfile fails rather than silently resolving a
+    # different tree than the one that was tested.
+    - cd studio && pnpm install --frozen-lockfile
+
+variables:
+  # Turbo/pnpm write here; caching them is what keeps a full run in single-digit minutes.
+  PNPM_HOME: "$CI_PROJECT_DIR/.pnpm-store"
+  npm_config_store_dir: "$CI_PROJECT_DIR/.pnpm-store"
+
+cache:
+  key:
+    files:
+      - studio/pnpm-lock.yaml
+  paths:
+    - .pnpm-store
+    - studio/node_modules
+    - studio/.turbo
+
+# ── the blocking gate ─────────────────────────────────────────────────────────
+# One job, not five: these steps share an install and a build cache, and splitting them would
+# pay that cost repeatedly to gain parallelism the repo is too small to need.
+verify:
+  stage: verify
+  script:
+    # Both TypeScript projects. The desktop one is separate and is NOT covered by `tsc -b` —
+    # a change can typecheck in the workspace and break the app.
+    - pnpm run typecheck
+    # biome, plus the two custom guards: no raw hex outside tokens/, and the §9 layout rules.
+    - pnpm run lint
+    # ~4500 node:test suites across core, cli and desktop.
+    - node scripts/run-tests.mjs
+    # The vite build is its own gate: the CORE_SUBPATHS alias map lives only here, so a new
+    # core subpath can pass tsc and every test and still fail the bundle.
+    - pnpm --filter @prometheus/desktop exec electron-vite build
+    # A real Electron launch under a virtual display. Zero pixel comparisons — this asserts the
+    # app starts, mounts and renders every route, which is what a headless runner can honestly
+    # check without platform baselines.
+    - xvfb-run -a pnpm --filter @prometheus/desktop exec playwright test shots.spec.ts
+  artifacts:
+    when: on_failure
+    paths:
+      - studio/apps/desktop/e2e/.artifacts
+      - studio/apps/desktop/playwright-report
+    expire_in: 1 week
+
+# ── Windows smoke (best-effort, informational until proven) ──────────────────
+# There was previously NO Windows coverage anywhere: four GitHub Actions workflows under
+# studio/.github/workflows/ had a Windows job, but that whole directory has never run (wrong
+# path for GitHub Actions, wrong repo layout, wrong forge — see the comment at the top of this
+# file). This is the first Windows job that actually has a chance of executing, on the real CI.
+#
+# Honesty about what's NOT verified: this job has never been run — there is no Windows machine
+# available to test it from. `saas-windows-medium-amd64` is GitLab.com's documented shared
+# Windows runner tag as of this writing, but Windows shared runners are gated by plan/minutes
+# on some GitLab tiers, and unlike the Linux `verify` job (a Docker image), Windows shared
+# runners are shell-executor VMs — no `image:` field, PowerShell by default. Watch the FIRST
+# real run of this job closely; `allow_failure: true` so a runner/tag mismatch doesn't block
+# merges while this gets ironed out.
+verify:windows:
+  stage: verify
+  tags:
+    - saas-windows-medium-amd64
+  allow_failure: true
+  before_script:
+    # Override the Linux `before_script` (nvm/apt-oriented) — this is a Windows shell VM.
+    - choco install -y nodejs --version=22.11.0
+    - refreshenv
+    - node --version
+    - corepack enable
+    - cd studio
+    - pnpm install --frozen-lockfile
+  script:
+    - pnpm run typecheck
+    - pnpm --filter @prometheus/desktop exec electron-vite build
+    # shots.spec.ts makes ZERO pixel comparisons (see the header note above on why baselines
+    # are darwin-only) — it only proves the app boots and every route mounts, which is exactly
+    # what's honestly checkable without a Windows-specific baseline set. Windows CI runners
+    # typically ship a real interactive desktop session (no Xvfb-equivalent needed), mirroring
+    # what was found true of GitHub's windows-latest runner — not independently verified here.
+    - pnpm --filter @prometheus/desktop exec playwright test shots.spec.ts
+  artifacts:
+    when: on_failure
+    paths:
+      - studio/apps/desktop/e2e/.artifacts
+      - studio/apps/desktop/playwright-report
+    expire_in: 1 week
+
+# ── the visual baselines, once Linux baselines exist ──────────────────────────
+# To adopt: run this job manually with UPDATE_SNAPSHOTS=1, download the artifact, commit the
+# generated `*-linux.png` files, then move this job into the `verify` stage and drop
+# `allow_failure`. Until then it is informational — a red job everyone learns to ignore is
+# worse than no job.
+e2e:baselines:
+  stage: e2e
+  when: manual
+  allow_failure: true
+  script:
+    - pnpm --filter @prometheus/desktop exec electron-vite build
+    - |
+      if [ -n "$UPDATE_SNAPSHOTS" ]; then
+        xvfb-run -a pnpm --filter @prometheus/desktop exec playwright test baselines.spec.ts smoke.spec.ts --update-snapshots
+      else
+        xvfb-run -a pnpm --filter @prometheus/desktop exec playwright test baselines.spec.ts smoke.spec.ts
+      fi
+  artifacts:
+    when: always
+    paths:
+      - studio/apps/desktop/e2e/__screenshots__
+      - studio/apps/desktop/playwright-report
+    expire_in: 1 week
+
+# ── the release preflight ─────────────────────────────────────────────────────
+# Proves the published artifact is buildable and runnable WITHOUT publishing anything. Both
+# documented install routes are currently broken, and the failure mode that matters is a
+# tarball that installs and then does not run.
+release:preflight:
+  stage: verify
+  script:
+    - node scripts/release-preflight.mjs
+  artifacts:
+    when: on_failure
+    paths:
+      - studio/apps/cli/dist
+    expire_in: 1 week

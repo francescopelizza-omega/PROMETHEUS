@@ -22,6 +22,7 @@
 
 import { type ReactElement, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
+import { Z } from "@prometheus/ui";
 import type { IdeGitLogEntry, IdeSearchMatch, IdeTreeNode } from "../../shared/ipc-contract.js";
 import { activeDescendantProps, optionProps, useFocusTrap } from "../shell/a11y.js";
 import { loadMonaco } from "./monaco-loader.js";
@@ -190,7 +191,7 @@ function Highlighted({ text, positions }: { text: string; positions: number[] })
         <span
           // biome-ignore lint/suspicious/noArrayIndexKey: segments are positionally derived + stable
           key={i}
-          style={seg.matched ? { color: "var(--accent, #6d5ef0)", fontWeight: 700 } : undefined}
+          style={seg.matched ? { color: "var(--accent)", fontWeight: 700 } : undefined}
         >
           {seg.text}
         </span>
@@ -215,7 +216,12 @@ export function CommandPalette(props: CommandPaletteProps): ReactElement {
   const dialogRef = useRef<HTMLDivElement | null>(null);
   // APP-100: trap Tab inside the dialog + restore focus to the opener on close (all close
   // paths unmount the palette, so the trap's cleanup fires for Esc AND execute uniformly).
-  useFocusTrap(dialogRef, true);
+  // `deferTabToTextFields` is load-bearing: Tab in the query input CYCLES THE SOURCE TABS
+  // (below) — the trap must not steal it. The palette focuses its input itself.
+  useFocusTrap(dialogRef, true, onClose, {
+    deferTabToTextFields: true,
+    skipInitialFocus: true,
+  });
   const LISTBOX_ID = "cmdp-listbox";
 
   // cached (open-once) sources: file walk, doc symbols, git log + branches.
@@ -598,7 +604,7 @@ export function CommandPalette(props: CommandPaletteProps): ReactElement {
         position: "fixed",
         inset: 0,
         background: "rgba(0,0,0,0.4)",
-        zIndex: 1100,
+        zIndex: Z.palette,
         display: "flex",
         justifyContent: "center",
         alignItems: "flex-start",
@@ -613,8 +619,8 @@ export function CommandPalette(props: CommandPaletteProps): ReactElement {
         style={{
           width: "min(880px, 94vw)",
           maxHeight: "76vh",
-          background: "var(--bg-surface-2, #16161b)",
-          border: "1px solid var(--border-subtle, #232329)",
+          background: "var(--bg-surface-2)",
+          border: "1px solid var(--border-subtle)",
           borderRadius: "var(--radius-md, 8px)",
           boxShadow: "0 12px 48px rgba(0,0,0,0.5)",
           overflow: "hidden",
@@ -630,7 +636,7 @@ export function CommandPalette(props: CommandPaletteProps): ReactElement {
               display: "flex",
               gap: 2,
               padding: "6px 8px 0",
-              borderBottom: "1px solid var(--border-subtle, #232329)",
+              borderBottom: "1px solid var(--border-subtle)",
             }}
           >
             {SEARCH_TABS.map((t) => (
@@ -642,11 +648,9 @@ export function CommandPalette(props: CommandPaletteProps): ReactElement {
                 style={{
                   padding: "5px 12px",
                   border: "none",
-                  borderBottom:
-                    tab === t ? "2px solid var(--accent, #6d5ef0)" : "2px solid transparent",
+                  borderBottom: tab === t ? "2px solid var(--accent)" : "2px solid transparent",
                   background: "transparent",
-                  color:
-                    tab === t ? "var(--text-primary, #e7e7ea)" : "var(--text-secondary, #9a9aa3)",
+                  color: tab === t ? "var(--text-primary)" : "var(--text-secondary)",
                   cursor: "pointer",
                   fontSize: "0.8rem",
                   textTransform: "capitalize",
@@ -694,8 +698,8 @@ export function CommandPalette(props: CommandPaletteProps): ReactElement {
             padding: "10px 12px",
             background: "transparent",
             border: "none",
-            borderBottom: "1px solid var(--border-subtle, #232329)",
-            color: "var(--text-primary, #e7e7ea)",
+            borderBottom: "1px solid var(--border-subtle)",
+            color: "var(--text-primary)",
             fontSize: "0.9rem",
             outline: "none",
           }}
@@ -708,14 +712,14 @@ export function CommandPalette(props: CommandPaletteProps): ReactElement {
               width: "44%",
               minWidth: 260,
               overflow: "auto",
-              borderRight: "1px solid var(--border-subtle, #232329)",
+              borderRight: "1px solid var(--border-subtle)",
             }}
           >
             {rows.length === 0 && (
               <p
                 style={{
                   padding: 12,
-                  color: "var(--text-secondary, #9a9aa3)",
+                  color: "var(--text-secondary)",
                   fontSize: "0.82rem",
                 }}
               >
@@ -738,7 +742,7 @@ export function CommandPalette(props: CommandPaletteProps): ReactElement {
                     border: "none",
                     padding: "6px 12px",
                     cursor: "pointer",
-                    background: i === active ? "var(--bg-surface-3, #1d1d24)" : "transparent",
+                    background: i === active ? "var(--bg-surface-3)" : "transparent",
                     display: "flex",
                     alignItems: "center",
                     gap: 8,
@@ -749,7 +753,7 @@ export function CommandPalette(props: CommandPaletteProps): ReactElement {
                     <span
                       style={{
                         fontSize: "0.85rem",
-                        color: "var(--text-primary, #e7e7ea)",
+                        color: "var(--text-primary)",
                         overflow: "hidden",
                         textOverflow: "ellipsis",
                         whiteSpace: "nowrap",
@@ -760,7 +764,7 @@ export function CommandPalette(props: CommandPaletteProps): ReactElement {
                     <span
                       style={{
                         fontSize: "0.72rem",
-                        color: "var(--text-secondary, #9a9aa3)",
+                        color: "var(--text-secondary)",
                         overflow: "hidden",
                         textOverflow: "ellipsis",
                         whiteSpace: "nowrap",
@@ -774,8 +778,8 @@ export function CommandPalette(props: CommandPaletteProps): ReactElement {
                       style={{
                         fontSize: "0.6rem",
                         textTransform: "uppercase",
-                        color: "var(--text-secondary, #9a9aa3)",
-                        border: "1px solid var(--border-subtle, #232329)",
+                        color: "var(--text-secondary)",
+                        border: "1px solid var(--border-subtle)",
                         borderRadius: "var(--radius-sm, 4px)",
                         padding: "0 4px",
                         flexShrink: 0,
@@ -867,8 +871,8 @@ function Preview({ row, root }: { row: Row | undefined; root: string }): ReactEl
         fontFamily: "var(--font-mono, monospace)",
         fontSize: "0.75rem",
         lineHeight: 1.5,
-        color: "var(--text-primary, #e7e7ea)",
-        background: "var(--bg-surface-1, #101014)",
+        color: "var(--text-primary)",
+        background: "var(--bg-surface-1)",
       }}
     >
       {children}
@@ -877,17 +881,15 @@ function Preview({ row, root }: { row: Row | undefined; root: string }): ReactEl
 
   if (!row) {
     return wrap(
-      <span style={{ color: "var(--text-secondary, #9a9aa3)" }}>Select a result to preview.</span>,
+      <span style={{ color: "var(--text-secondary)" }}>Select a result to preview.</span>,
     );
   }
   // command / git rows have no file → show the id/category instead of an excerpt.
   if (!uri) {
     return wrap(
       <div style={{ padding: 4 }}>
-        <div style={{ color: "var(--text-primary, #e7e7ea)", fontSize: "0.85rem" }}>
-          {row.label}
-        </div>
-        <div style={{ color: "var(--text-secondary, #9a9aa3)", marginTop: 4 }}>
+        <div style={{ color: "var(--text-primary)", fontSize: "0.85rem" }}>{row.label}</div>
+        <div style={{ color: "var(--text-secondary)", marginTop: 4 }}>
           {row.runRow?.kind === "freeform" && row.runRow.argv.length > 0
             ? `argv: ${JSON.stringify(row.runRow.argv)}`
             : row.commandId
@@ -898,21 +900,19 @@ function Preview({ row, root }: { row: Row | undefined; root: string }): ReactEl
     );
   }
   if (text === null) {
-    return wrap(<span style={{ color: "var(--text-secondary, #9a9aa3)" }}>Loading…</span>);
+    return wrap(<span style={{ color: "var(--text-secondary)" }}>Loading…</span>);
   }
   if (!excerpt) {
-    return wrap(
-      <span style={{ color: "var(--text-secondary, #9a9aa3)" }}>{relOf(uri, root)}</span>,
-    );
+    return wrap(<span style={{ color: "var(--text-secondary)" }}>{relOf(uri, root)}</span>);
   }
 
   return wrap(
     <>
       <div
         style={{
-          color: "var(--text-secondary, #9a9aa3)",
+          color: "var(--text-secondary)",
           padding: "0 8px 6px",
-          borderBottom: "1px solid var(--border-subtle, #232329)",
+          borderBottom: "1px solid var(--border-subtle)",
           marginBottom: 4,
           overflow: "hidden",
           textOverflow: "ellipsis",
@@ -931,13 +931,13 @@ function Preview({ row, root }: { row: Row | undefined; root: string }): ReactEl
               display: "flex",
               gap: 8,
               padding: "0 8px",
-              background: isTarget ? "var(--bg-inset, #0c0c10)" : "transparent",
-              borderLeft: isTarget ? "2px solid var(--accent, #6d5ef0)" : "2px solid transparent",
+              background: isTarget ? "var(--bg-inset)" : "transparent",
+              borderLeft: isTarget ? "2px solid var(--accent)" : "2px solid transparent",
             }}
           >
             <span
               style={{
-                color: "var(--text-tertiary, #6a6a73)",
+                color: "var(--text-tertiary)",
                 width: 34,
                 textAlign: "right",
                 flexShrink: 0,
@@ -983,7 +983,7 @@ function PreviewLine({
           <span
             style={{
               background: "var(--accent-muted, rgba(109,94,240,0.35))",
-              color: "var(--text-primary, #e7e7ea)",
+              color: "var(--text-primary)",
             }}
           >
             {clip.text.slice(clip.start, clip.end)}

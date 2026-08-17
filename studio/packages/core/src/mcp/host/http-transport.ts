@@ -251,11 +251,28 @@ export class StreamableHttpTransport implements McpClientTransport {
     }
     const text = await res.text();
     if (!text.trim()) return null; // an accepted notification / empty body
+    let msg: { id?: unknown; method?: unknown; result?: unknown; error?: { message?: string } };
     try {
-      return JSON.parse(text);
+      msg = JSON.parse(text);
     } catch {
       throw new McpTransportError("protocol", "malformed JSON-RPC response body");
     }
+    /**
+     * The SAME two checks the SSE path does, and for the same reason — this branch had neither.
+     *
+     * A body carrying `method` is a server request, not our answer: returning it made `rpc()`
+     * read `undefined` off it and `listTools()` turn that into `[]`, i.e. a server that connects,
+     * reports healthy and offers no tools. And with no id check at all, a reply for a DIFFERENT
+     * id was accepted as ours. Both are refused loudly rather than silently mis-read: an empty
+     * tool list is indistinguishable from a server that genuinely has none.
+     */
+    if (typeof msg.method === "string") {
+      throw new McpTransportError("protocol", `expected a response, got a "${msg.method}" request`);
+    }
+    if (typeof msg.id === "number" && msg.id !== id) {
+      throw new McpTransportError("protocol", `response id ${msg.id} does not match request ${id}`);
+    }
+    return msg;
   }
 
   /** Parse an SSE stream (WHATWG ReadableStream), buffering across reads, and return the first
@@ -283,11 +300,33 @@ export class StreamableHttpTransport implements McpClientTransport {
             .map((l) => l.slice(5).replace(/^ /, "")) // strip a single leading space after `data:`
             .join("\n");
           if (data) {
+            let msg: {
+              id?: unknown;
+              method?: unknown;
+              result?: unknown;
+              error?: { message?: string };
+            };
             try {
-              const msg = JSON.parse(data);
-              if (typeof msg.id === "number" && msg.id === id) return msg;
+              msg = JSON.parse(data);
             } catch {
               throw new McpTransportError("protocol", "malformed SSE JSON-RPC data");
+            }
+            /**
+             * A message carrying `method` is a server REQUEST or notification, never our
+             * response — and a server numbers ids from its own counter, so one can collide with
+             * the id we are waiting on. Returning it would hand `callTool` a request object
+             * whose `content` is undefined: a silent empty result rather than an error.
+             *
+             * The skip is a NO-OP here rather than a `continue`, deliberately. `continue` jumps
+             * to `while (m)` WITHOUT re-running the exec below, so the next iteration slices the
+             * already-advanced buffer at a stale offset and cuts the following event mid-token —
+             * turning an ordinary "notification then result in one flush" into a
+             * `malformed SSE JSON-RPC data` throw. Progress notifications followed by a result
+             * on the same POST stream is the standard long-running-tool shape, so that was a
+             * coin flip on TCP segment boundaries.
+             */
+            if (typeof msg.method !== "string" && typeof msg.id === "number" && msg.id === id) {
+              return msg;
             }
           }
           m = /\r\n\r\n|\r\r|\n\n/.exec(buf);

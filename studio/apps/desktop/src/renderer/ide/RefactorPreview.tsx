@@ -26,6 +26,7 @@ import { type TemplateKind, templateKindForLanguage } from "@prometheus/core/edi
 import { Button, Panel } from "@prometheus/ui";
 import { type ReactElement, useEffect, useRef, useState } from "react";
 
+import { Z } from "@prometheus/ui";
 import { streamChat } from "./ai/ai-client.js";
 import { toEndpoints } from "./ai/endpoints.js";
 import { loadMonaco } from "./monaco-loader.js";
@@ -182,9 +183,9 @@ export interface RefactorPreviewDialogProps {
 }
 
 const mono = "var(--font-mono, ui-monospace, monospace)";
-const secondary = "var(--text-secondary, #9a9aa3)";
-const primaryText = "var(--text-primary, #e7e7ea)";
-const hairline = "1px solid var(--border-subtle, #232329)";
+const secondary = "var(--text-secondary)";
+const primaryText = "var(--text-primary)";
+const hairline = "1px solid var(--border-subtle)";
 
 /** One labelled text input of the params form. */
 function ParamInput({
@@ -216,8 +217,8 @@ function ParamInput({
           width: "100%",
           boxSizing: "border-box",
           padding: "6px 8px",
-          background: "var(--bg-inset, #0b0b0f)",
-          border: "1px solid var(--border-strong, #313139)",
+          background: "var(--bg-inset)",
+          border: "1px solid var(--border-strong)",
           borderRadius: "var(--radius-sm, 4px)",
           color: primaryText,
           fontFamily: mono,
@@ -268,8 +269,8 @@ function ParamsForm({
               defaultValue="method"
               style={{
                 padding: "5px 8px",
-                background: "var(--bg-inset, #0b0b0f)",
-                border: "1px solid var(--border-strong, #313139)",
+                background: "var(--bg-inset)",
+                border: "1px solid var(--border-strong)",
                 borderRadius: "var(--radius-sm, 4px)",
                 color: primaryText,
                 fontSize: "0.8rem",
@@ -345,8 +346,8 @@ function ParamsForm({
               defaultValue="python"
               style={{
                 padding: "5px 8px",
-                background: "var(--bg-inset, #0b0b0f)",
-                border: "1px solid var(--border-strong, #313139)",
+                background: "var(--bg-inset)",
+                border: "1px solid var(--border-strong)",
                 borderRadius: "var(--radius-sm, 4px)",
                 color: primaryText,
                 fontSize: "0.8rem",
@@ -411,9 +412,9 @@ function FileNode({
           disabled={disabled}
           onChange={onToggle}
           aria-label={`include ${node.path}`}
-          style={{ accentColor: "var(--accent, #6d5ef0)" }}
+          style={{ accentColor: "var(--accent)" }}
         />
-        <span style={{ fontFamily: mono, overflowWrap: "anywhere" }}>{node.path}</span>
+        <span style={{ fontFamily: mono, overflowWrap: "break-word" }}>{node.path}</span>
         <span style={{ color: secondary, fontSize: "0.72rem", whiteSpace: "nowrap" }}>
           {node.editCount} edit{node.editCount === 1 ? "" : "s"}
         </span>
@@ -429,11 +430,11 @@ function FileNode({
               {e.oldText !== undefined && (
                 <>
                   {"  "}
-                  <span style={{ color: "var(--danger, #e5534b)" }}>
+                  <span style={{ color: "var(--danger)" }}>
                     {e.oldText === "" ? "∅" : e.oldText.split("\n")[0]}
                   </span>
                   {" → "}
-                  <span style={{ color: "var(--ok, #57ab5a)" }}>
+                  <span style={{ color: "var(--ok)" }}>
                     {e.newText === "" ? "∅" : e.newText.split("\n")[0]}
                   </span>
                 </>
@@ -444,7 +445,7 @@ function FileNode({
                 style={{
                   margin: "3px 0 0",
                   padding: "4px 6px",
-                  background: "var(--bg-inset, #0b0b0f)",
+                  background: "var(--bg-inset)",
                   border: hairline,
                   borderRadius: "var(--radius-sm, 4px)",
                   overflowX: "auto",
@@ -452,12 +453,12 @@ function FileNode({
                 }}
               >
                 {e.before.map((l, j) => (
-                  <div key={`b${j}:${l}`} style={{ color: "var(--danger, #e5534b)" }}>
+                  <div key={`b${j}:${l}`} style={{ color: "var(--danger)" }}>
                     - {l}
                   </div>
                 ))}
                 {e.after.map((l, j) => (
-                  <div key={`a${j}:${l}`} style={{ color: "var(--ok, #57ab5a)" }}>
+                  <div key={`a${j}:${l}`} style={{ color: "var(--ok)" }}>
                     + {l}
                   </div>
                 ))}
@@ -490,7 +491,7 @@ export function RefactorPreviewDialog(props: RefactorPreviewDialogProps): ReactE
         position: "fixed",
         inset: 0,
         background: "rgba(0,0,0,0.4)",
-        zIndex: 1100,
+        zIndex: Z.palette,
         display: "flex",
         justifyContent: "center",
         alignItems: "flex-start",
@@ -546,12 +547,12 @@ export function RefactorPreviewDialog(props: RefactorPreviewDialogProps): ReactE
                 style={{
                   marginTop: 8,
                   padding: "6px 8px",
-                  border: "1px solid var(--danger, #e5534b)",
+                  border: "1px solid var(--danger)",
                   borderRadius: "var(--radius-sm, 4px)",
-                  color: "var(--danger, #e5534b)",
+                  color: "var(--danger)",
                   fontSize: "0.78rem",
                   fontFamily: mono,
-                  overflowWrap: "anywhere",
+                  overflowWrap: "break-word",
                 }}
               >
                 {error}

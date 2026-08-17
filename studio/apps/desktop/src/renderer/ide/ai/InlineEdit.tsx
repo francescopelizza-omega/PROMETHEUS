@@ -100,9 +100,9 @@ export function InlineEdit(props: InlineEditProps): ReactElement {
         if (e.key === "Escape") onClose();
       }}
       style={{
-        border: "1px solid var(--accent, #6d5ef0)",
+        border: "1px solid var(--accent)",
         borderRadius: "var(--radius-md, 6px)",
-        background: "var(--bg-surface-2, #16161b)",
+        background: "var(--bg-surface-2)",
         padding: 8,
         fontSize: "0.8rem",
       }}
@@ -128,9 +128,9 @@ export function InlineEdit(props: InlineEditProps): ReactElement {
             flex: 1,
             padding: "6px 8px",
             borderRadius: "var(--radius-md, 6px)",
-            border: "1px solid var(--border-subtle, #232329)",
-            background: "var(--bg-inset, #0b0b0e)",
-            color: "var(--text-primary, #e7e7ea)",
+            border: "1px solid var(--border-subtle)",
+            background: "var(--bg-inset)",
+            color: "var(--text-primary)",
             fontFamily: "var(--font-ui, system-ui)",
           }}
         />
@@ -155,7 +155,7 @@ export function InlineEdit(props: InlineEditProps): ReactElement {
         </Button>
       </form>
 
-      {error && <p style={{ color: "var(--danger, #ef5a5a)", margin: "6px 0 0" }}>{error}</p>}
+      {error && <p style={{ color: "var(--danger)", margin: "6px 0 0" }}>{error}</p>}
 
       {streaming && (
         <div style={{ marginTop: 6 }}>
@@ -191,11 +191,9 @@ function DiffView({ before, after }: { before: string; after: string }): ReactEl
   const stats = useMemo(() => diffStats(lines), [lines]);
   return (
     <div style={{ marginTop: 2 }}>
-      <div
-        style={{ fontSize: "0.66rem", color: "var(--text-secondary, #9a9aa3)", marginBottom: 2 }}
-      >
-        <span style={{ color: "var(--ok, #36c46a)" }}>+{stats.added}</span>{" "}
-        <span style={{ color: "var(--danger, #ef5a5a)" }}>−{stats.removed}</span> proposed
+      <div style={{ fontSize: "0.66rem", color: "var(--text-secondary)", marginBottom: 2 }}>
+        <span style={{ color: "var(--ok)" }}>+{stats.added}</span>{" "}
+        <span style={{ color: "var(--danger)" }}>−{stats.removed}</span> proposed
       </div>
       <div
         aria-label="inline edit diff"
@@ -203,7 +201,7 @@ function DiffView({ before, after }: { before: string; after: string }): ReactEl
           margin: 0,
           maxHeight: 200,
           overflow: "auto",
-          background: "var(--bg-inset, #0b0b0e)",
+          background: "var(--bg-inset)",
           borderRadius: 4,
           fontFamily: "var(--font-mono, monospace)",
           fontSize: "0.72rem",
@@ -220,10 +218,10 @@ function DiffView({ before, after }: { before: string; after: string }): ReactEl
               whiteSpace: "pre-wrap",
               color:
                 l.type === "add"
-                  ? "var(--ok, #36c46a)"
+                  ? "var(--ok)"
                   : l.type === "del"
-                    ? "var(--danger, #ef5a5a)"
-                    : "var(--text-secondary, #9a9aa3)",
+                    ? "var(--danger)"
+                    : "var(--text-secondary)",
               background:
                 l.type === "add"
                   ? "color-mix(in srgb, var(--ok) 12%, transparent)"

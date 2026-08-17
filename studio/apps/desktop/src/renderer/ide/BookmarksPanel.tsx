@@ -8,8 +8,9 @@
  *
  * Renderer-SANDBOXED (C5): react + the store only — no monaco/electron/core.
  */
-import { type CSSProperties, type ReactElement, useMemo } from "react";
+import { type CSSProperties, type ReactElement, useMemo, useRef } from "react";
 
+import { Z, useFocusTrap } from "@prometheus/ui";
 import { type Bookmark, allSorted, useBookmarksStore } from "./state/bookmarks.js";
 
 export interface BookmarksPanelProps {
@@ -35,6 +36,11 @@ const rowStyle: CSSProperties = {
 };
 
 export function BookmarksPanel({ onNavigate, onClose }: BookmarksPanelProps): ReactElement {
+  // §9.2 overlay contract: it declares role="dialog" but had no focus trap and no Escape —
+  // Tab walked the editor behind it and the ✕ was the only way out.
+  const rootRef = useRef<HTMLDivElement | null>(null);
+  useFocusTrap(rootRef, true, onClose);
+
   const state = useBookmarksStore((s) => s.state);
   const remove = useBookmarksStore((s) => s.remove);
   // group by file (path-sorted) → the rows, guarded against a partial store.
@@ -50,10 +56,17 @@ export function BookmarksPanel({ onNavigate, onClose }: BookmarksPanelProps): Re
 
   return (
     <div
+      ref={rootRef}
       role="dialog"
+      aria-modal="true"
       aria-label="Bookmarks"
       style={{
-        position: "absolute",
+        // `fixed`, not `absolute` (§9.2): as `absolute` this resolved against whatever
+        // ancestor happened to be positioned — the editor route root is not — so the panel's
+        // "10% from the top, centred" was measured against an arbitrary box and moved when
+        // the layout around it changed. Fixed means the viewport, which is what the numbers
+        // below have always described.
+        position: "fixed",
         top: "10%",
         left: "50%",
         transform: "translateX(-50%)",
@@ -64,7 +77,10 @@ export function BookmarksPanel({ onNavigate, onClose }: BookmarksPanelProps): Re
         border: "1px solid var(--border-strong)",
         borderRadius: "var(--radius-md, 6px)",
         boxShadow: "var(--elevation-e3, 0 10px 40px rgba(0,0,0,0.4))",
-        zIndex: 60,
+        // Z.modal: it declares role="dialog" and is the only thing the user can interact
+        // with while it is up. On the `dropdown` rung (500) any menu opened behind it would
+        // have painted over it.
+        zIndex: Z.modal,
         fontFamily: "var(--font-ui)",
         color: "var(--text-primary)",
       }}

@@ -22,9 +22,17 @@ overrides:
 # the studio dir, which is surprising and unwanted.)
 #
 # NOTE: electron's own install.js extracts via `extract-zip`, which produces an
-# INCOMPLETE app under Node 26 (missing Electron Framework.framework). Use the
-# pinned Node 20 (.nvmrc) for a clean `pnpm install`; under newer Node the binary
-# may need a manual `unzip` of the release zip into electron/dist + a path.txt.
+# INCOMPLETE app under Node 26 (missing Electron Framework.framework). Under newer
+# Node the binary may need a manual `unzip` of the release zip into electron/dist
+# + a path.txt.
+#
+# THE VERSION IS A COMPROMISE BETWEEN TWO REAL CONSTRAINTS, and .nvmrc used to name
+# a version that satisfied only one of them. `pnpm install` wants an older Node (the
+# extract above); the TEST SUITE wants a newer one, because apps/cli/dev-resolver.mjs
+# resolves sources with `format: "module-typescript"` — Node's type stripping, which
+# does not exist before 22.6. .nvmrc said 20, so a CI runner honouring it would have
+# failed every single suite with ERR_UNKNOWN_MODULE_FORMAT, before running one test.
+# 22 is the version that satisfies both, and `engines.node` now states it.
 onlyBuiltDependencies:
   - "@biomejs/biome"
   - electron

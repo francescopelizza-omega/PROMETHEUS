@@ -14,6 +14,8 @@
  */
 import { createRequire } from "node:module";
 
+import { OWNER_PID_ENV, trackChild } from "../child-reaper.js";
+
 // node:child_process is engine-bridge's EXCLUSIVE static import (C5). We spawn vendor AI
 // CLIs as agents, so — like onboarding's ollama pull — we load spawn LAZILY via
 // createRequire (a runtime call, NOT a restricted static import) to respect the boundary.
@@ -140,8 +142,26 @@ export function makeSpawnCapture(): SpawnCapture {
           TERM: "dumb",
           NO_COLOR: "1",
           FORCE_COLOR: "0",
+          // Stamp the owning CLI's pid so a child that survives a SIGKILL of the parent
+          // (the one case no exit handler can cover) is still identifiable afterwards.
+          [OWNER_PID_ENV]: String(process.pid),
           ...opts.env,
         },
+      });
+
+      // `detached: true` is what makes group-kill possible — and also what makes this child
+      // OUTLIVE the CLI. The watchdogs below live in this process, so if the user quits the
+      // TUI or hits Ctrl-C mid-run they die with it and the agent runs forever. Registering
+      // with the reaper is what closes that hole; `untrack` fires on the child's own exit so
+      // a recycled pid is never signalled later.
+      // `command` must match what `ps -o command=` will later report, or the post-mortem
+      // sweep will (correctly, safely) refuse to touch it. argv joined by single spaces is
+      // what ps prints for a spawn without a shell.
+      const untrack = trackChild({
+        pid: child.pid,
+        group: true,
+        label: `agent:${bin}`,
+        command: [bin, ...opts.args].join(" "),
       });
 
       const idleMs = opts.idleMs ?? 90_000;
@@ -200,6 +220,7 @@ export function makeSpawnCapture(): SpawnCapture {
       const finish = (code: number | null, signal: NodeJS.Signals | null): void => {
         if (settled) return;
         settled = true;
+        untrack(); // this pid is done — never signal it again (the OS may recycle it)
         clearTimeout(wallTimer);
         if (idleTimer) clearTimeout(idleTimer);
         if (killTimer) clearTimeout(killTimer); // don't leave the grace timer dangling

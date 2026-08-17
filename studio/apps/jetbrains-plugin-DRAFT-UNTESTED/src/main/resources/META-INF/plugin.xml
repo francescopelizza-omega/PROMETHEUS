@@ -1,0 +1,83 @@
+<!--
+  UNTESTED DRAFT — see README.md at the package root. This manifest has never been
+  loaded by a real IDE; every value below is my best-effort reconstruction of the
+  IntelliJ Platform plugin descriptor schema from training knowledge, not a
+  verified-working file.
+-->
+<idea-plugin>
+    <!-- Reverse-DNS id, matches the Gradle `group` in build.gradle.kts. Once a plugin
+         with a given id is EVER published to the JetBrains Marketplace this id is
+         permanent — pick the final value deliberately before a real release. -->
+    <id>com.prometheus.studio.jetbrains</id>
+    <name>Prometheus Studio</name>
+    <vendor email="red-beard-phoenix@users.noreply.gitlab.com" url="https://gitlab.com/red-beard-phoenix/PROMETHEUS">
+        Francesco Pelizza
+    </vendor>
+
+    <description><![CDATA[
+        <p><b>Prometheus Studio</b> brings the Prometheus AI-native development
+        platform's security-gated chat/agent loop into the IDE as a tool window.</p>
+        <p>This plugin does not embed the Prometheus engine. It shells out to the
+        <code>prometheus</code> CLI (Node) already installed on the machine, pointed
+        at the currently open project's root, and renders its session inside an
+        embedded webview (JCEF). See <code>PrometheusCliService.kt</code> for the
+        exact mechanism and rationale.</p>
+        <p>Every scan/gate/install verdict the CLI prints is the engine's own
+        fail-closed verdict (nemesis) — this plugin only displays it, per the
+        Prometheus "GOLDEN RULE": UI surfaces never decide safety themselves.</p>
+    ]]></description>
+
+    <change-notes><![CDATA[
+        <p>0.1.0 — initial UNTESTED DRAFT. Tool window + CLI subprocess bridge only;
+        no packaged icon, no settings page, no marketplace listing yet.</p>
+    ]]></change-notes>
+
+    <!--
+      VERIFY: sinceBuild/untilBuild build-number ranges below use the branch-number
+      convention that has held for years (2023.3 = 233, 2024.1 = 241, 2024.2 = 242,
+      2024.3 = 243, 2025.1 = 251, 2025.2 = 252, 2025.3 = 253) — I'm confident in the
+      PATTERN, not that these exact numbers are what a human's current IDE reports.
+      JetBrains' current published guidance is to leave `untilBuild` OPEN (omit it)
+      unless you have a specific reason to cap compatibility, since a closed upper
+      bound silently stops your plugin from installing on every future IDE release
+      until you republish. I set an explicit upper bound here only because the task
+      asked for "a specific realistic range" — a human should reconsider removing
+      `until-build` entirely before a real release.
+    -->
+    <idea-version since-build="233" until-build="253.*"/>
+
+    <!-- com.intellij.modules.platform = the common denominator across ALL JetBrains
+         IDEs (IntelliJ IDEA, WebStorm, PyCharm, Android Studio, ...). Depending on
+         this alone (rather than e.g. com.intellij.modules.java) is what makes a
+         single build installable across the whole IDE family, matching the "targets
+         the standard JetBrains plugin family" scope of this task. -->
+    <depends>com.intellij.modules.platform</depends>
+
+    <!-- JCEF (JBCefBrowser) ships inside the platform itself since 2020.2 — no extra
+         <depends> module is needed to use it, it's part of com.intellij.modules.platform.
+         VERIFY: confirm JCEF is actually bundled/enabled in the target IDE build; some
+         minimal/EAP builds or headless distributions historically shipped without a
+         bundled Chromium runtime, in which case JBCefApp.isSupported() returns false
+         and the tool window should fall back to a plain text/console view (not
+         attempted in this draft — see PrometheusChatPanel.kt VERIFY note). -->
+
+    <extensions defaultExtensionNs="com.intellij">
+        <!-- Registers the sidebar tool window. `factoryClass` is loaded via the
+             plugin's own classloader; `anchor` places it on the right rail, mirroring
+             where the Prometheus Studio desktop app puts its own chat rail
+             (studio/apps/desktop, HANDOFF_2 §2: RightRail, 330px open / 42px tray). -->
+        <toolWindow id="Prometheus"
+                    anchor="right"
+                    factoryClass="com.prometheus.studio.jetbrains.PrometheusToolWindowFactory"
+                    icon="/META-INF/pluginIcon.svg"/>
+
+        <!-- Project-level service owning the `prometheus` CLI subprocess lifecycle
+             (one subprocess per open project, keyed off its root path). Declared as
+             a `service` element (the current, post-2020.1 way to register project
+             services) rather than the legacy `projectService` element name.
+             VERIFY: `projectService`/`service` element naming and the exact
+             attribute set have shifted across platform versions in the past —
+             confirm against the current com.intellij plugin.xml schema. -->
+        <projectService serviceImplementation="com.prometheus.studio.jetbrains.PrometheusCliService"/>
+    </extensions>
+</idea-plugin>

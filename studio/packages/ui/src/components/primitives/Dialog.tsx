@@ -9,6 +9,7 @@
  */
 
 import { type ReactNode, useId, useRef } from "react";
+import { Z } from "../../tokens/layers.js";
 import { Button } from "../Button.js";
 import { useFocusTrap } from "./overlay.js";
 import { fs, FOCUS_RING, rad, sp, v } from "./styles.js";
@@ -68,7 +69,7 @@ export function Dialog({
       style={{
         position: "fixed",
         inset: 0,
-        zIndex: 1000,
+        zIndex: Z.modal,
         display: "flex",
         alignItems: "center",
         justifyContent: "center",
@@ -217,7 +218,7 @@ export function AlertDialog({
       style={{
         position: "fixed",
         inset: 0,
-        zIndex: 1100,
+        zIndex: Z.palette,
         display: "flex",
         alignItems: "center",
         justifyContent: "center",
@@ -307,7 +308,7 @@ export function Sheet({
   useFocusTrap(panelRef, open, () => onOpenChange(false));
   if (!open) return null;
   return (
-    <div style={{ position: "fixed", inset: 0, zIndex: 1000 }}>
+    <div style={{ position: "fixed", inset: 0, zIndex: Z.modal }}>
       <Scrim onClick={() => onOpenChange(false)} />
       <div
         ref={panelRef}

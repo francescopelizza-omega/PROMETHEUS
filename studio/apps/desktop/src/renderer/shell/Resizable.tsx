@@ -15,6 +15,7 @@
  * Renderer-SANDBOXED (C5): react only, pure DOM events. No node/electron/bridge.
  */
 
+import { Z } from "@prometheus/ui";
 import {
   type CSSProperties,
   type ReactElement,
@@ -203,7 +204,7 @@ export function ResizeHandle({ axis, edge, rz, label, min }: ResizeHandleProps):
       onMouseLeave={() => setHover(false)}
       style={{
         position: "absolute",
-        zIndex: 6,
+        zIndex: Z.raise,
         background: active ? "var(--brand)" : "transparent",
         opacity: rz.dragging ? 1 : hover ? 0.6 : 0,
         transition: "opacity 120ms ease, background 120ms ease",

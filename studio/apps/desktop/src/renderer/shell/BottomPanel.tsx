@@ -39,7 +39,10 @@ export type BottomTab =
   | "system"
   // APP-072: the editor workbench also hosts the DB console + profiler in the bottom panel.
   | "database"
-  | "profiler";
+  | "profiler"
+  // handoff §2.4: the terminal island's "✳ Claude Code" tab — a terminal session running
+  // the Claude Code CLI, not a second chat surface.
+  | "claude";
 
 export const BOTTOM_TABS: readonly { id: BottomTab; label: string }[] = [
   { id: "terminal", label: "Terminal" },
@@ -53,8 +56,10 @@ export const BOTTOM_TABS: readonly { id: BottomTab; label: string }[] = [
   { id: "system", label: "System" },
 ];
 
-/** Default expanded panel height (px); MIN/INSET are the single-sourced pure consts. */
-const DEFAULT_HEIGHT = 220;
+/** Default expanded panel height (px) — handoff §2.4's 212px terminal island; MIN/INSET are
+ *  the single-sourced pure consts. Heights FLEX from here (drag + maximize), never hardcoded
+ *  anywhere else. */
+const DEFAULT_HEIGHT = 212;
 const MIN_HEIGHT = BOTTOM_MIN_HEIGHT;
 const MAX_HEIGHT_INSET = BOTTOM_MAX_INSET;
 
@@ -79,17 +84,21 @@ export interface BottomPanelProps {
   onMaximize?(next: boolean): void;
 }
 
+/** §2.4: pill tabs — active gets the --bg-active tint, not an uppercase weight change. */
 function tabStyle(activeTab: boolean): CSSProperties {
   return {
-    background: "transparent",
+    display: "flex",
+    alignItems: "center",
+    gap: 6,
+    background: activeTab ? "var(--bg-active)" : "transparent",
     border: "none",
-    color: activeTab ? "var(--text-primary)" : "var(--text-secondary)",
+    borderRadius: 7,
+    color: activeTab ? "var(--text-primary)" : "var(--text-muted)",
     cursor: "pointer",
-    fontSize: "0.75rem",
+    fontSize: 12,
     fontWeight: activeTab ? 600 : 400,
-    padding: "2px 4px",
-    textTransform: "uppercase",
-    letterSpacing: "0.03em",
+    padding: "4px 12px",
+    whiteSpace: "nowrap",
   };
 }
 
@@ -155,8 +164,12 @@ export function BottomPanel({
         // APP-100: minWidth:0 lets the panel shrink with a narrow window instead of forcing the
         // whole shell wider than the viewport (the tab row below clips gracefully).
         minWidth: 0,
-        borderTop: "1px solid var(--border-subtle)",
-        background: "var(--bg-surface)",
+        // §2/§2.4: an ISLAND — its own radius + border on the app ground, not a slab
+        // welded to the window edge by a top hairline.
+        borderRadius: "var(--radius-island)",
+        border: "1px solid var(--border-subtle)",
+        background: "var(--bg-inset)",
+        overflow: "hidden",
         height,
       }}
     >
@@ -170,9 +183,11 @@ export function BottomPanel({
         style={{
           display: "flex",
           alignItems: "center",
-          gap: "var(--space-6, 12px)",
-          height: "var(--row-h, 36px)",
-          paddingInline: "var(--space-6, 12px)",
+          gap: 2,
+          height: 32,
+          flex: "none",
+          background: "var(--bg-surface)",
+          paddingInline: 8,
           // APP-100: clip (not overflow) when the window is too narrow for every tab + the strip.
           minWidth: 0,
           overflow: "hidden",
@@ -209,7 +224,21 @@ export function BottomPanel({
               style={tabStyle(selected)}
             >
               {t.label}
-              {shouldShowBadge(n) && <span style={{ color: "var(--text-secondary)" }}> ({n})</span>}
+              {shouldShowBadge(n) && (
+                // §2.4: a warn-tinted mono chip, not a parenthesised number.
+                <span
+                  style={{
+                    fontFamily: "var(--font-mono)",
+                    fontSize: 10,
+                    padding: "0 5px",
+                    borderRadius: 6,
+                    background: "color-mix(in srgb, var(--warn) 15%, transparent)",
+                    color: "var(--warn)",
+                  }}
+                >
+                  {n}
+                </span>
+              )}
             </button>
           );
         })}

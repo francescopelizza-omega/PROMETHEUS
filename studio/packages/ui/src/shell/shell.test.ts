@@ -17,8 +17,10 @@ import { test } from "node:test";
 import { hasActivityIcon } from "./icon-names.js";
 import {
   ACTIVITIES,
+  ACTIVITY_REDIRECTS,
   DEFAULT_ACTIVITY,
   PINNED,
+  RAIL_ACTIVITIES,
   appearanceAttributes,
   deriveShield,
   filterPalette,
@@ -26,6 +28,7 @@ import {
   getActivity,
   isActivityId,
   parseAppearance,
+  resolveActivity,
   resolveThemeBase,
   routeActivity,
   sidebarTitle,
@@ -65,19 +68,37 @@ test("ACTIVITIES: Home is first + all ids unique", () => {
   assert.equal(new Set(ids).size, ids.length);
 });
 
-test("ACTIVITIES: every §4.1 noun is present", () => {
-  const ids = new Set(ACTIVITIES.map((a) => a.id));
-  for (const id of [
-    "home",
-    "editor",
-    "catalog",
-    "models",
-    "environments",
-    "security",
-    "repos",
-    "extensions",
-  ]) {
-    assert.ok(ids.has(id as never), `missing activity: ${id}`);
+test("ACTIVITIES: the handoff_3 §1 rail is exactly six nouns, in order", () => {
+  assert.deepEqual(
+    RAIL_ACTIVITIES.map((a) => a.id),
+    ["home", "editor", "catalog", "models", "security", "workspace"],
+  );
+  // `chat` stays a real route without a rail icon (the agent lives in the RightRail).
+  assert.ok(ACTIVITIES.some((a) => a.id === "chat" && a.rail === false));
+});
+
+test("the four retired activities redirect to their merged route + segment", () => {
+  // These ids are on disk in `prometheus.layout` for anyone who quit before the merge.
+  // Losing this table does not remove the persisted value — it just turns a working
+  // migration back into a blank frame.
+  assert.deepEqual(resolveActivity("repos"), { activity: "workspace", tab: "repos" });
+  assert.deepEqual(resolveActivity("environments"), {
+    activity: "workspace",
+    tab: "environments",
+  });
+  assert.deepEqual(resolveActivity("docs"), { activity: "workspace", tab: "docs" });
+  assert.deepEqual(resolveActivity("extensions"), { activity: "catalog", tab: "extensions" });
+});
+
+test("resolveActivity: a live id passes through with no tab; junk degrades to Home", () => {
+  assert.deepEqual(resolveActivity("security"), { activity: "security" });
+  assert.deepEqual(resolveActivity("nope"), { activity: DEFAULT_ACTIVITY });
+  assert.deepEqual(resolveActivity(null), { activity: DEFAULT_ACTIVITY });
+});
+
+test("no retired id is still a live activity (the merge is complete)", () => {
+  for (const dead of Object.keys(ACTIVITY_REDIRECTS)) {
+    assert.ok(!isActivityId(dead), `${dead} should have been merged away`);
   }
 });
 
@@ -109,6 +130,7 @@ test("isActivityId + getActivity are consistent", () => {
 
 test("sidebarTitle: unknown id falls back to Home label", () => {
   assert.equal(sidebarTitle("models"), "Model Hub");
+  assert.equal(sidebarTitle("workspace"), "Workspace");
   assert.equal(sidebarTitle("bogus"), "Home");
 });
 

@@ -23,6 +23,14 @@ export interface StatusItem {
   /** Click handler — e.g. the shield opens the Security panel (08 §4.2). */
   onClick?: () => void;
   title?: string;
+  /**
+   * A semantic COLOR-VAR NAME (e.g. "--warn", "--ok") to tint this entry — never a hex.
+   * Used by the §7 bar for the problems count, the engine state and the auth level, where
+   * the value itself is the signal. Omitted → the bar's own muted text color.
+   */
+  tone?: string;
+  /** Accessible name when the visible label alone is not descriptive (e.g. "A2"). */
+  ariaLabel?: string;
 }
 
 export interface StatusBarProps {
@@ -44,24 +52,36 @@ function Item({ item }: { item: StatusItem }): ReactElement {
       type="button"
       onClick={item.onClick}
       title={item.title}
+      aria-label={item.ariaLabel}
       disabled={!interactive}
       style={{
         display: "inline-flex",
         alignItems: "center",
-        gap: "var(--space-2, 4px)",
-        paddingInline: "var(--space-4, 8px)",
-        paddingBlock: "var(--space-1, 2px)",
+        gap: 5,
+        paddingInline: 7,
+        paddingBlock: 0,
+        height: "100%",
         background: "transparent",
         border: "none",
-        color: "var(--text-secondary)",
+        // §7: the bar is 11px mono. A `tone` (a semantic var NAME) tints the whole entry.
+        color: item.tone ? `var(${item.tone})` : "var(--text-muted)",
         fontFamily: "var(--font-mono)",
-        fontSize: "var(--text-small-size, 0.8125rem)",
+        fontSize: 11,
         cursor: interactive ? "pointer" : "default",
-        lineHeight: 1.4,
+        lineHeight: 1,
+        whiteSpace: "nowrap",
       }}
     >
-      {item.glyph != null && <span aria-hidden="true">{item.glyph}</span>}
-      <span>{item.label}</span>
+      {item.glyph != null && (
+        <span aria-hidden="true" style={{ flex: "none" }}>
+          {item.glyph}
+        </span>
+      )}
+      {/* ellipsis, not a hard clip: the group clips at its edge, and a label cut mid-glyph
+          reads as a rendering bug rather than as truncation. */}
+      <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis" }}>
+        {item.label}
+      </span>
     </button>
   );
 }
@@ -78,18 +98,35 @@ export function StatusBar({
       className={className}
       role="contentinfo"
       style={{
+        // §7: a hard 26px bar — not a rem multiple, so it cannot drift with the type scale.
         display: "flex",
         alignItems: "center",
         justifyContent: "space-between",
-        minHeight: "1.8rem",
-        paddingInline: "var(--space-2, 4px)",
-        background: "var(--bg-surface)",
-        borderTop: "1px solid var(--border-subtle)",
-        color: "var(--text-secondary)",
+        height: 26,
+        flex: "none",
+        paddingInline: 5,
+        background: "var(--bg-inset)",
+        borderTop: "1px solid var(--border-header)",
+        color: "var(--text-muted)",
         userSelect: "none",
       }}
     >
-      <div style={{ display: "flex", alignItems: "center" }}>
+      {/*
+        `minWidth: 0` + `overflow: hidden` on the GROUP: every item inside is
+        `whiteSpace: nowrap` and the labels are unbounded strings the workspace supplies —
+        a git branch, a served model id, a venv path. Without this the group's min-content
+        width is the sum of all of them, and a long branch name pushes the whole 26px
+        footer wider than the window (§9 layout rules).
+      */}
+      <div
+        style={{
+          display: "flex",
+          alignItems: "center",
+          height: "100%",
+          minWidth: 0,
+          overflow: "hidden",
+        }}
+      >
         {shield != null && (
           <button
             type="button"
@@ -99,9 +136,9 @@ export function StatusBar({
             style={{
               display: "inline-flex",
               alignItems: "center",
-              gap: "var(--space-2, 4px)",
-              paddingInline: "var(--space-4, 8px)",
-              paddingBlock: "var(--space-1, 2px)",
+              gap: 5,
+              paddingInline: 7,
+              height: "100%",
               background: "transparent",
               border: "none",
               cursor: typeof onShieldClick === "function" ? "pointer" : "default",
@@ -115,7 +152,15 @@ export function StatusBar({
           <Item key={item.id} item={item} />
         ))}
       </div>
-      <div style={{ display: "flex", alignItems: "center" }}>
+      <div
+        style={{
+          display: "flex",
+          alignItems: "center",
+          height: "100%",
+          minWidth: 0,
+          overflow: "hidden",
+        }}
+      >
         {right.map((item) => (
           <Item key={item.id} item={item} />
         ))}

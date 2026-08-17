@@ -153,11 +153,26 @@ export class StdioMcpTransport implements McpClientTransport {
       const line = this.buf.slice(0, idx).trim();
       this.buf = this.buf.slice(idx + 1);
       if (!line) continue;
-      let msg: { id?: unknown; result?: unknown; error?: { message?: string } };
+      let msg: { id?: unknown; method?: unknown; result?: unknown; error?: { message?: string } };
       try {
         msg = JSON.parse(line);
       } catch {
         continue; // a non-JSON log line leaked to stdout — ignore
+      }
+      /**
+       * `method` is what separates a REQUEST from a RESPONSE, and checking it is load-bearing.
+       *
+       * JSON-RPC is bidirectional: a server may send us a request (`ping` is legal from either
+       * side at any time, irrespective of declared capabilities) and it numbers its ids from
+       * its own counter — which starts where ours does. Without this check, a server `ping`
+       * carrying id 1 was matched against OUR pending id 1, resolved it with `undefined`, and
+       * `listTools` turned that into `[]`. The server connects, reports healthy, and offers
+       * zero tools, with nothing anywhere saying why. That is the exact silent-failure shape
+       * this transport must not have.
+       */
+      if (typeof msg.method === "string") {
+        this.onInbound(msg.method, msg.id);
+        continue;
       }
       if (typeof msg.id === "number") {
         const p = this.pending.get(msg.id);
@@ -167,6 +182,38 @@ export class StdioMcpTransport implements McpClientTransport {
         if (msg.error) p.reject(new Error(msg.error.message ?? "MCP error"));
         else p.resolve(msg.result);
       }
+    }
+  }
+
+  /**
+   * Handle a server-initiated request or notification.
+   *
+   * A NOTIFICATION (no id) is dropped: we advertise no capabilities, so nothing a server
+   * notifies us about changes our behaviour, and answering one is a protocol error.
+   *
+   * A REQUEST (with an id) must be ANSWERED, because a compliant server may block on it.
+   * `ping` gets the spec's empty result. Everything else gets METHOD_NOT_FOUND rather than
+   * silence — we declare `capabilities: {}`, so a server asking for sampling or roots is
+   * asking for something we truthfully do not have, and an error says so in one round trip
+   * instead of stalling it until its own timeout.
+   */
+  private onInbound(method: string, id: unknown): void {
+    if (id === undefined || id === null) return; // a notification — nothing to answer
+    if (method === "ping") {
+      this.respond(id, { result: {} });
+      return;
+    }
+    this.respond(id, {
+      error: { code: -32601, message: `method not found: ${method}` },
+    });
+  }
+
+  /** Write one JSON-RPC response. Never throws — a dead pipe is the caller's problem, not ours. */
+  private respond(id: unknown, body: { result?: unknown; error?: unknown }): void {
+    try {
+      this.proc?.stdin?.write(`${JSON.stringify({ jsonrpc: "2.0", id, ...body })}\n`);
+    } catch {
+      /* the child is gone; `failAll` on its exit is what the caller will see */
     }
   }
 

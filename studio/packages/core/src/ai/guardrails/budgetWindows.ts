@@ -25,6 +25,18 @@ export interface BudgetConfig {
   dailyUsd?: number;
   /** warn when spend crosses this % of a cap (default 80). */
   warnAtPercent?: number;
+  /**
+   * What to do when a metered model has NO price entry: `"block"` (the default, fail-closed)
+   * or `"warn"` — an explicit opt-in to spend uncapped on that model.
+   *
+   * Thirteen of the eighteen cloud providers this CLI can select have no price, and an
+   * unpriced record used to contribute exactly $0. So a `session_usd = 1` cap let a
+   * 200-million-token Groq session through reporting `spentUsd: 0`, while the same record on
+   * Claude blocked at $1800. A cap that silently does not apply is worse than no cap: the
+   * user believes they are protected. There is no token→USD conversion for a model we have no
+   * rate for, so counting tokens instead would enforce a number the user never chose.
+   */
+  unpricedPolicy?: "block" | "warn";
 }
 
 export type BudgetAction = "ok" | "warn" | "block";
@@ -36,6 +48,10 @@ export interface BudgetDecision {
   spentUsd: number;
   capUsd: number;
   reason?: string;
+  /** what triggered the decision: a cap window, or a model that cannot be priced at all. */
+  cause?: BudgetWindow | "unpriced";
+  /** distinct model ids with no price — their spend is NOT included in `spentUsd`. */
+  unpriced?: string[];
 }
 
 /** Model → per-MTok price (null/absent ⇒ free/local ⇒ $0). */
@@ -50,9 +66,13 @@ function localDayKey(iso: string): string {
   return `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`;
 }
 
-function recordUsd(r: SpendRecord, priceFor: PriceFor): number {
+/** `null` ⇒ this model has NO price, which is not the same fact as "it cost nothing". */
+function recordUsd(r: SpendRecord, priceFor: PriceFor): number | null {
   const price = priceFor(r.model);
-  if (!price) return 0; // unknown/local model → $0 (never counts toward a metered cap)
+  // Absent, or present with both rates null (a local/free row) — the first is ignorance, the
+  // second is a real zero, and conflating them is what made the cap silently inapplicable.
+  if (!price) return null;
+  if (price.pricePerMTokIn == null && price.pricePerMTokOut == null) return 0;
   const usage: TokenUsage = { inputTokens: r.promptTokens, outputTokens: r.completionTokens };
   return estimateCost(usage, {
     pricePerMTokIn: price.pricePerMTokIn ?? null,
@@ -75,10 +95,35 @@ export function evaluateBudgets(
   const today = localDayKey(nowIso);
   let sessionSpent = 0;
   let dailySpent = 0;
+  const unpriced = new Set<string>();
   for (const r of records) {
     const usd = recordUsd(r, priceFor);
+    if (usd === null) {
+      unpriced.add(r.model);
+      continue;
+    }
     sessionSpent += usd;
     if (localDayKey(r.atIso) === today) dailySpent += usd;
+  }
+  /**
+   * A cap is in force and something in this session cannot be priced ⇒ FAIL CLOSED.
+   *
+   * Only reached when the user actually set a cap: with no `[budget]` table the guard is not
+   * consulted at all, so nothing changes for anyone who did not ask for the guarantee. The
+   * escapes are explicit — `--force-budget` for one run, `unpriced_policy = "warn"` to stand
+   * it down permanently.
+   */
+  const capped = (cfg.sessionUsd ?? 0) > 0 || (cfg.dailyUsd ?? 0) > 0;
+  if (capped && unpriced.size > 0 && cfg.unpricedPolicy !== "warn") {
+    const names = [...unpriced].sort();
+    return {
+      action: "block",
+      cause: "unpriced",
+      unpriced: names,
+      spentUsd: sessionSpent,
+      capUsd: cfg.sessionUsd ?? cfg.dailyUsd ?? 0,
+      reason: `no price is known for ${names.join(", ")}, so a USD cap cannot be enforced for it — re-run with --force-budget, or set budget.unpriced_policy = "warn" to allow uncapped spend on unpriced models`,
+    };
   }
   const windows: { window: BudgetWindow; spent: number; cap?: number }[] = [
     { window: "session", spent: sessionSpent, cap: cfg.sessionUsd },

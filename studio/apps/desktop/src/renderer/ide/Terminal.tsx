@@ -13,7 +13,7 @@
  * Renderer-SANDBOXED (C5): react + xterm (lazy) + window.prometheus only.
  */
 
-import { xtermThemeFromSemantic } from "@prometheus/ui";
+import { Z, xtermThemeFromSemantic } from "@prometheus/ui";
 import { type ReactElement, useCallback, useEffect, useRef, useState } from "react";
 
 import type { IdeEvent } from "../../shared/ipc-contract.js";
@@ -540,13 +540,13 @@ export function Terminal({
             position: "absolute",
             top: "var(--space-2, 4px)",
             right: "var(--space-2, 4px)",
-            zIndex: 20,
+            zIndex: Z.raise,
             display: "flex",
             alignItems: "center",
             gap: "var(--space-2, 4px)",
             padding: "var(--space-1, 2px) var(--space-2, 4px)",
-            background: "var(--bg-surface-2, #16161b)",
-            border: "1px solid var(--border-strong, #313139)",
+            background: "var(--bg-surface-2)",
+            border: "1px solid var(--border-strong)",
             borderRadius: "var(--radius-md, 6px)",
             boxShadow: "var(--elevation-e3)",
             fontSize: "var(--text-small-size, 0.8125rem)",
@@ -575,9 +575,9 @@ export function Terminal({
             }}
             style={{
               width: 160,
-              background: "var(--bg-app, #0b0d10)",
-              color: "var(--text-primary, #e7e7ea)",
-              border: "1px solid var(--border-subtle, #232329)",
+              background: "var(--bg-app)",
+              color: "var(--text-primary)",
+              border: "1px solid var(--border-subtle)",
               borderRadius: "var(--radius-sm, 4px)",
               padding: "2px 6px",
               font: "inherit",
@@ -590,10 +590,7 @@ export function Terminal({
               minWidth: 34,
               textAlign: "center",
               fontVariantNumeric: "tabular-nums",
-              color:
-                findQuery && matchInfo.count === 0
-                  ? "var(--warn, #d9a441)"
-                  : "var(--text-secondary, #9a9aa3)",
+              color: findQuery && matchInfo.count === 0 ? "var(--warn)" : "var(--text-secondary)",
             }}
           >
             {matchReadout(matchInfo.index, matchInfo.count)}
@@ -635,7 +632,7 @@ export function Terminal({
             display: "flex",
             alignItems: "center",
             justifyContent: "center",
-            color: "var(--text-secondary, #9a9aa3)",
+            color: "var(--text-secondary)",
             fontSize: "0.8rem",
             fontFamily: "var(--font-mono, ui-monospace, monospace)",
             padding: 16,
@@ -656,7 +653,7 @@ function findBtn(): import("react").CSSProperties {
   return {
     background: "transparent",
     border: "none",
-    color: "var(--text-secondary, #9a9aa3)",
+    color: "var(--text-secondary)",
     cursor: "pointer",
     font: "inherit",
     padding: "0 2px",

@@ -9,6 +9,7 @@ import {
   type ConnectorConfig,
   type Pricing,
   type Provider,
+  contextLenForModel,
   costLightForTier,
   costOf,
   detectKeyShadowsOauth,
@@ -294,6 +295,24 @@ test("priceForModel: longest-prefix, case-insensitive; absent → null (CLI-058)
   assert.equal(priceForModel(PRICING, "Claude-Sonnet-4-6")?.inputUsdPerMTok, 3); // case-insensitive
   assert.equal(priceForModel(PRICING, "claude-3-haiku")?.inputUsdPerMTok, 3); // falls back to `claude`
   assert.equal(priceForModel(PRICING, "mystery-model"), null); // absent → null (never a guess)
+});
+
+test("contextLenForModel: same longest-prefix rule as pricing; absent → null (CLI-092)", () => {
+  const withCtx: Pricing = {
+    claude: { inputUsdPerMTok: 3, outputUsdPerMTok: 15, contextLen: 100_000 },
+    "claude-opus-4": { inputUsdPerMTok: 15, outputUsdPerMTok: 75, contextLen: 200_000 },
+    "gpt-4o": { inputUsdPerMTok: 2.5, outputUsdPerMTok: 10 }, // no contextLen on this entry
+  };
+  assert.equal(contextLenForModel(withCtx, "claude-opus-4-20250219"), 200_000);
+  assert.equal(contextLenForModel(withCtx, "claude-3-haiku"), 100_000); // falls back to `claude`
+  assert.equal(contextLenForModel(withCtx, "gpt-4o-mini"), null); // priced but no contextLen
+  assert.equal(contextLenForModel(withCtx, "mystery-model"), null); // absent → null
+});
+
+test("loadPricing: the shipped config carries a real contextLen for known cloud models (CLI-092)", () => {
+  const p = loadPricing();
+  assert.equal(contextLenForModel(p, "claude-sonnet-4-6-20250219"), 200_000);
+  assert.equal(contextLenForModel(p, "gpt-4o-2026-01-01"), 128_000);
 });
 
 test("costOf: exact tokens×rate; local → 0; unknown → null (CLI-058)", () => {

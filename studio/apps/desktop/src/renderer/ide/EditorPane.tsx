@@ -29,8 +29,14 @@ import {
   resolveEditorConfig,
 } from "@prometheus/core/format";
 import { receiverExpression, toMonacoSnippet } from "@prometheus/core/templates";
-import { monacoThemeFromSemantic } from "@prometheus/ui";
-import { type ReactElement, useEffect, useRef, useState } from "react";
+import {
+  DEFAULT_SCHEME_ID,
+  Z,
+  clampToViewport,
+  monacoThemeFromSemantic,
+  pellyMonacoTheme,
+} from "@prometheus/ui";
+import { type ReactElement, useCallback, useEffect, useRef, useState } from "react";
 
 import { useTheme } from "../shell/ThemeProvider.js";
 import { Breadcrumbs } from "./Breadcrumbs.js";
@@ -61,6 +67,7 @@ import { useClipboardStore } from "./state/clipboard-store.js";
 import { classifyCodeAction } from "./state/code-action-classify.js";
 import { coverageEntryForPath, useCoverageStore } from "./state/coverage-store.js";
 import type { Diagnostic } from "./state/diagnostics.js";
+import { countDiagnostics } from "./state/diagnostics.js";
 import { onVisionChange, useEditorVisionStore } from "./state/editor-vision-store.js";
 import {
   type FoldRange,
@@ -183,7 +190,9 @@ function monacoFontOptions(cfg: FontConfig): {
   };
 }
 /** The generated Monaco theme name we (re)define from the active design tokens. */
-const EDITOR_THEME = "prometheus";
+/** The ONE Monaco theme name every editor surface selects (the main editor, the git
+ *  diff view). Exported so a second surface can never drift back to a stock theme. */
+export const EDITOR_THEME = "prometheus";
 
 /** Map the resolved app base → Monaco's theme base. */
 function monacoBase(resolvedBase: string): "vs" | "vs-dark" | "hc-black" {
@@ -1663,9 +1672,19 @@ function EditorGroup({ group }: { group: number }): ReactElement {
     flashTimer.current = setTimeout(() => setFormatStatus(null), 2600);
   };
   // the active design tokens → a Monaco theme (Monaco can't read CSS vars).
-  const { colors, resolvedBase } = useTheme();
-  const themeRef = useRef({ colors, resolvedBase });
-  themeRef.current = { colors, resolvedBase };
+  const { colors, resolvedBase, activeSchemeId } = useTheme();
+  // handoff §1 "Editor scheme": the DEFAULT scheme paints the editor with the operator's
+  // Pelly syntax palette. An explicitly-picked scheme keeps its OWN syntax colors — the
+  // 41-scheme picker would be cosmetically broken if every entry rendered Pelly.
+  const editorTheme = useCallback(
+    (c: typeof colors, rb: typeof resolvedBase, schemeId: string | null): unknown =>
+      schemeId && schemeId !== DEFAULT_SCHEME_ID
+        ? monacoThemeFromSemantic(c, monacoBase(rb))
+        : pellyMonacoTheme(c, monacoBase(rb)),
+    [],
+  );
+  const themeRef = useRef({ colors, resolvedBase, activeSchemeId });
+  themeRef.current = { colors, resolvedBase, activeSchemeId };
   // the user's editor font (Settings → Fonts). Read via a ref for the one-time create
   // (so the mount effect doesn't re-run on a font change); a dedicated effect below
   // live-applies changes via editor.updateOptions.
@@ -1713,12 +1732,10 @@ function EditorGroup({ group }: { group: number }): ReactElement {
       registerBookmarkGutter(); // bookmark glyphs (APP-061, once)
       // define a theme from the ACTIVE tokens so the editor matches the app (light /
       // dark / high-contrast) instead of being hardcoded to vs-dark.
-      const { colors: c, resolvedBase: rb } = themeRef.current;
+      const { colors: c, resolvedBase: rb, activeSchemeId: sid } = themeRef.current;
       monaco.editor.defineTheme(
         EDITOR_THEME,
-        monacoThemeFromSemantic(c, monacoBase(rb)) as Parameters<
-          typeof monaco.editor.defineTheme
-        >[1],
+        editorTheme(c, rb, sid) as Parameters<typeof monaco.editor.defineTheme>[1],
       );
       const editor = monaco.editor.create(hostRef.current, {
         automaticLayout: true,
@@ -1728,7 +1745,10 @@ function EditorGroup({ group }: { group: number }): ReactElement {
         // it the margin has zero width and clicks never hit GUTTER_GLYPH_MARGIN.
         glyphMargin: true,
         // built-in modern-editor polish (leap #14) — all Monaco-native (MIT), config only.
-        bracketPairColorization: { enabled: true },
+        // OFF (handoff §1): bracket-pair colorization paints bracket characters by NESTING
+        // DEPTH and overrides the tokenizer, which would erase the Pelly per-character
+        // brace (#6591ff) / bracket (#18ff00) colors. The indent guides stay on.
+        bracketPairColorization: { enabled: false },
         guides: { bracketPairs: true, indentation: true },
         cursorSmoothCaretAnimation: "on",
         smoothScrolling: true,
@@ -2387,12 +2407,12 @@ function EditorGroup({ group }: { group: number }): ReactElement {
     if (!monaco) return;
     monaco.editor.defineTheme(
       EDITOR_THEME,
-      monacoThemeFromSemantic(colors, monacoBase(resolvedBase)) as Parameters<
+      editorTheme(colors, resolvedBase, activeSchemeId) as Parameters<
         typeof monaco.editor.defineTheme
       >[1],
     );
     monaco.editor.setTheme(EDITOR_THEME);
-  }, [colors, resolvedBase]);
+  }, [colors, resolvedBase, activeSchemeId, editorTheme]);
 
   // live-apply the editor font when the user changes it (Settings → Fonts) — PyCharm
   // applies font changes instantly. updateOptions is per-instance (unlike the global
@@ -2699,7 +2719,7 @@ function EditorGroup({ group }: { group: number }): ReactElement {
           style={{
             position: "absolute",
             inset: 0,
-            zIndex: 10,
+            zIndex: Z.raise,
             background: "var(--bg-app)",
             overflow: "auto",
           }}
@@ -2715,12 +2735,12 @@ function EditorGroup({ group }: { group: number }): ReactElement {
             position: "absolute",
             bottom: 8,
             right: 12,
-            zIndex: 20,
+            zIndex: Z.raise,
             padding: "3px 10px",
             borderRadius: "var(--radius-sm, 4px)",
-            background: "var(--bg-surface-2, #16161b)",
-            border: "1px solid var(--border-strong, #313139)",
-            color: "var(--text-secondary, #9a9aa3)",
+            background: "var(--bg-surface-2)",
+            border: "1px solid var(--border-strong)",
+            color: "var(--text-secondary)",
             fontSize: "0.72rem",
             fontFamily: "var(--font-mono, monospace)",
           }}
@@ -2736,9 +2756,9 @@ function EditorGroup({ group }: { group: number }): ReactElement {
             display: "flex",
             alignItems: "center",
             justifyContent: "center",
-            color: "var(--text-secondary, #9a9aa3)",
+            color: "var(--text-secondary)",
             fontSize: "0.85rem",
-            background: "var(--bg-surface, #101015)",
+            background: "var(--bg-surface)",
             fontFamily: "var(--font-mono, ui-monospace, monospace)",
             padding: 16,
             textAlign: "center",
@@ -2760,9 +2780,9 @@ function EditorGroup({ group }: { group: number }): ReactElement {
             display: "flex",
             alignItems: "center",
             justifyContent: "center",
-            color: "var(--danger, #e5534b)",
+            color: "var(--danger)",
             fontSize: "0.85rem",
-            background: "var(--bg-surface, #101015)",
+            background: "var(--bg-surface)",
             fontFamily: "var(--font-mono, ui-monospace, monospace)",
             padding: 16,
             textAlign: "center",
@@ -2789,8 +2809,11 @@ function TabBar({ group }: { group: number }): ReactElement {
       style={{
         display: "flex",
         alignItems: "stretch",
-        borderBottom: "1px solid var(--border-subtle, #232329)",
-        background: "var(--bg-surface-2, #16161b)",
+        flex: "none",
+        // §2.4: the strip sits on --bg-surface; the ACTIVE tab drops to the editor's own
+        // ground (--bg-inset) so the tab reads as continuous with the code below it.
+        borderBottom: "1px solid var(--border-header)",
+        background: "var(--bg-surface)",
       }}
     >
       <div
@@ -2813,19 +2836,23 @@ function TabBar({ group }: { group: number }): ReactElement {
               style={{
                 display: "flex",
                 alignItems: "center",
-                gap: 6,
-                padding: "4px 8px",
+                gap: 8,
+                padding: "8px 14px",
                 cursor: "pointer",
-                fontSize: "0.8rem",
+                // §2.4: mono 12px tabs — a filename is code, not prose.
+                fontFamily: "var(--font-mono)",
+                fontSize: 12,
                 fontStyle: t.preview ? "italic" : "normal",
-                color: isActive ? "var(--text-primary, #e7e7ea)" : "var(--text-secondary, #9a9aa3)",
-                borderTop: `2px solid ${isActive ? "var(--accent, #6d5ef0)" : "transparent"}`,
+                color: isActive ? "var(--text-primary)" : "var(--text-muted)",
+                background: isActive ? "var(--bg-inset)" : "transparent",
+                borderTop: `2px solid ${isActive ? "var(--accent)" : "transparent"}`,
+                borderRight: "1px solid var(--border-header)",
                 whiteSpace: "nowrap",
               }}
             >
               <span>{t.name}</span>
               {t.dirty && (
-                <span aria-label="unsaved" style={{ color: "var(--accent, #6d5ef0)" }}>
+                <span aria-label="unsaved" style={{ color: "var(--accent)" }}>
                   ●
                 </span>
               )}
@@ -2857,6 +2884,10 @@ function TabBar({ group }: { group: number }): ReactElement {
           );
         })}
       </div>
+      {/* §2.4: the problems / checks counters live to the RIGHT of the tab strip — the
+          same diagnostics store the StatusBar and the Problems panel read, so the three
+          can never disagree. "checks" is the count of diagnostics-free open files. */}
+      <TabStripCounters />
       {groupTabs.length > 0 && (
         <button
           type="button"
@@ -2867,8 +2898,8 @@ function TabBar({ group }: { group: number }): ReactElement {
             flexShrink: 0,
             background: "transparent",
             border: "none",
-            borderLeft: "1px solid var(--border-subtle, #232329)",
-            color: "var(--text-secondary, #9a9aa3)",
+            borderLeft: "1px solid var(--border-header)",
+            color: "var(--text-muted)",
             cursor: "pointer",
             fontSize: "0.95rem",
             padding: "0 10px",
@@ -2877,6 +2908,36 @@ function TabBar({ group }: { group: number }): ReactElement {
           ◫
         </button>
       )}
+    </div>
+  );
+}
+
+/** The right-of-tabs diagnostics readout (§2.4): `⚠ n` warnings + `✓ n` clean files. */
+function TabStripCounters(): ReactElement | null {
+  const byUri = useDiagnosticsStore((s) => s.byUri);
+  const docs = useTabsStore((s) => s.tabs.docs);
+  const counts = countDiagnostics(byUri);
+  const problems = counts.errors + counts.warnings;
+  const clean = docs.filter((d) => (byUri[d.uri]?.length ?? 0) === 0).length;
+  if (problems === 0 && clean === 0) return null;
+  return (
+    <div
+      style={{
+        display: "flex",
+        alignItems: "center",
+        gap: 10,
+        flexShrink: 0,
+        paddingInline: 12,
+        fontFamily: "var(--font-mono)",
+        fontSize: 11,
+      }}
+    >
+      {problems > 0 && (
+        <span style={{ color: counts.errors > 0 ? "var(--danger)" : "var(--warn)" }}>
+          ⚠ {problems}
+        </span>
+      )}
+      {clean > 0 && <span style={{ color: "var(--ok)" }}>✓ {clean}</span>}
     </div>
   );
 }
@@ -2933,7 +2994,11 @@ function QuickDocHost(): ReactElement | null {
 
   return (
     // biome-ignore lint/a11y/useKeyWithClickEvents: backdrop is click-to-dismiss; Esc is handled by the window keydown listener above.
-    <div onClick={close} style={{ position: "absolute", inset: 0, zIndex: 32 }} role="presentation">
+    <div
+      onClick={close}
+      style={{ position: "absolute", inset: 0, zIndex: Z.raise }}
+      role="presentation"
+    >
       {/* biome-ignore lint/a11y/useSemanticElements: a role="dialog" div matches the other EditorPane overlay hosts; a native <dialog> needs showModal() plumbing. */}
       {/* biome-ignore lint/a11y/useKeyWithClickEvents: onClick only stops backdrop dismiss; Esc closes via the window keydown listener. */}
       <div
@@ -2948,8 +3013,8 @@ function QuickDocHost(): ReactElement | null {
           width: "min(620px, 82%)",
           maxHeight: "60%",
           overflow: "auto",
-          background: "var(--surface-1, #1e1e24)",
-          border: "1px solid var(--border, #3a3a42)",
+          background: "var(--surface-1)",
+          border: "1px solid var(--border)",
           borderRadius: 8,
           boxShadow: "var(--shadow-e3, 0 12px 40px rgba(0,0,0,0.45))",
           padding: 10,
@@ -2961,7 +3026,7 @@ function QuickDocHost(): ReactElement | null {
             display: "flex",
             alignItems: "center",
             marginBottom: 6,
-            color: "var(--text-secondary, #9a9aa3)",
+            color: "var(--text-secondary)",
             fontSize: "0.7rem",
           }}
         >
@@ -2974,7 +3039,7 @@ function QuickDocHost(): ReactElement | null {
             style={{
               background: "transparent",
               border: "none",
-              color: "var(--text-secondary, #9a9aa3)",
+              color: "var(--text-secondary)",
               cursor: "pointer",
             }}
           >
@@ -2987,7 +3052,7 @@ function QuickDocHost(): ReactElement | null {
             style={{
               marginTop: 8,
               paddingTop: 6,
-              borderTop: "1px solid var(--border-subtle, #232329)",
+              borderTop: "1px solid var(--border-subtle)",
               display: "flex",
               flexDirection: "column",
               gap: 3,
@@ -3004,7 +3069,7 @@ function QuickDocHost(): ReactElement | null {
                     textAlign: "left",
                     background: "transparent",
                     border: "none",
-                    color: "var(--accent, #22d3ee)",
+                    color: "var(--accent)",
                     cursor: "pointer",
                     fontSize: "0.74rem",
                     padding: 0,
@@ -3022,7 +3087,7 @@ function QuickDocHost(): ReactElement | null {
                 >
                   <span
                     style={{
-                      color: "var(--text-secondary, #9a9aa3)",
+                      color: "var(--text-secondary)",
                       overflow: "hidden",
                       textOverflow: "ellipsis",
                       whiteSpace: "nowrap",
@@ -3037,9 +3102,9 @@ function QuickDocHost(): ReactElement | null {
                     onClick={() => void navigator.clipboard?.writeText(l.url)}
                     style={{
                       background: "transparent",
-                      border: "1px solid var(--border, #3a3a42)",
+                      border: "1px solid var(--border)",
                       borderRadius: 4,
-                      color: "var(--text-secondary, #9a9aa3)",
+                      color: "var(--text-secondary)",
                       cursor: "pointer",
                       fontSize: "0.66rem",
                       padding: "0 5px",
@@ -3163,7 +3228,7 @@ function InlineEditHost(): ReactElement | null {
         left: "50%",
         transform: "translateX(-50%)",
         width: "min(560px, 80%)",
-        zIndex: 30,
+        zIndex: Z.raise,
       }}
     >
       <InlineEdit
@@ -3205,9 +3270,9 @@ function bpEditInput(
         if (e.key === "Enter") (e.target as HTMLInputElement).blur();
       }}
       style={{
-        background: "var(--bg-surface-2, #16161b)",
-        color: "var(--text-primary, #e7e7ea)",
-        border: "1px solid var(--border-subtle, #2a2a33)",
+        background: "var(--bg-surface-2)",
+        color: "var(--text-primary)",
+        border: "1px solid var(--border-subtle)",
         borderRadius: 4,
         padding: "3px 6px",
         fontSize: "0.72rem",
@@ -3245,8 +3310,7 @@ function BreakpointEditHost(): ReactElement | null {
   const set = (patch: { condition?: string; hitCondition?: string; logMessage?: string }): void =>
     useBreakpointStore.getState().update(edit.path, edit.line, patch);
   // clamp within the viewport so the panel never renders off-screen.
-  const left = Math.min(edit.x, (typeof window !== "undefined" ? window.innerWidth : 1024) - 300);
-  const top = Math.min(edit.y, (typeof window !== "undefined" ? window.innerHeight : 768) - 220);
+  const { x: left, y: top } = clampToViewport(edit.x, edit.y, 300, 220);
   return (
     // full-screen click-away/Escape backdrop (presentation) — the same modal pattern
     // ClipboardHistory/CommandPalette use; the panel floats at the right-clicked line.
@@ -3258,7 +3322,7 @@ function BreakpointEditHost(): ReactElement | null {
       onKeyDown={(e) => {
         if (e.key === "Escape") close();
       }}
-      style={{ position: "fixed", inset: 0, zIndex: 40, background: "transparent" }}
+      style={{ position: "fixed", inset: 0, zIndex: Z.dropdown, background: "transparent" }}
     >
       {/* biome-ignore lint/a11y/useSemanticElements: role=dialog on a div matches the CommandPalette modal; we manage focus/escape ourselves rather than use <dialog> */}
       <div
@@ -3266,20 +3330,20 @@ function BreakpointEditHost(): ReactElement | null {
         aria-label={`breakpoint ${edit.path}:${edit.line}`}
         style={{
           position: "fixed",
-          left: Math.max(8, left),
-          top: Math.max(8, top),
-          zIndex: 41,
+          left,
+          top,
+          zIndex: Z.dropdown,
           display: "flex",
           flexDirection: "column",
           gap: 6,
           padding: 10,
-          background: "var(--bg-surface, #0f0f13)",
-          border: "1px solid var(--border-subtle, #2a2a33)",
+          background: "var(--bg-surface)",
+          border: "1px solid var(--border-subtle)",
           borderRadius: 6,
           boxShadow: "var(--elevation-e2, 0 8px 24px rgba(0,0,0,0.4))",
         }}
       >
-        <div style={{ fontSize: "0.7rem", color: "var(--text-secondary, #9a9aa3)" }}>
+        <div style={{ fontSize: "0.7rem", color: "var(--text-secondary)" }}>
           Breakpoint · line {edit.line}
           {bp && isLogpoint(bp) ? " · logpoint" : ""}
         </div>
@@ -3308,9 +3372,9 @@ function BreakpointEditHost(): ReactElement | null {
               }}
               style={{
                 background: "transparent",
-                border: "1px solid var(--border-subtle, #2a2a33)",
+                border: "1px solid var(--border-subtle)",
                 borderRadius: 4,
-                color: "var(--danger, #ef5a5a)",
+                color: "var(--danger)",
                 cursor: "pointer",
                 fontSize: "0.7rem",
                 padding: "2px 8px",
@@ -3324,9 +3388,9 @@ function BreakpointEditHost(): ReactElement | null {
             onClick={close}
             style={{
               background: "transparent",
-              border: "1px solid var(--border-subtle, #2a2a33)",
+              border: "1px solid var(--border-subtle)",
               borderRadius: 4,
-              color: "var(--text-secondary, #9a9aa3)",
+              color: "var(--text-secondary)",
               cursor: "pointer",
               fontSize: "0.7rem",
               padding: "2px 8px",
@@ -3398,7 +3462,7 @@ export function EditorPane(): ReactElement {
             minWidth: 0,
             display: "flex",
             flexDirection: "column",
-            borderRight: "1px solid var(--border-subtle, #232329)",
+            borderRight: "1px solid var(--border-subtle)",
           }}
         >
           <TabBar group={g} />

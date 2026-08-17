@@ -7,6 +7,14 @@
  * section → the universal AgentTuning the loop consumes. PURE.
  */
 import type { AgentTuning } from "../agent/loop.js";
+import { APPLY_PATCH_TOOL } from "../agent/patch.js";
+import { QUESTION_TOOL } from "../agent/question.js";
+import { WEB_SEARCH_TOOL } from "../agent/search.js";
+import { SPAWN_AGENT_TOOL } from "../agent/subagent.js";
+import { SYSTEM_FS_WRITE_TOOLS } from "../agent/system/fs-mutate.js";
+import { SYSTEM_MEMORY_TOOLS } from "../agent/system/memory.js";
+import { SYSTEM_TOOLS } from "../agent/system/tools.js";
+import { TODO_TOOLS } from "../agent/todo.js";
 import type { ModelRef } from "../agents/types.js";
 import { type TomlTable, parseToml, stringifyToml } from "./toml.js";
 
@@ -31,6 +39,13 @@ export interface CliProfile {
     sessionUsd?: number;
     dailyUsd?: number;
     warnAtPercent?: number;
+    /**
+     * What a USD cap does when a model has NO price entry: `"block"` (the default) or
+     * `"warn"`. Thirteen of the eighteen cloud providers are unpriced, and an unpriced record
+     * used to count as $0 — so the cap silently did not apply to them. `"warn"` is the
+     * explicit opt-in to spend uncapped on those models.
+     */
+    unpricedPolicy?: "block" | "warn";
   };
 }
 
@@ -69,12 +84,18 @@ export function parseProfile(toml: string, name?: string): CliProfile | null {
   const sessionUsd = num(budgetT?.session_usd);
   const dailyUsd = num(budgetT?.daily_usd);
   const warnAtPercent = num(budgetT?.warn_at_percent);
+  // Only the literal "warn" stands the fail-closed default down: a typo must not disable a cap.
+  const unpricedPolicy = str(budgetT?.unpriced_policy) === "warn" ? ("warn" as const) : undefined;
   const budget =
-    sessionUsd !== undefined || dailyUsd !== undefined || warnAtPercent !== undefined
+    sessionUsd !== undefined ||
+    dailyUsd !== undefined ||
+    warnAtPercent !== undefined ||
+    unpricedPolicy !== undefined
       ? {
           ...(sessionUsd !== undefined ? { sessionUsd } : {}),
           ...(dailyUsd !== undefined ? { dailyUsd } : {}),
           ...(warnAtPercent !== undefined ? { warnAtPercent } : {}),
+          ...(unpricedPolicy !== undefined ? { unpricedPolicy } : {}),
         }
       : undefined;
   const profile: CliProfile = {
@@ -185,11 +206,197 @@ export function mergeFlags(profile: CliProfile, flags: ProfileFlagOverrides): Cl
 
 /**
  * Merge three profile layers with precedence project > user > builtin (CLI-046). SCALAR-REPLACE
- * per key — a defined project value REPLACES the user/builtin one wholesale (arrays like tool
- * allow/deny are never concatenated across layers, so a repo pinning tools doesn't inherit stray
- * user entries). Only `builtin` is required (it always carries agent.model). PURE.
+ * per key — a defined project value REPLACES the user/builtin one wholesale, so a repo pinning
+ * a model or a system prompt doesn't inherit stray user entries. Only `builtin` is required (it
+ * always carries agent.model). PURE.
+ *
+ * TWO DELIBERATE EXCEPTIONS, both about the project layer being untrusted (see
+ * `sanitizeProjectLayer`): `tools.deny` ACCUMULATES across layers and `tools.allow` INTERSECTS.
+ * Wholesale replacement was right for a preference and wrong for a safety decision — under it, a
+ * user who denied `run_command` had it re-armed by any repo whose config happened to deny
+ * something else.
+ */
+/** The gate postures, ordered by how much they protect. Higher = stricter. */
+const GATE_RANK: Readonly<Record<"off" | "warn" | "enforce", number>> = Object.freeze({
+  off: 0,
+  warn: 1,
+  enforce: 2,
+});
+
+/** One setting a project file asked for and did not get, and why. Shown to the user. */
+export interface ProjectLayerRejection {
+  key: string;
+  reason: string;
+}
+
+/**
+ * Strip anything from the project layer that would WEAKEN the user's safety posture.
+ *
+ * A `.prometheus.toml` is discovered by walking UPWARD from the working directory, so it
+ * arrives with the code: cloning a repository and running `prometheus` inside it is enough to
+ * apply it. It was the highest-priority layer for every key, which meant a checked-in file
+ * could set `gateMode = "off"` and silently disable the nemesis scan for anyone who visited
+ * that directory. That is a supply-chain shape, not a configuration preference.
+ *
+ * So the project layer is TIGHTEN-ONLY on the security keys. It may still do everything a
+ * project config is actually for — pin the model, set the system prompt, cap iterations, narrow
+ * the tool list, lower a budget — and it may make the posture *stricter* than the user's. It
+ * simply cannot make it looser.
+ *
+ * `base` is builtin ⊕ user: the posture the human running the command chose for themselves.
+ * PURE. Returns the filtered layer plus every rejection, because silently ignoring a setting
+ * someone wrote is its own kind of dishonesty — the host prints these.
+ */
+export function sanitizeProjectLayer(
+  project: CliProfile,
+  base: CliProfile,
+): { profile: CliProfile; rejected: ProjectLayerRejection[] } {
+  const rejected: ProjectLayerRejection[] = [];
+  const engine: CliProfile["engine"] = { ...project.engine };
+
+  // gateMode: may only be raised. off < warn < enforce.
+  const pg = project.engine.gateMode;
+  const bg = base.engine.gateMode ?? "enforce";
+  if (pg && GATE_RANK[pg] < GATE_RANK[bg]) {
+    rejected.push({
+      key: "engine.gateMode",
+      reason: `project asked for "${pg}", weaker than "${bg}" — a project file cannot turn the scanner down`,
+    });
+    engine.gateMode = undefined;
+  }
+
+  // yes: blanket auto-approval. A project may withdraw it, never grant it.
+  if (project.engine.yes === true && base.engine.yes !== true) {
+    rejected.push({
+      key: "engine.yes",
+      reason: "a project file cannot auto-approve every tool call on your behalf",
+    });
+    engine.yes = undefined;
+  }
+
+  // dryRun: `true` is the safe direction. A project cannot take a user's dry-run away.
+  if (project.engine.dryRun === false && base.engine.dryRun === true) {
+    rejected.push({
+      key: "engine.dryRun",
+      reason: "a project file cannot cancel your dry-run",
+    });
+    engine.dryRun = undefined;
+  }
+
+  // paths: repointing the engine or the interpreter is arbitrary code execution by config.
+  // There is no tightening direction here, so the project layer never gets this key at all.
+  if (project.engine.paths) {
+    rejected.push({
+      key: "engine.paths",
+      reason: "a project file cannot repoint the engine or interpreter binary",
+    });
+    engine.paths = undefined;
+  }
+
+  // tools: denies UNION across layers (a project may add, never remove); allow INTERSECTS with
+  // the user's list when they set one (a project may narrow, never widen).
+  let tools = project.agent.tools;
+  if (tools || base.agent.tools) {
+    const baseDeny = base.agent.tools?.deny ?? [];
+    const projDeny = tools?.deny ?? [];
+    const deny = [...new Set([...baseDeny, ...projDeny])];
+    const dropped = baseDeny.filter((t) => !projDeny.includes(t));
+    if (tools && dropped.length > 0) {
+      rejected.push({
+        key: "agent.tools.deny",
+        reason: `kept your denies as well (${dropped.join(", ")}) — a project file cannot re-arm a tool you disabled`,
+      });
+    }
+    const baseAllow = base.agent.tools?.allow ?? [];
+    let allow = tools?.allow ?? baseAllow;
+    if (tools?.allow && baseAllow.length > 0) {
+      const widened = tools.allow.filter((t) => !baseAllow.includes(t));
+      allow = tools.allow.filter((t) => baseAllow.includes(t));
+      if (widened.length > 0) {
+        rejected.push({
+          key: "agent.tools.allow",
+          reason: `ignored ${widened.join(", ")} — a project file cannot add tools outside your allow-list`,
+        });
+      }
+    }
+    const enabled = tools?.enabled ?? base.agent.tools?.enabled;
+    tools = {
+      ...(enabled !== undefined ? { enabled } : {}),
+      ...(allow.length > 0 ? { allow } : {}),
+      ...(deny.length > 0 ? { deny } : {}),
+    };
+  }
+
+  // budget: a cap may only come DOWN. An absent project cap does not lift the user's.
+  let budget = project.budget;
+  if (budget && base.budget) {
+    const lower = (a: number | undefined, b: number | undefined): number | undefined =>
+      a === undefined ? b : b === undefined ? a : Math.min(a, b);
+    budget = {
+      ...(lower(budget.sessionUsd, base.budget.sessionUsd) !== undefined
+        ? { sessionUsd: lower(budget.sessionUsd, base.budget.sessionUsd) as number }
+        : {}),
+      ...(lower(budget.dailyUsd, base.budget.dailyUsd) !== undefined
+        ? { dailyUsd: lower(budget.dailyUsd, base.budget.dailyUsd) as number }
+        : {}),
+      ...(lower(budget.warnAtPercent, base.budget.warnAtPercent) !== undefined
+        ? { warnAtPercent: lower(budget.warnAtPercent, base.budget.warnAtPercent) as number }
+        : {}),
+    };
+  }
+
+  return {
+    profile: {
+      ...project,
+      agent: { ...project.agent, ...(tools ? { tools } : {}) },
+      engine,
+      ...(budget ? { budget } : {}),
+    },
+    rejected,
+  };
+}
+
+/**
+ * The same resolution as `resolveEffectiveProfile`, plus what the project layer was refused.
+ *
+ * Split out so a host can TELL the user. A setting that is silently dropped teaches them the
+ * file works when it does not.
+ */
+export function resolveEffectiveProfileWithNotes(layers: {
+  builtin: CliProfile;
+  user?: CliProfile;
+  project?: CliProfile;
+}): { profile: CliProfile; rejected: ProjectLayerRejection[] } {
+  const { builtin, user, project } = layers;
+  if (!project)
+    return { profile: mergeLayers({ builtin, ...(user ? { user } : {}) }), rejected: [] };
+  // The posture the human chose for themselves, before the repo gets a say.
+  const base = mergeLayers({ builtin, ...(user ? { user } : {}) });
+  const { profile: safeProject, rejected } = sanitizeProjectLayer(project, base);
+  return {
+    profile: mergeLayers({ builtin, ...(user ? { user } : {}), project: safeProject }),
+    rejected,
+  };
+}
+
+/**
+ * Resolve the effective profile across the three layers.
+ *
+ * The project layer is SANITIZED first — see `sanitizeProjectLayer`. That happens in here, not
+ * in the caller, precisely so a host that forgets cannot reintroduce the hole: there is exactly
+ * one way to combine these layers and it is this one. Use `resolveEffectiveProfileWithNotes`
+ * when you want to tell the user what the project file was refused.
  */
 export function resolveEffectiveProfile(layers: {
+  builtin: CliProfile;
+  user?: CliProfile;
+  project?: CliProfile;
+}): CliProfile {
+  return resolveEffectiveProfileWithNotes(layers).profile;
+}
+
+/** The raw first-defined-wins merge. PRIVATE: it has no idea what a security key is. */
+function mergeLayers(layers: {
   builtin: CliProfile;
   user?: CliProfile;
   project?: CliProfile;
@@ -246,6 +453,28 @@ export function resolveTuning(profile: CliProfile): AgentTuning {
       enabled: profile.agent.tools?.enabled ?? true,
       allow: profile.agent.tools?.allow ?? [],
       deny: profile.agent.tools?.deny ?? [],
+      // full_wrapper_compose Phases 1-2: the read-only view of the machine (files, git,
+      // hardware) plus `run_command`. HOST-local, hence `extra` rather than the shared
+      // catalog — the CLI dispatches them in `session/system-tools.ts` and their
+      // `toArgv` throws.
+      //
+      // Without these the agent cannot read a file or run `git diff`, which is how `/diff`
+      // came to end with the model asking the human to paste the diff. `allow`/`deny` apply
+      // to them exactly as they do to any other tool.
+      // Tier R + run_command, PLUS the Tier-W file mutators (delete/move/mkdir). Without
+      // those three the agent could read, search, write and edit a file but not remove or
+      // rename one — an ordinary refactor forced it into `run_command`, a shell-shaped
+      // detour at a higher permission tier for a structured operation.
+      extra: [
+        ...SYSTEM_TOOLS,
+        ...SYSTEM_FS_WRITE_TOOLS,
+        ...SYSTEM_MEMORY_TOOLS,
+        ...TODO_TOOLS,
+        APPLY_PATCH_TOOL,
+        WEB_SEARCH_TOOL,
+        SPAWN_AGENT_TOOL,
+        QUESTION_TOOL,
+      ],
     },
     gateMode: profile.engine.gateMode ?? "enforce",
     dryRun: profile.engine.dryRun ?? false,

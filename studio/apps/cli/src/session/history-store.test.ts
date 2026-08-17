@@ -2,7 +2,7 @@
  * history-store.test.ts — the /recall session-history descriptor + record/list/format.
  */
 import assert from "node:assert/strict";
-import { appendFileSync, mkdtempSync, rmSync } from "node:fs";
+import { appendFileSync, chmodSync, mkdtempSync, rmSync, utimesSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -20,6 +20,7 @@ import {
   listSessions,
   loadTurns,
   readAccounting,
+  readAccountingSince,
   recordSession,
   resolveSessionId,
   rotateSessions,
@@ -136,6 +137,8 @@ test("loadTurns skips a corrupt/truncated line, keeps the rest (CLI-012)", () =>
 test("rotateSessions deletes oldest, never the live file nor index (CLI-012)", () => {
   const removed: string[] = [];
   // 3 files @ 40 bytes each = 120 > cap 100; live=c, so oldest (a) is pruned first.
+  // `now` is pinned near the fixture mtimes so the AGE policy is not what fires here — this
+  // test is about the byte cap, and the age rule gets its own test below.
   const files: Record<string, { size: number; mtimeMs: number }> = {
     "a.jsonl": { size: 40, mtimeMs: 1 },
     "b.jsonl": { size: 40, mtimeMs: 2 },
@@ -145,11 +148,96 @@ test("rotateSessions deletes oldest, never the live file nor index (CLI-012)", (
   rotateSessions("/home", {
     maxBytes: 100,
     liveId: "c",
+    now: 100,
     listDir: () => Object.keys(files),
     statFn: (p) => files[p.split("/").pop() as string] as { size: number; mtimeMs: number },
     rmFn: (p) => removed.push(p.split("/").pop() as string),
+    writeFn: () => {},
   });
   assert.deepEqual(removed, ["a.jsonl"]); // oldest non-live pruned; b/c/index kept
+});
+
+test("retention covers ACCOUNTING too — it used to be exempt and therefore unbounded", () => {
+  // `*.acct.jsonl` was filtered out of the candidate list entirely, so accounting grew forever.
+  // Worst in CI: every `prometheus -p` mints a fresh session id, writes an accounting file,
+  // records no index entry — so `sessions delete` can never reach it — and leaked one per run.
+  const removed: string[] = [];
+  const now = Date.now();
+  const old = now - 40 * 24 * 60 * 60 * 1000; // well before today, so nothing is cap evidence
+  const files: Record<string, { size: number; mtimeMs: number }> = {
+    "oldrun.jsonl": { size: 10, mtimeMs: old },
+    "oldrun.acct.jsonl": { size: 90, mtimeMs: old },
+    "live.jsonl": { size: 10, mtimeMs: now },
+    "index.jsonl": { size: 999, mtimeMs: 0 },
+  };
+  rotateSessions("/home", {
+    maxBytes: 50,
+    liveId: "live",
+    now,
+    listDir: () => Object.keys(files),
+    statFn: (p) => files[p.split("/").pop() as string] as { size: number; mtimeMs: number },
+    rmFn: (p) => removed.push(p.split("/").pop() as string),
+    writeFn: () => {},
+  });
+  assert.deepEqual(removed.sort(), ["oldrun.acct.jsonl", "oldrun.jsonl"]);
+});
+
+test("TODAY's accounting is never pruned — it is the daily spend cap's evidence", () => {
+  // `checkBudgetGate` measures the daily cap by reading these files. Pruning one silently
+  // re-opens the cap, which is the one failure mode a spend limit may not have.
+  const removed: string[] = [];
+  const now = Date.now();
+  const files: Record<string, { size: number; mtimeMs: number }> = {
+    "today.acct.jsonl": { size: 10_000, mtimeMs: now },
+    "index.jsonl": { size: 1, mtimeMs: 0 },
+  };
+  rotateSessions("/home", {
+    maxBytes: 1,
+    liveId: "other",
+    now,
+    listDir: () => Object.keys(files),
+    statFn: (p) => files[p.split("/").pop() as string] as { size: number; mtimeMs: number },
+    rmFn: (p) => removed.push(p.split("/").pop() as string),
+    writeFn: () => {},
+  });
+  assert.deepEqual(removed, [], "today's accounting was pruned — the daily cap is now bypassable");
+});
+
+test("an OLD session is pruned even when the store is well under the byte cap", () => {
+  const removed: string[] = [];
+  const now = Date.now();
+  const ancient = now - 400 * 24 * 60 * 60 * 1000;
+  const files: Record<string, { size: number; mtimeMs: number }> = {
+    "ancient.jsonl": { size: 1, mtimeMs: ancient },
+    "recent.jsonl": { size: 1, mtimeMs: now },
+    "index.jsonl": { size: 1, mtimeMs: 0 },
+  };
+  rotateSessions("/home", {
+    maxBytes: 10_000_000,
+    liveId: "recent",
+    now,
+    listDir: () => Object.keys(files),
+    statFn: (p) => files[p.split("/").pop() as string] as { size: number; mtimeMs: number },
+    rmFn: (p) => removed.push(p.split("/").pop() as string),
+    writeFn: () => {},
+  });
+  assert.deepEqual(removed, ["ancient.jsonl"]);
+});
+
+test("index.jsonl is pruned in the same pass, so /recall stops offering dead sessions", () => {
+  // The index was pruned only by an explicit delete, so it grew a line per launch and `/recall`
+  // listed sessions whose transcripts rotation had already removed.
+  const home = mkdtempSync(join(tmpdir(), "prom-idx-"));
+  recordSession(home, { id: "gone", ts: "2020-01-01T00:00:00Z", descriptor: "old", cwd: "/w" });
+  recordSession(home, { id: "live", ts: "2026-01-01T00:00:00Z", descriptor: "new", cwd: "/w" });
+  appendTurnEvents(home, "gone", [{ role: "user", text: "x" }]);
+  appendTurnEvents(home, "live", [{ role: "user", text: "y" }]);
+  rotateSessions(home, { maxBytes: 0, liveId: "live", now: Date.now() });
+  assert.deepEqual(
+    listSessions(home).map((r) => r.id),
+    ["live"],
+    "a session whose transcript was pruned is still offered by /recall",
+  );
 });
 
 test("appendTurnEvents on a read-only home degrades silently (CLI-012)", () => {
@@ -393,6 +481,132 @@ test("buildSessionExport CLI-082: loadTurns → export round-trip from a persist
     assert.equal(doc.turns[0]?.text, "hi");
     assert.equal(doc.turns[1]?.text, "hello");
     assert.match(doc.turns[0]?.at ?? "", /Z$/); // appendTurnEvents stamped a real ISO ts
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+/* ── accounting: absent vs unreadable, and the whole day ───────────────────*/
+
+/**
+ * Two defects, both found by an adversarial pass:
+ *
+ *  - `readAccounting` swallowed EVERY read error and returned `[]`, so an unreadable store read
+ *    as "$0 spent". `checkBudgetGate` documents itself as failing CLOSED on exactly that — so the
+ *    guarantee was inverted into a one-command cap bypass (`rm` the file).
+ *  - `daily_usd` was evaluated from the CURRENT session's file only, and a fresh sessionId is
+ *    minted every launch — so the "daily" window reset to $0 on restart.
+ */
+
+const acctRec = (over: Partial<AccountingRecord> = {}): AccountingRecord => ({
+  model: "m",
+  endpointId: "e",
+  promptTokens: 10,
+  completionTokens: 20,
+  estimated: false,
+  atIso: new Date().toISOString(),
+  ...over,
+});
+
+test("a store that was never written reads as empty — the normal first run", () => {
+  const home = mkdtempSync(join(tmpdir(), "prom-acct-"));
+  assert.deepEqual(readAccounting(home, "never-ran"), []);
+});
+
+test("an UNREADABLE store THROWS rather than reading as $0 spent", () => {
+  // This is the whole fail-closed guarantee. Returning [] here is a cap bypass.
+  const home = mkdtempSync(join(tmpdir(), "prom-acct-"));
+  appendAccounting(home, "s1", acctRec());
+  const file = join(home, "sessions", "s1.acct.jsonl");
+  chmodSync(file, 0o000);
+  try {
+    assert.throws(() => readAccounting(home, "s1"));
+  } finally {
+    chmodSync(file, 0o600); // so the tmpdir can be cleaned
+  }
+});
+
+test("the day window spans EVERY session, not just the current one", () => {
+  // A fresh sessionId per launch is why `daily_usd` reset on restart.
+  const home = mkdtempSync(join(tmpdir(), "prom-acct-"));
+  appendAccounting(home, "yesterdaysession", acctRec({ model: "a" }));
+  appendAccounting(home, "todaysession", acctRec({ model: "b" }));
+  const all = readAccountingSince(home, 0);
+  assert.deepEqual(all.map((r) => r.model).sort(), ["a", "b"]);
+});
+
+test("a session file older than the window is not even opened", () => {
+  // The cost bound: a file whose last write predates local midnight cannot hold today's records.
+  const home = mkdtempSync(join(tmpdir(), "prom-acct-"));
+  appendAccounting(home, "old", acctRec());
+  const file = join(home, "sessions", "old.acct.jsonl");
+  const past = new Date(Date.now() - 86_400_000);
+  utimesSync(file, past, past);
+  assert.deepEqual(readAccountingSince(home, Date.now() - 3600_000), []);
+});
+
+test("one unreadable session does not make the whole day unreadable", () => {
+  // Fail-soft ACROSS sessions, fail-closed WITHIN the current one — the two callers want
+  // different things and get them.
+  const home = mkdtempSync(join(tmpdir(), "prom-acct-"));
+  appendAccounting(home, "good", acctRec({ model: "good" }));
+  appendAccounting(home, "bad", acctRec({ model: "bad" }));
+  const badFile = join(home, "sessions", "bad.acct.jsonl");
+  chmodSync(badFile, 0o000);
+  try {
+    assert.deepEqual(
+      readAccountingSince(home, 0).map((r) => r.model),
+      ["good"],
+    );
+  } finally {
+    chmodSync(badFile, 0o600);
+  }
+});
+
+test("no sessions directory at all is empty, never a throw", () => {
+  assert.deepEqual(readAccountingSince(mkdtempSync(join(tmpdir(), "prom-acct-")), 0), []);
+});
+
+test("today's accounting survives while its transcript is pruned — evidence, not bulk", () => {
+  // The protection is on the FILE, not the session: the transcript is the bulk and may go, but
+  // the accounting is what `checkBudgetGate` reads for the daily cap.
+  const removed: string[] = [];
+  const now = Date.now();
+  const files: Record<string, { size: number; mtimeMs: number }> = {
+    "run.jsonl": { size: 10_000, mtimeMs: now },
+    "run.acct.jsonl": { size: 10, mtimeMs: now },
+    "index.jsonl": { size: 1, mtimeMs: 0 },
+  };
+  rotateSessions("/home", {
+    maxBytes: 1,
+    liveId: "other",
+    now,
+    listDir: () => Object.keys(files),
+    statFn: (p) => files[p.split("/").pop() as string] as { size: number; mtimeMs: number },
+    rmFn: (p) => removed.push(p.split("/").pop() as string),
+    writeFn: () => {},
+  });
+  assert.deepEqual(removed, ["run.jsonl"]);
+});
+
+test("deleteSession removes the ACCOUNTING file too — it used to survive an explicit delete", () => {
+  // It kept ranking in `latestAccountingSession`, so `prometheus tokens report` could still
+  // report a session the user had deleted.
+  const home = mkdtempSync(join(tmpdir(), "prom-del-"));
+  try {
+    recordSession(home, { id: "doomed", ts: "2026-01-01T00:00:00Z", descriptor: "d", cwd: "/w" });
+    appendTurnEvents(home, "doomed", [{ role: "user", text: "x" }]);
+    appendAccounting(home, "doomed", {
+      atIso: "2026-01-01T00:00:00Z",
+      model: "m",
+      promptTokens: 1,
+      completionTokens: 1,
+      estimated: false,
+    } as AccountingRecord);
+    assert.equal(readAccounting(home, "doomed").length, 1, "fixture did not write accounting");
+    deleteSession(home, "doomed");
+    assert.deepEqual(readAccounting(home, "doomed"), [], "the accounting outlived the delete");
+    assert.deepEqual(loadTurns(home, "doomed"), []);
   } finally {
     rmSync(home, { recursive: true, force: true });
   }

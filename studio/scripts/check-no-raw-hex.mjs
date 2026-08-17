@@ -56,12 +56,16 @@ function collect(dir, acc) {
  * STRICT scope (APP-070): the SWEPT IDE-chrome files must be token-PURE — a
  * `var(--x, #hex)` FALLBACK is a VIOLATION here (a phantom/typo'd token then paints only via
  * its hex fallback and never re-themes — the root cause of the "app couldn't re-theme" bugs).
- * rgb()/color-mix() with a hex arg stays legal (translucent tints). The rest of the tree keeps
- * the var()-fallback allowance — the repo-wide fallback count is far from zero, so we tighten
- * exactly the files whose fallbacks have been removed, and grow this set as more are swept.
+ * rgb()/color-mix() with a hex arg stays legal (translucent tints).
+ *
+ * HANDOFF_2 §9 ("extend STRICT_FALLBACK repo-wide, not 3 files"): this now covers EVERY
+ * scanned root. The staged allowance existed only because ~139 stale fallbacks were still
+ * in the tree; they have all been stripped, so the ratchet is closed. A `var(--x, #hex)`
+ * anywhere in app code is now a build failure — which is the point: those fallbacks were
+ * silently painting the OLD grey palette on any token typo, and a typo'd token that still
+ * renders something plausible is the hardest kind of theming bug to see.
  */
-const STRICT_FALLBACK =
-  /(^|\/)apps\/desktop\/src\/renderer\/ide\/(FileTree|GitPanel)\.tsx$|(^|\/)apps\/desktop\/src\/routes\/editor\.tsx$/;
+const STRICT_FALLBACK = /.*/;
 
 /** Is this hex match an allowed one (var() fallback / color-fn / marked line)? In a `strict`
  *  file a `var()` fallback is NOT allowed (but rgb()/color-mix() still are). */
@@ -151,7 +155,10 @@ if (violations.length > 0) {
   console.error(`✗ no-raw-hex: ${violations.length} bare color literal(s) outside tokens/ (§6):`);
   for (const v of violations) console.error(`  ${v}`);
   console.error(
-    "\nUse a semantic token: var(--<token>) (or a var(--x, #hex) fallback). Source: packages/ui/src/tokens.",
+    "\nUse a BARE semantic token: var(--<token>). A `var(--x, #hex)` fallback is NOT" +
+      " accepted (HANDOFF_2 §9) — it silently paints a stale palette when the token name is" +
+      " wrong. rgb()/rgba()/hsl()/color-mix() hex ARGS are still fine (translucent tints)." +
+      " Token source: packages/ui/src/tokens.ts.",
   );
   process.exit(1);
 }

@@ -196,7 +196,7 @@ export function TodoView({ root }: { root: string }): ReactElement {
       aria-label="todo"
     >
       <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 6 }}>
-        <span style={{ color: "var(--text-secondary, #9a9aa3)" }}>
+        <span style={{ color: "var(--text-secondary)" }}>
           {visible.length} marker{visible.length === 1 ? "" : "s"}
         </span>
         <Button size="sm" variant="ghost" onClick={() => void scan()} disabled={busy}>
@@ -211,16 +211,16 @@ export function TodoView({ root }: { root: string }): ReactElement {
           {editorOpen ? "▾ patterns" : "▸ patterns"}
         </Button>
         <label style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 4 }}>
-          <span style={{ color: "var(--text-secondary, #9a9aa3)", fontSize: "0.7rem" }}>scope</span>
+          <span style={{ color: "var(--text-secondary)", fontSize: "0.7rem" }}>scope</span>
           <select
             aria-label="todo scope"
             value={scopeKind}
             onChange={(e) => setScopeKind(e.target.value as ScopeKind)}
             style={{
               fontSize: "0.7rem",
-              background: "var(--surface-2, #26262c)",
+              background: "var(--surface-2)",
               color: "inherit",
-              border: "1px solid var(--border, #3a3a42)",
+              border: "1px solid var(--border)",
               borderRadius: 4,
             }}
           >
@@ -260,9 +260,9 @@ export function TodoView({ root }: { root: string }): ReactElement {
                   padding: "1px 7px",
                   borderRadius: 10,
                   cursor: "pointer",
-                  border: "1px solid var(--border, #3a3a42)",
-                  background: on ? "var(--surface-3, #32323a)" : "transparent",
-                  color: on ? "inherit" : "var(--text-secondary, #9a9aa3)",
+                  border: "1px solid var(--border)",
+                  background: on ? "var(--surface-3)" : "transparent",
+                  color: on ? "inherit" : "var(--text-secondary)",
                   opacity: on ? 1 : 0.55,
                 }}
               >
@@ -274,7 +274,7 @@ export function TodoView({ root }: { root: string }): ReactElement {
       )}
 
       {scanned && !busy && visible.length === 0 && (
-        <p style={{ color: "var(--text-secondary, #9a9aa3)", fontSize: "0.72rem" }}>
+        <p style={{ color: "var(--text-secondary)", fontSize: "0.72rem" }}>
           No markers found in this scope.
         </p>
       )}
@@ -295,8 +295,8 @@ export function TodoView({ root }: { root: string }): ReactElement {
                   style={{
                     color:
                       it.marker === "FIXME" || it.marker === "XXX"
-                        ? "var(--danger, #ef5a5a)"
-                        : "var(--warn, #e0a63a)",
+                        ? "var(--danger)"
+                        : "var(--warn)",
                     fontWeight: 600,
                     fontSize: "0.68rem",
                   }}
@@ -360,9 +360,9 @@ function PatternEditor({
 
   const fieldStyle = {
     fontSize: "0.7rem",
-    background: "var(--surface-2, #26262c)",
+    background: "var(--surface-2)",
     color: "inherit",
-    border: "1px solid var(--border, #3a3a42)",
+    border: "1px solid var(--border)",
     borderRadius: 4,
     padding: "1px 4px",
   } as const;
@@ -370,15 +370,15 @@ function PatternEditor({
   return (
     <div
       style={{
-        border: "1px solid var(--border, #3a3a42)",
+        border: "1px solid var(--border)",
         borderRadius: 6,
         padding: 8,
         marginBottom: 8,
-        background: "var(--surface-1, #1e1e24)",
+        background: "var(--surface-1)",
       }}
     >
       {!editable && (
-        <p style={{ color: "var(--warn, #e0a63a)", fontSize: "0.68rem", margin: "0 0 6px" }}>
+        <p style={{ color: "var(--warn)", fontSize: "0.68rem", margin: "0 0 6px" }}>
           Settings unavailable — showing the builtin markers (read-only).
         </p>
       )}
@@ -420,7 +420,7 @@ function PatternEditor({
             style={{
               background: "transparent",
               border: "none",
-              color: "var(--text-secondary, #9a9aa3)",
+              color: "var(--text-secondary)",
               cursor: editable ? "pointer" : "default",
             }}
           >
@@ -439,7 +439,7 @@ function PatternEditor({
             listStyle: "none",
             margin: "6px 0 0",
             padding: 0,
-            color: "var(--danger, #ef5a5a)",
+            color: "var(--danger)",
             fontSize: "0.66rem",
           }}
         >

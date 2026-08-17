@@ -24,18 +24,12 @@ import { existsSync, mkdirSync, readFileSync, statfsSync, writeFileSync } from "
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 
-/** Expand a leading `~`/`~/` to $HOME (path.resolve does NOT do this). */
-function expandTilde(p: string): string {
-  if (p === "~") return homedir();
-  if (p.startsWith("~/")) return join(homedir(), p.slice(2));
-  return p;
-}
+// The resolver moved to core (Phase 6): the exec audit is written by the CLI *and* by
+// Studio's main process, so both must agree on where the home root is. Re-exported here
+// because every CLI call site already imports it from this module.
+import { prometheusHome } from "@prometheus/core/agent-system-host";
 
-/** The canonical Prometheus home root: $PROMETHEUS_HOME, else `~/.prometheus`. */
-export function prometheusHome(env: NodeJS.ProcessEnv = process.env): string {
-  const override = env.PROMETHEUS_HOME?.trim();
-  return override ? resolve(expandTilde(override)) : join(homedir(), ".prometheus");
-}
+export { prometheusHome };
 
 /** The full subdir tree created under the home root (idempotent ensure). */
 export const HOME_TREE: readonly string[] = [

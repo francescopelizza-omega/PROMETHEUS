@@ -18,121 +18,43 @@
  * shape only, no code copied. Renderer-SANDBOXED (C5).
  */
 
+import { AGENT_TOOL_DISCIPLINE } from "@prometheus/core/agent-loop";
+import type { EffortResolution } from "@prometheus/core/ai-effort";
+import type {
+  AgentEngineToolRequest,
+  AgentGrant,
+  AgentGrantsResult,
+  AgentHookRunRequest,
+  AgentHookRunResult,
+  AgentSystemToolRequest,
+  AgentSystemToolResult,
+  IdeAgentFilesListResult,
+  McpAgentCallRequest,
+  McpAgentToolsResult,
+} from "../../../shared/ipc-contract.js";
 import type { ReviewChangeSet, ReviewFile, ReviewHunk } from "../state/diff-review-state.js";
 import { reviewFileFromTexts } from "../state/diff-review-state.js";
+
 import type { AiMsg, ChatTurnResult, RendererEndpoint, ToolCall } from "./ai-client.js";
-import { runChatTurn } from "./ai-client.js";
+import { runChatTurn, splitTiming } from "./ai-client.js";
+
+// re-exported: run-controller builds a message list for the loop and should take its shape
+// from the module that defines the loop's inputs, not reach past it into the transport.
+export type { AiMsg } from "./ai-client.js";
 
 /** The agent's system prompt (read-before-act; edits are reviewed; commands need approval). */
-export const AGENT_SYSTEM =
-  "You are a coding agent inside Prometheus Studio. You can call tools to read files, " +
-  "list directories, propose file edits (propose_edit — the user reviews the diff and " +
-  "applies it; the tool itself never writes to disk), and PROPOSE shell commands (the " +
-  "user must approve each command before it runs). Prefer reading the relevant files " +
-  "before acting. When you have enough information, answer the user directly without " +
-  "calling a tool.";
-
+/**
+ * §9 ("GUI chat = CLI agent"): the tool-discipline half is now the SHARED constant from
+ * `@prometheus/core/agent-loop`, so the GUI stops maintaining a weaker paraphrase of the
+ * rules the CLI learned the hard way — in particular "printing does nothing on disk",
+ * which the previous GUI prompt never said.
+ *
+ * The surrounding sentences describe THIS surface's actual tools and are deliberately
+ * narrower than the CLI's: the desktop has no `write_file` and no prometheus verbs (the
+ * preload exposes fixed verbs only — there is no generic engine channel yet), so promising
+ * them would have the model narrate actions it cannot take.
+ */
 /** The OpenAI function-tool schemas the model is offered. */
-export const AGENT_TOOLS: readonly unknown[] = [
-  {
-    type: "function",
-    function: {
-      name: "read_file",
-      description: "Read a UTF-8 text file in the workspace and return its contents.",
-      parameters: {
-        type: "object",
-        properties: {
-          path: { type: "string", description: "workspace-relative or absolute path" },
-        },
-        required: ["path"],
-      },
-    },
-  },
-  {
-    type: "function",
-    function: {
-      name: "list_dir",
-      description: "List the entries (files + folders) of a directory in the workspace.",
-      parameters: {
-        type: "object",
-        properties: { path: { type: "string", description: "directory path" } },
-        required: ["path"],
-      },
-    },
-  },
-  {
-    type: "function",
-    function: {
-      name: "grep",
-      description:
-        "Search the workspace for files whose CONTENT contains a substring; returns " +
-        "matching file:line locations. Use to find where something is defined or used.",
-      parameters: {
-        type: "object",
-        properties: { query: { type: "string", description: "the substring to search for" } },
-        required: ["query"],
-      },
-    },
-  },
-  {
-    type: "function",
-    function: {
-      name: "propose_edit",
-      description:
-        "Propose edits to ONE file as a reviewable diff. NOTHING is written to disk — " +
-        "the user reviews and applies hunks in the Diff Review panel, so keep working " +
-        "after calling this. Each edit replaces oldText (an EXACT, UNIQUE substring of " +
-        "the current file — include surrounding lines to make it unique) with newText. " +
-        "To create a new file, send exactly one edit with an empty oldText and the full " +
-        "file content as newText.",
-      parameters: {
-        type: "object",
-        properties: {
-          path: {
-            type: "string",
-            description: "workspace-relative file path (never absolute)",
-          },
-          edits: {
-            type: "array",
-            description: "the edits to apply to this file (length 1 for a single edit)",
-            items: {
-              type: "object",
-              properties: {
-                oldText: {
-                  type: "string",
-                  description:
-                    "exact unique span of the current file ('' only when creating a new file)",
-                },
-                newText: { type: "string", description: "the replacement text" },
-              },
-              required: ["oldText", "newText"],
-            },
-          },
-          description: {
-            type: "string",
-            description: "one-line rationale shown to the reviewer",
-          },
-        },
-        required: ["path", "edits"],
-      },
-    },
-  },
-  {
-    type: "function",
-    function: {
-      name: "run_command",
-      description:
-        "Propose a shell command to run in the workspace root. It does NOT run until " +
-        "the user approves it. Use for tests, builds, linters, git status, etc.",
-      parameters: {
-        type: "object",
-        properties: { command: { type: "string", description: "the shell command line" } },
-        required: ["command"],
-      },
-    },
-  },
-];
-
 /** The side-effecting tool implementations the loop drives (injected by AgentPane). */
 export interface AgentTools {
   /** read a file → its contents (already capped/normalized by the caller). */
@@ -144,7 +66,14 @@ export interface AgentTools {
   /** stage a validated edit into the §7.4 review ChangeSet (NEVER writes disk) → note. */
   proposeEdit(edit: ProposedEdit): Promise<string>;
   /** create a pending, confirm-gated task card for `command`; return a short note. */
-  proposeCommand(command: string): string;
+  proposeCommand(command: string, tool?: string, args?: Record<string, unknown>): string;
+  /**
+   * Mint a QUESTION card and register it, so the controller can suspend the turn on it.
+   *
+   * Optional: a host without a question surface simply has no `question` tool, and the model
+   * is told so rather than left waiting for an answer nobody can give.
+   */
+  askQuestion?(prompt: string): void;
 }
 
 /* ── propose_edit — validation + hunk math (pure; the fail-closed §7.4 seam) ─────────
@@ -190,6 +119,69 @@ export function normalizeWorkspaceRelPath(p: string): string | null {
 }
 
 /** Validate raw propose_edit tool args → a ProposedEdit, or a model-actionable error. */
+/**
+ * Parse `apply_patch`'s `edits: [{path, hunks:[{old,new}]}]` into per-file proposed edits.
+ *
+ * The CLI applies a multi-file patch itself, two-phase, because it writes to disk directly and
+ * has to guarantee that a half-applied tree is impossible. The desktop does not need that
+ * machinery and should not copy it: every edit here lands in the SAME review ChangeSet, and the
+ * user's single Apply in DiffReview is already the atomic step. Reusing the review queue also
+ * means a multi-file patch is approved the way every other edit is, rather than through a second
+ * surface the user has to learn.
+ *
+ * Note the field names differ from `propose_edit` — core's `EditHunk` is `{old, new}` while the
+ * renderer's span is `{oldText, newText}`. They are the same idea and the mapping is one-for-one;
+ * accepting both spellings here would be inviting a model to guess.
+ */
+export function parseApplyPatchArgs(
+  args: Record<string, unknown>,
+): { ok: true; edits: ProposedEdit[] } | { ok: false; error: string } {
+  const raw = args.edits;
+  const list = Array.isArray(raw)
+    ? raw
+    : typeof raw === "string"
+      ? (() => {
+          // Models send a JSON string for an array constantly; losing the whole patch over that
+          // is a far worse outcome than a lenient parse (the same tolerance parseHunks has).
+          try {
+            const p: unknown = JSON.parse(raw);
+            return Array.isArray(p) ? p : [];
+          } catch {
+            return [];
+          }
+        })()
+      : [];
+  if (list.length === 0) {
+    return { ok: false, error: "edits must be a non-empty array of {path, hunks:[{old,new}]}" };
+  }
+  const out: ProposedEdit[] = [];
+  for (const entry of list) {
+    const e = entry as Record<string, unknown> | null;
+    if (!e || typeof e !== "object") return { ok: false, error: "each entry must be an object" };
+    const rawPath = typeof e.path === "string" ? e.path.trim() : "";
+    if (!rawPath) return { ok: false, error: "each entry needs a path" };
+    const rel = normalizeWorkspaceRelPath(rawPath);
+    if (rel === null) {
+      return {
+        ok: false,
+        error: `path must be workspace-relative and stay inside the workspace (got "${rawPath}")`,
+      };
+    }
+    const hunks = Array.isArray(e.hunks) ? e.hunks : [];
+    if (hunks.length === 0) return { ok: false, error: `no hunks for ${rawPath}` };
+    const spans: ProposedEditSpan[] = [];
+    for (const h of hunks) {
+      const o = h as Record<string, unknown> | null;
+      if (!o || typeof o !== "object" || typeof o.old !== "string" || typeof o.new !== "string") {
+        return { ok: false, error: "each hunk needs a string `old` and a string `new`" };
+      }
+      spans.push({ oldText: o.old, newText: o.new });
+    }
+    out.push({ path: rel, spans });
+  }
+  return { ok: true, edits: out };
+}
+
 export function parseProposeEditArgs(
   args: Record<string, unknown>,
 ): { ok: true; edit: ProposedEdit } | { ok: false; error: string } {
@@ -399,8 +391,62 @@ export function createProposeEditTool(
 }
 
 /** Streaming + transcript callbacks the loop emits into. */
+/** The result of running (or denying) one human-approved command. */
+export interface CommandResult {
+  command: string;
+  stdout?: string;
+  stderr?: string;
+  exit?: number;
+  /** the user denied the command → core re-plans instead of the loop hanging. */
+  denied?: boolean;
+  /** a question card's typed answer. Absent/empty is a real answer ("nothing"), not an error. */
+  answer?: string;
+  /** the user chose "always allow" — the scope to remember this approval at. */
+  remember?: "project" | "user";
+  /**
+   * The UNMAPPED result main returned, carried through so the tool runner can replay it
+   * faithfully instead of reconstructing it from stdout/stderr/exit.
+   *
+   * The `verdict` is why this exists and it is load-bearing: core's loop ABORTS the turn on a
+   * `block` (`agent/loop.ts:372`). Flattening a tool result into text loses it, so a blocked
+   * command would come back looking like an ordinary failure and the turn would continue.
+   */
+  raw?: AgentSystemToolResult;
+}
+
 export interface AgentLoopDeps {
   endpoint: RendererEndpoint;
+  /**
+   * Phase 6: the bridge to core's shared system tools in main, and the workspace root they
+   * run against. The pane passes `window.prometheus.ide`; a test passes a fake. Optional so
+   * a headless/harness context degrades to "unavailable" rather than throwing.
+   */
+  /**
+   * The MCP surface: the tool descriptors the pane turns into defs, and the one call channel.
+   *
+   * Separate from `ide` because it is a separate main-side module with its own manager and its
+   * own lifecycle — folding it in would make the pane's one optional seam mean two things.
+   */
+  mcp?: {
+    agentTools(): Promise<McpAgentToolsResult>;
+    agentCall(req: McpAgentCallRequest): Promise<AgentSystemToolResult>;
+  };
+  ide?: {
+    systemTool(req: AgentSystemToolRequest): Promise<AgentSystemToolResult>;
+    /** run one `prometheus_*` verb through the engine (no cwd — the verbs are machine-global). */
+    engineTool(req: AgentEngineToolRequest): Promise<AgentSystemToolResult>;
+    /** the persisted "don't ask again" grants, shared on disk with the CLI. */
+    grantsList?(): Promise<AgentGrantsResult>;
+    grantsAdd?(grant: AgentGrant): Promise<AgentGrantsResult>;
+    /** Task #5 (desktop parity): sub-agent personas from markdown for `spawn_agent`, via the
+     *  SAME `@prometheus/core/agent-files` clamping the CLI applies. Optional so a headless
+     *  harness degrades to "no personas" rather than throwing. */
+    agentFilesList?(root: string): Promise<IdeAgentFilesListResult>;
+    /** list/run the user's lifecycle hooks — MAIN spawns; the renderer only proxies.
+     *  Optional so a harness (or an older preload) degrades to "no hooks", never a throw. */
+    hookRun?(req: AgentHookRunRequest): Promise<AgentHookRunResult>;
+  };
+  root?: string;
   neverSendToCloud: boolean;
   signal: AbortSignal;
   tools: AgentTools;
@@ -412,196 +458,30 @@ export interface AgentLoopDeps {
   onToolNote(note: string): void;
   /** APP-055: a turn reported token usage (fed to the session spend meter). */
   onUsage?(usage: { inputTokens: number; outputTokens: number; totalTokens: number }): void;
+  /**
+   * handoff §3: the run's measured phase totals, emitted once when the loop settles.
+   * `wrapper` is the residual — total wall time minus what model/load/tools accounted
+   * for — so the four legs always sum to the real elapsed time and the bar cannot lie.
+   */
+  onPhases?(p: { model: number; load: number; tools: number; wrapper: number }): void;
   /** max model round-trips before the loop stops (default 6). */
   maxIters?: number;
-  /** injectable turn-runner (defaults to runChatTurn) — lets tests script turns. */
-  runTurn?: (
-    endpoint: RendererEndpoint,
-    messages: AiMsg[],
-    opts: {
-      tools?: unknown[];
-      neverSendToCloud?: boolean;
-      signal?: AbortSignal;
-      onText?: (d: string) => void;
-    },
-  ) => Promise<ChatTurnResult>;
-}
-
-/** Defensively parse a tool call's JSON-string arguments → an object. */
-export function parseToolArgs(tc: ToolCall): Record<string, unknown> {
-  try {
-    const o = JSON.parse(tc.arguments || "{}");
-    return o && typeof o === "object" && !Array.isArray(o) ? (o as Record<string, unknown>) : {};
-  } catch {
-    return {};
-  }
-}
-
-/** The cap for a tool RESULT fed back into the loop (mirrors readFile's 8000-char cap). */
-export const TOOL_OUTPUT_CAP = 8000;
-
-/**
- * Byte-cap a string, truncating from the MIDDLE (keep head + tail with a marker). A
- * command's error/exit context is usually at the TAIL, so head-only truncation would
- * hide the reason the model needs. Pure.
- */
-export function truncateMiddle(text: string, cap = TOOL_OUTPUT_CAP): string {
-  if (text.length <= cap) return text;
-  const keep = Math.max(0, cap - 24);
-  const head = Math.ceil(keep / 2);
-  const tail = keep - head;
-  const elided = text.length - keep;
-  return `${text.slice(0, head)}\n…[${elided} chars elided]…\n${text.slice(text.length - tail)}`;
-}
-
-/** A pending, human-gated command from a paused turn (carried through resume). */
-export interface PendingCommand {
-  command: string;
-}
-
-/** The result of running (or denying) one approved command. */
-export interface CommandResult {
-  command: string;
-  stdout?: string;
-  stderr?: string;
-  exit?: number;
-  /** the user denied the command → the model re-plans instead of hanging. */
-  denied?: boolean;
+  /** the composer's resolved reasoning effort for THIS endpoint (handoff §2.5 chip) —
+   *  forwarded verbatim to every turn so a run's depth is the depth the chip showed. */
+  effort?: EffortResolution;
 }
 
 /**
- * Format ONE command result as a tool-result message mirroring the loop's existing
- * `[tool <name> …]` envelope (or the model won't recognize it and re-proposes). Always
- * includes `exit <code>` (a missing exit reads as "still running"), labels stdout vs
- * stderr, and mid-truncates the combined output to TOOL_OUTPUT_CAP.
+ * The retired fork.
+ *
+ * `parseToolArgs`, `TOOL_OUTPUT_CAP`, `truncateMiddle`, `formatCommandResult`,
+ * `PendingCommand`, `AgentLoopOutcome`, `runAgentLoop` and `resumeAgentLoop` used to live
+ * below this line: a second agent loop, with its own char-based output cap, its own
+ * pause/resume snapshot, its own `{role:"user"}` pseudo-tool-results, and none of the
+ * broker / --force / gate invariants core enforces. It is gone (HANDOFF_2 §9c) — the pane
+ * runs `@prometheus/core/agent-loop` via `ai/core-agent.ts`.
+ *
+ * What survives here is what was never part of the loop: the propose-edit tool (argument
+ * parsing, the workspace-relative path guard, the review-file builder, the sink) and the
+ * `AgentTools` / `AgentLoopDeps` shapes the pane and the run controller pass around.
  */
-export function formatCommandResult(r: CommandResult): string {
-  if (r.denied) {
-    return `[tool run_command ${r.command}] denied by user — do not retry this command; re-plan or ask the user.`;
-  }
-  const parts: string[] = [`exit ${r.exit ?? 0}`];
-  if (r.stdout?.length) parts.push(`stdout:\n${r.stdout}`);
-  if (r.stderr?.length) parts.push(`stderr:\n${r.stderr}`);
-  return `[tool run_command ${r.command}]\n${truncateMiddle(parts.join("\n"))}`;
-}
-
-/** The outcome of a (possibly resumable) agent loop run. */
-export type AgentLoopOutcome =
-  | { status: "done" }
-  | {
-      /** the model proposed command(s); the loop waits for the human to Run/Deny each. */
-      status: "paused";
-      /** the FULL conversation so far (resume continues honoring maxIters). */
-      convo: AiMsg[];
-      pending: PendingCommand[];
-      /** iterations consumed (so resume continues from here, never a fresh budget). */
-      itersUsed: number;
-    };
-
-/** The core iteration engine, shared by runAgentLoop + resumeAgentLoop. */
-async function iterate(
-  convo: AiMsg[],
-  deps: AgentLoopDeps,
-  startIter: number,
-  maxIters: number,
-): Promise<AgentLoopOutcome> {
-  const runTurn = deps.runTurn ?? runChatTurn;
-  for (let iter = startIter; iter < maxIters; iter++) {
-    if (deps.signal.aborted) return { status: "done" };
-    const turn = await runTurn(deps.endpoint, convo, {
-      tools: AGENT_TOOLS as unknown[],
-      neverSendToCloud: deps.neverSendToCloud,
-      signal: deps.signal,
-      onText: deps.onText,
-    });
-    const { text, toolCalls } = turn;
-    if (turn.usage) deps.onUsage?.(turn.usage); // APP-055: fold usage into the spend meter
-    if (text.trim()) {
-      convo.push({ role: "assistant", content: text });
-      deps.onTurnComplete();
-    }
-    if (toolCalls.length === 0) return { status: "done" }; // a plain answer → done
-
-    const pending: PendingCommand[] = [];
-    for (const tc of toolCalls) {
-      if (deps.signal.aborted) return { status: "done" };
-      const args = parseToolArgs(tc);
-      if (tc.name === "read_file") {
-        const path = String(args.path ?? "");
-        deps.onToolNote(`read ${path}`);
-        const content = await deps.tools.readFile(path);
-        convo.push({ role: "user", content: `[tool read_file ${path}]\n${content}` });
-      } else if (tc.name === "list_dir") {
-        const path = String(args.path ?? "");
-        deps.onToolNote(`list ${path}`);
-        const listing = await deps.tools.listDir(path);
-        convo.push({ role: "user", content: `[tool list_dir ${path}]\n${listing}` });
-      } else if (tc.name === "grep") {
-        const query = String(args.query ?? "");
-        deps.onToolNote(`grep "${query}"`);
-        const out = await deps.tools.grep(query);
-        convo.push({ role: "user", content: `[tool grep ${query}]\n${out}` });
-      } else if (tc.name === "propose_edit") {
-        const parsed = parseProposeEditArgs(args);
-        if (!parsed.ok) {
-          deps.onToolNote(`✎ propose_edit rejected: ${parsed.error}`);
-          convo.push({ role: "user", content: `[tool propose_edit] error: ${parsed.error}` });
-        } else {
-          deps.onToolNote(`✎ edit ${parsed.edit.path}`);
-          const note = await deps.tools.proposeEdit(parsed.edit);
-          convo.push({ role: "user", content: `[tool propose_edit ${parsed.edit.path}]\n${note}` });
-        }
-        // review is ASYNC (§7.4) — the loop keeps going; only run_command pauses.
-      } else if (tc.name === "run_command") {
-        const command = String(args.command ?? "");
-        deps.onToolNote(deps.tools.proposeCommand(command));
-        pending.push({ command }); // human-in-the-loop: collect, then pause after this turn
-      } else {
-        convo.push({ role: "user", content: `[tool ${tc.name}] unsupported tool; ignored.` });
-      }
-    }
-    // Pause AFTER the whole turn's tool calls so ALL proposed commands are carried
-    // together (resume once with all results → provider-safe tool-call/result ordering).
-    if (pending.length) return { status: "paused", convo, pending, itersUsed: iter + 1 };
-  }
-  deps.onToolNote("(agent reached the step limit — ask it to continue if needed)");
-  return { status: "done" };
-}
-
-/**
- * Run the agent loop over `messages` (which must already include the system prompt +
- * the user's request). Streams text, auto-runs read-only tools + feeds results back,
- * and PAUSES (returns `{status:"paused", …}`) when the model proposes command(s) — a
- * task card awaits the human; the caller resumes via `resumeAgentLoop`.
- */
-export async function runAgentLoop(
-  messages: AiMsg[],
-  deps: AgentLoopDeps,
-): Promise<AgentLoopOutcome> {
-  return iterate([...messages], deps, 0, deps.maxIters ?? 6);
-}
-
-/**
- * Resume a PAUSED loop after the user Ran or Denied the proposed command(s). Appends one
- * tool-result message per pending command (POSITIONALLY matched to `results`; a missing
- * result is treated as denied) then re-enters the SAME loop from `itersUsed`, honoring
- * the remaining maxIters budget. Abort-while-paused (stop / new prompt) drops cleanly.
- */
-export async function resumeAgentLoop(
-  paused: { convo: AiMsg[]; pending: PendingCommand[]; itersUsed: number },
-  results: CommandResult[],
-  deps: AgentLoopDeps,
-): Promise<AgentLoopOutcome> {
-  if (deps.signal.aborted) return { status: "done" }; // the user hit stop / re-prompted
-  const convo: AiMsg[] = [...paused.convo];
-  paused.pending.forEach((cmd, i) => {
-    const r = results[i];
-    convo.push({
-      role: "user",
-      content: formatCommandResult(
-        r ? { ...r, command: cmd.command } : { command: cmd.command, denied: true },
-      ),
-    });
-  });
-  return iterate(convo, deps, paused.itersUsed, deps.maxIters ?? 6);
-}

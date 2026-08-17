@@ -8,5 +8,13 @@
  */
 
 declare module "*.css";
-declare module "*.svg";
-declare module "*.png";
+// Image assets resolve to a bundler-fingerprinted URL. Typed as `string` (not the
+// implicit `any` a bare `declare module` gives) so a misuse is a type error.
+declare module "*.svg" {
+  const src: string;
+  export default src;
+}
+declare module "*.png" {
+  const src: string;
+  export default src;
+}

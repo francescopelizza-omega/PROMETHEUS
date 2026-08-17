@@ -14,7 +14,11 @@ import { loadPricing, tokenEconomy } from "@prometheus/core";
 import type { CliContext, CommandOutcome } from "../context.js";
 import { prometheusHome } from "../home.js";
 import { c, heading, kv } from "../render.js";
-import { latestAccountingSession, readAccounting } from "../session/history-store.js";
+import {
+  type AccountingRecord,
+  latestAccountingSession,
+  readAccounting,
+} from "../session/history-store.js";
 import { isTokenEnabled, readTokenToggles, setTokenToggle } from "./token-toggles.js";
 import { type CacheEconomyReport, buildCacheReport } from "./tokens-report.js";
 
@@ -70,9 +74,29 @@ function estUsd(n: number): string {
 function runTokensReport(ctx: CliContext): CommandOutcome {
   const home = prometheusHome();
   const sessionId = latestAccountingSession(home);
-  const records = sessionId ? readAccounting(home, sessionId) : [];
+  /**
+   * A read-only REPORT must not inherit the spend gate's fail-closed posture.
+   *
+   * `readAccounting` now throws on an unreadable store so `checkBudgetGate` can refuse a metered
+   * turn — that is right for a gate and wrong here: an EACCES would turn `prometheus tokens` into
+   * `fatal:` + exit 2 instead of rendering what it can. An empty report is the honest answer for
+   * a store we cannot read, and the reason is worth one line rather than a stack.
+   */
+  let records: AccountingRecord[] = [];
+  let acctError: string | undefined;
+  if (sessionId) {
+    try {
+      records = readAccounting(home, sessionId);
+    } catch (e) {
+      acctError = (e as NodeJS.ErrnoException).code ?? (e as Error).message;
+    }
+  }
   const toggles = readTokenToggles();
   const report = buildCacheReport(records, toggles, loadPricing(), sessionId);
+  // Say WHY the numbers are empty rather than presenting an unreadable store as "nothing spent".
+  const acctNote = acctError
+    ? `accounting unreadable (${acctError}) — counts below are incomplete`
+    : "";
 
   if (ctx.json) {
     // raw counters (not just the human summary) for scripting/telemetry — deliverable 3.
@@ -84,11 +108,16 @@ function runTokensReport(ctx: CliContext): CommandOutcome {
         measurable: report.measurable,
         raw: report.raw,
         techniques: report.techniques,
+        ...(acctError ? { accountingError: acctError } : {}),
       },
       exitCode: 0,
     };
   }
-  return { text: renderReport(report).join("\n"), exitCode: 0 };
+  const body = renderReport(report);
+  return {
+    text: (acctNote ? [c.yellow(`! ${acctNote}`), "", ...body] : body).join("\n"),
+    exitCode: 0,
+  };
 }
 
 function renderReport(r: CacheEconomyReport): string[] {

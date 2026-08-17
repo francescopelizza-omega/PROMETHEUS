@@ -25,7 +25,7 @@ test("hasSidebarBody: true exactly for the registered body activities", () => {
 
 test("defaultSidebarCollapsed: open for body routes, EXCEPT editor (owns its own tools)", () => {
   assert.equal(defaultSidebarCollapsed("home"), false);
-  assert.equal(defaultSidebarCollapsed("repos"), false);
+  assert.equal(defaultSidebarCollapsed("workspace"), false);
   assert.equal(defaultSidebarCollapsed("editor"), true);
   assert.equal(defaultSidebarCollapsed("chat"), true); // body-less → collapsed
 });
@@ -60,8 +60,8 @@ test("parseSidebarCollapsed: neither shape (or garbage) → undefined, never thr
 test("toggleSidebarMap: flips the active route's entry both ways", () => {
   const opened = toggleSidebarMap({ home: true }, "home");
   assert.equal(opened.home, false);
-  const closed = toggleSidebarMap({}, "repos"); // default open → toggle collapses
-  assert.equal(closed.repos, true);
+  const closed = toggleSidebarMap({}, "workspace"); // default open → toggle collapses
+  assert.equal(closed.workspace, true);
   const editorOpen = toggleSidebarMap({}, "editor"); // default collapsed → toggle opens
   assert.equal(editorOpen.editor, false);
 });

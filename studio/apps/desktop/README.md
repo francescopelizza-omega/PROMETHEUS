@@ -48,5 +48,5 @@ pnpm --filter @prometheus/desktop dev     # electron-vite dev (HMR)
 pnpm --filter @prometheus/desktop build   # electron-vite build
 ```
 
-Specs → [`01-vision-architecture.md`](../../../MDS/the_real_prometheus/01-vision-architecture.md),
-[`07-code-editor-ide-core.md`](../../../MDS/the_real_prometheus/07-code-editor-ide-core.md).
+Vision, architecture, and IDE-core design rationale live in the maintainer's internal spec set
+(not part of this repo).

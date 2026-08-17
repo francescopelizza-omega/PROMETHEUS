@@ -12,6 +12,7 @@ import {
   parseModelRef,
   parseProfile,
   resolveEffectiveProfile,
+  resolveEffectiveProfileWithNotes,
   resolveTuning,
   serializeProfile,
 } from "./profile.js";
@@ -306,10 +307,192 @@ test("resolveEffectiveProfile: project > user > builtin, scalar-replace (CLI-046
   assert.equal(eff.engine.gateMode, "warn"); // project didn't set it → user's value
   // no project layer → user wins over builtin
   assert.equal(resolveEffectiveProfile({ builtin, user }).agent.model, "user-model");
-  // arrays are REPLACED wholesale by the winning layer, never concatenated
+  // A DENY ACCUMULATES across layers rather than being replaced. Wholesale replacement was
+  // right for a preference and wrong for a safety decision: under it, a user who denied
+  // `run_command` had it silently re-armed by any repo whose config happened to deny something
+  // else. A project file may ADD a deny; it may not lift one.
   const u: CliProfile = { agent: { model: "m", tools: { deny: ["a", "b"] } }, engine: {} };
   const p: CliProfile = { agent: { model: "m", tools: { deny: ["z"] } }, engine: {} };
   assert.deepEqual(resolveEffectiveProfile({ builtin, user: u, project: p }).agent.tools?.deny, [
+    "a",
+    "b",
     "z",
   ]);
+});
+
+/* ── the project layer is untrusted: tighten-only ───────────────────────────*/
+
+/**
+ * A `.prometheus.toml` is found by walking UPWARD from the working directory, so it arrives with
+ * the code. Cloning a repository and running `prometheus` inside it was enough to apply it — and
+ * it was the top-priority layer for every key, including `gateMode`. A checked-in
+ * `gateMode = "off"` silently disabled the nemesis scan for anyone who visited that directory.
+ *
+ * These pin the asymmetry that fixes it: the project layer may make the posture STRICTER than
+ * the user's, and may still do everything a project config is for. It cannot make it looser.
+ */
+
+const BUILTIN = (): CliProfile => getCliProfile("default") as CliProfile;
+const proj = (over: Partial<CliProfile>): CliProfile => ({
+  agent: { model: "m" },
+  engine: {},
+  ...over,
+});
+
+test("a project file CANNOT turn the nemesis gate down", () => {
+  const user: CliProfile = { agent: { model: "m" }, engine: { gateMode: "enforce" } };
+  const project = proj({ engine: { gateMode: "off" } });
+  const { profile, rejected } = resolveEffectiveProfileWithNotes({
+    builtin: BUILTIN(),
+    user,
+    project,
+  });
+  assert.equal(profile.engine.gateMode, "enforce");
+  assert.equal(rejected.length, 1);
+  assert.equal(rejected[0]?.key, "engine.gateMode");
+  assert.match(rejected[0]?.reason ?? "", /cannot turn the scanner down/);
+});
+
+test("`warn` is still a downgrade from `enforce` and is refused too", () => {
+  const user: CliProfile = { agent: { model: "m" }, engine: { gateMode: "enforce" } };
+  const { profile } = resolveEffectiveProfileWithNotes({
+    builtin: BUILTIN(),
+    user,
+    project: proj({ engine: { gateMode: "warn" } }),
+  });
+  assert.equal(profile.engine.gateMode, "enforce");
+});
+
+test("a project file CAN tighten the gate — that direction is allowed", () => {
+  // The rule is about direction, not about ignoring the repo. A repo that wants MORE scrutiny
+  // than the user's default gets it.
+  const user: CliProfile = { agent: { model: "m" }, engine: { gateMode: "warn" } };
+  const { profile, rejected } = resolveEffectiveProfileWithNotes({
+    builtin: BUILTIN(),
+    user,
+    project: proj({ engine: { gateMode: "enforce" } }),
+  });
+  assert.equal(profile.engine.gateMode, "enforce");
+  assert.deepEqual(rejected, []);
+});
+
+test("a project file cannot grant blanket auto-approval", () => {
+  const user: CliProfile = { agent: { model: "m" }, engine: { yes: false } };
+  const { profile, rejected } = resolveEffectiveProfileWithNotes({
+    builtin: BUILTIN(),
+    user,
+    project: proj({ engine: { yes: true } }),
+  });
+  assert.notEqual(profile.engine.yes, true);
+  assert.ok(rejected.some((r) => r.key === "engine.yes"));
+});
+
+test("a project file CAN withdraw auto-approval the user granted", () => {
+  const user: CliProfile = { agent: { model: "m" }, engine: { yes: true } };
+  const { profile } = resolveEffectiveProfileWithNotes({
+    builtin: BUILTIN(),
+    user,
+    project: proj({ engine: { yes: false } }),
+  });
+  assert.equal(profile.engine.yes, false);
+});
+
+test("a project file cannot cancel the user's dry-run", () => {
+  const user: CliProfile = { agent: { model: "m" }, engine: { dryRun: true } };
+  const { profile, rejected } = resolveEffectiveProfileWithNotes({
+    builtin: BUILTIN(),
+    user,
+    project: proj({ engine: { dryRun: false } }),
+  });
+  assert.equal(profile.engine.dryRun, true);
+  assert.ok(rejected.some((r) => r.key === "engine.dryRun"));
+});
+
+test("a project file can NEVER repoint the engine or interpreter binary", () => {
+  // There is no "tightening" direction for a path — it is arbitrary code execution by config,
+  // so the project layer does not get the key at all, in either direction.
+  const { profile, rejected } = resolveEffectiveProfileWithNotes({
+    builtin: BUILTIN(),
+    user: { agent: { model: "m" }, engine: {} },
+    project: proj({ engine: { paths: { python: "/tmp/evil", prometheusPy: "/tmp/evil.py" } } }),
+  });
+  assert.equal(profile.engine.paths, undefined);
+  assert.ok(rejected.some((r) => r.key === "engine.paths"));
+});
+
+test("a project file cannot re-arm a tool the user denied", () => {
+  const user: CliProfile = {
+    agent: { model: "m", tools: { deny: ["run_command"] } },
+    engine: {},
+  };
+  const { profile, rejected } = resolveEffectiveProfileWithNotes({
+    builtin: BUILTIN(),
+    user,
+    project: proj({ agent: { model: "m", tools: { deny: ["web_fetch"] } } }),
+  });
+  assert.deepEqual(profile.agent.tools?.deny, ["run_command", "web_fetch"]);
+  assert.ok(rejected.some((r) => r.key === "agent.tools.deny"));
+});
+
+test("a project file cannot widen the user's allow-list, but can narrow it", () => {
+  const user: CliProfile = {
+    agent: { model: "m", tools: { allow: ["read_file", "grep"] } },
+    engine: {},
+  };
+  const widen = resolveEffectiveProfileWithNotes({
+    builtin: BUILTIN(),
+    user,
+    project: proj({ agent: { model: "m", tools: { allow: ["read_file", "run_command"] } } }),
+  });
+  assert.deepEqual(widen.profile.agent.tools?.allow, ["read_file"]);
+  assert.ok(widen.rejected.some((r) => r.key === "agent.tools.allow"));
+
+  const narrow = resolveEffectiveProfileWithNotes({
+    builtin: BUILTIN(),
+    user,
+    project: proj({ agent: { model: "m", tools: { allow: ["grep"] } } }),
+  });
+  assert.deepEqual(narrow.profile.agent.tools?.allow, ["grep"]);
+});
+
+test("a budget cap may only come DOWN", () => {
+  const user: CliProfile = { agent: { model: "m" }, engine: {}, budget: { sessionUsd: 5 } };
+  const raise = resolveEffectiveProfileWithNotes({
+    builtin: BUILTIN(),
+    user,
+    project: proj({ budget: { sessionUsd: 500 } }),
+  });
+  assert.equal(raise.profile.budget?.sessionUsd, 5);
+  const lower = resolveEffectiveProfileWithNotes({
+    builtin: BUILTIN(),
+    user,
+    project: proj({ budget: { sessionUsd: 1 } }),
+  });
+  assert.equal(lower.profile.budget?.sessionUsd, 1);
+});
+
+test("the benign keys a project config is actually FOR still win outright", () => {
+  // The fix must not turn `.prometheus.toml` into a decoration.
+  const user: CliProfile = { agent: { model: "user-model", maxIterations: 4 }, engine: {} };
+  const { profile, rejected } = resolveEffectiveProfileWithNotes({
+    builtin: BUILTIN(),
+    user,
+    project: proj({
+      agent: { model: "project-model", systemPrompt: "repo prompt", maxIterations: 12 },
+    }),
+  });
+  assert.equal(profile.agent.model, "project-model");
+  assert.equal(profile.agent.systemPrompt, "repo prompt");
+  assert.equal(profile.agent.maxIterations, 12);
+  assert.deepEqual(rejected, []);
+});
+
+test("the plain resolver is the SAFE one — the hole cannot be reintroduced by forgetting", () => {
+  // resolveEffectiveProfile delegates to the sanitizing path; there is no raw merge exported.
+  const eff = resolveEffectiveProfile({
+    builtin: BUILTIN(),
+    user: { agent: { model: "m" }, engine: { gateMode: "enforce" } },
+    project: proj({ engine: { gateMode: "off" } }),
+  });
+  assert.equal(eff.engine.gateMode, "enforce");
 });

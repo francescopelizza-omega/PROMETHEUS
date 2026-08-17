@@ -205,8 +205,8 @@ export function Breadcrumbs({ group }: { group: number }): ReactElement | null {
         height: 22,
         minHeight: 22,
         padding: "0 8px",
-        borderBottom: "1px solid var(--border-subtle, #232329)",
-        background: "var(--bg-surface, #101015)",
+        borderBottom: "1px solid var(--border-subtle)",
+        background: "var(--bg-surface)",
         overflow: "hidden",
       }}
     >
@@ -216,14 +216,12 @@ export function Breadcrumbs({ group }: { group: number }): ReactElement | null {
           // biome-ignore lint/suspicious/noArrayIndexKey: path segments are positional
           <span key={`p${i}`} style={{ display: "flex", alignItems: "center", gap: 2 }}>
             {i > 0 && (
-              <span style={{ color: "var(--text-secondary, #9a9aa3)", fontSize: "0.7rem" }}>
-                {SEP}
-              </span>
+              <span style={{ color: "var(--text-secondary)", fontSize: "0.7rem" }}>{SEP}</span>
             )}
             <span
               style={{
                 ...crumbStyle,
-                color: last ? "var(--text-primary, #e7e7ea)" : "var(--text-secondary, #9a9aa3)",
+                color: last ? "var(--text-primary)" : "var(--text-secondary)",
               }}
             >
               {seg}
@@ -234,15 +232,13 @@ export function Breadcrumbs({ group }: { group: number }): ReactElement | null {
       {trail.map((s, i) => (
         // biome-ignore lint/suspicious/noArrayIndexKey: symbol trail is positional
         <span key={`s${i}`} style={{ display: "flex", alignItems: "center", gap: 2 }}>
-          <span style={{ color: "var(--text-secondary, #9a9aa3)", fontSize: "0.7rem" }}>{SEP}</span>
-          <span style={{ color: "var(--accent, #22d3ee)", fontSize: "0.7rem" }}>
-            {kindGlyph(s.kind)}
-          </span>
+          <span style={{ color: "var(--text-secondary)", fontSize: "0.7rem" }}>{SEP}</span>
+          <span style={{ color: "var(--accent)", fontSize: "0.7rem" }}>{kindGlyph(s.kind)}</span>
           <button
             type="button"
             onClick={() => jump(s)}
             title={`Jump to ${s.name}`}
-            style={{ ...crumbStyle, color: "var(--text-primary, #e7e7ea)", cursor: "pointer" }}
+            style={{ ...crumbStyle, color: "var(--text-primary)", cursor: "pointer" }}
           >
             {s.name}
           </button>

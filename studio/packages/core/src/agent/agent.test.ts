@@ -7,16 +7,19 @@ import test from "node:test";
 import type { ModelRef } from "../agents/types.js";
 import { applyProposedEdit, diffHunk, parseHunks } from "./edit.js";
 import type { AgentEvent } from "./events.js";
+import { HOOK_REFUSAL_HINT } from "./hooks.js";
 import {
   type AgentTuning,
   type LLMClient,
   type LlmTurn,
+  type Thread,
   type ToolOutcome,
   capBytes,
   defaultTuning,
   runAgentTurn,
 } from "./loop.js";
-import { exposedToolNames, isForceArg } from "./tools.js";
+import { PLAN_REFUSAL_HINT } from "./permission-modes.js";
+import { exposedToolNames, exposedTools, isForceArg } from "./tools.js";
 
 const MODEL: ModelRef = { provider: "local", modelId: "qwen3:8b" };
 
@@ -38,6 +41,49 @@ async function collect(it: AsyncIterable<AgentEvent>): Promise<AgentEvent[]> {
   for await (const e of it) out.push(e);
   return out;
 }
+
+/* ── host-local tools (§9c): the seam that let the desktop drop its loop fork ──── */
+
+const HOST_TOOL = {
+  name: "read_file",
+  title: "Read file",
+  description: "Read a file from the host's workspace.",
+  schema: { path: { type: "string" as const, required: true } },
+  annotations: { readOnlyHint: true },
+  toArgv: () => {
+    throw new Error("host-local");
+  },
+};
+
+test("tools.extra merges host-local tools into the catalog", () => {
+  const names = exposedToolNames({ enabled: true, allow: [], deny: [], extra: [HOST_TOOL] });
+  assert.equal(names.size, 18); // the 17 above + read_file
+  assert.ok(names.has("read_file"));
+  // the catalog is NOT mutated — a second call must not see the host tool accumulate.
+  assert.equal(exposedToolNames({ enabled: true, allow: [], deny: [] }).size, 17);
+});
+
+test("allow / deny / enabled apply to host tools identically", () => {
+  const policy = { enabled: true, allow: ["read_file"], deny: [], extra: [HOST_TOOL] };
+  assert.deepEqual([...exposedToolNames(policy)], ["read_file"]);
+  assert.equal(
+    exposedToolNames({ ...policy, allow: [], deny: ["read_file"] }).has("read_file"),
+    false,
+  );
+  assert.equal(exposedToolNames({ ...policy, enabled: false }).size, 0);
+});
+
+test("a host tool WINS a name collision — it is the one that will actually run", () => {
+  const shadow = { ...HOST_TOOL, name: "propose_edit", description: "the host's own" };
+  const tools = exposedTools({
+    enabled: true,
+    allow: ["propose_edit"],
+    deny: [],
+    extra: [shadow],
+  });
+  assert.equal(tools.length, 1, "no duplicate entry for the shadowed name");
+  assert.equal(tools[0]?.description, "the host's own");
+});
 
 test("exposedTools: the 14 prometheus tools + propose_edit + write_file + web_fetch (CLI-010/011)", () => {
   assert.equal(exposedToolNames({ enabled: false, allow: [], deny: [] }).size, 0);
@@ -425,4 +471,371 @@ test("loop: a reasoned rejection surfaces as a tool_result (model re-plans), not
   assert.ok(tr && !("ok" in tr && tr.ok), "a reasoned reject is a failed tool_result");
   assert.match((tr as { summary: string }).summary, /user rejected: not what I wanted/);
   assert.ok(!events.some((e) => e.kind === "blocked"), "reasoned reject is NOT a blocked event");
+});
+
+/* ── permission MODE: the read-only deny, enforced in the loop itself ─────────*/
+
+/**
+ * These cover the defect that made "plan mode" mean three different things.
+ *
+ * The deny lived ONLY in the TUI's confirm seam. So the readline host, the headless run and
+ * the whole desktop pane advertised a plan mode that could still write files — and even in
+ * the TUI the check could be skipped entirely, because `tuning.yes` lifts read-only-annotated
+ * tools straight past `confirm`. The check now sits above the broker in the shared loop, which
+ * is the one place every surface goes through.
+ */
+
+test("loop: plan mode DENIES a destructive tool before it can run", async () => {
+  const ran: string[] = [];
+  const tuning: AgentTuning = { ...defaultTuning(MODEL), permissionMode: "plan" };
+  const events = await collect(
+    runAgentTurn({ messages: [] }, tuning, {
+      llm: scriptedLlm([
+        { kind: "tool_call", call: { name: "prometheus_install", args: { name: "x" } } },
+      ]),
+      runTool: async (t) => {
+        ran.push(t.name);
+        return { ok: true, summary: "" };
+      },
+      // A confirm that says YES: plan mode must refuse anyway, or the mode is merely advice.
+      confirm: () => true,
+    }),
+  );
+  assert.deepEqual(ran, [], "the tool must never reach the runner");
+  assert.ok(events.some((e) => e.kind === "blocked" && /plan mode/.test(e.reason)));
+});
+
+test("loop: plan mode's refusal reaches the MODEL as the structured planModeRefusal", async () => {
+  // The model has to be able to re-plan from the refusal, so it rides the tool-result channel
+  // in the same JSON shape the TUI's confirm seam returns — one refusal contract, not two.
+  const thread: Thread = { messages: [] };
+  const tuning: AgentTuning = { ...defaultTuning(MODEL), permissionMode: "plan" };
+  await collect(
+    runAgentTurn(thread, tuning, {
+      llm: scriptedLlm([
+        { kind: "tool_call", call: { name: "write_file", args: { path: "a.ts", content: "x" } } },
+      ]),
+      runTool: async () => ({ ok: true, summary: "" }),
+    }),
+  );
+  const toolMsg = thread.messages.find((m) => m.role === "tool");
+  assert.ok(toolMsg, "the refusal must be folded into the thread");
+  const payload = JSON.parse(/\{[\s\S]*\}/.exec(toolMsg?.content ?? "")?.[0] ?? "{}");
+  assert.deepEqual(payload, {
+    denied: true,
+    tool: "write_file",
+    mode: "plan",
+    hint: PLAN_REFUSAL_HINT,
+  });
+});
+
+test("loop: plan mode still ALLOWS read-only tools (it is read-only, not no-op)", async () => {
+  const ran: string[] = [];
+  const tuning: AgentTuning = { ...defaultTuning(MODEL), permissionMode: "plan", yes: true };
+  await collect(
+    runAgentTurn({ messages: [] }, tuning, {
+      llm: scriptedLlm([
+        { kind: "tool_call", call: { name: "prometheus_list", args: {} } },
+        { kind: "final", text: "here is the plan" },
+      ]),
+      runTool: async (t) => {
+        ran.push(t.name);
+        return { ok: true, summary: "ok" };
+      },
+    }),
+  );
+  assert.deepEqual(ran, ["prometheus_list"]);
+});
+
+test("loop: plan mode denies EVEN a tool tuning.yes would have auto-approved", async () => {
+  /**
+   * The regression this pins: `yes:true` sends read-only-annotated tools straight to the
+   * runner with no confirm call at all. A plan-mode check that lives in a host's confirm
+   * function therefore never sees them. `prometheus_install` classifies as exec, and the only
+   * reason it is refused here is that the check is ABOVE the broker rather than below it.
+   */
+  const ran: string[] = [];
+  const tuning: AgentTuning = { ...defaultTuning(MODEL), permissionMode: "plan", yes: true };
+  await collect(
+    runAgentTurn({ messages: [] }, tuning, {
+      llm: scriptedLlm([
+        { kind: "tool_call", call: { name: "prometheus_install", args: { name: "x" } } },
+      ]),
+      runTool: async (t) => {
+        ran.push(t.name);
+        return { ok: true, summary: "" };
+      },
+      confirm: () => {
+        throw new Error("confirm must not even be consulted under a mode deny");
+      },
+    }),
+  );
+  assert.deepEqual(ran, []);
+});
+
+test("loop: a NON-deny mode never widens what the broker decided", async () => {
+  /**
+   * `acceptEdits` and `bypassPermissions` say "allow" in the mode matrix. If the loop honoured
+   * that, a tuning field would silently bypass the human confirm the broker demanded — the
+   * exact inversion the matrix's own C5 note forbids. Deny is the only verdict this loop acts
+   * on, so a declined confirm must still stop the call under the most permissive mode there is.
+   */
+  let ran = 0;
+  const tuning: AgentTuning = { ...defaultTuning(MODEL), permissionMode: "bypassPermissions" };
+  const events = await collect(
+    runAgentTurn({ messages: [] }, tuning, {
+      llm: scriptedLlm([
+        { kind: "tool_call", call: { name: "prometheus_install", args: { name: "x" } } },
+      ]),
+      runTool: async () => {
+        ran++;
+        return { ok: true, summary: "" };
+      },
+      confirm: () => false,
+    }),
+  );
+  assert.equal(ran, 0, "the human's decline still governs");
+  assert.ok(events.some((e) => e.kind === "blocked"));
+});
+
+test("loop: no permissionMode ⇒ byte-identical behaviour to before the field existed", async () => {
+  const ran: string[] = [];
+  const tuning: AgentTuning = { ...defaultTuning(MODEL), yes: true };
+  assert.equal(tuning.permissionMode, undefined);
+  await collect(
+    runAgentTurn({ messages: [] }, tuning, {
+      llm: scriptedLlm([
+        { kind: "tool_call", call: { name: "prometheus_list", args: {} } },
+        { kind: "final", text: "ok" },
+      ]),
+      runTool: async (t) => {
+        ran.push(t.name);
+        return { ok: true, summary: "ok" };
+      },
+    }),
+  );
+  assert.deepEqual(ran, ["prometheus_list"]);
+});
+
+/* ── lifecycle HOOKS, enforced in the loop (not per-host) ─────────────────────*/
+
+/**
+ * These pin the wiring, not the pure logic (`hooks.test.ts` covers that).
+ *
+ * The point of putting hooks on `AgentTuning` and checking them in `runAgentTurn` is that all
+ * four surfaces — CLI readline, CLI TUI, the desktop pane and every `spawn_agent` child —
+ * funnel through this one function. A hook enforced at a host's confirm seam would miss every
+ * call `tuning.yes` auto-approves, which is the exact defect plan mode shipped with.
+ */
+
+/** A hook runner that answers from a table keyed by command, recording what it saw. */
+function hookRunnerStub(
+  table: Record<string, { exitCode?: number; timedOut?: boolean; error?: string }>,
+): { runner: NonNullable<AgentTuning["hookRunner"]>; seen: { command: string; stdin: string }[] } {
+  const seen: { command: string; stdin: string }[] = [];
+  return {
+    seen,
+    runner: async (inv) => {
+      seen.push({ command: inv.command, stdin: inv.stdin });
+      const a = table[inv.command] ?? {};
+      return { exitCode: a.exitCode ?? 0, stdout: "", stderr: "", ...a };
+    },
+  };
+}
+
+test("loop: a PreToolUse hook exiting nonzero DENIES the call before the runner sees it", async () => {
+  const ran: string[] = [];
+  const { runner } = hookRunnerStub({ "guard.sh": { exitCode: 1 } });
+  const tuning: AgentTuning = {
+    ...defaultTuning(MODEL),
+    hooks: [{ event: "PreToolUse", command: "guard.sh" }],
+    hookRunner: runner,
+  };
+  const events = await collect(
+    runAgentTurn({ messages: [] }, tuning, {
+      llm: scriptedLlm([
+        { kind: "tool_call", call: { name: "write_file", args: { path: "a.ts", content: "x" } } },
+      ]),
+      runTool: async (t) => {
+        ran.push(t.name);
+        return { ok: true, summary: "" };
+      },
+      // A confirm that says YES: the hook must refuse anyway, or it is advice, not a hook.
+      confirm: () => true,
+    }),
+  );
+  assert.deepEqual(ran, [], "the tool must never reach the runner");
+  assert.ok(
+    events.some((e) => e.kind === "blocked" && /blocked by hook: guard\.sh/.test(e.reason)),
+  );
+});
+
+test("loop: a PreToolUse hook sees a call that `yes` would auto-approve past confirm", async () => {
+  // This is the case a host-side confirm hook could NEVER see: `yes:true` lifts read-only
+  // tools straight past `confirm`, so a check living at that seam is blind to most calls.
+  const ran: string[] = [];
+  const { runner, seen } = hookRunnerStub({ "guard.sh": { exitCode: 1 } });
+  const tuning: AgentTuning = {
+    ...defaultTuning(MODEL),
+    yes: true,
+    hooks: [{ event: "PreToolUse", command: "guard.sh" }],
+    hookRunner: runner,
+  };
+  await collect(
+    runAgentTurn({ messages: [] }, tuning, {
+      llm: scriptedLlm([{ kind: "tool_call", call: { name: "prometheus_list", args: {} } }]),
+      runTool: async (t) => {
+        ran.push(t.name);
+        return { ok: true, summary: "" };
+      },
+      confirm: () => true,
+    }),
+  );
+  assert.deepEqual(ran, []);
+  assert.equal(seen.length, 1, "the hook must have been consulted for the auto-approved call");
+});
+
+test("loop: the hook refusal reaches the MODEL in the same shape as the plan-mode refusal", async () => {
+  const thread: Thread = { messages: [] };
+  const { runner } = hookRunnerStub({ "guard.sh": { exitCode: 3 } });
+  const tuning: AgentTuning = {
+    ...defaultTuning(MODEL),
+    hooks: [{ event: "PreToolUse", command: "guard.sh" }],
+    hookRunner: runner,
+  };
+  await collect(
+    runAgentTurn(thread, tuning, {
+      llm: scriptedLlm([
+        { kind: "tool_call", call: { name: "write_file", args: { path: "a.ts", content: "x" } } },
+      ]),
+      runTool: async () => ({ ok: true, summary: "" }),
+    }),
+  );
+  const toolMsg = thread.messages.find((m) => m.role === "tool");
+  assert.ok(toolMsg, "the refusal must be folded into the thread");
+  const payload = JSON.parse(/\{[\s\S]*\}/.exec(toolMsg?.content ?? "")?.[0] ?? "{}");
+  assert.deepEqual(payload, {
+    denied: true,
+    tool: "write_file",
+    event: "PreToolUse",
+    hook: "guard.sh",
+    hint: HOOK_REFUSAL_HINT,
+  });
+});
+
+test("loop: a matcher scopes the veto — an unmatched tool runs untouched", async () => {
+  const ran: string[] = [];
+  const { runner } = hookRunnerStub({ "guard.sh": { exitCode: 1 } });
+  const tuning: AgentTuning = {
+    ...defaultTuning(MODEL),
+    yes: true,
+    hooks: [{ event: "PreToolUse", command: "guard.sh", matcher: "write_*" }],
+    hookRunner: runner,
+  };
+  await collect(
+    runAgentTurn({ messages: [] }, tuning, {
+      llm: scriptedLlm([
+        { kind: "tool_call", call: { name: "prometheus_list", args: {} } },
+        { kind: "final", text: "done" },
+      ]),
+      runTool: async (t) => {
+        ran.push(t.name);
+        return { ok: true, summary: "ok" };
+      },
+    }),
+  );
+  assert.deepEqual(ran, ["prometheus_list"]);
+});
+
+test("loop: a hook that throws/times out NEVER blocks the call (fail-soft, with a status note)", async () => {
+  // The single most important property: a broken hook script must not silently become a veto
+  // over every tool call. It degrades to "no hook fired" and says so on the status channel.
+  const ran: string[] = [];
+  const tuning: AgentTuning = {
+    ...defaultTuning(MODEL),
+    yes: true,
+    hooks: [{ event: "PreToolUse", command: "boom.sh" }],
+    hookRunner: async () => {
+      throw new Error("ENOENT");
+    },
+  };
+  const events = await collect(
+    runAgentTurn({ messages: [] }, tuning, {
+      llm: scriptedLlm([
+        { kind: "tool_call", call: { name: "prometheus_list", args: {} } },
+        { kind: "final", text: "done" },
+      ]),
+      runTool: async (t) => {
+        ran.push(t.name);
+        return { ok: true, summary: "ok" };
+      },
+    }),
+  );
+  assert.deepEqual(ran, ["prometheus_list"], "the call must proceed as if no hook existed");
+  assert.ok(
+    events.some((e) => e.kind === "status" && /hook: PreToolUse hook failed to run/.test(e.text)),
+    "the broken hook must be VISIBLE, not silently inert",
+  );
+});
+
+test("loop: PostToolUse fires with the tool's result and does not gate the turn", async () => {
+  const { runner, seen } = hookRunnerStub({ "log.sh": { exitCode: 7 } });
+  const tuning: AgentTuning = {
+    ...defaultTuning(MODEL),
+    yes: true,
+    hooks: [{ event: "PostToolUse", command: "log.sh" }],
+    hookRunner: runner,
+  };
+  const events = await collect(
+    runAgentTurn({ messages: [] }, tuning, {
+      llm: scriptedLlm([
+        { kind: "tool_call", call: { name: "prometheus_list", args: {} } },
+        { kind: "final", text: "done" },
+      ]),
+      runTool: async () => ({ ok: true, summary: "listed" }),
+    }),
+  );
+  assert.equal(seen.length, 1);
+  assert.deepEqual(JSON.parse(seen[0]?.stdin ?? "{}"), {
+    tool: "prometheus_list",
+    args: {},
+    result: { ok: true, summary: "listed" },
+  });
+  // exit 7 from a POST hook means nothing — the call already happened.
+  assert.ok(!events.some((e) => e.kind === "blocked"));
+});
+
+test("loop: PostToolUse also fires when the tool runner THREW (observers need the failures)", async () => {
+  const { runner, seen } = hookRunnerStub({ "log.sh": {} });
+  const tuning: AgentTuning = {
+    ...defaultTuning(MODEL),
+    yes: true,
+    hooks: [{ event: "PostToolUse", command: "log.sh" }],
+    hookRunner: runner,
+  };
+  await collect(
+    runAgentTurn({ messages: [] }, tuning, {
+      llm: scriptedLlm([{ kind: "tool_call", call: { name: "prometheus_list", args: {} } }]),
+      runTool: async () => {
+        throw new Error("engine down");
+      },
+    }),
+  );
+  assert.equal(seen.length, 1);
+  assert.match(seen[0]?.stdin ?? "", /engine down/);
+});
+
+test("loop: no hooks configured ⇒ the runner is never consulted (zero-config costs nothing)", async () => {
+  const { runner, seen } = hookRunnerStub({});
+  const tuning: AgentTuning = { ...defaultTuning(MODEL), yes: true, hookRunner: runner };
+  await collect(
+    runAgentTurn({ messages: [] }, tuning, {
+      llm: scriptedLlm([
+        { kind: "tool_call", call: { name: "prometheus_list", args: {} } },
+        { kind: "final", text: "done" },
+      ]),
+      runTool: async () => ({ ok: true, summary: "ok" }),
+    }),
+  );
+  assert.deepEqual(seen, []);
 });

@@ -191,6 +191,9 @@ export interface ModelPrice {
   inputUsdPerMTok: number;
   outputUsdPerMTok: number;
   match?: string;
+  /** the connector's declared context window, when known (CLI-092: no cloud endpoint should
+   *  hard-code 8192 when the provider's real window is public knowledge). */
+  contextLen?: number;
 }
 
 /** The `pricing` map from providers.config.json, keyed by model id / prefix. */
@@ -214,10 +217,12 @@ export function loadPricing(path: string = DEFAULT_AI_PROVIDERS_CONFIG): Pricing
     const outRate = val.outputUsdPerMTok;
     if (typeof inRate !== "number" || !Number.isFinite(inRate)) continue;
     if (typeof outRate !== "number" || !Number.isFinite(outRate)) continue;
+    const contextLen = val.contextLen;
     out[key] = {
       inputUsdPerMTok: inRate,
       outputUsdPerMTok: outRate,
       ...(typeof val.match === "string" ? { match: val.match } : {}),
+      ...(typeof contextLen === "number" && Number.isFinite(contextLen) ? { contextLen } : {}),
     };
   }
   return out;
@@ -240,6 +245,18 @@ export function priceForModel(pricing: Pricing, modelId: string): ModelPrice | n
     }
   }
   return best;
+}
+
+/**
+ * The connector's declared context window for a cloud model, by the same longest-prefix rule
+ * as `priceForModel` (CLI-092). Absent/unknown ⇒ null so the caller falls back to the
+ * documented conservative default rather than a fabricated number — never probed live: firing
+ * an unrequested request at a cloud provider to satisfy curiosity is out of scope for a
+ * privacy-first client (see `ai/context-window.ts`'s local-only probe).
+ */
+export function contextLenForModel(pricing: Pricing, modelId: string): number | null {
+  const p = priceForModel(pricing, modelId);
+  return p?.contextLen ?? null;
 }
 
 /**

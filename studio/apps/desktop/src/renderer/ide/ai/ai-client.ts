@@ -16,7 +16,37 @@
  *
  * Renderer-SANDBOXED (C5): uses the global `fetch` (injectable for tests). NO
  * node/electron/engine-bridge. The model endpoint URLs come across the contextBridge.
+ * `@prometheus/core/ai-effort` is a PURE subpath (types + math, zero IO) — safe here.
  */
+
+import { applyEffort, applyEffortToMessages } from "@prometheus/core/ai-effort";
+import type { EffortResolution } from "@prometheus/core/ai-effort";
+
+/**
+ * handoff §3: per-turn phase timings, measured (not estimated). `load` is everything
+ * before the model produced anything — connect, queue, weights load; `model` is the
+ * generation itself. A field left undefined means that boundary never happened (e.g.
+ * the request failed before the first byte) — the card renders what it has.
+ */
+export interface TurnTiming {
+  /** ms clock at request start. */
+  requestAt: number;
+  /** ms clock when the response headers resolved (connect + queue done). */
+  firstByteAt?: number;
+  /** ms clock at the first non-empty content delta (the model is now generating). */
+  firstTokenAt?: number;
+  /** ms clock when the stream finished. */
+  lastByteAt: number;
+}
+
+/** `load` / `model` split for one turn, in ms. Never negative. */
+export function splitTiming(t: TurnTiming): { load: number; model: number } {
+  const start = t.firstTokenAt ?? t.firstByteAt ?? t.lastByteAt;
+  return {
+    load: Math.max(0, start - t.requestAt),
+    model: Math.max(0, t.lastByteAt - start),
+  };
+}
 
 /** A chat message (OpenAI shape). */
 export interface AiMsg {
@@ -33,6 +63,15 @@ export interface RendererEndpoint {
   locality: "local" | "cloud";
   /** the model name to send in the body (defaults to the id). */
   model?: string;
+  /**
+   * The model's context window, when it is known.
+   *
+   * Used to size the tool preamble: the budget is a share of the window, and without a window
+   * it falls back to the one sized for 8192 — which drops every tool description from the
+   * listing the model is shown. The endpoint picker already derives this from the model
+   * catalogue (`endpoints.ts` `contextWindow`), it just never travelled this far.
+   */
+  contextWindow?: number;
 }
 
 /* ── pure SSE parsing (mirrors @prometheus/core/ai/client — kept identical) ──── */
@@ -105,7 +144,137 @@ export function deltaFromPayload(payload: string): string {
   return "";
 }
 
+/**
+ * Extract a REASONING delta from one payload (CLI parity, `agent-runtime.ts:906`).
+ *
+ * Thinking models stream their chain-of-thought on a separate field and leave
+ * `delta.content` empty meanwhile. Ollama calls it `reasoning`; several OpenAI-compatible
+ * proxies call it `reasoning_content`. Reading only `content` — which is what the GUI did
+ * — makes such a model look HUNG for the entire thinking phase: no text, no tool call,
+ * nothing to show. Read both, in the CLI's order.
+ */
+export function reasoningFromPayload(payload: string): string {
+  if (payload === "[DONE]") return "";
+  let obj: unknown;
+  try {
+    obj = JSON.parse(payload);
+  } catch {
+    return "";
+  }
+  const choices = (obj as { choices?: unknown }).choices;
+  if (!Array.isArray(choices) || choices.length === 0) return "";
+  const delta = (choices[0] as { delta?: { reasoning?: unknown; reasoning_content?: unknown } })
+    .delta;
+  const r = delta?.reasoning ?? delta?.reasoning_content;
+  return typeof r === "string" ? r : "";
+}
+
 /* ── the streaming client ────────────────────────────────────────────────────*/
+
+/**
+ * Progress watchdog windows, byte-identical to the CLI (`agent-runtime.ts:787-789`).
+ *
+ * A large local model can take 30–90s to produce its FIRST byte (cold prefill, weights
+ * reload). Without a heartbeat the user cannot tell a slow MODEL from a hung WRAPPER, and
+ * without a hard ceiling a wedged runner hangs the pane forever — the GUI had neither.
+ */
+export const FIRST_TOKEN_TICK_MS = 8_000;
+export const STREAM_IDLE_TICK_MS = 15_000;
+export const HARD_TIMEOUT_MS = 180_000;
+
+/** What the watchdog needs to narrate and to stop. */
+interface WatchdogCtl {
+  /** the model name to name in the status line. */
+  label: string;
+  /** ms clock the request started at (for the elapsed counter). */
+  startedAt: number;
+  /** true once the run has been cancelled (user abort or hard timeout). */
+  aborted: () => boolean;
+  /** a human-facing progress line; absent → the watchdog only enforces the timeout. */
+  onStatus?: (text: string) => void;
+}
+
+/**
+ * Yield SSE payloads from a response body, emitting a heartbeat while the model is quiet.
+ *
+ * The one subtlety, and the reason this is shared rather than written twice: exactly ONE
+ * `reader.read()` may be in flight at a time — calling it again while the first is pending
+ * throws. So the pending read is HELD across watchdog ticks and re-raced, never re-issued.
+ * Stops at `[DONE]`; always releases the reader (and its socket) on every exit path,
+ * including a consumer `break`.
+ */
+async function* ssePayloads(
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+  ctl: WatchdogCtl,
+): AsyncGenerator<string, void, unknown> {
+  const decoder = new TextDecoder();
+  let buf = "";
+  let firstByte = false;
+  let pendingRead = reader.read();
+  try {
+    for (;;) {
+      if (ctl.aborted()) break;
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const tick = new Promise<"TICK">((r) => {
+        timer = setTimeout(() => r("TICK"), firstByte ? STREAM_IDLE_TICK_MS : FIRST_TOKEN_TICK_MS);
+      });
+      const raced = await Promise.race([pendingRead, tick]);
+      if (timer) clearTimeout(timer);
+      if (raced === "TICK") {
+        const s = Math.round((Date.now() - ctl.startedAt) / 1000);
+        ctl.onStatus?.(
+          firstByte
+            ? `▼ ${ctl.label} still generating… (${s}s)`
+            : `⏳ waiting for ${ctl.label} — no output yet (${s}s). A large local model can take 30–90s to start.`,
+        );
+        continue; // pendingRead is STILL pending — re-race it, never re-read
+      }
+      const { value, done } = raced;
+      if (done) break;
+      firstByte = true;
+      buf += decoder.decode(value, { stream: true });
+      const { payloads, rest } = parseSseChunk(buf);
+      buf = rest;
+      for (const p of payloads) {
+        if (p === "[DONE]") return;
+        yield p;
+      }
+      pendingRead = reader.read();
+    }
+    // flush whatever the last partial chunk left behind
+    const { payloads } = parseSseChunk(`${buf}\n`);
+    for (const p of payloads) {
+      if (p === "[DONE]") return;
+      yield p;
+    }
+  } finally {
+    await reader.cancel().catch(() => {});
+  }
+}
+
+/**
+ * Chain the caller's AbortSignal to our own controller and arm the hard timeout.
+ *
+ * We need our OWN controller because the hard timeout has to cancel the in-flight fetch,
+ * not merely stop consuming it. Returns the controller plus a `dispose` that MUST run in a
+ * `finally` — an un-cleared 180s timer keeps the process (and node:test) alive.
+ */
+function armRun(signal?: AbortSignal): { ac: AbortController; dispose: () => void } {
+  const ac = new AbortController();
+  const onAbort = (): void => ac.abort();
+  if (signal) {
+    if (signal.aborted) ac.abort();
+    else signal.addEventListener("abort", onAbort, { once: true });
+  }
+  const hardTimer = setTimeout(() => ac.abort(), HARD_TIMEOUT_MS);
+  return {
+    ac,
+    dispose: () => {
+      clearTimeout(hardTimer);
+      signal?.removeEventListener("abort", onAbort);
+    },
+  };
+}
 
 /** Thrown BEFORE any request when the workspace policy forbids a cloud endpoint. */
 export class CloudPolicyError extends Error {
@@ -133,6 +302,80 @@ export function chatCompletionsUrl(baseUrl: string): string {
   return /\/v1$/.test(b) ? `${b}/chat/completions` : joinUrl(b, "/v1/chat/completions");
 }
 
+/* ── the MAIN-process transport (§9c) ────────────────────────────────────────*/
+
+/**
+ * Run one turn through `window.prometheus.ai` (i.e. in MAIN), subscribing to its deltas.
+ *
+ * This is the DEFAULT path, and it exists because the production CSP is
+ * `connect-src 'self'`: a renderer `fetch` to a model endpoint is refused in the packaged
+ * app. The renderer streamed models directly, which worked under the dev CSP and could
+ * never have worked in a build. Both entry points below keep their `doFetch` option as the
+ * direct-fetch escape hatch — it is how the SSE parsers in this file stay unit-testable
+ * without Electron, and it is the ONLY thing that still uses them.
+ */
+async function streamViaMain(
+  endpoint: RendererEndpoint,
+  messages: AiMsg[],
+  opts: {
+    tools?: unknown[];
+    neverSendToCloud?: boolean;
+    signal?: AbortSignal;
+    effort?: EffortResolution;
+    onText?: (delta: string) => void;
+    onReasoning?: (delta: string) => void;
+    onStatus?: (text: string) => void;
+  },
+): Promise<ChatTurnResult> {
+  const ai = globalThis.window?.prometheus?.ai;
+  if (!ai) throw new Error("model streaming is unavailable (no bridge)");
+  // A per-turn id: the delta feed is shared by every run, so the subscriber below has to be
+  // able to tell ITS bytes from a concurrent turn's.
+  const runId = `ai-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+  const off = ai.onProgress((ev) => {
+    if (ev.runId !== runId) return;
+    if (ev.kind === "text") opts.onText?.(ev.text);
+    else if (ev.kind === "reasoning") opts.onReasoning?.(ev.text);
+    else opts.onStatus?.(ev.text);
+  });
+  const onAbort = (): void => void ai.cancel(runId);
+  opts.signal?.addEventListener("abort", onAbort, { once: true });
+  try {
+    if (opts.signal?.aborted) return { text: "", toolCalls: [] };
+    const r = await ai.stream({
+      runId,
+      endpoint: {
+        id: endpoint.id,
+        baseUrl: endpoint.baseUrl,
+        ...(endpoint.model ? { model: endpoint.model } : {}),
+        locality: endpoint.locality,
+        // The window the pane already derived from the catalogue. It sized the tool preamble
+        // and stopped there; main needs it to pre-flight a request that cannot possibly fit.
+        ...(endpoint.contextWindow ? { contextWindow: endpoint.contextWindow } : {}),
+      },
+      messages,
+      ...(opts.tools && opts.tools.length > 0 ? { tools: opts.tools } : {}),
+      ...(opts.effort ? { effort: opts.effort } : {}),
+      ...(opts.neverSendToCloud ? { neverSendToCloud: true } : {}),
+    });
+    if (!r.ok) {
+      // The cloud-policy refusal keeps its own type so callers can special-case it; main is
+      // the enforcer, this just re-labels its answer.
+      if (r.error?.includes("never send to cloud")) throw new CloudPolicyError(endpoint.id);
+      throw new Error(r.error ?? `AI endpoint ${endpoint.id} failed`);
+    }
+    return {
+      text: r.text,
+      toolCalls: r.toolCalls.map((t) => ({ id: t.id, name: t.name, arguments: t.arguments })),
+      ...(r.usage ? { usage: r.usage } : {}),
+      ...(r.timing ? { timing: r.timing } : {}),
+    };
+  } finally {
+    off();
+    opts.signal?.removeEventListener("abort", onAbort);
+  }
+}
+
 /**
  * Stream a chat completion from `endpoint`. Yields text deltas. Enforces the cloud
  * policy BEFORE the request leaves (§7.5). Aborts on `signal`. The actual model is
@@ -141,48 +384,109 @@ export function chatCompletionsUrl(baseUrl: string): string {
 export async function* streamChat(
   endpoint: RendererEndpoint,
   messages: AiMsg[],
-  opts: { neverSendToCloud?: boolean; signal?: AbortSignal; doFetch?: FetchLike } = {},
+  opts: {
+    neverSendToCloud?: boolean;
+    signal?: AbortSignal;
+    /**
+     * DIRECT-fetch escape hatch. Omitted (the default) the turn runs in MAIN, because the
+     * production CSP is `connect-src 'self'` and a renderer fetch is refused there. Passing
+     * it keeps the request in the renderer, which is how the SSE parsing in this file stays
+     * unit-testable without Electron.
+     */
+    doFetch?: FetchLike;
+    /**
+     * The reasoning-effort resolution for THIS endpoint (from `@prometheus/core/ai-effort`
+     * `resolveEffort`). Its patch lands on the body or the messages depending on the
+     * model's mechanism — an enum field, a template kwarg, or a literal prompt line — which
+     * is why the caller resolves it and we just apply it. Omitted → nothing is sent.
+     */
+    effort?: EffortResolution;
+    /**
+     * Heartbeat while the model is quiet (see FIRST_TOKEN_TICK_MS). Without it a cold
+     * local model looks identical to a hung wrapper for a minute and a half.
+     */
+    onStatus?: (text: string) => void;
+  } = {},
 ): AsyncGenerator<string, void, unknown> {
   if (opts.neverSendToCloud && endpoint.locality === "cloud") {
     throw new CloudPolicyError(endpoint.id);
   }
-  const doFetch = opts.doFetch ?? fetch;
-  const res = await doFetch(chatCompletionsUrl(endpoint.baseUrl), {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ model: endpoint.model ?? endpoint.id, messages, stream: true }),
-    ...(opts.signal ? { signal: opts.signal } : {}),
-  });
-  if (!res.ok) throw new Error(`AI endpoint ${endpoint.id} HTTP ${res.status}`);
-  if (!res.body) throw new Error(`AI endpoint ${endpoint.id}: empty body`);
-
-  const reader = res.body.getReader();
-  const decoder = new TextDecoder();
-  let buf = "";
-  // Release the reader (and the underlying HTTP connection) on EVERY exit path — an
-  // early `return`, a consumer `break`/throw, or an abort. Without this the reader lock
-  // and socket leak whenever the caller stops consuming before the stream ends.
-  try {
+  if (!opts.doFetch) {
+    // DEFAULT: stream in main (the prod CSP forbids a renderer fetch — see streamViaMain).
+    // The text arrives on the delta feed, so re-yield it through a queue as it lands rather
+    // than waiting for the turn to finish; a "streaming" answer that appears all at once at
+    // the end is not streaming.
+    const queue: string[] = [];
+    let notify: (() => void) | undefined;
+    let finished = false;
+    let failed: unknown;
+    const turn = streamViaMain(endpoint, messages, {
+      ...(opts.neverSendToCloud ? { neverSendToCloud: true } : {}),
+      ...(opts.signal ? { signal: opts.signal } : {}),
+      ...(opts.effort ? { effort: opts.effort } : {}),
+      ...(opts.onStatus ? { onStatus: opts.onStatus } : {}),
+      onText: (d) => {
+        queue.push(d);
+        notify?.();
+      },
+    })
+      .catch((e: unknown) => {
+        failed = e;
+        return undefined;
+      })
+      .finally(() => {
+        finished = true;
+        notify?.();
+      });
     for (;;) {
-      const { value, done } = await reader.read();
-      if (done) break;
-      buf += decoder.decode(value, { stream: true });
-      const { payloads, rest } = parseSseChunk(buf);
-      buf = rest;
-      for (const p of payloads) {
-        if (p === "[DONE]") return;
-        const delta = deltaFromPayload(p);
-        if (delta) yield delta;
-      }
+      while (queue.length > 0) yield queue.shift() as string;
+      if (finished) break;
+      await new Promise<void>((r) => {
+        notify = r;
+      });
+      notify = undefined;
     }
-    const { payloads } = parseSseChunk(`${buf}\n`);
-    for (const p of payloads) {
-      if (p === "[DONE]") return;
+    await turn;
+    if (failed) throw failed;
+    return;
+  }
+  const doFetch = opts.doFetch;
+  const model = endpoint.model ?? endpoint.id;
+  const body = applyEffort(
+    {
+      model,
+      messages: applyEffortToMessages(messages, opts.effort),
+      stream: true,
+      // Ollama extension, ignored elsewhere: keep the model resident so a second prompt
+      // does not pay the cold RELOAD. LOCAL only — a cloud endpoint gets no unknown field.
+      ...(endpoint.locality === "local" ? { keep_alive: "30m" } : {}),
+    },
+    opts.effort,
+  );
+  const { ac, dispose } = armRun(opts.signal);
+  try {
+    const res = await doFetch(chatCompletionsUrl(endpoint.baseUrl), {
+      method: "POST",
+      headers: { "content-type": "application/json", accept: "text/event-stream" },
+      body: JSON.stringify(body),
+      signal: ac.signal,
+    });
+    if (!res.ok) throw new Error(`AI endpoint ${endpoint.id} HTTP ${res.status}`);
+    if (!res.body) throw new Error(`AI endpoint ${endpoint.id}: empty body`);
+    // ssePayloads owns reader cleanup on EVERY exit path — an early `return`, a consumer
+    // `break`/throw, or an abort — so the reader lock and socket cannot leak.
+    const frames = ssePayloads(res.body.getReader(), {
+      label: model,
+      startedAt: Date.now(),
+      aborted: () => ac.signal.aborted,
+      ...(opts.onStatus ? { onStatus: opts.onStatus } : {}),
+    });
+    for await (const p of frames) {
       const delta = deltaFromPayload(p);
       if (delta) yield delta;
     }
   } finally {
-    await reader.cancel().catch(() => {});
+    dispose();
   }
 }
 
@@ -273,6 +577,8 @@ export interface ChatTurnResult {
   toolCalls: ToolCall[];
   /** token usage when the endpoint reported it (APP-055); absent = unknown (fail-soft). */
   usage?: TokenUsage;
+  /** handoff §3: the measured phase boundaries for this turn (feeds the latency card). */
+  timing?: TurnTiming;
 }
 
 /**
@@ -288,18 +594,52 @@ export async function runChatTurn(
     tools?: unknown[];
     neverSendToCloud?: boolean;
     signal?: AbortSignal;
+    /**
+     * DIRECT-fetch escape hatch. Omitted (the default) the turn runs in MAIN, because the
+     * production CSP is `connect-src 'self'` and a renderer fetch is refused there. Passing
+     * it keeps the request in the renderer, which is how the SSE parsing in this file stays
+     * unit-testable without Electron.
+     */
     doFetch?: FetchLike;
     onText?: (delta: string) => void;
+    /**
+     * A THINKING delta (`delta.reasoning` / `delta.reasoning_content`). Reasoning models
+     * emit nothing on `content` while they think, so without this the pane shows a blank
+     * turn for the whole thinking phase and the run reads as hung.
+     */
+    onReasoning?: (delta: string) => void;
+    /** heartbeat while the model is quiet (see FIRST_TOKEN_TICK_MS). */
+    onStatus?: (text: string) => void;
+    /** the resolved reasoning effort for this endpoint (see streamChat). */
+    effort?: EffortResolution;
   } = {},
 ): Promise<ChatTurnResult> {
   if (opts.neverSendToCloud && endpoint.locality === "cloud") {
     throw new CloudPolicyError(endpoint.id);
   }
-  const doFetch = opts.doFetch ?? fetch;
-  const body: Record<string, unknown> = {
-    model: endpoint.model ?? endpoint.id,
-    messages,
+  if (!opts.doFetch) {
+    // DEFAULT: run the turn in main (see streamViaMain). Tool calls, usage and timing come
+    // back in its typed reply, so nothing about the loop's decisions rides on the deltas.
+    return streamViaMain(endpoint, messages, {
+      ...(opts.tools ? { tools: opts.tools } : {}),
+      ...(opts.neverSendToCloud ? { neverSendToCloud: true } : {}),
+      ...(opts.signal ? { signal: opts.signal } : {}),
+      ...(opts.effort ? { effort: opts.effort } : {}),
+      ...(opts.onText ? { onText: opts.onText } : {}),
+      ...(opts.onReasoning ? { onReasoning: opts.onReasoning } : {}),
+      ...(opts.onStatus ? { onStatus: opts.onStatus } : {}),
+    });
+  }
+  const doFetch = opts.doFetch;
+  const model = endpoint.model ?? endpoint.id;
+  let body: Record<string, unknown> = {
+    model,
+    messages: applyEffortToMessages(messages, opts.effort),
     stream: true,
+    // Ollama extension, ignored elsewhere (CLI parity, `agent-runtime.ts:825`): keep the
+    // model resident 30m so the loop's SECOND round-trip does not pay a cold reload.
+    // LOCAL only — a cloud endpoint never receives a non-standard field.
+    ...(endpoint.locality === "local" ? { keep_alive: "30m" } : {}),
   };
   // APP-055: ask cloud (OpenAI-compatible) endpoints for token usage on the final chunk.
   // Gated to cloud so a strict local server (llama.cpp/older proxies) never 400s on the
@@ -311,25 +651,45 @@ export async function runChatTurn(
     body.tools = opts.tools;
     body.tool_choice = "auto";
   }
+  // last, so an effort constraint (suppress temperature, raise max_tokens) is not undone
+  // by a field written above it.
+  body = applyEffort(body, opts.effort);
+  // §3 latency attribution — measured at the real boundaries, never estimated.
+  const requestAt = Date.now();
+  let firstTokenAt: number | undefined;
+  const { ac, dispose } = armRun(opts.signal);
   const res = await doFetch(chatCompletionsUrl(endpoint.baseUrl), {
     method: "POST",
-    headers: { "content-type": "application/json" },
+    headers: { "content-type": "application/json", accept: "text/event-stream" },
     body: JSON.stringify(body),
-    ...(opts.signal ? { signal: opts.signal } : {}),
+    signal: ac.signal,
+  }).catch((e: unknown) => {
+    dispose();
+    throw e;
   });
-  if (!res.ok) throw new Error(`AI endpoint ${endpoint.id} HTTP ${res.status}`);
-  if (!res.body) throw new Error(`AI endpoint ${endpoint.id}: empty body`);
+  // headers resolved → connect + queue + (for a cold local runner) weights load are done.
+  const firstByteAt = Date.now();
+  if (!res.ok) {
+    dispose();
+    throw new Error(`AI endpoint ${endpoint.id} HTTP ${res.status}`);
+  }
+  if (!res.body) {
+    dispose();
+    throw new Error(`AI endpoint ${endpoint.id}: empty body`);
+  }
 
-  const reader = res.body.getReader();
-  const decoder = new TextDecoder();
-  let buf = "";
   let text = "";
   let usage: TokenUsage | undefined;
   const acc: ToolCallAccumulator = new Map();
   const consume = (p: string): void => {
     if (p === "[DONE]") return;
+    const thinking = reasoningFromPayload(p);
+    if (thinking) opts.onReasoning?.(thinking);
     const delta = deltaFromPayload(p);
     if (delta) {
+      // the FIRST content delta is where generation actually starts; everything before
+      // it is load, however the runner spent it.
+      firstTokenAt ??= Date.now();
       text += delta;
       opts.onText?.(delta);
     }
@@ -341,24 +701,26 @@ export async function runChatTurn(
     text,
     toolCalls: finalizeToolCalls(acc),
     ...(usage ? { usage } : {}),
+    timing: {
+      requestAt,
+      ...(firstByteAt !== undefined ? { firstByteAt } : {}),
+      ...(firstTokenAt !== undefined ? { firstTokenAt } : {}),
+      lastByteAt: Date.now(),
+    },
   });
   try {
-    for (;;) {
-      const { value, done } = await reader.read();
-      if (done) break;
-      buf += decoder.decode(value, { stream: true });
-      const { payloads, rest } = parseSseChunk(buf);
-      buf = rest;
-      for (const p of payloads) {
-        // some providers send `usage` THEN `[DONE]`; capture usage before returning.
-        if (p === "[DONE]") return result();
-        consume(p);
-      }
-    }
-    const { payloads } = parseSseChunk(`${buf}\n`);
-    for (const p of payloads) consume(p);
+    // ssePayloads stops AT `[DONE]` and yields everything before it, so a provider that
+    // sends `usage` and then `[DONE]` still has its usage folded in — and it owns reader
+    // cleanup on every exit path.
+    const frames = ssePayloads(res.body.getReader(), {
+      label: model,
+      startedAt: requestAt,
+      aborted: () => ac.signal.aborted,
+      ...(opts.onStatus ? { onStatus: opts.onStatus } : {}),
+    });
+    for await (const p of frames) consume(p);
   } finally {
-    await reader.cancel().catch(() => {});
+    dispose();
   }
   return result();
 }

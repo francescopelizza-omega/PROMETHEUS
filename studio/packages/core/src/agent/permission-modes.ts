@@ -25,6 +25,8 @@
 import type { PermissionDecision, PermissionRule } from "./permission-engine.js";
 
 /** The permission modes (the first four match Claude Code's `permissionMode`; `yolo` is ours). */
+import { utf8Bytes, utf8Decode, utf8Length } from "./bytes.js";
+
 export type PermissionModeId = "default" | "acceptEdits" | "plan" | "bypassPermissions" | "yolo";
 
 /** A tool's effect class, derived from its MCP annotations (the single source). */
@@ -219,12 +221,12 @@ export function formatAuditLine(
   // the empty-argv line == the whole line minus the argv bytes, so its length is the
   // fixed overhead; the argv field gets whatever budget remains.
   const fixed = `${iso} | ${tool} |  | ${outcome}\n`;
-  const budget = AUDIT_LINE_MAX_BYTES - Buffer.byteLength(fixed, "utf8");
+  const budget = AUDIT_LINE_MAX_BYTES - utf8Length(fixed);
   let argv = argvSummary.replace(/\s+/g, " ").trim();
-  if (Buffer.byteLength(argv, "utf8") > Math.max(0, budget)) {
+  if (utf8Length(argv) > Math.max(0, budget)) {
     // byte-truncate (multibyte-safe) leaving room for the 3-byte "…" marker.
-    const buf = Buffer.from(argv, "utf8").subarray(0, Math.max(0, budget - 3));
-    argv = `${buf.toString("utf8")}…`;
+    const buf = utf8Bytes(argv).subarray(0, Math.max(0, budget - 3));
+    argv = `${utf8Decode(buf)}…`;
   }
   return `${iso} | ${tool} | ${argv} | ${outcome}\n`;
 }

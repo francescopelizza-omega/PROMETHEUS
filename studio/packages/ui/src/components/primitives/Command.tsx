@@ -12,6 +12,7 @@
  */
 
 import { type KeyboardEvent, type ReactNode, useId, useMemo, useRef, useState } from "react";
+import { Z } from "../../tokens/layers.js";
 import { Input } from "./Input.js";
 import { filterItems } from "./filter.js";
 import { useFocusTrap } from "./overlay.js";
@@ -99,7 +100,7 @@ export function Command({
       style={{
         position: "fixed",
         inset: 0,
-        zIndex: 1400,
+        zIndex: Z.palette,
         display: "flex",
         alignItems: "flex-start",
         justifyContent: "center",

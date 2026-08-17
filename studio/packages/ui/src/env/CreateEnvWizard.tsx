@@ -111,7 +111,7 @@ export function CreateEnvWizard({
       className={className}
       aria-label="New environment"
       style={{
-        border: "1px solid var(--border-subtle, #232329)",
+        border: "1px solid var(--border-subtle)",
         borderRadius: "var(--radius-lg, 10px)",
         padding: "var(--space-8, 16px)",
         display: "flex",
@@ -224,7 +224,7 @@ export function CreateEnvWizard({
                   gap: "var(--space-3, 6px)",
                   padding: "var(--space-2, 4px) var(--space-3, 6px)",
                   borderRadius: "var(--radius-md, 6px)",
-                  border: "1px solid var(--border-subtle, #232329)",
+                  border: "1px solid var(--border-subtle)",
                 }}
               >
                 <input
@@ -333,8 +333,8 @@ export function CreateEnvWizard({
 const inputStyle = {
   padding: "6px 8px",
   borderRadius: "var(--radius-md, 6px)",
-  border: "1px solid var(--border-subtle, #232329)",
-  background: "var(--bg-surface-2, #16161b)",
+  border: "1px solid var(--border-subtle)",
+  background: "var(--bg-surface-2)",
   color: "var(--text-primary)",
   fontSize: "0.85rem",
   fontFamily: "var(--font-ui)",
@@ -396,8 +396,8 @@ function NavButton({
       onClick={onClick}
       disabled={disabled || !onClick}
       style={{
-        background: ghost ? "transparent" : "var(--accent, #6d5ef0)",
-        border: "1px solid var(--border-subtle, #232329)",
+        background: ghost ? "transparent" : "var(--accent)",
+        border: "1px solid var(--border-subtle)",
         borderRadius: "var(--radius-md, 6px)",
         color: ghost ? "var(--text-primary)" : "var(--brand-fg)",
         cursor: disabled || !onClick ? "default" : "pointer",

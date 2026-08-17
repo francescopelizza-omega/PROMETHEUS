@@ -13,7 +13,7 @@
  * stores + ai-client + window.prometheus only.
  */
 
-import { Button, Panel } from "@prometheus/ui";
+import { Button, Panel, Z, clampToViewport, useFocusTrap } from "@prometheus/ui";
 import { type ReactElement, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import type {
@@ -26,7 +26,9 @@ import type {
   IdePrSummary,
 } from "../../shared/ipc-contract.js";
 import { ChangelistsPanel } from "./ChangelistsPanel.js";
+import { EDITOR_THEME } from "./EditorPane.js";
 import { MergeView } from "./MergeView.js";
+import { WorktreesPanel } from "./WorktreesPanel.js";
 import type { RendererEndpoint } from "./ai/ai-client.js";
 import { streamChat } from "./ai/ai-client.js";
 import { familyHasLigatures, resolveFontStack } from "./fonts/registry.js";
@@ -184,7 +186,9 @@ function DiffView({ diff, fileName }: { diff: string; fileName: string }): React
       editor = monaco.editor.createDiffEditor(hostRef.current, {
         readOnly: true,
         automaticLayout: true,
-        theme: "vs-dark",
+        // the SHARED theme name, not a stock one — a hardcoded "vs-dark" here was the
+        // one Monaco surface that ignored the app palette (handoff §1).
+        theme: EDITOR_THEME,
         renderSideBySide: true,
         ignoreTrimWhitespace: false,
         minimap: { enabled: false },
@@ -209,7 +213,11 @@ function DiffView({ diff, fileName }: { diff: string; fileName: string }): React
       <pre
         style={{
           margin: 0,
-          maxHeight: 280,
+          // §9: no fixed-px pane heights. Viewport-relative, not `flex:1` — both call
+          // sites mount this inside a <Panel> body that has no definite height, so a
+          // flex child would collapse. This grows with the window instead of clipping
+          // every diff to the same 280px slice.
+          maxHeight: "min(46vh, 640px)",
           overflow: "auto",
           fontFamily: "var(--font-mono, monospace)",
           fontSize: "0.72rem",
@@ -220,7 +228,9 @@ function DiffView({ diff, fileName }: { diff: string; fileName: string }): React
       </pre>
     );
   }
-  return <div ref={hostRef} style={{ height: 280 }} aria-label="diff" />;
+  // §9: viewport-relative instead of a hardcoded 280. Monaco needs a DEFINITE height
+  // (automaticLayout measures its host), so this is a height, not a max-height.
+  return <div ref={hostRef} style={{ height: "min(46vh, 640px)" }} aria-label="diff" />;
 }
 
 /** APP-084: per-hunk / per-line staging over `git apply --cached [-R] -`. Parses the
@@ -803,6 +813,9 @@ export function GitPanel({ root }: { root: string }): ReactElement {
   const [stashes, setStashes] = useState<IdeGitStashEntry[]>([]);
   const [showStash, setShowStash] = useState(false);
   const [showChangelists, setShowChangelists] = useState(false);
+  // Task #5 (desktop parity): worktree isolation, toggled from the "worktrees" button below
+  // or the `git.worktrees` command-palette entry (editor.tsx dispatches "ide:open-worktrees").
+  const [showWorktrees, setShowWorktrees] = useState(false);
   const [mergeFile, setMergeFile] = useState<string | null>(null); // APP-039 merge editor
   // network ops (push/pull/fetch) — disable the trio + show which is in flight.
   const [netBusy, setNetBusy] = useState<null | "push" | "pull" | "fetch">(null);
@@ -823,6 +836,22 @@ export function GitPanel({ root }: { root: string }): ReactElement {
   );
   const [rebaseBusy, setRebaseBusy] = useState(false);
   const [rebaseError, setRebaseError] = useState<string | null>(null);
+  // §9.2 overlay contract for the two modal dialogs below. Neither had ANY Escape path —
+  // not a dead handler, no handler at all — and neither trapped focus, so Tab walked the
+  // git panel behind a dialog whose whole job is to gate a destructive `reset --hard` or a
+  // history rewrite. The trap supplies Escape (document capture), initial focus and restore.
+  const resetDialogRef = useRef<HTMLDivElement | null>(null);
+  const rebaseDialogRef = useRef<HTMLDivElement | null>(null);
+  const closeReset = useCallback(() => {
+    setConfirmReset(null);
+    setResetConfirmText("");
+  }, []);
+  const closeRebase = useCallback(() => {
+    setRebasePlan(null);
+    setRebaseError(null);
+  }, []);
+  useFocusTrap(resetDialogRef, confirmReset !== null, closeReset);
+  useFocusTrap(rebaseDialogRef, rebasePlan !== null, closeRebase);
 
   const refresh = useCallback(async () => {
     const s = await ide()?.gitStatus(root);
@@ -1087,6 +1116,15 @@ export function GitPanel({ root }: { root: string }): ReactElement {
     void refreshRebaseState();
   }, [refreshRebaseState]);
 
+  // Task #5 (desktop parity): the `git.worktrees` command-palette entry routes here (editor.tsx
+  // sets activity="git" then fires this) so the panel opens even when the Git activity wasn't
+  // already showing worktrees.
+  useEffect(() => {
+    const onOpen = (): void => setShowWorktrees(true);
+    window.addEventListener("ide:open-worktrees", onOpen);
+    return () => window.removeEventListener("ide:open-worktrees", onOpen);
+  }, []);
+
   useEffect(() => {
     let alive = true;
     void diffNonce; // intentional refetch trigger: bumped by refresh()/stage() so the
@@ -1341,6 +1379,9 @@ export function GitPanel({ root }: { root: string }): ReactElement {
             <Button size="sm" variant="ghost" onClick={() => setShowChangelists((v) => !v)}>
               {showChangelists ? "flat view" : "changelists"}
             </Button>
+            <Button size="sm" variant="ghost" onClick={() => setShowWorktrees((v) => !v)}>
+              {showWorktrees ? "hide worktrees" : "worktrees"}
+            </Button>
           </>
         )}
       </div>
@@ -1546,6 +1587,8 @@ export function GitPanel({ root }: { root: string }): ReactElement {
         <>
           {/* APP-085: gated PR/MR review (hidden unless origin is GitHub/GitLab). */}
           <PullRequests root={root} />
+          {/* Task #5 (desktop parity): worktree isolation, same core functions as the CLI. */}
+          {showWorktrees && <WorktreesPanel root={root} />}
           {showChangelists && (
             <ChangelistsPanel
               root={root}
@@ -1710,7 +1753,10 @@ export function GitPanel({ root }: { root: string }): ReactElement {
             top: 8,
             left: "50%",
             transform: "translateX(-50%)",
-            zIndex: 1004,
+            // Z.toast, not Z.modal: this banner exists to say WHY the operation failed, and
+            // it must outrank the dialog that failed. Tied at Z.modal, DOM order decided —
+            // and the dialogs come later in this file, so they painted over the reason.
+            zIndex: Z.toast,
             maxWidth: 480,
             padding: "6px 10px",
             background: "var(--bg-surface-2)",
@@ -1761,7 +1807,7 @@ export function GitPanel({ root }: { root: string }): ReactElement {
             style={{
               position: "fixed",
               inset: 0,
-              zIndex: 1000,
+              zIndex: Z.modal,
               background: "transparent",
               border: "none",
               cursor: "default",
@@ -1771,10 +1817,13 @@ export function GitPanel({ root }: { root: string }): ReactElement {
             style={{
               position: "fixed",
               // clamp into the viewport so a right-click low/right doesn't push the menu (and
-              // its destructive "Reset (hard)" item) off-window.
-              top: Math.min(commitMenu.y, window.innerHeight - 240),
-              left: Math.min(commitMenu.x, window.innerWidth - 190),
-              zIndex: 1001,
+              // its destructive "Reset (hard)" item) off-window. The shared clamp also holds
+              // the TOP-LEFT edge, which the hand-rolled version here did not: a right-click
+              // near the origin used to place the menu at a negative offset.
+              ...(({ x, y }) => ({ left: x, top: y }))(
+                clampToViewport(commitMenu.x, commitMenu.y, 190, 240),
+              ),
+              zIndex: Z.modal,
               minWidth: 180,
               padding: 4,
               background: "var(--bg-surface-2)",
@@ -1847,27 +1896,32 @@ export function GitPanel({ root }: { root: string }): ReactElement {
           <button
             type="button"
             aria-label="cancel reset"
-            onClick={() => {
-              setConfirmReset(null);
-              setResetConfirmText("");
-            }}
+            onClick={closeReset}
             style={{
               position: "fixed",
               inset: 0,
-              zIndex: 1002,
+              zIndex: Z.modal,
               background: "rgba(0, 0, 0, 0.45)",
               border: "none",
               cursor: "default",
             }}
           />
           <div
+            ref={resetDialogRef}
+            role="alertdialog"
+            aria-modal="true"
+            aria-label="confirm reset"
             style={{
               position: "fixed",
               top: "30%",
               left: "50%",
               transform: "translateX(-50%)",
-              zIndex: 1003,
+              zIndex: Z.modal,
               width: "min(420px, 90vw)",
+              // the --hard branch adds a paragraph + a labelled typed-confirm input, which
+              // overflowed a short window with no way to scroll to the buttons.
+              maxHeight: "70vh",
+              overflow: "auto",
               padding: 14,
               background: "var(--bg-surface-2)",
               border: "1px solid var(--border-subtle)",
@@ -1954,27 +2008,27 @@ export function GitPanel({ root }: { root: string }): ReactElement {
           <button
             type="button"
             aria-label="cancel rebase"
-            onClick={() => {
-              setRebasePlan(null);
-              setRebaseError(null);
-            }}
+            onClick={closeRebase}
             style={{
               position: "fixed",
               inset: 0,
-              zIndex: 1004,
+              zIndex: Z.modal,
               background: "rgba(0, 0, 0, 0.45)",
               border: "none",
               cursor: "default",
             }}
           />
           <div
+            ref={rebaseDialogRef}
+            role="dialog"
+            aria-modal="true"
             aria-label="interactive rebase editor"
             style={{
               position: "fixed",
               top: "12%",
               left: "50%",
               transform: "translateX(-50%)",
-              zIndex: 1005,
+              zIndex: Z.modal,
               width: "min(560px, 94vw)",
               maxHeight: "76vh",
               overflow: "auto",
@@ -2159,7 +2213,10 @@ export function GitPanel({ root }: { root: string }): ReactElement {
             top: 8,
             left: "50%",
             transform: "translateX(-50%)",
-            zIndex: 1006,
+            // Z.toast, not Z.modal: this banner exists to say WHY the operation failed, and
+            // it must outrank the dialog that failed. Tied at Z.modal, DOM order decided —
+            // and the dialogs come later in this file, so they painted over the reason.
+            zIndex: Z.toast,
             maxWidth: 480,
             padding: "6px 10px",
             background: "var(--bg-surface-2)",

@@ -18,6 +18,7 @@
  */
 import { createRequire } from "node:module";
 
+import { DEFAULT_CONTEXT_WINDOW } from "@prometheus/core";
 import type { AiEndpoint } from "@prometheus/core";
 import type { EngineClient } from "@prometheus/engine-bridge";
 
@@ -98,7 +99,9 @@ export function buildLocalEndpoint(runner: LocalRunner): AiEndpoint {
     id: `local:${runner.name}:${model}`,
     baseUrl: runner.baseUrl,
     locality: "local",
-    contextWindow: 8192,
+    // A FLOOR, not a measurement — `probeContextWindow` replaces it with the served model's
+    // real length where the runner reports one (see `withProbedContextWindow`).
+    contextWindow: DEFAULT_CONTEXT_WINDOW,
     // capable local runners (ollama/lmstudio) return native OpenAI tool_calls — the agent
     // runtime now has a tool-call transport (makeLlmClient.toolTurn), so offer tools.
     supportsTools: true,

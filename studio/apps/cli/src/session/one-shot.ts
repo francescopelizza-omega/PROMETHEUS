@@ -1,0 +1,375 @@
+/**
+ * session/one-shot.ts — `prometheus -p "<prompt>"`: ONE agent turn, no TTY, then exit.
+ *
+ * Until now there was no way to get a tool-using turn without a terminal. That reads like a
+ * missing convenience and is actually a missing capability: `prometheus chat "msg"` and
+ * `cat task.md | prometheus chat` both route to the PYTHON engine's chat verb, which has no
+ * tools, no broker, no gate events and no session transcript. So the agent — the whole point of
+ * the product — was unreachable from a script, a CI job, a git hook or a pipe.
+ *
+ * DEFAULT POSTURE, and the one way out of it.
+ *
+ *   By default this run is READ-ONLY: it reads, searches, greps and reasons freely, and every
+ *   write, command and install is refused with a reason the model can act on. That default is
+ *   right and it stays.
+ *
+ *   It used to be a HARD LOCK with no way out, on the reasoning that a one-shot which can
+ *   modify a repository from a script is a more dangerous product to opt into by accident.
+ *   The reasoning is sound about ACCIDENT and wrong about the conclusion: every rival agentic
+ *   CLI runs unattended in CI, and a headless mode that can never write cannot do the work.
+ *   So the escape hatch is deliberately hard to type by accident and impossible to arrive at
+ *   by default — `--allow-writes` and `--allow-commands` raise the autonomy ladder for
+ *   this run only and are named for exactly what they permit (see `headlessAuthLevel`).
+ *   Neither reaches `installs` or `runall`, and nothing raises the level without one of them
+ *   on the command line — so the dangerous product is never the one you get by default.
+ *
+ *   It supplies NO `ask` in either posture: nobody is there. The `question` tool already
+ *   refuses honestly in that case and tells the model to state its assumption instead.
+ */
+import { agent, ai, cliProfiles, loadPricing, orchestration } from "@prometheus/core";
+import { loadMemoryIndexBlock, loadPermissionRules } from "@prometheus/core/agent-system-host";
+import { createEngineClient } from "@prometheus/engine-bridge";
+
+import { prometheusHome } from "../home.js";
+import type { ParsedArgs } from "../parse.js";
+import { type SessionCtx, runMessageTurn } from "./agent-runtime.js";
+import {
+  SESSION_STORE_MAX_BYTES,
+  appendTurnEvents,
+  descriptorOf,
+  recordSession,
+  rotateSessions,
+} from "./history-store.js";
+import { makeBudgetGuard, seedTuningWithNotes } from "./host.js";
+import { createKeyResolver, keychainProviders } from "./key-resolver.js";
+import { type Backends, detectBackends } from "./onboarding.js";
+import { assembleSteering, discoverSteering } from "./steering.js";
+
+/** What a one-shot run produced, for the caller to render or serialize. */
+export interface OneShotResult {
+  ok: boolean;
+  reply: string;
+  /** tools the model actually called, in order — the honest record of what it did. */
+  toolCalls: string[];
+  /** true when the turn hit its round cap with the model still wanting to work. */
+  capped: boolean;
+  /** why it failed, when it did. */
+  error?: string;
+}
+
+/**
+ * Read the one-shot prompt out of the parsed args, or null when this is not a one-shot run.
+ *
+ * `-p` is NOT in the boolean-flag set, so the parser swallows the following token as its value
+ * and leaves the command empty — which sets `repl: true` and would launch the full-screen TUI,
+ * silently eating the prompt. Reading it here, before the interactive check, is what makes
+ * `prometheus -p "..."` mean what it looks like it means.
+ */
+export function oneShotPrompt(parsed: ParsedArgs): string | null {
+  for (const key of ["p", "print", "prompt"]) {
+    const v = parsed.flags[key];
+    if (typeof v === "string" && v.trim() !== "") return v.trim();
+  }
+  return null;
+}
+
+/**
+ * The prompt from `prometheus chat "<message>"` — or null when that is not what this is.
+ *
+ * `chat` with a message printed a static capability blurb and exited 0:
+ *
+ *     $ prometheus chat "what is 2+2"
+ *     chat
+ *     modes: local, terminal
+ *     clis: claude, codex, gemini, cursor, opencode
+ *     runners: ollama, lmstudio
+ *
+ * The message was read from argv and then discarded. It is the most obvious command in the
+ * product and the most obvious thing to type first, and it silently did nothing while
+ * reporting success — including for `cat task.md | prometheus chat`, which `bin.ts` feeds
+ * here as a positional. So it routes to the same agentic turn `-p` runs.
+ *
+ * `--cli` and `--local` are left alone: those name genuinely different surfaces (the terminal
+ * CLI preview, and the engine's own local chat verb), and both are still reachable.
+ */
+export function chatPrompt(parsed: ParsedArgs): string | null {
+  if (parsed.command[0] !== "chat") return null;
+  if (parsed.flags.cli !== undefined || parsed.flags.local !== undefined) return null;
+  const text = parsed.positionals.join(" ").trim();
+  return text === "" ? null : text;
+}
+
+/**
+ * How much this headless run is allowed to do, from explicit flags only.
+ *
+ * Two flags rather than one blanket bypass, each named for its exact effect, because "can
+ * edit files" and "can execute arbitrary commands" are genuinely different risks and a CI
+ * file should say which one it is granting. Neither reaches `installs` or `runall`: an
+ * unattended run that can install packages is a decision to make deliberately at a keyboard,
+ * not a side effect of wanting the tests to run.
+ *
+ *   (none)             → 1 readonly  — read, search, grep, reason. The default, unchanged.
+ *   --allow-writes     → 2 edits     — …and write/patch/move/delete files.
+ *   --allow-commands   → 4 commands  — …and run commands. Implies --allow-writes.
+ */
+export function headlessAuthLevel(parsed: ParsedArgs): number {
+  if (parsed.flags["allow-commands"] === true) return 4;
+  if (parsed.flags["allow-writes"] === true) return 2;
+  return agent.DEFAULT_AUTH_LEVEL;
+}
+
+export interface OneShotDeps {
+  /** injected in tests; defaults to the real turn. */
+  runTurn?: typeof runMessageTurn;
+  /** injected in tests; defaults to the real backend probe. */
+  detect?: typeof detectBackends;
+  write?: (line: string) => void;
+}
+
+/**
+ * Run one agent turn headlessly and return what happened.
+ *
+ * Never throws: a missing model, an unreachable runner and a mid-turn error all come back as
+ * `{ok:false, error}` so the caller can choose an exit code and a rendering.
+ */
+export async function runOneShot(
+  parsed: ParsedArgs,
+  prompt: string,
+  deps: OneShotDeps = {},
+): Promise<OneShotResult> {
+  const write = deps.write ?? (() => {});
+  const runTurn = deps.runTurn ?? runMessageTurn;
+  const detect = deps.detect ?? detectBackends;
+  const client = createEngineClient();
+
+  const { tuning, budget } = seedTuningWithNotes(parsed);
+  const backends: Backends = await detect({ client }).catch(
+    () => ({ liveRunners: [], paidClis: [] }) as Backends,
+  );
+  /**
+   * Cloud endpoints, discovered exactly as the two interactive hosts discover them.
+   *
+   * This path took `backends.localEndpoint` and nothing else, so `-p` could reach only a
+   * runner on one of two hardcoded localhost ports. A machine with `ANTHROPIC_API_KEY`
+   * exported and no Ollama running was told "no local model is available — start a runner",
+   * which is both unhelpful and untrue. `resolveKey` was absent for the same reason, so even
+   * a hand-picked cloud endpoint could not have authenticated: the native transport refuses a
+   * keyed endpoint with no resolver.
+   */
+  const cloudKeys = await keychainProviders(orchestration.API_PROVIDER_IDS).catch(
+    () => new Set<string>(),
+  );
+  const cloudEndpoints = ai.discoverCloudEndpoints({
+    env: process.env,
+    hasKeychainKey: (id) => cloudKeys.has(id),
+  });
+  // Local first when it exists — free, private, already warm — then any configured provider.
+  const endpoint = backends.localEndpoint ?? cloudEndpoints[0]?.endpoint;
+  if (!endpoint) {
+    return {
+      ok: false,
+      reply: "",
+      toolCalls: [],
+      capped: false,
+      error:
+        "no model is available — start a local runner (e.g. `ollama serve`), " +
+        "or connect a provider with `prometheus provider connect <id>`",
+    };
+  }
+
+  const cwd = parsed.cwd ?? process.cwd();
+  /**
+   * A headless run is a SESSION, recorded through the same three primitives the two
+   * interactive hosts use.
+   *
+   * It used to persist nothing at all: no index record, no transcript, no rotation — so
+   * `prometheus sessions list|search`, `/recall`, `--continue`, `sessions fork` and
+   * `buildSessionExport` were blind to every CI run. The accounting was worse than absent: it
+   * was written under a `oneshot-<ts>` id in a namespace nothing else knew, so
+   * `tokens report` could name a session whose transcript did not exist.
+   *
+   * `--session-id` makes a scripted run deterministic and appendable, which is what turns a
+   * sequence of `-p` calls into one auditable job.
+   */
+  const home = prometheusHome();
+  const budgetGuard = makeBudgetGuard(budget, loadPricing(), parsed.flags["force-budget"] === true);
+  const explicitId =
+    typeof parsed.flags["session-id"] === "string" ? parsed.flags["session-id"] : "";
+  const sessionId = explicitId.trim() || `headless-${Date.now().toString(36)}`;
+  const liveTuning = {
+    ...tuning,
+    model: { provider: backends.localRunner?.name ?? "ollama", modelId: endpoint.model ?? "" },
+  };
+  /**
+   * The headless confirm: auto-approve exactly what the autonomy ladder auto-approves at its
+   * DEFAULT level, and refuse everything else with a reason the model can act on.
+   *
+   * Omitting `confirm` entirely looked right and was not: auto-approval by authorisation level
+   * lives in the HOST's confirm, not in the loop, so a one-shot with no confirm could not even
+   * `read_file` — the model burned its rounds retrying a read that would never be allowed. A1
+   * (`readonly`) is the documented default and is exactly the useful headless posture: read,
+   * search, grep and reason freely; refuse every write, command and install.
+   *
+   * `headlessAuthLevel` is the only thing that can raise it, and only from an explicit flag.
+   */
+  const level = headlessAuthLevel(parsed);
+  const allowWrites = level > agent.DEFAULT_AUTH_LEVEL;
+  const confirm = (call: { name: string }): { approved: boolean; reason?: string } | true => {
+    const tool = agent.exposedTools(liveTuning.tools).find((t) => t.name === call.name);
+    if (agent.authDecision(level, call.name, tool?.annotations) === "allow") {
+      return true;
+    }
+    return {
+      approved: false,
+      reason: [
+        `${call.name} needs a human approval and this is a non-interactive run. Do NOT retry it.`,
+        allowWrites
+          ? "This run permits some changes but not this tool; work within what is permitted."
+          : "Read-only tools are available: answer from what you can inspect, and say plainly what you would have changed. Re-run with --allow-writes (file changes) or --allow-commands (also run commands) to permit them.",
+      ].join(" "),
+    };
+  };
+
+  /**
+   * Project steering — AGENTS.md / CLAUDE.md / PROMETHEUS.md.
+   *
+   * `SessionCtx.steering` is optional, both interactive hosts set it, and this path did not.
+   * That is the repo's signature defect: the field type-checks either way, so a headless run
+   * silently ignored every project instruction the user had written, while the same prompt
+   * typed into the REPL honoured them. Read once here — a one-shot has no reload to worry
+   * about — and fail-soft, because an unreadable steering file must not take the run with it.
+   */
+  const steeringBlock = ((): string => {
+    try {
+      return assembleSteering(discoverSteering(cwd));
+    } catch {
+      return "";
+    }
+  })();
+  // Durable cross-session memory — same "read once here, no reload to worry about" posture as
+  // steering above, and the same fail-soft framing: an unreadable/missing index must not take
+  // a headless run down with it.
+  const memoryBlock = ((): string | null => {
+    try {
+      return loadMemoryIndexBlock(home, cwd);
+    } catch {
+      return null;
+    }
+  })();
+
+  const ctx: SessionCtx = {
+    client,
+    tuning: liveTuning,
+    json: parsed.json,
+    endpoint,
+    confirm,
+    // No `ask` — nobody is there. The `question` tool already refuses honestly in that case.
+    write,
+    cwd,
+    home,
+    workingSet: [cwd],
+    todos: new agent.TodoStore(),
+    accounting: { home, sessionId },
+    resolveKey: createKeyResolver(),
+    /**
+     * A headless run honours the user's rules too — especially the DENY ones.
+     *
+     * The rule engine used to be gated on a grant store, which this path has no reason to
+     * carry (nobody is here to remember an answer for), so a `deny` a user had written could
+     * not reach the one surface that runs unattended.
+     */
+    permissionRules: loadPermissionRules({ cwd }).rules,
+    /**
+     * The USD spend cap applies to UNATTENDED runs too — it did not.
+     *
+     * This path built its `SessionCtx` by hand with `accounting` but no `budget`, so a
+     * `session_usd` cap the user had configured was enforced in both interactive hosts and
+     * silently ignored by the one surface that runs in a loop in CI with nobody watching.
+     */
+    ...(budgetGuard ? { budget: budgetGuard } : {}),
+    ...(steeringBlock ? { steering: () => steeringBlock } : {}),
+    ...(memoryBlock ? { memory: () => memoryBlock } : {}),
+  };
+
+  // Recorded BEFORE the turn: a run that crashes is exactly the one worth having a record of.
+  recordSession(home, {
+    id: sessionId,
+    ts: new Date().toISOString(),
+    descriptor: descriptorOf(prompt),
+    cwd,
+    kind: "headless",
+  });
+  try {
+    const res = await runTurn(undefined, prompt, { ctx });
+    appendTurnEvents(home, sessionId, [{ role: "user", text: prompt }, ...res.events]);
+    rotateSessions(home, { maxBytes: SESSION_STORE_MAX_BYTES, liveId: sessionId });
+    const toolCalls = res.events
+      .filter((e) => e.kind === "tool_use")
+      .map((e) => (e as { call: { name: string } }).call.name);
+    /**
+     * The exit code has to mean something, because a script is reading it.
+     *
+     * `ok: true` was returned for every turn that did not THROW — so a provider hard failure,
+     * a refused-everything run and a model that produced nothing all exited 0. In CI that is
+     * the worst possible outcome: the job goes green and the work did not happen.
+     *
+     * A turn failed if the runtime emitted a `blocked` event naming the model, or if it ended
+     * with no reply AND no tool calls: there is no reading of "no output, no actions" that is
+     * a success. Being capped is NOT a failure — the model was working and ran out of rounds,
+     * which `capped` already reports for the caller to act on.
+     */
+    const failure = res.events.find(
+      (e): e is Extract<typeof e, { kind: "blocked" }> =>
+        e.kind === "blocked" && !e.tool && /model|endpoint|provider/i.test(e.reason),
+    );
+    const modelError = res.events.find(
+      (e): e is Extract<typeof e, { kind: "text" }> =>
+        e.kind === "text" && /^model error:/i.test(e.text.trim()),
+    );
+    const empty = res.reply.trim() === "" && toolCalls.length === 0;
+    const error = failure?.reason ?? modelError?.text.trim();
+    if (error || empty) {
+      return {
+        ok: false,
+        reply: res.reply,
+        toolCalls,
+        capped: res.capped === true,
+        error: error ?? "the model produced no reply and called no tools",
+      };
+    }
+    return { ok: true, reply: res.reply, toolCalls, capped: res.capped === true };
+  } catch (err) {
+    return {
+      ok: false,
+      reply: "",
+      toolCalls: [],
+      capped: false,
+      error: err instanceof Error ? err.message : String(err),
+    };
+  }
+}
+
+/** The human rendering: the reply, then one honest line about what was refused or cut short. */
+export function renderOneShot(r: OneShotResult): string {
+  if (!r.ok) return `prometheus: ${r.error ?? "one-shot failed"}`;
+  const tail = oneShotNotes(r);
+  return `${r.reply.trim()}${tail ? `\n\n${tail}` : ""}`;
+}
+
+/**
+ * The trailing notes ALONE — for a caller that already streamed the reply.
+ *
+ * `runOneShot` streams every line through `write` as it arrives, and `bin.ts` then printed
+ * `renderOneShot(res)`, which begins with the whole reply again. So every headless answer was
+ * emitted TWICE: once streamed, once in full. Anything parsing the output saw the response
+ * duplicated, and a long answer doubled the bytes for no benefit.
+ */
+export function oneShotNotes(r: OneShotResult): string {
+  const notes: string[] = [];
+  if (r.capped) {
+    notes.push("(stopped at the step cap — the model still wanted to continue)");
+  }
+  // Naming the tools it ran is the difference between "it answered" and "it did something".
+  if (r.toolCalls.length > 0) notes.push(`(tools: ${r.toolCalls.join(", ")})`);
+  return notes.join(" ");
+}

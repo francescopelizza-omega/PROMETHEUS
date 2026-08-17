@@ -5,6 +5,14 @@
   "type": "module",
   "description": "prometheus — Prometheus Studio terminal CLI / interactive TUI (Node). Full GUI feature parity over engine-bridge.",
   "license": "MIT",
+  "author": "Francesco Pelizza <red-beard-phoenix@users.noreply.gitlab.com>",
+  "repository": {
+    "type": "git",
+    "url": "https://gitlab.com/red-beard-phoenix/PROMETHEUS.git",
+    "directory": "studio/apps/cli"
+  },
+  "bugs": { "url": "https://gitlab.com/red-beard-phoenix/PROMETHEUS/-/issues" },
+  "homepage": "https://gitlab.com/red-beard-phoenix/PROMETHEUS",
   "bin": { "prometheus": "dist/bin.js" },
   "files": ["dist/bin.js", "README.md"],
   "engines": { "node": ">=20" },
@@ -20,7 +28,7 @@
     "build:sea": "node scripts/build-sea.mjs",
     "sea:smoke": "node scripts/sea-smoke.mjs",
     "start": "node --import ./dev-register.mjs src/bin.ts",
-    "test": "node --import ./dev-register.mjs --test src/cli.test.ts"
+    "test": "node ../../scripts/run-tests.mjs apps/cli"
   },
   "dependencies": {},
   "//deps-note": "The @prometheus/* workspace packages + the Ink-REPL externals (ink/react/yargs/chalk) are DEV-only: dev resolves them via the pnpm workspace symlink; the published package bundles the @prometheus/* code into dist/bin.js and loads the (optional) Ink view via a guarded dynamic import. Keeping `dependencies` empty preserves the zero-dependency install the README advertises.",

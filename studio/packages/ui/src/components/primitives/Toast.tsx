@@ -8,6 +8,7 @@
  */
 
 import { type ReactNode, useCallback, useEffect, useState } from "react";
+import { Z } from "../../tokens/layers.js";
 import { fs, rad, sp, v } from "./styles.js";
 
 export type ToastTone = "info" | "ok" | "warn" | "danger";
@@ -121,7 +122,7 @@ export function ToastViewport({ toasts, onDismiss }: ToastViewportProps): ReactN
         position: "fixed",
         bottom: sp(8),
         right: sp(8),
-        zIndex: 1500,
+        zIndex: Z.toast,
         display: "flex",
         flexDirection: "column",
         gap: sp(3),

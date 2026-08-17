@@ -11,6 +11,8 @@
 import { globMatch } from "../agents/sandbox.js";
 
 /** A captured pre-turn snapshot of the workspace files (E2). */
+import { utf8Length } from "./bytes.js";
+
 export interface Checkpoint {
   id: string;
   sessionId: string;
@@ -48,7 +50,7 @@ export function shouldSnapshot(
   const ignore = [...DEFAULT_IGNORE, ...(policy.ignore ?? [])];
   if (ignore.some((g) => globMatch(g, path))) return false;
   const max = policy.maxBytes ?? 2_000_000; // 2 MB
-  if (Buffer.byteLength(content, "utf8") > max) return false;
+  if (utf8Length(content) > max) return false;
   return true;
 }
 

@@ -30,20 +30,23 @@ export interface SecurityStore {
   lastVerdict: GateResult | null;
   /** the verdict tier currently tinting the permanent nemesis shield. */
   shieldTier: VerdictTier | null;
-  /** a plugin name awaiting a typed-confirm before a `--force` override. */
-  pendingForce: string | null;
+  /**
+   * How many deep-red overrides the user has forced THIS SESSION (HANDOFF_2 §9).
+   * ForceOverrideDialog surfaces it: the second override in a sitting should feel
+   * different from the first, and a count is the cheapest honest way to say so.
+   */
+  forcedThisSession: number;
   setVerdict(v: GateResult): void;
-  requestForce(name: string): void;
-  clearForce(): void;
+  /** record that an override was actually confirmed (not merely offered). */
+  noteForced(): void;
 }
 
 export const useSecurityStore = create<SecurityStore>((set) => ({
   lastVerdict: null,
   shieldTier: null,
-  pendingForce: null,
+  forcedThisSession: 0,
   setVerdict: (v: GateResult): void => set({ lastVerdict: v, shieldTier: v?.verdict ?? null }),
-  requestForce: (name: string): void => set({ pendingForce: name }),
-  clearForce: (): void => set({ pendingForce: null }),
+  noteForced: (): void => set((s) => ({ forcedThisSession: s.forcedThisSession + 1 })),
 }));
 
 /* ── packages (04): catalog selection + which plugin's detail pane is open ───*/

@@ -18,6 +18,8 @@ import { readFileSync } from "node:fs";
  * Node built-ins only (node:fs/promises, node:path). Zero third-party deps.
  */
 import { readFile } from "node:fs/promises";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import type {
   BillingMode,
@@ -239,9 +241,25 @@ function parseConfigText(text: string): Provider[] {
   return raw.map(parseProvider);
 }
 
-/** Default config location relative to the monorepo root. */
-export const DEFAULT_PROVIDERS_CONFIG =
-  "/Users/dev/ALPHA/PROMETHEUS/studio/config/providers.config.json";
+/**
+ * Default config location, resolved RELATIVE to this module rather than hard-coded:
+ * …/studio/packages/core/(src|dist)/providers → up 4 = …/studio. src and dist sit at the
+ * same depth, so one count serves both the dev and the compiled tree.
+ *
+ * This value is inlined into the published CLI bundle and the Electron asar, so an
+ * absolute developer path here ships the author's username and home layout to every user
+ * — and points at a directory that exists on exactly one machine. Callers pass an explicit
+ * path when they have one; this is only the fallback.
+ */
+export const DEFAULT_PROVIDERS_CONFIG = (() => {
+  try {
+    const here = dirname(fileURLToPath(import.meta.url));
+    return resolve(here, "..", "..", "..", "..", "config", "providers.config.json");
+  } catch {
+    // no import.meta (bundled to CJS / SEA) — stay relative to the process, not to a home dir
+    return resolve(process.cwd(), "studio", "config", "providers.config.json");
+  }
+})();
 
 /** Async-load + parse the provider config from disk (C11). */
 export async function loadProviders(path: string = DEFAULT_PROVIDERS_CONFIG): Promise<Provider[]> {

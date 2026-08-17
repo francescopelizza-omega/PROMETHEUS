@@ -129,7 +129,7 @@ function Node({
             fontFamily: "var(--font-ui)",
             paddingLeft: `calc(var(--space-4, 12px) + ${depth * 14}px)`,
             whiteSpace: "pre-wrap",
-            overflowWrap: "anywhere",
+            overflowWrap: "break-word",
           }}
         >
           {node.message}
@@ -225,7 +225,7 @@ export function TestExplorerPanel({
             fontSize: "var(--text-small-size, 0.8125rem)",
             marginBottom: "var(--space-2, 4px)",
             whiteSpace: "pre-wrap",
-            overflowWrap: "anywhere",
+            overflowWrap: "break-word",
           }}
         >
           {lastError}
@@ -404,7 +404,7 @@ export function TestExplorer({ root }: { root: string }): ReactElement {
               fontFamily: "var(--font-mono, monospace)",
               fontSize: "var(--text-small-size, 0.8125rem)",
               whiteSpace: "pre-wrap",
-              overflowWrap: "anywhere",
+              overflowWrap: "break-word",
               color: "var(--text-primary)",
             }}
           >

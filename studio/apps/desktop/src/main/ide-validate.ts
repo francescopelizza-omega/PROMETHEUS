@@ -452,6 +452,22 @@ export const gitBranchSchema = z.object({
     .regex(/^[^-]/, "branch must not start with '-'"),
   create: z.boolean().optional().default(false),
 });
+// Task #5 (desktop parity): worktree isolation. Zod is a SECOND, redundant defense here —
+// `@prometheus/core/git-worktree`'s `isSafeToken` already rejects a flag-like branch/path
+// before any spawn — but the seam still validates shape at the IPC boundary like every
+// other git.* channel.
+export const gitWorktreeCreateSchema = z.object({
+  root: PATH,
+  branch: z
+    .string()
+    .trim()
+    .min(1, "branch must not be empty")
+    .max(255, "branch is too long")
+    .regex(/^[^\s;&|`$<>(){}\\]+$/, "branch has invalid characters")
+    .regex(/^[^-]/, "branch must not start with '-'"),
+  path: PATH.optional(),
+});
+export const gitWorktreeRemoveSchema = z.object({ root: PATH, path: PATH });
 export const gitStashSchema = z.object({ root: PATH, message: TEXT.optional() });
 export const gitStashRefSchema = z.object({
   root: PATH,
@@ -1075,6 +1091,22 @@ export function validateGitBranch(
   a: unknown,
 ): GuardResult<{ root: string; name: string; create: boolean }> {
   return runSchema(gitBranchSchema, asObject(a));
+}
+
+export interface GitWorktreeCreateArgs {
+  root: string;
+  branch: string;
+  path?: string;
+}
+export function validateGitWorktreeCreate(a: unknown): GuardResult<GitWorktreeCreateArgs> {
+  const r = runSchema(gitWorktreeCreateSchema, asObject(a));
+  if (!r.ok) return r;
+  const v: GitWorktreeCreateArgs = { root: r.value.root, branch: r.value.branch };
+  if (r.value.path !== undefined) v.path = r.value.path;
+  return { ok: true, value: v };
+}
+export function validateGitWorktreeRemove(a: unknown): GuardResult<{ root: string; path: string }> {
+  return runSchema(gitWorktreeRemoveSchema, asObject(a));
 }
 
 export interface GitStashArgs {

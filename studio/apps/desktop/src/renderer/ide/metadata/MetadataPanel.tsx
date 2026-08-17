@@ -10,8 +10,9 @@
  * For the user's OWN files + privacy only — the destructive erase ALWAYS confirms.
  */
 import { Button, EmptyState, Panel, StatusPill } from "@prometheus/ui";
-import { type CSSProperties, type ReactElement, useCallback, useState } from "react";
+import { type CSSProperties, type ReactElement, useCallback, useRef, useState } from "react";
 
+import { Z, useFocusTrap } from "@prometheus/ui";
 import type { MetadataInspectResult } from "../../../shared/ipc-contract.js";
 import { type MetadataRow, buildMetadataRows, summarize } from "./metadata-panel-view.js";
 
@@ -50,6 +51,12 @@ export function MetadataPanel(): ReactElement {
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState<string | null>(null);
   const [confirming, setConfirming] = useState(false);
+  // §9.2 overlay contract: a destructive confirm traps focus, closes on Escape, and has a
+  // VISIBLE close affordance. It previously had none of the three — its Escape handler sat
+  // on a `role="presentation"` backdrop that is never focused, so it could never fire.
+  const confirmRef = useRef<HTMLElement | null>(null);
+  const closeConfirm = useCallback(() => setConfirming(false), []);
+  useFocusTrap(confirmRef, confirming, closeConfirm);
 
   const load = useCallback(async (uri: string) => {
     const api = bridge();
@@ -165,11 +172,18 @@ export function MetadataPanel(): ReactElement {
 
         {filePath && (
           <code
+            title={filePath}
             style={{
               color: "var(--text-secondary)",
               fontFamily: "var(--font-mono)",
               fontSize: "var(--text-small-size, 0.8125rem)",
-              wordBreak: "break-all",
+              // header context, so ellipsis. The SAME path inside the erase confirm below
+              // keeps `break-all` — there it is the thing being confirmed and must be
+              // readable in full before the user destroys anything.
+              display: "block",
+              overflow: "hidden",
+              textOverflow: "ellipsis",
+              whiteSpace: "nowrap",
             }}
           >
             {filePath}
@@ -219,7 +233,10 @@ export function MetadataPanel(): ReactElement {
                   <tr key={`${r.group}:${r.key}`}>
                     <td style={{ ...cell, color: "var(--text-secondary)" }}>{r.group}</td>
                     <td style={{ ...cell, fontFamily: "var(--font-mono)" }}>{r.key}</td>
-                    <td style={{ ...cell, wordBreak: "break-all" }}>{r.value}</td>
+                    {/* `break-word`, not `break-all`: these are arbitrary metadata values,
+                        mostly prose (author, comments, camera model). break-all chops normal
+                        words mid-letter; break-word only breaks a token that cannot fit. */}
+                    <td style={{ ...cell, overflowWrap: "break-word" }}>{r.value}</td>
                     <td style={cell}>
                       {r.sensitive ? (
                         <StatusPill status="degraded" label="sensitive" />
@@ -236,81 +253,98 @@ export function MetadataPanel(): ReactElement {
       </div>
 
       {confirming && (
-        <div
-          role="presentation"
-          onClick={(e) => {
-            if (e.target === e.currentTarget) setConfirming(false);
-          }}
-          onKeyDown={(e) => {
-            if (e.key === "Escape") setConfirming(false);
-          }}
-          style={{
-            position: "fixed",
-            inset: 0,
-            background: "rgba(0,0,0,0.5)",
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            zIndex: 1100,
-          }}
-        >
-          <section
-            aria-label="Confirm erase metadata"
+        <>
+          {/* biome-ignore lint/a11y/useKeyWithClickEvents: the keyboard path is Escape, owned
+              by useFocusTrap on the document in capture. The onKeyDown this rule asks for is
+              what USED to be here — on a never-focused presentation div, where it satisfied
+              the lint and did nothing. */}
+          <div
+            role="presentation"
+            onClick={(e) => {
+              if (e.target === e.currentTarget) closeConfirm();
+            }}
             style={{
-              width: 440,
-              maxWidth: "90vw",
-              background: "var(--bg-surface-2)",
-              border: "1px solid var(--danger)",
-              borderRadius: "var(--radius-xl, 14px)",
-              boxShadow: "0 16px 48px rgba(0,0,0,.5)",
-              padding: "var(--space-8, 16px)",
-              color: "var(--text-primary)",
-              fontFamily: "var(--font-ui)",
+              position: "fixed",
+              inset: 0,
+              background: "rgba(0,0,0,0.5)",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              // Z.modal, not Z.palette: this is a destructive confirm the user must answer
+              // before continuing, which is exactly the rung layers.ts assigns to `modal`.
+              // On `palette` (1100) it sat BELOW every other confirm in the app.
+              zIndex: Z.modal,
             }}
           >
-            <h2
+            <section
+              ref={confirmRef}
+              role="alertdialog"
+              aria-modal="true"
+              aria-label="Confirm erase metadata"
               style={{
-                margin: 0,
-                fontSize: "var(--text-h2-size, 1.125rem)",
-                color: "var(--danger)",
+                width: 440,
+                maxWidth: "90vw",
+                maxHeight: "90vh",
+                overflow: "auto",
+                background: "var(--bg-surface-2)",
+                border: "1px solid var(--danger)",
+                borderRadius: "var(--radius-xl, 14px)",
+                boxShadow: "0 16px 48px rgba(0,0,0,.5)",
+                padding: "var(--space-8, 16px)",
+                color: "var(--text-primary)",
+                fontFamily: "var(--font-ui)",
               }}
             >
-              🧼 Erase all metadata?
-            </h2>
-            <p
-              style={{
-                color: "var(--text-secondary)",
-                fontSize: "var(--text-small-size, 0.8125rem)",
-              }}
-            >
-              This strips content tags + extended attributes from a COPY, verifies, then atomically
-              replaces the file. The file's content is preserved and the original is never lost on
-              failure. Applies to:
-            </p>
-            <code
-              style={{
-                display: "block",
-                color: "var(--text-secondary)",
-                fontFamily: "var(--font-mono)",
-                fontSize: "var(--text-small-size, 0.8125rem)",
-                wordBreak: "break-all",
-                marginBottom: "var(--space-4, 8px)",
-              }}
-            >
-              {filePath}
-            </code>
-            <div
-              style={{ display: "flex", justifyContent: "flex-end", gap: "var(--space-3, 6px)" }}
-            >
-              <Button variant="secondary" onClick={() => setConfirming(false)}>
-                Cancel
-              </Button>
-              <Button variant="danger" onClick={erase} disabled={busy}>
-                Erase metadata
-              </Button>
-            </div>
-          </section>
-        </div>
+              <div style={{ display: "flex", alignItems: "center", gap: "var(--space-4, 8px)" }}>
+                <h2
+                  style={{
+                    margin: 0,
+                    flex: 1,
+                    fontSize: "var(--text-h2-size, 1.125rem)",
+                    color: "var(--danger)",
+                  }}
+                >
+                  🧼 Erase all metadata?
+                </h2>
+                <Button size="sm" variant="ghost" aria-label="close" onClick={closeConfirm}>
+                  ✕
+                </Button>
+              </div>
+              <p
+                style={{
+                  color: "var(--text-secondary)",
+                  fontSize: "var(--text-small-size, 0.8125rem)",
+                }}
+              >
+                This strips content tags + extended attributes from a COPY, verifies, then
+                atomically replaces the file. The file's content is preserved and the original is
+                never lost on failure. Applies to:
+              </p>
+              <code
+                style={{
+                  display: "block",
+                  color: "var(--text-secondary)",
+                  fontFamily: "var(--font-mono)",
+                  fontSize: "var(--text-small-size, 0.8125rem)",
+                  wordBreak: "break-all",
+                  marginBottom: "var(--space-4, 8px)",
+                }}
+              >
+                {filePath}
+              </code>
+              <div
+                style={{ display: "flex", justifyContent: "flex-end", gap: "var(--space-3, 6px)" }}
+              >
+                <Button variant="secondary" onClick={closeConfirm}>
+                  Cancel
+                </Button>
+                <Button variant="danger" onClick={erase} disabled={busy}>
+                  Erase metadata
+                </Button>
+              </div>
+            </section>
+          </div>
+        </>
       )}
     </Panel>
   );

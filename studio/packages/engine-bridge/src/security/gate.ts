@@ -35,6 +35,16 @@ export interface RunOptions {
   timeoutMs?: number;
   signal?: AbortSignal;
   onStderr?: (line: string) => void;
+  /**
+   * Text piped to nemesis's stdin, then closed — for `nemesis gate -`, which scans whatever
+   * arrives there.
+   *
+   * This is the seam `prometheus.py` already uses via `enforce_gate_text` to vet a shell body
+   * BEFORE running it. Without it the bridge could only gate a PATH, so a proposed command
+   * line had no way to reach the scanner at all. Nothing touches disk: the text goes straight
+   * down the pipe.
+   */
+  stdin?: string;
 }
 
 export interface NemesisRunResult {
@@ -192,6 +202,15 @@ export function runNemesis(
       }
     });
 
+    // Pipe the body BEFORE closing (nemesis `gate -` reads stdin). `end()` on its own is the
+    // no-stdin case and stays the default.
+    if (typeof opts.stdin === "string" && opts.stdin.length > 0) {
+      try {
+        child.stdin?.write(opts.stdin);
+      } catch {
+        /* a closed pipe surfaces as a spawn/exit error below — fail closed there */
+      }
+    }
     child.stdin?.end();
 
     child.on("error", (err: Error) => {
@@ -331,5 +350,107 @@ function failClosedVerdict(target: string, reason: string): SecurityVerdict {
     ],
     scannedAt: new Date().toISOString(),
     target,
+  };
+}
+
+/**
+ * Gate a proposed COMMAND LINE through nemesis (full_wrapper_compose §6, layer 3).
+ *
+ * The other four layers reason about structure — can we parse it, do we know the programs,
+ * what does the ladder say, does the human agree. This layer is the only one that asks the
+ * question the rest of Prometheus asks about everything else it runs: *does the scanner think
+ * this is malicious?* Nemesis already carries the rules (`R2.pipe` for pipe-to-shell,
+ * `R3.sudo`, and the rest of the table), and `gate -` already reads stdin — the only thing
+ * missing was a caller.
+ *
+ * FAIL-CLOSED, exactly like `gate()`: a missing binary, a timeout, an unparseable verdict —
+ * anything that leaves us without a trustworthy answer — comes back as `error`, which the
+ * agent loop treats as a BLOCK under `gateMode: "enforce"`.
+ *
+ * The text scanned is the RE-RENDERED command (what will actually run), never the model's
+ * original string, so the scanner and the executor see the same thing.
+ */
+export async function gateCommand(
+  commandText: string,
+  opts: RunOptions = {},
+  config: EngineConfig = {},
+): Promise<SecurityVerdict> {
+  const text = (commandText ?? "").trim();
+  if (!text) return failClosedVerdict("<command>", "empty command");
+  // A short, self-contained body: a command line is one line, so the long install-scan
+  // budget would only turn a wedged scanner into a wedged turn.
+  const timeoutMs = opts.timeoutMs ?? 20_000;
+  return gateStdinText(text, `command: ${text.slice(0, 120)}`, { ...opts, timeoutMs }, config);
+}
+
+/**
+ * Scan an in-memory body through `nemesis gate -`.
+ *
+ * Shares `gate()`'s reconciliation rules verbatim: take the MORE conservative of the exit-code
+ * tier and the JSON tier, and treat "no parseable verdict JSON" as untrustworthy rather than
+ * as permission.
+ */
+async function gateStdinText(
+  body: string,
+  label: string,
+  opts: RunOptions,
+  config: EngineConfig,
+): Promise<SecurityVerdict> {
+  let res: NemesisRunResult;
+  try {
+    res = await runNemesis(["gate", "-"], { ...opts, stdin: body }, config);
+  } catch (e) {
+    return failClosedVerdict(label, e instanceof Error ? e.message : String(e));
+  }
+
+  const exitTier = tierFromExitCode(res.exitCode);
+  const json =
+    res.json && typeof res.json === "object" && !Array.isArray(res.json)
+      ? (res.json as Record<string, unknown>)
+      : undefined;
+
+  if (!json) {
+    // A permissive exit code with no verdict JSON is not evidence of safety — same rule
+    // `gate()` applies, for the same reason (a broken or hijacked scanner).
+    if (exitTier === "allow" || exitTier === "warn") {
+      return failClosedVerdict(label, "nemesis produced no parseable verdict JSON");
+    }
+    return {
+      verdict: exitTier,
+      risk_score: 100,
+      signed: false,
+      findings: [],
+      scannedAt: new Date().toISOString(),
+      target: label,
+    };
+  }
+
+  const verdict = moreConservative(exitTier, normalizeVerdict(json.verdict));
+  const risk =
+    typeof json.risk_score === "number"
+      ? json.risk_score
+      : verdict === "allow"
+        ? 0
+        : verdict === "warn"
+          ? 50
+          : 100;
+  const reasons = Array.isArray(json.blocking_reasons)
+    ? json.blocking_reasons.filter((r): r is string => typeof r === "string")
+    : [];
+  return {
+    verdict,
+    risk_score: risk,
+    signed: json.signed === true,
+    // `blocking_reasons` are prose, not structured findings — map them into the Finding
+    // shape rather than inventing a parallel one, so every surface that already renders a
+    // verdict renders this one too.
+    findings: reasons.map((r) => ({
+      klass: "malware" as const,
+      severity: (verdict === "warn" ? "medium" : "high") as Finding["severity"],
+      rule: "nemesis",
+      where: r,
+    })),
+    scannedAt: new Date().toISOString(),
+    target: label,
   };
 }

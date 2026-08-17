@@ -8,11 +8,15 @@
 appId: ai.prometheus.studio
 productName: Prometheus Studio
 copyright: © 2026 Francesco Pelizza
-# App icon: the single source is build/icon.png (1024×1024). electron-builder reads
-# it from buildResources (build/) by convention and derives every per-OS format;
-# build/icon.icns is also shipped for macOS fidelity. To rebrand, replace those two
-# files (a 1024² PNG is enough — regenerate the .icns with `iconutil`). The dev run
-# loads the same PNG for its dock/window icon (see main/index.ts APP_ICON_PATH).
+# App icon (HANDOFF_2 §8): the pixel-art human Prometheus. The single SOURCE is the
+# master artwork; build/icon.{png,icns,ico} are GENERATED and committed. Regenerate with
+#   node scripts/build-app-icon.mjs [path/to/master.png]
+# which keys out the master's baked-in background, upscales by integer nearest-neighbour
+# (pixel art must never be bilinear-filtered), centres it on the #0d0d0d ground, and
+# emits the 1024² PNG + the macOS .icns (via iconutil) + the Windows .ico. It also writes
+# the in-app 19×21 mark to renderer/assets/. electron-builder reads build/ as
+# buildResources by convention; the dev run loads the same PNG for its dock/window icon
+# (see main/index.ts APP_ICON_PATH). Do NOT hand-edit the generated files.
 directories:
   output: release
   buildResources: build
@@ -79,8 +83,25 @@ nsis:
   perMachine: false # per-user → no UAC, easier auto-update
   allowToChangeInstallationDirectory: true
   shortcutName: Prometheus Studio
-publish:
-  provider: github
-  owner: dev
-  repo: prometheus
-  channel: latest # beta/alpha channels gated by the prerelease tag (§5)
+# PUBLISHING IS DELIBERATELY UNCONFIGURED.
+#
+# This block pointed at `provider: github, owner: <a personal github account>, repo: prometheus`
+# — a GitHub repository, while this project's remote is GitLab
+# (gitlab.com/red-beard-phoenix/PROMETHEUS). Two things were wrong with that, and the second is
+# the serious one:
+#
+#   1. It could never have worked: `electron-builder --publish` would authenticate against a
+#      GitHub repo that is not this project's, and the auto-updater would have pointed users at
+#      releases that were never going to appear there.
+#   2. A misconfigured publish target is a loaded gun. `pnpm run package` passes
+#      `--publish never`, so nothing has fired — but any invocation that did not would have
+#      attempted an upload to somebody else's namespace.
+#
+# The packaging path (`pnpm --filter @prometheus/desktop run package`) is unaffected: it builds
+# a local artifact and explicitly does not publish. Restore a `publish:` block only alongside a
+# real release process, pointing at the forge this project actually uses — and note that
+# electron-builder has no first-class GitLab provider, so that will mean `provider: generic`
+# with a release URL, or GitLab's package registry.
+#
+# The auto-updater reads the same block; leaving it wrong meant update checks against a
+# stranger's repository.

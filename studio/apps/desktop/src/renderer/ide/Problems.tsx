@@ -34,7 +34,7 @@ import { absTestPath, useTestRunStore } from "./test/test-run-store.js";
 const headerBtnStyle = {
   background: "transparent",
   border: "none",
-  color: "var(--accent, #22d3ee)",
+  color: "var(--accent)",
   cursor: "pointer",
   fontSize: "0.72rem",
   padding: "0 2px",
@@ -42,10 +42,10 @@ const headerBtnStyle = {
 
 const SEV_GLYPH: Record<number, string> = { 1: "✖", 2: "⚠", 3: "ℹ", 4: "·" };
 const SEV_COLOR: Record<number, string> = {
-  1: "var(--danger, #ef5a5a)",
-  2: "var(--warn, #d9a441)",
-  3: "var(--text-secondary, #9a9aa3)",
-  4: "var(--text-secondary, #9a9aa3)",
+  1: "var(--danger)",
+  2: "var(--warn)",
+  3: "var(--text-secondary)",
+  4: "var(--text-secondary)",
 };
 
 export function Problems(): ReactElement {
@@ -161,9 +161,9 @@ export function Problems(): ReactElement {
           alignItems: "center",
           gap: 8,
           padding: "4px 8px",
-          background: "var(--bg-surface-2, #16161b)",
-          borderBottom: "1px solid var(--border-subtle, #232329)",
-          color: "var(--text-secondary, #9a9aa3)",
+          background: "var(--bg-surface-2)",
+          borderBottom: "1px solid var(--border-subtle)",
+          color: "var(--text-secondary)",
         }}
       >
         <span>
@@ -218,7 +218,7 @@ export function Problems(): ReactElement {
         />
       </div>
       {rows.length === 0 ? (
-        <p style={{ padding: 8, color: "var(--text-secondary, #9a9aa3)" }}>
+        <p style={{ padding: 8, color: "var(--text-secondary)" }}>
           {allRows.length === 0
             ? "No problems detected."
             : "All problems suppressed by the profile."}
@@ -242,7 +242,7 @@ export function Problems(): ReactElement {
                   gap: 6,
                   padding: "3px 8px",
                   cursor: "pointer",
-                  color: "var(--text-primary, #e7e7ea)",
+                  color: "var(--text-primary)",
                   background: "transparent",
                   border: "none",
                   font: "inherit",
@@ -256,7 +256,7 @@ export function Problems(): ReactElement {
                 <span
                   style={{
                     fontFamily: "var(--font-mono, monospace)",
-                    color: "var(--text-secondary, #9a9aa3)",
+                    color: "var(--text-secondary)",
                   }}
                 >
                   {r.name}:{r.line + 1}
@@ -266,9 +266,7 @@ export function Problems(): ReactElement {
                 >
                   {r.message}
                 </span>
-                {r.source && (
-                  <span style={{ color: "var(--text-secondary, #9a9aa3)" }}>({r.source})</span>
-                )}
+                {r.source && <span style={{ color: "var(--text-secondary)" }}>({r.source})</span>}
               </button>
               <button
                 type="button"
@@ -278,7 +276,7 @@ export function Problems(): ReactElement {
                 style={{
                   background: "transparent",
                   border: "none",
-                  color: "var(--text-secondary, #9a9aa3)",
+                  color: "var(--text-secondary)",
                   cursor: "pointer",
                   fontSize: "0.75rem",
                   padding: "0 4px",
@@ -294,7 +292,7 @@ export function Problems(): ReactElement {
                 style={{
                   background: "transparent",
                   border: "none",
-                  color: "var(--text-secondary, #9a9aa3)",
+                  color: "var(--text-secondary)",
                   cursor: "pointer",
                   fontSize: "0.75rem",
                   padding: "0 4px",
@@ -307,8 +305,8 @@ export function Problems(): ReactElement {
         </div>
       )}
       {testFailures.length > 0 && (
-        <div style={{ borderTop: "1px solid var(--border-subtle, #232329)" }}>
-          <div style={{ padding: "4px 8px", color: "var(--text-secondary, #9a9aa3)" }}>
+        <div style={{ borderTop: "1px solid var(--border-subtle)" }}>
+          <div style={{ padding: "4px 8px", color: "var(--text-secondary)" }}>
             TEST FAILURES · {testFailures.length}
           </div>
           {testFailures.map((t) => (
@@ -334,7 +332,7 @@ export function Problems(): ReactElement {
                 width: "100%",
                 padding: "3px 8px",
                 cursor: "pointer",
-                color: "var(--text-primary, #e7e7ea)",
+                color: "var(--text-primary)",
                 background: "transparent",
                 border: "none",
                 font: "inherit",
@@ -342,13 +340,13 @@ export function Problems(): ReactElement {
                 overflow: "hidden",
               }}
             >
-              <span aria-hidden="true" style={{ color: "var(--danger, #ef5a5a)" }}>
+              <span aria-hidden="true" style={{ color: "var(--danger)" }}>
                 ✖
               </span>
               <span
                 style={{
                   fontFamily: "var(--font-mono, monospace)",
-                  color: "var(--text-secondary, #9a9aa3)",
+                  color: "var(--text-secondary)",
                 }}
               >
                 {t.name}:{t.line}

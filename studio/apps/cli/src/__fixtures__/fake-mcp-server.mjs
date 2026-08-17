@@ -11,8 +11,9 @@ let buf = "";
 process.stdin.setEncoding("utf8");
 process.stdin.on("data", (chunk) => {
   buf += chunk;
-  let idx;
-  while ((idx = buf.indexOf("\n")) >= 0) {
+  for (;;) {
+    const idx = buf.indexOf("\n");
+    if (idx < 0) break;
     const line = buf.slice(0, idx).trim();
     buf = buf.slice(idx + 1);
     if (!line) continue;

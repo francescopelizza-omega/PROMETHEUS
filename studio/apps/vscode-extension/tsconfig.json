@@ -1,0 +1,22 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "//": "NOT part of the root `tsc -b` composite graph, for the same reason apps/desktop is not: this package is BUNDLED (esbuild.mjs → CJS) rather than tsc-emitted, so it is noEmit + non-composite and is type-checked by the root `typecheck` script running `tsc -p` on it directly.",
+  "//moduleResolution": "Bundler (inherited from the base config): esbuild is the real resolver, and it honours @prometheus/core's `exports` map, which declares `import` conditions only.",
+  "//typeRoots": "Overridden because @types/vscode is installed in THIS package (the isolated linker keeps it here, not at the root), while @types/node still lives in the root store — so both roots must be listed or one of them stops resolving.",
+  "compilerOptions": {
+    "rootDir": "src",
+    "lib": ["ES2023", "DOM"],
+    "types": ["node", "vscode"],
+    "typeRoots": [
+      "./node_modules/@types",
+      "../../node_modules/@types",
+      "../../node_modules/.pnpm/@types+node@20.19.43/node_modules/@types"
+    ],
+    "noEmit": true,
+    "composite": false,
+    "declaration": false,
+    "declarationMap": false
+  },
+  "include": ["src/**/*"],
+  "exclude": ["out", "node_modules"]
+}

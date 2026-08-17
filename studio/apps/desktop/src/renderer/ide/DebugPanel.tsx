@@ -326,13 +326,13 @@ function TreeNode({
             padding: 0,
             cursor: canExpand ? "pointer" : "default",
             textAlign: "left",
-            color: "var(--text-primary, #e7e7ea)",
+            color: "var(--text-primary)",
           }}
         >
-          <span style={{ width: 10, color: "var(--text-secondary, #9a9aa3)" }}>
+          <span style={{ width: 10, color: "var(--text-secondary)" }}>
             {canExpand ? (open ? "▾" : "▸") : ""}
           </span>
-          <span style={{ color: "var(--accent, #22d3ee)" }}>{label}</span>
+          <span style={{ color: "var(--accent)" }}>{label}</span>
         </button>
         {editing ? (
           <input
@@ -365,7 +365,7 @@ function TreeNode({
                 }
                 title={editable ? "double-click to set value" : undefined}
                 style={{
-                  color: "var(--text-secondary, #9a9aa3)",
+                  color: "var(--text-secondary)",
                   overflow: "hidden",
                   textOverflow: "ellipsis",
                   whiteSpace: "nowrap",
@@ -376,27 +376,21 @@ function TreeNode({
               </span>
             )}
             {curType && (
-              <span style={{ color: "var(--text-secondary, #9a9aa3)", opacity: 0.7 }}>
-                {curType}
-              </span>
+              <span style={{ color: "var(--text-secondary)", opacity: 0.7 }}>{curType}</span>
             )}
           </>
         )}
       </div>
       {editErr && (
-        <p role="alert" style={{ ...mono, margin: "0 0 0 22px", color: "var(--danger, #ef5a5a)" }}>
+        <p role="alert" style={{ ...mono, margin: "0 0 0 22px", color: "var(--danger)" }}>
           {editErr}
         </p>
       )}
       {open &&
         (kids === null ? (
-          <p style={{ ...mono, margin: "0 0 0 22px", color: "var(--text-secondary, #9a9aa3)" }}>
-            loading…
-          </p>
+          <p style={{ ...mono, margin: "0 0 0 22px", color: "var(--text-secondary)" }}>loading…</p>
         ) : kids.length === 0 ? (
-          <p style={{ ...mono, margin: "0 0 0 22px", color: "var(--text-secondary, #9a9aa3)" }}>
-            (empty)
-          </p>
+          <p style={{ ...mono, margin: "0 0 0 22px", color: "var(--text-secondary)" }}>(empty)</p>
         ) : (
           kids.map((k, i) => (
             <TreeNode
@@ -454,9 +448,9 @@ function buildLaunchRequest(
 
 const inputStyle = {
   flex: 1,
-  background: "var(--bg-surface-2, #16161b)",
-  color: "var(--text-primary, #e7e7ea)",
-  border: "1px solid var(--border-subtle, #2a2a33)",
+  background: "var(--bg-surface-2)",
+  color: "var(--text-primary)",
+  border: "1px solid var(--border-subtle)",
   borderRadius: 4,
   padding: "2px 6px",
   fontSize: "0.7rem",
@@ -495,7 +489,7 @@ function BreakpointRow({
         <span
           aria-hidden="true"
           title={isLogpoint(bp) ? "logpoint" : isConditional(bp) ? "conditional" : "breakpoint"}
-          style={{ color: isLogpoint(bp) ? "var(--accent, #22d3ee)" : "var(--danger, #ef5a5a)" }}
+          style={{ color: isLogpoint(bp) ? "var(--accent)" : "var(--danger)" }}
         >
           {kind}
         </span>
@@ -514,17 +508,14 @@ function BreakpointRow({
             textAlign: "left",
             fontSize: "0.72rem",
             fontFamily: "var(--font-mono, monospace)",
-            color: bp.enabled ? "var(--text-primary, #e7e7ea)" : "var(--text-secondary, #9a9aa3)",
+            color: bp.enabled ? "var(--text-primary)" : "var(--text-secondary)",
           }}
         >
           <span style={{ overflow: "hidden", textOverflow: "ellipsis" }}>{basename(bp.path)}</span>
-          <span style={{ color: "var(--text-secondary, #9a9aa3)" }}>:{bp.line}</span>
+          <span style={{ color: "var(--text-secondary)" }}>:{bp.line}</span>
         </button>
         {bp.enabled && bp.verified === false && (
-          <span
-            title="not verified by the debug adapter"
-            style={{ color: "var(--warning, #e0a324)" }}
-          >
+          <span title="not verified by the debug adapter" style={{ color: "var(--warning)" }}>
             ?
           </span>
         )}
@@ -537,7 +528,7 @@ function BreakpointRow({
           style={{
             background: "transparent",
             border: "none",
-            color: editing ? "var(--accent, #22d3ee)" : "var(--text-secondary, #9a9aa3)",
+            color: editing ? "var(--accent)" : "var(--text-secondary)",
             cursor: "pointer",
             fontSize: "0.72rem",
           }}
@@ -551,7 +542,7 @@ function BreakpointRow({
           style={{
             background: "transparent",
             border: "none",
-            color: "var(--text-secondary, #9a9aa3)",
+            color: "var(--text-secondary)",
             cursor: "pointer",
             fontSize: "0.72rem",
           }}
@@ -565,7 +556,7 @@ function BreakpointRow({
             marginLeft: 24,
             fontSize: "0.68rem",
             fontFamily: "var(--font-mono, monospace)",
-            color: "var(--text-secondary, #9a9aa3)",
+            color: "var(--text-secondary)",
           }}
         >
           {detail}
@@ -595,7 +586,7 @@ function BreakpointRow({
             style={inputStyle}
           />
           {isLogpoint(bp) && !logpointsSupported && (
-            <span style={{ fontSize: "0.66rem", color: "var(--warning, #e0a324)" }}>
+            <span style={{ fontSize: "0.66rem", color: "var(--warning)" }}>
               this adapter doesn't support logpoints — it will stop instead of logging
             </span>
           )}
@@ -1238,9 +1229,9 @@ export function DebugPanel(): ReactElement {
             aria-label="run configuration"
             title="Run/Debug configuration (launch.json)"
             style={{
-              background: "var(--bg-surface-2, #16161b)",
-              color: "var(--text-primary, #e7e7ea)",
-              border: "1px solid var(--border-subtle, #2a2a33)",
+              background: "var(--bg-surface-2)",
+              color: "var(--text-primary)",
+              border: "1px solid var(--border-subtle)",
               borderRadius: 4,
               padding: "2px 4px",
               fontSize: "0.76rem",
@@ -1261,7 +1252,7 @@ export function DebugPanel(): ReactElement {
             title={`unsupported fields skipped on import: ${(
               configs[selectedIdx]?.unsupported ?? []
             ).join(", ")}`}
-            style={{ color: "var(--warning, #e0a324)", cursor: "help" }}
+            style={{ color: "var(--warning)", cursor: "help" }}
           >
             ⚠
           </span>
@@ -1321,7 +1312,7 @@ export function DebugPanel(): ReactElement {
       {importCandidates && (
         <Panel title="Import run configurations" elevation="e1">
           {importCandidates.length === 0 ? (
-            <p style={{ margin: 0, color: "var(--text-secondary, #9a9aa3)", fontSize: "0.74rem" }}>
+            <p style={{ margin: 0, color: "var(--text-secondary)", fontSize: "0.74rem" }}>
               No foreign run configurations found (.vscode/launch.json,
               .idea/runConfigurations/*.xml) — or everything is already imported.
             </p>
@@ -1354,7 +1345,7 @@ export function DebugPanel(): ReactElement {
                     />
                     <span
                       style={{
-                        color: "var(--text-primary, #e7e7ea)",
+                        color: "var(--text-primary)",
                         overflow: "hidden",
                         textOverflow: "ellipsis",
                         whiteSpace: "nowrap",
@@ -1362,18 +1353,15 @@ export function DebugPanel(): ReactElement {
                     >
                       {c.config.name}
                     </span>
-                    <span style={{ color: "var(--text-secondary, #9a9aa3)" }}>{c.config.type}</span>
+                    <span style={{ color: "var(--text-secondary)" }}>{c.config.type}</span>
                     <span
                       style={{
                         marginLeft: "auto",
-                        border: "1px solid var(--border-subtle, #2a2a33)",
+                        border: "1px solid var(--border-subtle)",
                         borderRadius: 3,
                         padding: "0 4px",
                         fontSize: "0.64rem",
-                        color:
-                          c.source === "vscode"
-                            ? "var(--accent, #22d3ee)"
-                            : "var(--warning, #e0a324)",
+                        color: c.source === "vscode" ? "var(--accent)" : "var(--warning)",
                       }}
                     >
                       {c.source === "vscode" ? "vscode" : ".idea"}
@@ -1383,7 +1371,7 @@ export function DebugPanel(): ReactElement {
                         role="img"
                         aria-label={`${c.config.name} has unsupported fields`}
                         title={`not imported: ${(c.config.unsupported ?? []).join(", ")}`}
-                        style={{ color: "var(--warning, #e0a324)", cursor: "help" }}
+                        style={{ color: "var(--warning)", cursor: "help" }}
                       >
                         ⚠
                       </span>
@@ -1411,7 +1399,7 @@ export function DebugPanel(): ReactElement {
           {importError && (
             <p
               role="alert"
-              style={{ margin: "6px 0 0", color: "var(--danger, #ef5a5a)", fontSize: "0.72rem" }}
+              style={{ margin: "6px 0 0", color: "var(--danger)", fontSize: "0.72rem" }}
             >
               {importError}
             </p>
@@ -1427,9 +1415,9 @@ export function DebugPanel(): ReactElement {
               onChange={(e) => setAttachType(e.target.value)}
               aria-label="attach adapter type"
               style={{
-                background: "var(--bg-surface-2, #16161b)",
-                color: "var(--text-primary, #e7e7ea)",
-                border: "1px solid var(--border-subtle, #2a2a33)",
+                background: "var(--bg-surface-2)",
+                color: "var(--text-primary)",
+                border: "1px solid var(--border-subtle)",
                 borderRadius: 4,
                 padding: "2px 4px",
                 fontSize: "0.72rem",
@@ -1470,7 +1458,7 @@ export function DebugPanel(): ReactElement {
             style={{
               margin: "6px 0 0",
               fontSize: "0.68rem",
-              color: "var(--text-secondary, #9a9aa3)",
+              color: "var(--text-secondary)",
             }}
           >
             The debuggee must already be listening (e.g.{" "}
@@ -1484,7 +1472,7 @@ export function DebugPanel(): ReactElement {
         <Panel title="Confirm remote debug attach" elevation="e2">
           <p
             role="alert"
-            style={{ margin: "0 0 6px", color: "var(--warning, #e0a324)", fontSize: "0.74rem" }}
+            style={{ margin: "0 0 6px", color: "var(--warning)", fontSize: "0.74rem" }}
           >
             Attaching to{" "}
             <strong>
@@ -1529,7 +1517,7 @@ export function DebugPanel(): ReactElement {
           {runError && (
             <p
               role="alert"
-              style={{ margin: "0 0 4px", color: "var(--danger, #ef5a5a)", fontSize: "0.72rem" }}
+              style={{ margin: "0 0 4px", color: "var(--danger)", fontSize: "0.72rem" }}
             >
               {runError}
             </p>
@@ -1544,7 +1532,7 @@ export function DebugPanel(): ReactElement {
                 fontSize: "0.7rem",
                 fontFamily: "var(--font-mono, monospace)",
                 whiteSpace: "pre-wrap",
-                color: "var(--text-primary, #e7e7ea)",
+                color: "var(--text-primary)",
               }}
             >
               {runOutput || "running…"}
@@ -1556,10 +1544,10 @@ export function DebugPanel(): ReactElement {
                 margin: "4px 0 0",
                 fontSize: "0.72rem",
                 color: runExit.killed
-                  ? "var(--warning, #e0a324)"
+                  ? "var(--warning)"
                   : runExit.exitCode === 0
-                    ? "var(--ok, #57ab5a)"
-                    : "var(--danger, #ef5a5a)",
+                    ? "var(--ok)"
+                    : "var(--danger)",
               }}
             >
               {runExit.killed ? "stopped by user" : `exited with code ${runExit.exitCode}`}
@@ -1620,7 +1608,7 @@ export function DebugPanel(): ReactElement {
 
       {(gate ?? runGateVerdict) && (status === "blocked" || runGateVerdict) && (
         <Panel title="Run gate" elevation="e1">
-          <p style={{ margin: 0, color: "var(--danger, #ef5a5a)" }}>
+          <p style={{ margin: 0, color: "var(--danger)" }}>
             {(gate ?? runGateVerdict)?.decision === "warn"
               ? "Findings — review before running."
               : "Blocked by nemesis."}{" "}
@@ -1630,7 +1618,7 @@ export function DebugPanel(): ReactElement {
           <p
             style={{
               margin: "4px 0 0",
-              color: "var(--text-secondary, #9a9aa3)",
+              color: "var(--text-secondary)",
               fontSize: "0.72rem",
             }}
           >
@@ -1641,7 +1629,7 @@ export function DebugPanel(): ReactElement {
 
       {adapterStatus && !adapterStatus.available && (
         <Panel title="Debug adapter" elevation="e1">
-          <p style={{ margin: 0, color: "var(--text-secondary, #9a9aa3)", fontSize: "0.78rem" }}>
+          <p style={{ margin: 0, color: "var(--text-secondary)", fontSize: "0.78rem" }}>
             {adapterStatus.detail}
           </p>
           {adapterStatus.type === "python" ? (
@@ -1668,7 +1656,7 @@ export function DebugPanel(): ReactElement {
               </div>
               {installNeedsConfirm && (
                 <div style={{ marginTop: 6 }}>
-                  <p style={{ margin: 0, color: "var(--warning, #e0a324)", fontSize: "0.72rem" }}>
+                  <p style={{ margin: 0, color: "var(--warning)", fontSize: "0.72rem" }}>
                     {installError}
                   </p>
                   <Button
@@ -1685,7 +1673,7 @@ export function DebugPanel(): ReactElement {
                 <p
                   style={{
                     margin: "4px 0 0",
-                    color: "var(--danger, #ef5a5a)",
+                    color: "var(--danger)",
                     fontSize: "0.72rem",
                   }}
                 >
@@ -1697,7 +1685,7 @@ export function DebugPanel(): ReactElement {
             <p
               style={{
                 margin: "4px 0 0",
-                color: "var(--text-secondary, #9a9aa3)",
+                color: "var(--text-secondary)",
                 fontSize: "0.72rem",
               }}
             >
@@ -1708,10 +1696,10 @@ export function DebugPanel(): ReactElement {
         </Panel>
       )}
 
-      {error && <p style={{ color: "var(--danger, #ef5a5a)" }}>{error}</p>}
+      {error && <p style={{ color: "var(--danger)" }}>{error}</p>}
 
       <section style={{ marginTop: 8 }}>
-        <h4 style={{ margin: "0 0 4px", color: "var(--text-secondary, #9a9aa3)", fontWeight: 600 }}>
+        <h4 style={{ margin: "0 0 4px", color: "var(--text-secondary)", fontWeight: 600 }}>
           THREADS
         </h4>
         {threads.length > 0 ? (
@@ -1735,8 +1723,7 @@ export function DebugPanel(): ReactElement {
                     display: "flex",
                     gap: 4,
                     width: "100%",
-                    background:
-                      t.id === selectedThreadId ? "var(--bg-surface-2, #16161b)" : "transparent",
+                    background: t.id === selectedThreadId ? "var(--bg-surface-2)" : "transparent",
                     border: "none",
                     borderRadius: 3,
                     padding: "1px 4px",
@@ -1744,29 +1731,27 @@ export function DebugPanel(): ReactElement {
                     textAlign: "left",
                     fontSize: "0.72rem",
                     fontFamily: "var(--font-mono, monospace)",
-                    color: "var(--text-primary, #e7e7ea)",
+                    color: "var(--text-primary)",
                   }}
                 >
                   <span
                     style={{
                       width: 12,
-                      color: stoppedIds.has(t.id)
-                        ? "var(--warning, #e0a324)"
-                        : "var(--ok, #57ab5a)",
+                      color: stoppedIds.has(t.id) ? "var(--warning)" : "var(--ok)",
                     }}
                   >
                     {stoppedIds.has(t.id) ? "⏸" : "▶"}
                   </span>
                   {t.name}
-                  <span style={{ color: "var(--text-secondary, #9a9aa3)" }}>#{t.id}</span>
+                  <span style={{ color: "var(--text-secondary)" }}>#{t.id}</span>
                 </button>
               </li>
             ))}
           </ul>
         ) : (
-          <p style={{ margin: "0 0 8px", color: "var(--text-secondary, #9a9aa3)" }}>—</p>
+          <p style={{ margin: "0 0 8px", color: "var(--text-secondary)" }}>—</p>
         )}
-        <h4 style={{ margin: "0 0 4px", color: "var(--text-secondary, #9a9aa3)", fontWeight: 600 }}>
+        <h4 style={{ margin: "0 0 4px", color: "var(--text-secondary)", fontWeight: 600 }}>
           CALL STACK
         </h4>
         {frames.length > 0 ? (
@@ -1793,8 +1778,7 @@ export function DebugPanel(): ReactElement {
                     display: "flex",
                     gap: 4,
                     width: "100%",
-                    background:
-                      f.id === selectedFrameId ? "var(--bg-surface-2, #16161b)" : "transparent",
+                    background: f.id === selectedFrameId ? "var(--bg-surface-2)" : "transparent",
                     border: "none",
                     borderRadius: 3,
                     padding: "1px 4px",
@@ -1802,26 +1786,23 @@ export function DebugPanel(): ReactElement {
                     textAlign: "left",
                     fontSize: "0.72rem",
                     fontFamily: "var(--font-mono, monospace)",
-                    color: "var(--text-primary, #e7e7ea)",
+                    color: "var(--text-primary)",
                   }}
                 >
-                  <span style={{ width: 10, color: "var(--accent, #22d3ee)" }}>
+                  <span style={{ width: 10, color: "var(--accent)" }}>
                     {f.id === selectedFrameId ? "▸" : ""}
                   </span>
-                  {f.name}{" "}
-                  <span style={{ color: "var(--text-secondary, #9a9aa3)" }}>:{f.line}</span>
+                  {f.name} <span style={{ color: "var(--text-secondary)" }}>:{f.line}</span>
                 </button>
               </li>
             ))}
           </ul>
         ) : (
-          <p style={{ margin: 0, color: "var(--text-secondary, #9a9aa3)" }}>
+          <p style={{ margin: 0, color: "var(--text-secondary)" }}>
             {paused ? "paused" : status === "running" ? "running…" : "Not paused."}
           </p>
         )}
-        <h4
-          style={{ margin: "8px 0 4px", color: "var(--text-secondary, #9a9aa3)", fontWeight: 600 }}
-        >
+        <h4 style={{ margin: "8px 0 4px", color: "var(--text-secondary)", fontWeight: 600 }}>
           VARIABLES
         </h4>
         {scopes.length > 0 && sessionId ? (
@@ -1845,12 +1826,12 @@ export function DebugPanel(): ReactElement {
             ))}
           </div>
         ) : (
-          <p style={{ margin: 0, color: "var(--text-secondary, #9a9aa3)" }}>—</p>
+          <p style={{ margin: 0, color: "var(--text-secondary)" }}>—</p>
         )}
         <h4
           style={{
             margin: "8px 0 4px",
-            color: "var(--text-secondary, #9a9aa3)",
+            color: "var(--text-secondary)",
             fontWeight: 600,
             display: "flex",
             alignItems: "center",
@@ -1868,7 +1849,7 @@ export function DebugPanel(): ReactElement {
               style={{
                 background: "transparent",
                 border: "none",
-                color: "var(--text-secondary, #9a9aa3)",
+                color: "var(--text-secondary)",
                 cursor: paused ? "pointer" : "default",
                 fontSize: "0.72rem",
                 padding: 0,
@@ -1889,9 +1870,9 @@ export function DebugPanel(): ReactElement {
             aria-label="add watch expression"
             style={{
               flex: 1,
-              background: "var(--bg-surface-2, #16161b)",
-              color: "var(--text-primary, #e7e7ea)",
-              border: "1px solid var(--border-subtle, #2a2a33)",
+              background: "var(--bg-surface-2)",
+              color: "var(--text-primary)",
+              border: "1px solid var(--border-subtle)",
               borderRadius: 4,
               padding: "2px 6px",
               fontSize: "0.72rem",
@@ -1903,9 +1884,9 @@ export function DebugPanel(): ReactElement {
             onClick={addWatch}
             style={{
               background: "transparent",
-              border: "1px solid var(--border-subtle, #2a2a33)",
+              border: "1px solid var(--border-subtle)",
               borderRadius: 4,
-              color: "var(--text-secondary, #9a9aa3)",
+              color: "var(--text-secondary)",
               cursor: "pointer",
               fontSize: "0.72rem",
               padding: "2px 8px",
@@ -1915,7 +1896,7 @@ export function DebugPanel(): ReactElement {
           </button>
         </div>
         {watchExprs.length === 0 ? (
-          <p style={{ margin: 0, color: "var(--text-secondary, #9a9aa3)" }}>—</p>
+          <p style={{ margin: 0, color: "var(--text-secondary)" }}>—</p>
         ) : (
           <ul style={{ listStyle: "none", margin: 0, padding: 0 }}>
             {watchExprs.map((expr) => (
@@ -1929,13 +1910,11 @@ export function DebugPanel(): ReactElement {
                   fontFamily: "var(--font-mono, monospace)",
                 }}
               >
-                <span style={{ color: "var(--accent, #22d3ee)" }}>{expr}</span>
+                <span style={{ color: "var(--accent)" }}>{expr}</span>
                 <span
                   style={{
                     flex: 1,
-                    color: watchResults[expr]?.error
-                      ? "var(--danger, #ef5a5a)"
-                      : "var(--text-secondary, #9a9aa3)",
+                    color: watchResults[expr]?.error ? "var(--danger)" : "var(--text-secondary)",
                   }}
                 >
                   {" = "}
@@ -1948,7 +1927,7 @@ export function DebugPanel(): ReactElement {
                   style={{
                     background: "transparent",
                     border: "none",
-                    color: "var(--text-secondary, #9a9aa3)",
+                    color: "var(--text-secondary)",
                     cursor: "pointer",
                     fontSize: "0.72rem",
                   }}
@@ -1959,9 +1938,7 @@ export function DebugPanel(): ReactElement {
             ))}
           </ul>
         )}
-        <h4
-          style={{ margin: "8px 0 4px", color: "var(--text-secondary, #9a9aa3)", fontWeight: 600 }}
-        >
+        <h4 style={{ margin: "8px 0 4px", color: "var(--text-secondary)", fontWeight: 600 }}>
           EVALUATE
         </h4>
         <div style={{ display: "flex", gap: 4, marginBottom: 4 }}>
@@ -1976,9 +1953,9 @@ export function DebugPanel(): ReactElement {
             aria-label="evaluate expression"
             style={{
               flex: 1,
-              background: "var(--bg-surface-2, #16161b)",
-              color: "var(--text-primary, #e7e7ea)",
-              border: "1px solid var(--border-subtle, #2a2a33)",
+              background: "var(--bg-surface-2)",
+              color: "var(--text-primary)",
+              border: "1px solid var(--border-subtle)",
               borderRadius: 4,
               padding: "2px 6px",
               fontSize: "0.72rem",
@@ -1992,9 +1969,9 @@ export function DebugPanel(): ReactElement {
             onClick={() => void runEvaluate()}
             style={{
               background: "transparent",
-              border: "1px solid var(--border-subtle, #2a2a33)",
+              border: "1px solid var(--border-subtle)",
               borderRadius: 4,
-              color: "var(--text-secondary, #9a9aa3)",
+              color: "var(--text-secondary)",
               cursor: "pointer",
               fontSize: "0.72rem",
               padding: "2px 8px",
@@ -2012,7 +1989,7 @@ export function DebugPanel(): ReactElement {
                 margin: 0,
                 fontSize: "0.72rem",
                 fontFamily: "var(--font-mono, monospace)",
-                color: "var(--danger, #ef5a5a)",
+                color: "var(--danger)",
               }}
             >
               {evalResult.expr} → {evalResult.r.value}
@@ -2038,7 +2015,7 @@ export function DebugPanel(): ReactElement {
             <h4
               style={{
                 margin: "8px 0 4px",
-                color: "var(--text-secondary, #9a9aa3)",
+                color: "var(--text-secondary)",
                 fontWeight: 600,
               }}
             >
@@ -2061,10 +2038,7 @@ export function DebugPanel(): ReactElement {
                     aria-label={`exception filter ${f.label}`}
                     onChange={(e) => toggleException(f.filter, e.target.checked)}
                   />
-                  <span
-                    title={f.description ?? f.label}
-                    style={{ color: "var(--text-primary, #e7e7ea)" }}
-                  >
+                  <span title={f.description ?? f.label} style={{ color: "var(--text-primary)" }}>
                     {f.label}
                   </span>
                 </li>
@@ -2072,13 +2046,11 @@ export function DebugPanel(): ReactElement {
             </ul>
           </>
         )}
-        <h4
-          style={{ margin: "8px 0 4px", color: "var(--text-secondary, #9a9aa3)", fontWeight: 600 }}
-        >
+        <h4 style={{ margin: "8px 0 4px", color: "var(--text-secondary)", fontWeight: 600 }}>
           BREAKPOINTS
         </h4>
         {allBreakpoints(breakpointMap).length === 0 ? (
-          <p style={{ margin: 0, color: "var(--text-secondary, #9a9aa3)" }}>
+          <p style={{ margin: 0, color: "var(--text-secondary)" }}>
             Click the editor gutter to add one; right-click a glyph for a condition or logpoint.
           </p>
         ) : (

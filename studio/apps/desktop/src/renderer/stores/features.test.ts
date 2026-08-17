@@ -40,12 +40,14 @@ test("securityStore.setVerdict records the verdict + projects shieldTier", () =>
   assert.equal(after.shieldTier, "block");
 });
 
-test("securityStore force-confirm request/clear round-trips", () => {
-  const s = useSecurityStore.getState();
-  s.requestForce("caveman");
-  assert.equal(useSecurityStore.getState().pendingForce, "caveman");
-  useSecurityStore.getState().clearForce();
-  assert.equal(useSecurityStore.getState().pendingForce, null);
+test("securityStore counts CONFIRMED overrides only (no arm-without-confirm reducer)", () => {
+  // The `requestForce`/`clearForce`/`pendingForce` trio this test used to cover is gone —
+  // nothing rendered `pendingForce`, so it armed an override that painted no UI. See
+  // force-gate.test.ts for the full reasoning; the typed confirm in shell/ForceGate.tsx
+  // is the only path to an override now.
+  const base = useSecurityStore.getState().forcedThisSession;
+  useSecurityStore.getState().noteForced();
+  assert.equal(useSecurityStore.getState().forcedThisSession, base + 1);
 });
 
 /* ── packages slice: the install-tracking map ───────────────────────────────*/

@@ -1,0 +1,34 @@
+{
+  "name": "@prometheus/mcp-server",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Real @modelcontextprotocol/sdk stdio MCP server over @prometheus/core's studio agent tool catalog — read-only surface only (see src/server.ts).",
+  "license": "Apache-2.0",
+  "author": "Francesco Pelizza <red-beard-phoenix@users.noreply.gitlab.com>",
+  "repository": {
+    "type": "git",
+    "url": "https://gitlab.com/red-beard-phoenix/PROMETHEUS.git",
+    "directory": "studio/apps/mcp-server"
+  },
+  "bugs": { "url": "https://gitlab.com/red-beard-phoenix/PROMETHEUS/-/issues" },
+  "homepage": "https://gitlab.com/red-beard-phoenix/PROMETHEUS",
+  "bin": { "prometheus-studio-mcp": "dist/server.js" },
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "build": "tsc -b",
+    "dev": "tsc -b --watch",
+    "lint": "biome check src",
+    "typecheck": "tsc -b",
+    "test": "node ../../scripts/run-tests.mjs apps/mcp-server",
+    "start": "node dist/server.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "@prometheus/core": "workspace:*",
+    "zod": "^3.24.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.2"
+  }
+}

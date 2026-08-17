@@ -1,6 +1,6 @@
 {
   "name": "@prometheus/core",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "private": true,
   "type": "module",
   "description": "Shared domain types & logic for Prometheus Studio (consumed by both the desktop GUI and the prometheus CLI).",
@@ -23,9 +23,81 @@
       "types": "./dist/rules/index.d.ts",
       "import": "./dist/rules/index.js"
     },
+    "./memory": {
+      "types": "./dist/memory/index.d.ts",
+      "import": "./dist/memory/index.js"
+    },
     "./agent-checkpoint": {
       "types": "./dist/agent/checkpoint.d.ts",
       "import": "./dist/agent/checkpoint.js"
+    },
+    "./agent-authorization": {
+      "types": "./dist/agent/authorization.d.ts",
+      "import": "./dist/agent/authorization.js"
+    },
+    "./agent-exec": {
+      "types": "./dist/agent/exec/index.d.ts",
+      "import": "./dist/agent/exec/index.js"
+    },
+    "./agent-system": {
+      "types": "./dist/agent/system/index.d.ts",
+      "import": "./dist/agent/system/index.js"
+    },
+    "./agent-tools": {
+      "types": "./dist/agent/tools.d.ts",
+      "import": "./dist/agent/tools.js"
+    },
+    "./agent-todo": {
+      "types": "./dist/agent/todo.d.ts",
+      "import": "./dist/agent/todo.js"
+    },
+    "./agent-hooks": {
+      "types": "./dist/agent/hooks.d.ts",
+      "import": "./dist/agent/hooks.js"
+    },
+    "./agent-subagent": {
+      "types": "./dist/agent/subagent.d.ts",
+      "import": "./dist/agent/subagent.js"
+    },
+    "./agent-question": {
+      "types": "./dist/agent/question.d.ts",
+      "import": "./dist/agent/question.js"
+    },
+    "./agent-permissions": {
+      "types": "./dist/agent/permissions.d.ts",
+      "import": "./dist/agent/permissions.js"
+    },
+    "./agent-permission-modes": {
+      "types": "./dist/agent/permission-modes.d.ts",
+      "import": "./dist/agent/permission-modes.js"
+    },
+    "./ai-retry": {
+      "types": "./dist/ai/retry-index.d.ts",
+      "import": "./dist/ai/retry-index.js"
+    },
+    "./agent-compact": {
+      "types": "./dist/agent/compact.d.ts",
+      "import": "./dist/agent/compact.js"
+    },
+    "./agent-patch": {
+      "types": "./dist/agent/patch.d.ts",
+      "import": "./dist/agent/patch.js"
+    },
+    "./agent-events": {
+      "types": "./dist/agent/events.d.ts",
+      "import": "./dist/agent/events.js"
+    },
+    "./agent-loop": {
+      "types": "./dist/agent/loop.d.ts",
+      "import": "./dist/agent/loop.js"
+    },
+    "./agent-protocol": {
+      "types": "./dist/agent/protocol/index.d.ts",
+      "import": "./dist/agent/protocol/index.js"
+    },
+    "./ai-effort": {
+      "types": "./dist/ai/effort/index.d.ts",
+      "import": "./dist/ai/effort/index.js"
     },
     "./agent-session": {
       "types": "./dist/agent/session-store.d.ts",
@@ -54,6 +126,26 @@
     "./mcp-node": {
       "types": "./dist/mcp/host/node.d.ts",
       "import": "./dist/mcp/host/node.js"
+    },
+    "./agent-system-host": {
+      "types": "./dist/agent/system/host/index.d.ts",
+      "import": "./dist/agent/system/host/index.js"
+    },
+    "./git-worktree": {
+      "types": "./dist/git/worktree.d.ts",
+      "import": "./dist/git/worktree.js"
+    },
+    "./agent-files": {
+      "types": "./dist/agent/agent-files.d.ts",
+      "import": "./dist/agent/agent-files.js"
+    },
+    "./command-loader": {
+      "types": "./dist/commands/loader.d.ts",
+      "import": "./dist/commands/loader.js"
+    },
+    "./command-gate": {
+      "types": "./dist/commands/gate.d.ts",
+      "import": "./dist/commands/gate.js"
     }
   },
   "scripts": {

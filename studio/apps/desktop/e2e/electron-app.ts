@@ -28,12 +28,26 @@ export interface LaunchedApp {
 const MAIN_ENTRY = "out/main/index.js";
 const WINDOW = { width: 1440, height: 900, scale: 1 };
 
+/** Options for `launchApp`. A bare number is still accepted (back-compat: `launchApp(45_000)`). */
+export interface LaunchAppOptions {
+  timeoutMs?: number;
+  /**
+   * Seed the freshly-minted userData dir BEFORE the app process starts — e.g. write
+   * `settings.json` so a hook is already configured when main's settings-ipc does its
+   * startup `publish()`. Runs after the temp dir exists, before `electron.launch`.
+   */
+  beforeLaunch?: (userDataDir: string) => void | Promise<void>;
+}
+
 /**
  * Launch the built Electron app headlessly-friendly. Rejects with the captured main-process
  * stderr if the first window never appears within `timeoutMs`.
  */
-export async function launchApp(timeoutMs = 30_000): Promise<LaunchedApp> {
+export async function launchApp(opts: number | LaunchAppOptions = {}): Promise<LaunchedApp> {
+  const { timeoutMs = 30_000, beforeLaunch } =
+    typeof opts === "number" ? { timeoutMs: opts } : opts;
   const userDataDir = mkdtempSync(join(tmpdir(), "prom-e2e-"));
+  if (beforeLaunch) await beforeLaunch(userDataDir);
   const args = [
     MAIN_ENTRY,
     `--user-data-dir=${userDataDir}`,
@@ -50,6 +64,16 @@ export async function launchApp(timeoutMs = 30_000): Promise<LaunchedApp> {
       PROM_E2E_SCALE: String(WINDOW.scale),
     },
   });
+
+  // Pin the OS color scheme to DARK. The appearance preference defaults to "system", so a
+  // reviewer's light-mode Mac would otherwise render the whole suite in the light palette and
+  // every screenshot would be a lie about the shipped (dark-first) design. nativeTheme is the
+  // real seam prefers-color-scheme reads, so this needs no app-side test hook.
+  await app
+    .evaluate(({ nativeTheme }) => {
+      nativeTheme.themeSource = "dark";
+    })
+    .catch(() => {});
 
   // Attach to stderr BEFORE awaiting the window, so a launch that never paints still yields the cause.
   let stderr = "";
@@ -80,10 +104,32 @@ export async function launchApp(timeoutMs = 30_000): Promise<LaunchedApp> {
   // <style> here: the app ships a STRICT prod CSP (style-src 'self') that blocks an inline
   // style tag, and addStyleTag would throw on the real (non-dev) bundle we deliberately drive.
 
-  // A fresh temp userData has no onboarding flag → the APP-064 first-run wizard shows as a
-  // modal that intercepts every click. Dismiss it (Skip) so the smoke flows drive the real
-  // shell; the dialog then persists "done" so it won't reappear this run.
-  const wizard = page.getByRole("dialog", { name: "First-run setup" });
+  // Seed the renderer's own persistence, then reload so the app boots ALREADY settled:
+  //   - appearance.theme = "dark": the shipped design is dark-first, and the default
+  //     preference is "system" — on a light-mode machine every screenshot would otherwise
+  //     show a palette the design was never authored against. nativeTheme (above) covers
+  //     the OS side; this covers the persisted side, so both agree.
+  //   - the onboarding flag: a fresh temp userData otherwise raises the first-run wizard as
+  //     a modal that intercepts every click. Pre-marking it "done" is deterministic where
+  //     racing a Skip click is not.
+  await page
+    .evaluate(
+      ([themeKey, onboardKey]) => {
+        window.localStorage.setItem(themeKey, JSON.stringify({ theme: "dark" }));
+        window.localStorage.setItem(onboardKey, JSON.stringify({ skipped: true, ts: 0 }));
+      },
+      ["prometheus.appearance", "prometheus.onboarding.v1"] as const,
+    )
+    .catch(() => {});
+  await page.reload({ waitUntil: "domcontentloaded" }).catch(() => {});
+  await page
+    .getByRole("navigation", { name: "Activity bar" })
+    .waitFor({ state: "visible", timeout: 20_000 })
+    .catch(() => {});
+
+  // Belt and braces: if the wizard still made it up (a shape change to the persisted flag),
+  // dismiss it rather than letting it eat every click in the suite.
+  const wizard = page.getByRole("dialog", { name: /first-run|welcome/i });
   if (await wizard.isVisible().catch(() => false)) {
     await page
       .getByRole("button", { name: "Skip" })
@@ -103,3 +149,51 @@ export async function launchApp(timeoutMs = 30_000): Promise<LaunchedApp> {
     },
   };
 }
+
+/** One `model:endpoints` entry (the shape `localai endpoints` returns per row). */
+export interface FakeModelEndpoint {
+  name: string;
+  baseUrl: string;
+}
+
+/**
+ * Monkey-patch the LIVE main process's `model:endpoints` IPC handler to return a fixed
+ * result, via `ElectronApplication.evaluate` — which runs in the REAL main process (the same
+ * `ipcMain` singleton `main/index.ts` registered every handler against, reached the same way
+ * `launchApp` already reaches `nativeTheme` above).
+ *
+ * This is the e2e substitute for a real engine-bridge sidecar: driving a chat turn needs SOME
+ * endpoint in the Model Hub picker, and spawning the real python sidecar (which itself shells
+ * out to probe local runners and query configured cloud providers) is exactly the kind of
+ * heavy, non-deterministic dependency an e2e suite should not carry. Everything downstream of
+ * this — the actual model HTTP traffic — stays completely real: a real `node:http` server,
+ * real loopback sockets, real SSE parsing, run for real by the real main-process `ai:stream`
+ * handler. Only the "which servers exist" catalog is substituted.
+ */
+export async function overrideModelEndpoints(
+  launched: LaunchedApp,
+  result: { ok: boolean; local: FakeModelEndpoint[]; openApi: FakeModelEndpoint[] },
+): Promise<void> {
+  await launched.app.evaluate(({ ipcMain }, r) => {
+    const channel = "model:endpoints";
+    ipcMain.removeHandler(channel);
+    ipcMain.handle(channel, async () => r);
+  }, result);
+}
+
+/**
+ * `shimLocalModelsProbe` used to live here — it patched the RENDERER's `window.fetch` so
+ * `endpoint-hook.ts`'s `probeServedModels` (a direct `GET {baseUrl}/models`) could resolve
+ * without a real network dispatch, working around a REAL bug this suite found live: the
+ * production CSP (`connect-src 'self'`, `main/index.ts`) refuses a renderer `fetch` to
+ * `http://127.0.0.1:<port>` (`TypeError: Failed to fetch`), so every local runner silently
+ * vanished from the Model Hub picker in the packaged app.
+ *
+ * Task #18 fixed the underlying bug (the probe now runs in MAIN via `ai:probeModels`, the
+ * same detour `ai:stream` already takes for chat completions), which made the shim not just
+ * unnecessary but WRONG to keep: it patched a `window.fetch` call the renderer no longer
+ * makes, so leaving it in place would silently stop testing the real path. Specs that need a
+ * served model now pass `servedModels` to `startFakeModelServer` (`fake-model-server.ts`),
+ * which answers `GET {baseUrl}/models` for real. See `model-probe.spec.ts` for the regression
+ * test pinning the fix itself.
+ */

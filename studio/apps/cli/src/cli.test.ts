@@ -11,7 +11,9 @@
  */
 import assert from "node:assert/strict";
 import { existsSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
 import { test } from "node:test";
+import { fileURLToPath } from "node:url";
 
 import { dispatch } from "./index.js";
 import { parseArgs } from "./parse.js";
@@ -138,8 +140,11 @@ test("dispatch unknown command exits nonzero", async () => {
 
 // ---- LIVE smoke: scan against the real engine (auto-skip) ----------------- //
 
-const ENGINE_PY =
-  process.env.PROMETHEUS_PY ?? "/Users/dev/ALPHA/PROMETHEUS/prometheus.py";
+/** The repo root, walked from this file: …/studio/apps/cli/src → up 4. Relative, never
+ *  an absolute developer path — those leak a username and only resolve on one machine. */
+const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "..");
+
+const ENGINE_PY = process.env.PROMETHEUS_PY ?? join(REPO_ROOT, "prometheus.py");
 
 test(
   "smoke: prometheus scan returns an agents envelope from the real engine",
@@ -157,7 +162,7 @@ test(
 test(
   "smoke: prometheus env list returns environments from the sidecar (auto-skip)",
   {
-    skip: existsSync("/Users/dev/ALPHA/PROMETHEUS/studio/python/sidecar/envmgr.py")
+    skip: existsSync(join(REPO_ROOT, "studio", "python", "sidecar", "envmgr.py"))
       ? false
       : "envmgr.py sidecar not found",
   },

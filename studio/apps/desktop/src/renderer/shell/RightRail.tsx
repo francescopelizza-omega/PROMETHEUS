@@ -1,11 +1,15 @@
 /**
- * shell/RightRail.tsx — the right AI/agent/inspector rail (file 08 §4.2).
+ * shell/RightRail.tsx — the agent rail (handoff §2.5, file 08 §4.2).
  *
- * "The right rail = the AI" (mirrors Cursor's right-side AI + Odysseus's agent
- * presence). Collapsible (⌥⌘B). Two modes: the agent/chat surface, and an
- * INSPECTOR that shows the selected entity's raw engine JSON (the --json payload)
- * for power users (08 §4.2). The shell mounts the real AgentPane (file 07) for the
- * chat mode; the inspector renders whatever JSON the workbench hands it.
+ * "The right rail = the AI". It is ALWAYS one of exactly two things and NEVER absent:
+ *   - OPEN      a 330px island: header (agent glyph · session chip · ＋ new · ⇥ minimise)
+ *               over the agent body (or the Inspector's raw engine JSON).
+ *   - MINIMISED a 42px tray strip: the agent icon (click restores) + a status dot.
+ * The choice persists (App.tsx's `prometheus.layout` blob), so the rail comes back the
+ * way you left it.
+ *
+ * The two modes still exist (agent / inspector) — the Inspector is where a power user
+ * reads the selected entity's raw `--json` payload (08 §4.2).
  *
  * Renderer-SANDBOXED (C5): react + @prometheus/ui only (the body is injected).
  */
@@ -15,12 +19,28 @@ import type { CSSProperties, ReactElement, ReactNode } from "react";
 import { ResizeHandle, useResizable } from "./Resizable.js";
 import { safeInspectorJson } from "./rightrail-view.js";
 
-const RAIL_DEFAULT = 320;
-const RAIL_MIN = 260;
-/** Collapsed → a thin vertical tray docked on the right edge (≈ the 56px ActivityBar). */
-const RAIL_TRAY_WIDTH = 44;
+/** §2.5: 330px open. */
+const RAIL_DEFAULT = 330;
+const RAIL_MIN = 280;
+/** §2.5: a 42px tray strip when minimised — never an unmount. */
+const RAIL_TRAY_WIDTH = 42;
 
 export type RightRailMode = "agent" | "inspector";
+
+/** What the tray dot / header dot says about the agent right now. */
+export type AgentActivity = "idle" | "running" | "attention";
+
+const ACTIVITY_VAR: Record<AgentActivity, string> = {
+  idle: "--ok",
+  running: "--accent",
+  attention: "--warn",
+};
+
+const ACTIVITY_LABEL: Record<AgentActivity, string> = {
+  idle: "agent idle",
+  running: "agent running",
+  attention: "agent awaiting approval",
+};
 
 export interface RightRailProps {
   collapsed: boolean;
@@ -31,6 +51,42 @@ export interface RightRailProps {
   agent?: ReactNode;
   /** the inspector payload — the selected entity's raw engine JSON. */
   inspectorJson?: unknown;
+  /** the active chat session's title — the header's session chip (§2.5). */
+  sessionLabel?: string;
+  /** start a new chat (the header's ＋). */
+  onNewSession?(): void;
+  /** what the status dot reports, in both the header and the tray. */
+  activity?: AgentActivity;
+}
+
+/** Icon-button style for the collapsed tray + the header actions. */
+function iconButtonStyle(activeItem: boolean): CSSProperties {
+  return {
+    width: 30,
+    height: 30,
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    background: activeItem ? "var(--bg-active)" : "transparent",
+    border: "none",
+    borderRadius: 9,
+    color: activeItem ? "var(--accent)" : "var(--text-muted)",
+    cursor: "pointer",
+    fontSize: 14,
+    lineHeight: 1,
+  };
+}
+
+function headerActionStyle(): CSSProperties {
+  return {
+    background: "transparent",
+    border: "none",
+    color: "var(--text-disabled)",
+    cursor: "pointer",
+    fontSize: 14,
+    lineHeight: 1,
+    padding: "0 2px",
+  };
 }
 
 function tabStyle(activeTab: boolean): CSSProperties {
@@ -38,32 +94,26 @@ function tabStyle(activeTab: boolean): CSSProperties {
     background: "transparent",
     border: "none",
     borderBottom: `2px solid ${activeTab ? "var(--accent)" : "transparent"}`,
-    color: activeTab ? "var(--text-primary)" : "var(--text-secondary)",
+    color: activeTab ? "var(--text-primary)" : "var(--text-muted)",
     cursor: "pointer",
-    fontSize: "0.78rem",
+    fontSize: 11,
     fontWeight: activeTab ? 600 : 400,
-    padding: "4px 2px",
+    padding: "2px 1px",
     textTransform: "uppercase",
-    letterSpacing: "0.03em",
+    letterSpacing: "0.04em",
   };
 }
 
-/** Icon-button style for the collapsed tray (mirrors the ActivityBar brand-mix). */
-function trayButtonStyle(activeItem: boolean): CSSProperties {
-  return {
-    width: 32,
-    height: 32,
-    display: "flex",
-    alignItems: "center",
-    justifyContent: "center",
-    background: activeItem ? "color-mix(in srgb, var(--brand) 16%, transparent)" : "transparent",
-    border: "none",
-    borderRadius: "var(--radius-md, 6px)",
-    color: activeItem ? "var(--brand)" : "var(--text-secondary)",
-    cursor: "pointer",
-    fontSize: "0.95rem",
-    lineHeight: 1,
-  };
+/** The agent spark, in the brand-2 tint the prototype uses for "the AI is here". */
+function AgentGlyph({ size = 13 }: { size?: number }): ReactElement {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" aria-hidden="true">
+      <path
+        d="M12 3l1.7 4.8L18.5 9.5l-4.8 1.7L12 16l-1.7-4.8L5.5 9.5l4.8-1.7L12 3Z"
+        fill="var(--brand-2)"
+      />
+    </svg>
+  );
 }
 
 export function RightRail({
@@ -73,26 +123,28 @@ export function RightRail({
   onToggle,
   agent,
   inspectorJson,
-}: RightRailProps): ReactElement | null {
+  sessionLabel,
+  onNewSession,
+  activity = "idle",
+}: RightRailProps): ReactElement {
   // Drag the LEFT edge to resize (invert: dragging left grows the rail).
   const rz = useResizable({
     axis: "x",
     initial: RAIL_DEFAULT,
     min: RAIL_MIN,
-    // 0.45 so rail_max + sidebar_max (0.35) + the 56px activity bar can never exceed
-    // the viewport. storageKey persists the chosen width across reloads (like Sidebar).
-    max: () => Math.max(RAIL_MIN, Math.round(window.innerWidth * 0.45)),
+    // 0.42 so rail_max + sidebar_max (0.35) + the 46px activity bar + the 8px island gaps
+    // can never exceed the viewport at the 1100px window minimum.
+    max: () => Math.max(RAIL_MIN, Math.round(window.innerWidth * 0.42)),
     invert: true,
     storageKey: "prometheus.layout.rightRailWidth",
   });
+
   if (collapsed) {
-    // Minimized: a thin vertical tray docked on the right edge (mirrors BottomPanel's
-    // stay-mounted, click-to-restore collapse — never a hard unmount). The chevron
-    // re-expands; each mode glyph re-expands straight into that mode. Kept AFTER the
-    // useResizable call so hook order stays stable.
+    // MINIMISED: a 42px tray strip. Kept AFTER the useResizable call so hook order stays
+    // stable across the two branches.
     return (
       <aside
-        aria-label="AI and inspector (minimized)"
+        aria-label="Agent (minimised)"
         data-shell-region="rail"
         tabIndex={-1}
         style={{
@@ -101,38 +153,33 @@ export function RightRail({
           display: "flex",
           flexDirection: "column",
           alignItems: "center",
-          gap: "var(--space-4, 8px)",
-          paddingBlock: "var(--space-4, 8px)",
-          background: "var(--bg-surface)",
-          borderLeft: "1px solid var(--border-subtle)",
+          gap: 6,
+          paddingBlock: 12,
+          borderLeft: "1px solid var(--border-header)",
         }}
       >
         <button
           type="button"
           aria-label="Expand right rail"
           aria-expanded={false}
-          title="Expand AI panel (⌥⌘B)"
+          title="Open agent chat (⌥⌘B)"
           onClick={onToggle}
-          style={trayButtonStyle(false)}
+          style={iconButtonStyle(true)}
         >
-          ⟨
+          <AgentGlyph size={14} />
         </button>
-        <div
-          style={{ width: 20, height: 1, background: "var(--border-subtle)" }}
-          aria-hidden="true"
-        />
-        <button
-          type="button"
-          aria-label="Open AI"
-          title="AI"
-          onClick={() => {
-            onModeChange("agent");
-            onToggle();
+        <span
+          title={ACTIVITY_LABEL[activity]}
+          aria-label={ACTIVITY_LABEL[activity]}
+          style={{
+            width: 6,
+            height: 6,
+            borderRadius: "50%",
+            background: `var(${ACTIVITY_VAR[activity]})`,
+            animation: activity === "running" ? "prom-pulse 1.6s ease-in-out infinite" : undefined,
           }}
-          style={trayButtonStyle(mode === "agent")}
-        >
-          ✦
-        </button>
+        />
+        <div style={{ flex: 1 }} />
         <button
           type="button"
           aria-label="Open Inspector"
@@ -141,26 +188,29 @@ export function RightRail({
             onModeChange("inspector");
             onToggle();
           }}
-          style={trayButtonStyle(mode === "inspector")}
+          style={iconButtonStyle(false)}
         >
           {"{}"}
         </button>
       </aside>
     );
   }
+
   return (
     <aside
-      aria-label="AI and inspector"
+      aria-label="Agent"
       data-shell-region="rail"
       tabIndex={-1}
       style={{
+        // §2.5: an ISLAND, not a bordered slab bolted to the window edge.
         position: "relative",
         width: rz.size,
         flexShrink: 0,
         display: "flex",
         flexDirection: "column",
         background: "var(--bg-surface)",
-        borderLeft: "1px solid var(--border-subtle)",
+        border: "1px solid var(--border-subtle)",
+        borderRadius: "var(--radius-island)",
         overflow: "hidden",
       }}
     >
@@ -169,54 +219,86 @@ export function RightRail({
         style={{
           display: "flex",
           alignItems: "center",
-          gap: "var(--space-6, 12px)",
-          height: "var(--row-h, 36px)",
-          paddingInline: "var(--space-6, 12px)",
-          borderBottom: "1px solid var(--border-subtle)",
+          gap: 8,
+          flex: "none",
+          padding: "9px 12px",
+          borderBottom: "1px solid var(--border-header)",
         }}
       >
+        <AgentGlyph />
         <button
           type="button"
-          style={tabStyle(mode === "agent")}
           onClick={() => onModeChange("agent")}
+          style={{
+            ...tabStyle(mode === "agent"),
+            fontSize: 12.5,
+            fontWeight: 600,
+            textTransform: "none",
+            letterSpacing: 0,
+            color: mode === "agent" ? "var(--text-title)" : "var(--text-muted)",
+          }}
         >
-          AI
+          Agent
         </button>
+        {mode === "agent" && sessionLabel && (
+          <span
+            title={sessionLabel}
+            style={{
+              fontSize: 11,
+              padding: "1px 8px",
+              borderRadius: "var(--radius-md)",
+              background: "var(--bg-active)",
+              color: "var(--text-secondary)",
+              fontFamily: "var(--font-mono)",
+              maxWidth: 110,
+              overflow: "hidden",
+              textOverflow: "ellipsis",
+              whiteSpace: "nowrap",
+            }}
+          >
+            {sessionLabel}
+          </span>
+        )}
         <button
           type="button"
-          style={tabStyle(mode === "inspector")}
           onClick={() => onModeChange("inspector")}
+          style={tabStyle(mode === "inspector")}
         >
           Inspector
         </button>
         <div style={{ flex: 1 }} />
+        {onNewSession && (
+          <button
+            type="button"
+            aria-label="New chat"
+            title="New chat"
+            onClick={onNewSession}
+            style={headerActionStyle()}
+          >
+            ＋
+          </button>
+        )}
         <button
           type="button"
-          aria-label="Minimize right rail to tray"
-          title="Minimize to tray (⌥⌘B)"
+          aria-label="Minimise right rail to tray"
+          title="Minimise to tray (⌥⌘B)"
           onClick={onToggle}
-          style={{
-            background: "transparent",
-            border: "none",
-            color: "var(--text-secondary)",
-            cursor: "pointer",
-            fontSize: "0.9rem",
-          }}
+          style={headerActionStyle()}
         >
-          ⟩
+          ⇥
         </button>
       </header>
-      <div style={{ flex: 1, minHeight: 0, overflow: "auto" }}>
+      <div style={{ flex: 1, minHeight: 0, overflow: "auto", padding: mode === "agent" ? 10 : 0 }}>
         {mode === "agent" ? (
-          (agent ?? <RailEmpty label="Agent pane" />)
+          (agent ?? <RailEmpty />)
         ) : (
           <pre
             style={{
               margin: 0,
-              padding: "var(--space-6, 12px)",
+              padding: 12,
               fontFamily: "var(--font-mono)",
-              fontSize: "0.75rem",
-              color: "var(--text-secondary)",
+              fontSize: 11.5,
+              color: "var(--text-muted)",
               whiteSpace: "pre-wrap",
               wordBreak: "break-word",
             }}
@@ -231,16 +313,10 @@ export function RightRail({
   );
 }
 
-function RailEmpty({ label }: { label: string }): ReactElement {
+function RailEmpty(): ReactElement {
   return (
-    <div
-      style={{
-        padding: "var(--space-8, 16px)",
-        color: "var(--text-secondary)",
-        fontSize: "0.85rem",
-      }}
-    >
-      {label} is available in the Editor workbench.
+    <div style={{ padding: 16, color: "var(--text-muted)", fontSize: 12.5, lineHeight: 1.5 }}>
+      The agent pane is mounted by the Editor workbench on this route.
     </div>
   );
 }

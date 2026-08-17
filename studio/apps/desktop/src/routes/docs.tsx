@@ -14,8 +14,11 @@ import { Panel } from "@prometheus/ui";
 import { type ReactElement, useEffect, useMemo, useState } from "react";
 
 import { SHELL_COMMANDS } from "../renderer/commands/registry.js";
+import { useTabsStore } from "../renderer/ide/state/stores.js";
+import { openFileInEditor } from "../renderer/open-resource.js";
 import { TUTORIALS } from "./docs-tutorials.js";
 import { type DocsTab, onDocsTab, searchHelp, takeDocsTab } from "./docs-view.js";
+import { type DocRowView, docRows } from "./workspace-view.js";
 
 /** mac vs other for the key labels (mirrors ChordRecorder's detection). */
 function detectPlatform(): "mac" | "other" {
@@ -36,6 +39,43 @@ const TABS: { id: DocsTab; label: string }[] = [
 
 export function DocsRoute(): ReactElement {
   const [query, setQuery] = useState("");
+  /**
+   * §5's Docs segment: the workspace's OWN documents, which the help browser below never
+   * covered — it lists engine commands and tutorials, not the README you are working on.
+   *
+   * The walk is `ide.workspaceIndex` (gitignore-aware, worker-offloaded), filtered to
+   * document extensions. It returns paths only, so §5's age column has no source and is
+   * omitted rather than approximated.
+   */
+  const workspaceRoot = useTabsStore((s) => s.workspaceRoot);
+  const [docs, setDocs] = useState<DocRowView[]>([]);
+  const [docsError, setDocsError] = useState<string | null>(null);
+  useEffect(() => {
+    if (!workspaceRoot) {
+      setDocs([]);
+      setDocsError(null);
+      return;
+    }
+    let live = true;
+    void window.prometheus?.ide
+      ?.workspaceIndex(workspaceRoot)
+      .then((r) => {
+        if (!live) return;
+        if (!r.ok) {
+          setDocsError(r.error ?? "the workspace walk did not answer");
+          setDocs([]);
+          return;
+        }
+        setDocsError(null);
+        setDocs(docRows(r.files ?? [], workspaceRoot));
+      })
+      .catch((e: unknown) => {
+        if (live) setDocsError(e instanceof Error ? e.message : String(e));
+      });
+    return () => {
+      live = false;
+    };
+  }, [workspaceRoot]);
   const [tab, setTab] = useState<DocsTab>(() => takeDocsTab() ?? "engine");
   const platform = useMemo(detectPlatform, []);
 
@@ -61,6 +101,94 @@ export function DocsRoute(): ReactElement {
 
   return (
     <div style={{ display: "grid", gap: "var(--space-8, 16px)", alignContent: "start" }}>
+      {/* ── §5's Docs rows: the workspace's own documents ───────────────────── */}
+      <Panel
+        title="Workspace docs"
+        elevation="e1"
+        actions={
+          <span
+            style={{
+              fontFamily: "var(--font-mono)",
+              fontSize: 11,
+              color: "var(--text-muted)",
+              whiteSpace: "nowrap", // §7
+            }}
+          >
+            {docs.length}
+          </span>
+        }
+      >
+        {!workspaceRoot ? (
+          <p style={{ color: "var(--text-secondary)", margin: 0, fontSize: "0.85rem" }}>
+            No folder is open. Open one from the Editor to list its documents here.
+          </p>
+        ) : docsError ? (
+          <p role="alert" style={{ color: "var(--danger)", margin: 0, fontSize: "0.85rem" }}>
+            Couldn't list documents: {docsError}
+          </p>
+        ) : docs.length === 0 ? (
+          <p style={{ color: "var(--text-secondary)", margin: 0, fontSize: "0.85rem" }}>
+            No documents found under this folder.
+          </p>
+        ) : (
+          <ul style={{ listStyle: "none", margin: 0, padding: 0 }}>
+            {docs.map((d) => (
+              <li key={d.path}>
+                <button
+                  type="button"
+                  onClick={() => openFileInEditor(d.path)}
+                  style={{
+                    width: "100%",
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 8,
+                    padding: "4px 4px",
+                    background: "transparent",
+                    border: "none",
+                    borderRadius: "var(--radius-md, 6px)",
+                    color: "var(--text-primary)",
+                    cursor: "pointer",
+                    textAlign: "left",
+                    minWidth: 0, // §7
+                  }}
+                >
+                  <span aria-hidden="true" style={{ flex: "none", color: "var(--accent)" }}>
+                    ▤
+                  </span>
+                  <span
+                    style={{
+                      flex: "none",
+                      fontFamily: "var(--font-mono)",
+                      fontSize: "0.78rem",
+                      whiteSpace: "nowrap",
+                    }}
+                  >
+                    {d.filename}
+                  </span>
+                  <span
+                    style={{
+                      flex: 1,
+                      minWidth: 0, // §7
+                      fontSize: "0.68rem",
+                      color: "var(--text-muted)",
+                      overflow: "hidden",
+                      textOverflow: "ellipsis",
+                      whiteSpace: "nowrap",
+                      direction: "rtl", // keep the DEEPEST directory visible when it elides
+                      textAlign: "left",
+                    }}
+                  >
+                    {/* a root-level document has no directory worth showing; "." beside the
+                        filename reads as a stray character, not as information. */}
+                    {d.dir === "." ? "" : d.dir}
+                  </span>
+                </button>
+              </li>
+            ))}
+          </ul>
+        )}
+      </Panel>
+
       <Panel title="Help & documentation" elevation="e1">
         <p style={{ marginTop: 0, color: "var(--text-secondary)", fontSize: "0.85rem" }}>
           Engine commands, the shell/editor cheat-sheet with live keybindings, and getting-started
@@ -106,7 +234,7 @@ export function DocsRoute(): ReactElement {
                 border: "1px solid var(--border-subtle)",
                 cursor: "pointer",
                 fontSize: "0.8rem",
-                background: tab === t.id ? "var(--bg-surface-3, #32323a)" : "transparent",
+                background: tab === t.id ? "var(--bg-surface-3)" : "transparent",
                 color: tab === t.id ? "var(--text-primary)" : "var(--text-secondary)",
               }}
             >
@@ -285,7 +413,7 @@ function TutorialsTab({
                       borderRadius: 10,
                       border: "1px solid var(--border-subtle)",
                       background: "transparent",
-                      color: "var(--accent, #22d3ee)",
+                      color: "var(--accent)",
                       cursor: "pointer",
                       fontSize: "0.68rem",
                     }}

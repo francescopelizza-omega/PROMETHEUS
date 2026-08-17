@@ -23,6 +23,7 @@ import {
 } from "react";
 import { createPortal } from "react-dom";
 
+import { Z } from "@prometheus/ui";
 import type { NormalizedSymbol } from "./state/lsp-convert.js";
 import { filterSymbols } from "./state/structure-filter.js";
 
@@ -118,7 +119,7 @@ export function FileStructurePopup({
         justifyContent: "center",
         paddingTop: "12vh",
         background: "var(--overlay, rgba(0,0,0,0.35))",
-        zIndex: 50,
+        zIndex: Z.dropdown,
       }}
     >
       {/* biome-ignore lint/a11y/useSemanticElements: a role="dialog" div matches the other EditorPane overlay hosts; a native <dialog> needs showModal() plumbing that fights the portal + focus-trap approach. */}
@@ -133,8 +134,8 @@ export function FileStructurePopup({
           maxHeight: "70vh",
           display: "flex",
           flexDirection: "column",
-          background: "var(--surface-1, #1e1e24)",
-          border: "1px solid var(--border, #3a3a42)",
+          background: "var(--surface-1)",
+          border: "1px solid var(--border)",
           borderRadius: 8,
           boxShadow: "var(--shadow-e3, 0 12px 40px rgba(0,0,0,0.45))",
           overflow: "hidden",
@@ -151,9 +152,9 @@ export function FileStructurePopup({
             margin: 8,
             padding: "6px 8px",
             fontSize: "0.82rem",
-            background: "var(--surface-2, #26262c)",
-            color: "var(--text-primary, #e7e7ea)",
-            border: "1px solid var(--border, #3a3a42)",
+            background: "var(--surface-2)",
+            color: "var(--text-primary)",
+            border: "1px solid var(--border)",
             borderRadius: 6,
             outline: "none",
           }}
@@ -163,9 +164,7 @@ export function FileStructurePopup({
           style={{ listStyle: "none", margin: 0, padding: "0 8px 8px", overflow: "auto", flex: 1 }}
         >
           {rows.length === 0 && (
-            <li
-              style={{ color: "var(--text-secondary, #9a9aa3)", fontSize: "0.76rem", padding: 6 }}
-            >
+            <li style={{ color: "var(--text-secondary)", fontSize: "0.76rem", padding: 6 }}>
               No matching symbols.
             </li>
           )}
@@ -187,15 +186,15 @@ export function FileStructurePopup({
                   fontSize: "0.78rem",
                   borderRadius: 4,
                   cursor: "pointer",
-                  background: i === sel ? "var(--surface-3, #32323a)" : "transparent",
+                  background: i === sel ? "var(--surface-3)" : "transparent",
                 }}
               >
-                <span style={{ color: "var(--accent, #22d3ee)", width: 12, textAlign: "center" }}>
+                <span style={{ color: "var(--accent)", width: 12, textAlign: "center" }}>
                   {kindGlyph(r.symbol.kind)}
                 </span>
                 <span
                   style={{
-                    color: "var(--text-primary, #e7e7ea)",
+                    color: "var(--text-primary)",
                     fontFamily: "var(--font-mono, monospace)",
                   }}
                 >
@@ -204,7 +203,7 @@ export function FileStructurePopup({
                 {r.symbol.detail && (
                   <span
                     style={{
-                      color: "var(--text-secondary, #9a9aa3)",
+                      color: "var(--text-secondary)",
                       fontSize: "0.72rem",
                       overflow: "hidden",
                       textOverflow: "ellipsis",

@@ -30,7 +30,7 @@ function GuardBanner({
         gap: "var(--space-3, 6px)",
         padding: "var(--space-3, 6px) var(--space-4, 8px)",
         borderRadius: "var(--radius-md, 6px)",
-        border: `1px solid ${blocked ? "var(--danger, #ef5a5a)" : "var(--border-subtle)"}`,
+        border: `1px solid ${blocked ? "var(--danger)" : "var(--border-subtle)"}`,
         background: blocked
           ? "color-mix(in srgb, var(--danger) 12%, var(--bg-inset))"
           : "var(--bg-inset)",

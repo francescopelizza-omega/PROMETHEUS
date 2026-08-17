@@ -11,5 +11,5 @@ long-running ops. Owns sidecar lifecycle/health and the request/response/error t
 
 **Rule:** no security decision is made in JS — verdicts come from `nemesis`/`prometheus.py`.
 
-Spec → [`02-monorepo-tech-stack-bridge.md`](../../../MDS/the_real_prometheus/02-monorepo-tech-stack-bridge.md),
-[`03-security-core-nemesis-gui.md`](../../../MDS/the_real_prometheus/03-security-core-nemesis-gui.md).
+Monorepo/tech-stack and security-architecture rationale live in the maintainer's internal spec
+set (not part of this repo).

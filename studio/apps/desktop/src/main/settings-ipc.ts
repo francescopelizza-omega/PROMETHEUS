@@ -37,19 +37,50 @@ function stringField(a: Record<string, unknown>, key: string): string | undefine
 export interface SettingsIpcOptions {
   /** where the global layer persists (defaults to `<userData>/settings.json`). */
   globalPath: string;
+  /**
+   * Fired with the resolved settings whenever they are read or written.
+   *
+   * This is how the security keys reach the code that enforces them. It fires on `list` (the
+   * renderer's first call, and the one that carries the workspace root), and on `set`/`reset`.
+   * The startup adoption is separate and happens BEFORE the AI handlers register — see
+   * `adoptSecurityPosture` — so there is no window in which a locked-down GLOBAL profile is
+   * configured but not yet in force; this seam is what additionally picks up a per-workspace
+   * layer once a workspace is actually open.
+   */
+  onEffective?: (effective: coreSettings.Settings) => void;
 }
 
 /** Register the `settings:*` handlers. Returns a disposer (mirrors sibling IPC modules). */
 export function registerSettingsIpcHandlers(opts: SettingsIpcOptions): () => void {
   const globalPath = opts.globalPath;
+  /** Resolve + publish the posture. Fail-soft: a settings read must never break a handler. */
+  const publish = async (workspaceRoot?: string): Promise<void> => {
+    if (!opts.onEffective) return;
+    try {
+      const { effective } = await loadEffective(globalPath, workspaceRoot);
+      opts.onEffective(effective as unknown as coreSettings.Settings);
+    } catch {
+      /* keep the last known posture rather than silently widening to the default */
+    }
+  };
+  // Adopt whatever is on disk NOW, so the policy is in force before the first model call —
+  // not only after the user happens to open the settings page.
+  void publish();
 
   ipcMain.handle(IPC.settingsList, async (_e, arg: unknown): Promise<SettingsListResult> => {
     try {
       const a = (arg ?? {}) as Record<string, unknown>;
-      const { global, profile, workspace } = await loadEffective(
+      const workspaceRoot = stringField(a, "workspaceRoot");
+      const { effective, global, profile, workspace } = await loadEffective(
         globalPath,
-        stringField(a, "workspaceRoot"),
+        workspaceRoot,
       );
+      // Adopt the posture for THIS workspace. The startup publish runs before any workspace is
+      // open, so it resolves the global layers only — a repo whose `.prometheus/settings.json`
+      // TIGHTENS the posture would otherwise not take effect until some unrelated write
+      // happened to pass a root. `settings:list` is the renderer's first call and it carries
+      // the root, so this is where a per-workspace posture actually lands.
+      opts.onEffective?.(effective as unknown as coreSettings.Settings);
       // APP-058: rich rows (per-scope raw values + the full definedIn chain), profile layer
       // INCLUDED so a profile-set key is labeled "profile", not mislabeled "default".
       const bySchemaKey = resolveRichRows(global, profile, workspace);
@@ -104,6 +135,9 @@ export function registerSettingsIpcHandlers(opts: SettingsIpcOptions): () => voi
           coreSettings.setInLayer(workspace, key, a.value),
         );
       }
+      // Re-resolve immediately: a security key that only took effect after a restart would be
+      // a control the user watched fail.
+      await publish(workspaceRoot);
       return { ok: true };
     } catch (e) {
       return { ok: false, error: errString(e) };
@@ -135,6 +169,9 @@ export function registerSettingsIpcHandlers(opts: SettingsIpcOptions): () => voi
           coreSettings.resetInLayer(workspace, key),
         );
       }
+      // A reset can WIDEN the posture (back to the default), so it must republish too —
+      // otherwise clearing `gateStrict` would leave the strict gate silently in force.
+      await publish(workspaceRoot);
       return { ok: true };
     } catch (e) {
       return { ok: false, error: errString(e) };

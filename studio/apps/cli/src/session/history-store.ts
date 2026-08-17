@@ -25,6 +25,15 @@ export interface SessionRecord {
   /** the first 15 words of the opening prompt (hard-chunked). */
   descriptor: string;
   cwd: string;
+  /**
+   * How the session was run. Absent ⇒ interactive, so every index line written before this
+   * field existed stays valid.
+   *
+   * Headless runs are recorded — a CI run that cannot be audited or resumed is the one that
+   * most needs to be — but they are kept OUT of the `/recall` picker, which a thousand
+   * `prometheus -p` invocations would otherwise bury.
+   */
+  kind?: "headless";
 }
 
 /** First 15 words of a prompt, hard-chunked + whitespace-collapsed (the `/recall` summary). */
@@ -47,6 +56,17 @@ export function recordSession(home: string, rec: SessionRecord): void {
   } catch {
     /* a read-only home just means no recall history */
   }
+}
+
+/**
+ * Sessions a human started, for the `/recall` picker.
+ *
+ * A separate FILTER rather than a filtering `listSessions`: `deleteSession` rewrites
+ * index.jsonl from `listSessions(home, 100000)`, so hiding records inside the reader would
+ * silently erase every headless record on the next delete.
+ */
+export function interactiveSessions(records: readonly SessionRecord[]): SessionRecord[] {
+  return records.filter((r) => r.kind !== "headless");
 }
 
 /** All recorded sessions, NEWEST FIRST. Unreadable/garbage lines are skipped. */
@@ -188,13 +208,15 @@ export function buildSessionExport(
       asst.text += String(t.text ?? "");
     } else if (kind === "tool_use") {
       const call = (t as { call?: { name?: unknown; args?: unknown } }).call;
-      (asst.toolCalls ??= []).push({
+      asst.toolCalls ??= [];
+      asst.toolCalls.push({
         name: String(call?.name ?? ""),
         ...(call && "args" in call ? { args: call.args } : {}),
       });
     } else if (kind === "verdict") {
       const r = t as { tool?: unknown; verdict?: unknown; riskScore?: unknown };
-      (asst.verdict ??= []).push({
+      asst.verdict ??= [];
+      asst.verdict.push({
         tool: String(r.tool ?? ""),
         verdict: String(r.verdict ?? ""),
         ...(typeof r.riskScore === "number" ? { riskScore: r.riskScore } : {}),
@@ -272,16 +294,72 @@ export function appendAccounting(home: string, sessionId: string, rec: Accountin
   }
 }
 
+/**
+ * Read one accounting file, distinguishing ABSENT from UNREADABLE.
+ *
+ * The difference is the whole point. `checkBudgetGate` documents itself as failing closed on an
+ * unreadable store — but with a reader that swallows every error and returns `[]`, an unreadable
+ * or deleted file read as "$0 spent", so the cap silently stopped enforcing. That is a cap
+ * BYPASS wearing the costume of a safe default: `rm` the file and the ceiling is gone.
+ *
+ * A missing file is the normal first run and yields `[]`. Anything else — EACCES, EISDIR, an I/O
+ * error — THROWS, so the caller that promised to fail closed can keep that promise.
+ */
+function readAcctFile(path: string): AccountingRecord[] {
+  let text: string;
+  try {
+    text = readFileSync(path, "utf8");
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === "ENOENT") return []; // never written yet
+    throw e;
+  }
+  return parseAcctLines(text);
+}
+
+/**
+ * Every accounting record from TODAY, across every session in this home.
+ *
+ * `daily_usd` was a session cap wearing a different name: the gate read only the CURRENT
+ * session's file, and a fresh sessionId is minted on every launch, so the "daily" window reset
+ * to $0 on restart and a user could spend N x the daily cap by quitting and reopening. The day
+ * filter itself lives in `evaluateBudgets`; this supplies the records it needs to filter.
+ *
+ * Cost is bounded by mtime: a session file whose last write was before local midnight cannot
+ * contain a record from today, so it is never opened. Fail-soft per file — one unreadable
+ * session's history must not make the whole store unreadable — but see `readAccounting` for the
+ * current session, where unreadable IS fatal.
+ */
+export function readAccountingSince(home: string, sinceMs: number): AccountingRecord[] {
+  const dir = sessionsDir(home);
+  let names: string[];
+  try {
+    names = readdirSync(dir);
+  } catch {
+    return []; // no sessions dir yet — nothing has ever been spent
+  }
+  const out: AccountingRecord[] = [];
+  for (const name of names) {
+    if (!name.endsWith(".acct.jsonl")) continue;
+    const path = join(dir, name);
+    try {
+      if (statSync(path).mtimeMs < sinceMs) continue; // cannot hold a record from today
+      out.push(...parseAcctLines(readFileSync(path, "utf8")));
+    } catch {
+      /* a single unreadable/vanished session file is skipped, not fatal for the whole window */
+    }
+  }
+  return out;
+}
+
 /** Load a session's accounting records in order; missing file → []; corrupt lines skipped. */
 export function readAccounting(home: string, sessionId: string): AccountingRecord[] {
   const id = safeSessionId(sessionId);
   if (!id) return [];
-  let text: string;
-  try {
-    text = readFileSync(acctFile(home, id), "utf8");
-  } catch {
-    return [];
-  }
+  return readAcctFile(acctFile(home, id));
+}
+
+/** Parse accounting JSONL: one record per line, corrupt lines skipped, order preserved. */
+function parseAcctLines(text: string): AccountingRecord[] {
   const out: AccountingRecord[] = [];
   for (const line of text.split("\n")) {
     const s = line.trim();
@@ -404,48 +482,172 @@ export interface RotateOptions {
   listDir?: (dir: string) => string[];
   statFn?: (path: string) => { size: number; mtimeMs: number };
   rmFn?: (path: string) => void;
+  /** injected clock, so the age policy is testable without touching mtimes. */
+  now?: number;
+  /** override the 30-day age policy (tests). */
+  maxAgeMs?: number;
+  /** override the index record cap (tests). */
+  maxIndexRecords?: number;
+  /** injected index writer (tests). */
+  writeFn?: (path: string, body: string) => void;
+}
+
+/** Total-bytes cap over the whole session store — transcripts AND accounting. */
+export const SESSION_STORE_MAX_BYTES = 50 * 1024 * 1024; // 50 MiB
+/** A session untouched this long is pruned even when the store is under the byte cap. */
+export const SESSION_STORE_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
+/** Hard cap on index.jsonl records — `/recall` and `sessions list` read the file whole. */
+export const SESSION_INDEX_MAX_RECORDS = 1000;
+
+const ACCT_SUFFIX = ".acct.jsonl";
+
+/** Every file the store owns for one session. A new artifact added HERE reaches all three arms. */
+function sessionArtifactPaths(home: string, id: string): string[] {
+  return [sessionFile(home, id), acctFile(home, id)];
+}
+
+/** The session a store filename belongs to, or null when it is not session-owned. */
+export function sessionIdOfFile(name: string): { id: string; kind: "transcript" | "acct" } | null {
+  if (name === "index.jsonl" || !name.endsWith(".jsonl")) return null;
+  const acct = name.endsWith(ACCT_SUFFIX);
+  const id = name.slice(0, -(acct ? ACCT_SUFFIX.length : ".jsonl".length));
+  return safeSessionId(id) ? { id, kind: acct ? "acct" : "transcript" } : null;
+}
+
+/** Local midnight — the floor `checkBudgetGate` measures the daily spend cap against. */
+export function startOfLocalDayMs(now: number = Date.now()): number {
+  const d = new Date(now);
+  d.setHours(0, 0, 0, 0);
+  return d.getTime();
 }
 
 /**
- * Rotate transcripts by total bytes: when `<home>/sessions/*.jsonl` exceeds the cap,
- * delete OLDEST-first (by mtime), NEVER index.jsonl and NEVER the live session file.
+ * Apply the session-store RETENTION POLICY. (Named `rotateSessions` for its callers.)
+ *
+ * It used to rotate transcripts only, and deliberately filtered `*.acct.jsonl` OUT — the
+ * reasoning being that accounting files are tiny and that including them would let rotation
+ * delete the live session's accounting. The first half was an assumption and the second is a
+ * bug in the live-guard, not a reason to exempt a whole class of file. So accounting was
+ * completely unbounded, and worst exactly where it grows fastest: every `prometheus -p` mints
+ * a fresh session id, writes an `<id>.acct.jsonl`, records no index entry — so
+ * `sessions delete` can never reach it — and never rotated at all. One file leaked per CI run,
+ * forever. `index.jsonl` had the mirror problem: pruned only by an explicit delete, so it grew
+ * a line per launch and `/recall` offered sessions whose transcripts rotation had already
+ * removed.
+ *
+ * THE POLICY, in one place:
+ *   - the unit of retention is a SESSION — all files named `<id>.*` — never a lone file;
+ *   - a session is pruned when it is older than `maxAgeMs`, or when the store exceeds
+ *     `maxBytes` and it is among the oldest;
+ *   - NEVER pruned: `index.jsonl`; any file of the LIVE session; and any `*.acct.jsonl`
+ *     written at or after the current budget floor (local midnight) — that file IS the
+ *     evidence `checkBudgetGate` reads for the daily cap, so deleting it would silently
+ *     re-open the spend limit;
+ *   - `index.jsonl` is pruned in the same pass: records for fully-pruned sessions are dropped
+ *     and the file is capped at `SESSION_INDEX_MAX_RECORDS`, newest kept.
  */
 export function rotateSessions(home: string, opts: RotateOptions): void {
   const dir = sessionsDir(home);
   const list = opts.listDir ?? ((d: string) => readdirSync(d));
   const stat = opts.statFn ?? ((p: string) => statSync(p));
   const rm = opts.rmFn ?? ((p: string) => rmSync(p));
-  const live = opts.liveId ? `${opts.liveId}.jsonl` : null;
+  const now = opts.now ?? Date.now();
+  const maxAgeMs = opts.maxAgeMs ?? SESSION_STORE_MAX_AGE_MS;
+  const dayFloor = startOfLocalDayMs(now);
   let names: string[];
   try {
     names = list(dir);
   } catch {
     return;
   }
-  const entries = names
-    // TRANSCRIPTS only: `*.acct.jsonl` are per-session accounting (CLI-029) — tiny, a separate
-    // concern, and the live one is `<id>.acct.jsonl` which the `<id>.jsonl` live-guard misses, so
-    // including them here would let rotation delete the ACTIVE session's accounting mid-run.
-    .filter((n) => n.endsWith(".jsonl") && !n.endsWith(".acct.jsonl") && n !== "index.jsonl")
-    .map((n) => {
-      try {
-        const st = stat(join(dir, n));
-        return { name: n, size: st.size, mtimeMs: st.mtimeMs };
-      } catch {
-        return null;
-      }
-    })
-    .filter((e): e is { name: string; size: number; mtimeMs: number } => e !== null);
-  let total = entries.reduce((a, e) => a + e.size, 0);
-  if (total <= opts.maxBytes) return;
-  for (const e of entries.filter((x) => x.name !== live).sort((a, b) => a.mtimeMs - b.mtimeMs)) {
-    if (total <= opts.maxBytes) break;
+
+  /** Every session in the store, with its total size and most recent mtime. */
+  const sessions = new Map<
+    string,
+    { size: number; mtimeMs: number; protectedAcct: boolean; files: string[] }
+  >();
+  for (const name of names) {
+    const owned = sessionIdOfFile(name);
+    if (!owned) continue;
+    let st: { size: number; mtimeMs: number };
     try {
-      rm(join(dir, e.name));
-      total -= e.size;
+      st = stat(join(dir, name));
     } catch {
-      /* skip an un-removable file, keep going */
+      continue;
     }
+    const cur = sessions.get(owned.id) ?? {
+      size: 0,
+      mtimeMs: 0,
+      protectedAcct: false,
+      files: [],
+    };
+    cur.size += st.size;
+    cur.mtimeMs = Math.max(cur.mtimeMs, st.mtimeMs);
+    // Today's accounting is the daily cap's evidence — pruning it re-opens the cap. The
+    // protection is on the FILE, not the session: the transcript is the bulk and can still go.
+    if (owned.kind === "acct" && st.mtimeMs >= dayFloor) cur.protectedAcct = true;
+    else cur.files.push(name);
+    sessions.set(owned.id, cur);
+  }
+
+  const prunable = [...sessions.entries()]
+    .filter(([id, s]) => id !== opts.liveId && s.files.length > 0)
+    .sort((a, b) => a[1].mtimeMs - b[1].mtimeMs);
+
+  const pruned = new Set<string>();
+  // Only files the listing actually reported are removed — a session is a set of artifacts,
+  // but there is no reason to issue an unlink for one that is not there.
+  const drop = (id: string): void => {
+    for (const name of sessions.get(id)?.files ?? []) {
+      try {
+        rm(join(dir, name));
+      } catch {
+        /* already gone, or un-removable — keep going */
+      }
+    }
+    // A session whose ONLY remaining artifact was protected is not fully gone, so its index
+    // record stays — `/recall` would otherwise stop offering a session that still has data.
+    if (!sessions.get(id)?.protectedAcct) pruned.add(id);
+  };
+
+  // Age first: an old session is pruned whatever the store's total size.
+  for (const [id, s] of prunable) {
+    if (now - s.mtimeMs > maxAgeMs) drop(id);
+  }
+
+  // Then size, oldest-first, over what survived.
+  let total = [...sessions.entries()]
+    .filter(([id]) => !pruned.has(id))
+    .reduce((a, [, s]) => a + s.size, 0);
+  for (const [id, s] of prunable) {
+    if (total <= opts.maxBytes) break;
+    if (pruned.has(id)) continue;
+    drop(id);
+    total -= s.size;
+  }
+
+  pruneIndex(home, pruned, opts);
+}
+
+/** Drop index records for pruned sessions and cap the file's length. Best-effort. */
+function pruneIndex(home: string, pruned: ReadonlySet<string>, opts: RotateOptions): void {
+  const max = opts.maxIndexRecords ?? SESSION_INDEX_MAX_RECORDS;
+  try {
+    const all = listSessions(home, 1_000_000);
+    const kept = all.filter((r) => !pruned.has(r.id)).slice(0, max);
+    if (kept.length === all.length) return; // nothing to do — do not rewrite for nothing
+    const write = opts.writeFn ?? ((p: string, body: string) => writeFileSync(p, body));
+    write(
+      indexPath(home),
+      kept.length
+        ? `${kept
+            .map((r) => JSON.stringify(r))
+            .reverse()
+            .join("\n")}\n`
+        : "",
+    );
+  } catch {
+    /* read-only home — the transcripts are still gone, which is the load-bearing half */
   }
 }
 
@@ -521,11 +723,17 @@ export function deleteSession(home: string, id: string): boolean {
   const clean = safeSessionId(id);
   if (!clean) return false;
   let removed = false;
-  try {
-    rmSync(sessionFile(home, clean));
-    removed = true;
-  } catch {
-    /* no transcript file (metadata-only session) — still prune the index below */
+  // EXPLICIT delete is user intent: it removes everything the store owns for this session.
+  // It used to unlink only `<id>.jsonl`, so the accounting file survived — and kept ranking in
+  // `latestAccountingSession`, so `prometheus tokens report` still reported a session the user
+  // had deleted.
+  for (const path of sessionArtifactPaths(home, clean)) {
+    try {
+      rmSync(path);
+      removed = true;
+    } catch {
+      /* no such artifact (a metadata-only session) — still prune the index below */
+    }
   }
   try {
     // rewrite index.jsonl WITHOUT the record (oldest-first append order restored).

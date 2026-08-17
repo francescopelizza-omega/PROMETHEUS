@@ -38,8 +38,9 @@ export function Sidebar({
     axis: "x",
     initial: SIDEBAR_DEFAULT,
     min: SIDEBAR_MIN,
-    // 0.35 so sidebar_max + rail_max (0.45) + the 56px activity bar can never exceed
-    // the viewport and push the workbench/rail off-screen (paired with RightRail 0.45).
+    // 0.35 so sidebar_max + rail_max (0.42) + the 46px activity bar + the 8px island gaps
+    // can never exceed the viewport and push the workbench/rail off-screen at the
+    // 1100px window minimum (paired with RightRail 0.42).
     max: () => Math.max(SIDEBAR_MIN, Math.round(window.innerWidth * 0.35)),
     storageKey: "prometheus.layout.sidebarWidth",
   });
@@ -50,13 +51,17 @@ export function Sidebar({
       data-shell-region="sidebar"
       tabIndex={-1}
       style={{
+        // §2: an ISLAND — it floats on the app ground with its own border + radius, so it
+        // never shares a hairline with a neighbour (which is what read as a "full-bleed"
+        // panel before). The 8px gap comes from the parent row's `gap`.
         position: "relative",
         width: rz.size,
         flexShrink: 0,
         display: "flex",
         flexDirection: "column",
         background: "var(--bg-surface)",
-        borderRight: "1px solid var(--border-subtle)",
+        border: "1px solid var(--border-subtle)",
+        borderRadius: "var(--radius-island)",
         overflow: "hidden",
       }}
     >
@@ -66,18 +71,19 @@ export function Sidebar({
           display: "flex",
           alignItems: "center",
           justifyContent: "space-between",
-          height: "var(--row-h, 36px)",
-          paddingInline: "var(--space-6, 12px)",
-          borderBottom: "1px solid var(--border-subtle)",
+          height: 34,
+          flex: "none",
+          paddingInline: 12,
+          borderBottom: "1px solid var(--border-header)",
         }}
       >
         <span
           style={{
-            fontSize: "var(--text-small-size, 0.8125rem)",
+            fontSize: 12,
             fontWeight: 600,
             textTransform: "uppercase",
             letterSpacing: "0.04em",
-            color: "var(--text-secondary)",
+            color: "var(--text-title)",
           }}
         >
           {sidebarTitle(activity)}

@@ -4,6 +4,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
+import { parseAgentFile } from "./agent-files.js";
 import {
   CheckpointStore,
   changedPaths,
@@ -15,19 +16,13 @@ import {
   type SessionEvent,
   SessionEventBus,
   compact,
+  compactionSlices,
+  estimateTextTokens,
   estimateTokens,
   shouldCompact,
+  shouldCompactTexts,
+  sliceForCompaction,
 } from "./compact.js";
-import {
-  AGENT_BUILD,
-  AGENT_PLAN,
-  SEED_AGENTS,
-  agentFileToDef,
-  getAgent,
-  parseAgentFile,
-  parseMention,
-  parseModelRef,
-} from "./modes.js";
 import {
   type Session,
   appendTurn,
@@ -175,38 +170,96 @@ test("CheckpointStore records, lists by session, evicts past capacity", () => {
   assert.equal(store.list("s1").length, 1);
 });
 
-// ---- modes-as-agents (§3.1) ------------------------------------------------ //
+// ---- agent-file frontmatter parsing (§3.1) --------------------------------- //
 
-test("seed roster: Build is full + auto, Plan is read-first (no auto, no shell)", () => {
-  assert.equal(SEED_AGENTS.length, 4);
-  assert.equal(getAgent(SEED_AGENTS, "build")?.id, "build");
-  assert.equal(AGENT_BUILD.tools[0]?.autoApprove, true);
-  assert.equal(AGENT_BUILD.sandbox.shell, true);
-  assert.equal(AGENT_PLAN.tools[0]?.autoApprove, false);
-  assert.equal(AGENT_PLAN.sandbox.shell, false);
-  assert.deepEqual(AGENT_PLAN.sandbox.fsWrite, []);
-});
-
-test("parseAgentFile + agentFileToDef build an AgentDef from markdown frontmatter", () => {
+/**
+ * The roster tests that lived here (`SEED_AGENTS`, `AGENT_BUILD`, `AGENT_PLAN`,
+ * `agentFileToDef`, `parseMention`, `parseModelRef`) are gone with `modes.ts` itself: they
+ * were the only callers of a second, parallel agent system that no production code imported,
+ * while the plan-mode posture that IS wired lives in `permission-modes.ts`. Deleting the
+ * tests alongside the code is the point — a green test over dead code is what let two
+ * competing answers to "what does plan mode do" survive this long. Plan mode's real
+ * behaviour is covered in `permission-modes.test.ts` and `loop.test.ts`.
+ */
+test("parseAgentFile reads tiny-YAML frontmatter (scalars, lists, bools) + the body", () => {
   const md =
-    "---\nname: Reviewer\ndescription: reviews diffs\nmode: plan\nmodel: anthropic:claude-sonnet-4-6\ntools: [engine:scan, fs:read]\n---\nYou review code.";
+    "---\nname: Reviewer\ndescription: reviews diffs\nmode: plan\nreadonly: true\ntools: [engine:scan, fs:read]\n---\nYou review code.";
   const parsed = parseAgentFile(md);
   assert.equal(parsed.meta.name, "Reviewer");
+  assert.equal(parsed.meta.mode, "plan");
+  assert.equal(parsed.meta.readonly, true, "`true` parses as a boolean, not the string");
   assert.deepEqual(parsed.meta.tools, ["engine:scan", "fs:read"]);
-  const def = agentFileToDef(parsed, "reviewer");
-  assert.equal(def.name, "Reviewer");
-  assert.deepEqual(def.model, { provider: "anthropic", modelId: "claude-sonnet-4-6" });
-  assert.equal(def.system, "You review code.");
-  assert.equal(def.tools[0]?.autoApprove, false, "plan mode → not auto");
-  assert.equal(def.sandbox.shell, false);
+  assert.equal(parsed.body, "You review code.");
 });
 
-test("parseModelRef + parseMention", () => {
-  assert.deepEqual(parseModelRef("openai:gpt-4o"), { provider: "openai", modelId: "gpt-4o" });
-  assert.deepEqual(parseModelRef("qwen3"), { provider: "local", modelId: "qwen3" });
-  assert.deepEqual(parseMention("@Explore find the bug"), {
-    agentId: "explore",
-    rest: "find the bug",
-  });
-  assert.equal(parseMention("no mention here"), null);
+test("parseAgentFile: no frontmatter → empty meta and the whole document as the body", () => {
+  // Prevents the regression where a bodyless/frontmatterless file throws instead of
+  // degrading to "a persona with no declared metadata", which `loadAgentFile` then clamps.
+  const parsed = parseAgentFile("just a prompt, no dashes");
+  assert.deepEqual(parsed.meta, {});
+  assert.equal(parsed.body, "just a prompt, no dashes");
+});
+
+/* ── compaction, without the CLI's turn shape ──────────────────────────────*/
+
+/**
+ * The three `SessionTurn`-typed helpers are why the desktop has had no compaction at all: its
+ * transcript is `{role, content}` and cannot satisfy `{prompt, events}`, so the GUI simply grew
+ * until it overflowed. Raising the round cap 8 → 32 made that likelier, which is what turned a
+ * gap into debt.
+ *
+ * The split was never about the shape — it is by COUNT — and a token estimate only needs text.
+ */
+
+test("the text estimator agrees with the turn estimator on the same content", () => {
+  const turns = [
+    { id: "1", turnNumber: 1, prompt: "hello there", events: [], createdAt: "t" },
+    { id: "2", turnNumber: 2, prompt: "second one", events: [], createdAt: "t" },
+  ];
+  assert.equal(
+    estimateTextTokens(turns.map((t) => t.prompt)),
+    estimateTokens(turns),
+    "two estimators over the same text disagreed",
+  );
+});
+
+test("shouldCompactTexts refuses to compact a transcript shorter than the keep window", () => {
+  // Compacting when there is nothing older than the keep window would summarize nothing and
+  // destroy the recent turns.
+  const policy = { maxTokens: 1, keepRecentTurns: 4 };
+  assert.equal(shouldCompactTexts(["a", "b"], policy), false);
+  assert.equal(shouldCompactTexts(["a".repeat(400), "b", "c", "d", "e"], policy), true);
+});
+
+test("sliceForCompaction splits by COUNT and keeps the recent tail intact", () => {
+  const turns = [1, 2, 3, 4, 5];
+  const { older, recent } = sliceForCompaction(turns, { maxTokens: 0, keepRecentTurns: 2 });
+  assert.deepEqual(older, [1, 2, 3]);
+  assert.deepEqual(recent, [4, 5]);
+});
+
+test("sliceForCompaction is total: a keep window larger than the transcript keeps everything", () => {
+  const { older, recent } = sliceForCompaction([1, 2], { maxTokens: 0, keepRecentTurns: 99 });
+  assert.deepEqual(older, []);
+  assert.deepEqual(recent, [1, 2]);
+});
+
+test("it produces the same split as the SessionTurn version, for the same length", () => {
+  // The two must not drift — a host on one and a host on the other would compact differently.
+  const turns = Array.from({ length: 7 }, (_, i) => ({
+    id: `${i}`,
+    turnNumber: i,
+    prompt: "x",
+    events: [],
+    createdAt: "t",
+  }));
+  const policy = { maxTokens: 0, keepRecentTurns: 3 };
+  assert.equal(
+    sliceForCompaction(turns, policy).older.length,
+    compactionSlices(turns, policy).older.length,
+  );
+  assert.equal(
+    sliceForCompaction(turns, policy).recent.length,
+    compactionSlices(turns, policy).recent.length,
+  );
 });

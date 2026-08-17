@@ -75,7 +75,18 @@ if (files.length === 0) {
 console.error(`run-tests: ${files.length} suites via dev-register node:test runner`);
 const res = spawnSync(
   process.execPath,
-  ["--import", DEV_REGISTER, "--test", ...files.map((f) => relative(ROOT, f))],
+  [
+    // Task #10: lets a suite `mock.module("electron", ...)` so a module with a REAL
+    // top-level `import { ipcMain } from "electron"` (ide-ipc.ts and its siblings) can
+    // be imported + exercised under plain node:test — the installed "electron" npm
+    // package here is just a binary-path resolver stub, not the real API surface.
+    // No-op (no warning, no behaviour change) for every suite that never calls it.
+    "--experimental-test-module-mocks",
+    "--import",
+    DEV_REGISTER,
+    "--test",
+    ...files.map((f) => relative(ROOT, f)),
+  ],
   { cwd: ROOT, stdio: "inherit" },
 );
 process.exit(res.status ?? 1);

@@ -44,8 +44,28 @@ export interface CompactPolicy {
 
 /** Rough token estimate for a turn (prompt + assistant text). */
 export function estimateTurnTokens(turn: SessionTurn, charsPerToken = 4): number {
-  const text = turn.prompt + turn.events.map((e) => (e.kind === "text" ? e.text : "")).join("");
-  return Math.ceil(text.length / charsPerToken);
+  /**
+   * TOOL OUTPUT COUNTS. It used to weigh exactly zero.
+   *
+   * The estimate summed `turn.prompt` and the `text` events — the model's prose — and ignored
+   * every `tool_result`. But tool output is the largest thing in an agentic session by an
+   * order of magnitude: one `read_file` on a 2000-line source file is more characters than a
+   * whole conversation of prose. So a session that had read ten files registered as nearly
+   * empty, `shouldCompact` stayed false, and the transcript sailed past the context window
+   * without ever compacting — until the provider rejected it mid-task.
+   *
+   * That is the exact inverse of what the trigger is for: it was blind precisely where the
+   * agent does its work, and accurate only in the chat-like case that was never going to
+   * overflow. `tool_use` arguments are counted too — an `apply_patch` payload is real input.
+   */
+  const parts: string[] = [turn.prompt];
+  for (const e of turn.events) {
+    if (e.kind === "text") parts.push(e.text);
+    else if (e.kind === "reasoning") parts.push(e.text);
+    else if (e.kind === "tool_result") parts.push(e.summary);
+    else if (e.kind === "tool_use") parts.push(JSON.stringify(e.call.args ?? {}));
+  }
+  return Math.ceil(parts.join("").length / charsPerToken);
 }
 
 /** Total estimated tokens across turns. */
@@ -57,6 +77,43 @@ export function estimateTokens(turns: readonly SessionTurn[], charsPerToken = 4)
 export function shouldCompact(turns: readonly SessionTurn[], policy: CompactPolicy): boolean {
   if (turns.length <= policy.keepRecentTurns) return false;
   return estimateTokens(turns, policy.charsPerToken) > policy.maxTokens;
+}
+
+/* ── the shape-agnostic core (§3.11, shared by hosts with different turn types) ──────────── *
+ *
+ * The three functions above are typed to `SessionTurn` — the CLI's shape, `{prompt, events}`.
+ * The desktop's transcript is `{role, content}` and cannot satisfy it, which is why the GUI has
+ * had no compaction at all while both CLI hosts have had it since it was written.
+ *
+ * Rather than teach one host the other's type or fork the arithmetic, the decision is expressed
+ * over plain TEXT. Both shapes can render themselves as text; nothing else about a turn matters
+ * to a token estimate.
+ * ─────────────────────────────────────────────────────────────────────────────────────────── */
+
+/** Rough token estimate for a list of already-rendered turn texts. */
+export function estimateTextTokens(texts: readonly string[], charsPerToken = 4): number {
+  return texts.reduce((sum, t) => sum + Math.ceil(t.length / charsPerToken), 0);
+}
+
+/** Whether a transcript of these turn texts should be compacted now. */
+export function shouldCompactTexts(texts: readonly string[], policy: CompactPolicy): boolean {
+  if (texts.length <= policy.keepRecentTurns) return false;
+  return estimateTextTokens(texts, policy.charsPerToken) > policy.maxTokens;
+}
+
+/**
+ * Split ANY turn list into the older slice to summarize + the recent slice to keep verbatim.
+ *
+ * Identical arithmetic to `compactionSlices`, without the `SessionTurn` constraint — the split
+ * is by COUNT, so it never needed the shape in the first place.
+ */
+export function sliceForCompaction<T>(
+  turns: readonly T[],
+  policy: CompactPolicy,
+): { older: T[]; recent: T[] } {
+  const keep = Math.max(0, policy.keepRecentTurns);
+  const cut = Math.max(0, turns.length - keep);
+  return { older: turns.slice(0, cut), recent: turns.slice(cut) };
 }
 
 /** Split turns into the older slice to summarize + the recent slice to keep verbatim. */

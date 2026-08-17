@@ -81,3 +81,15 @@ test("lifecycleStreams: mutating runs stream, reads do not", () => {
   assert.equal(lifecycleStreams("logs"), false);
   assert.equal(lifecycleStreams("status"), false);
 });
+
+test("lifecycleRunId: the prefix names the KIND of run and is sanitised like the tool", () => {
+  // §9: install / uninstall streams share the log pane, so their run ids must be
+  // distinguishable — and the prefix goes through the same RUN_ID regex as the tool.
+  assert.equal(lifecycleRunId("comfy", 1, "install"), "install:comfy:1");
+  assert.equal(lifecycleRunId("comfy", 2, "uninstall"), "uninstall:comfy:2");
+  // the default keeps every pre-existing caller (and the assertion above) unchanged.
+  assert.equal(lifecycleRunId("comfy", 1), "lifecycle:comfy:1");
+  // a hostile prefix cannot break main's zod regex.
+  assert.match(lifecycleRunId("t", 1, "a/b c,d"), /^[A-Za-z0-9._:-]+$/);
+  assert.equal(lifecycleRunId("t", 1, ""), "run:t:1");
+});

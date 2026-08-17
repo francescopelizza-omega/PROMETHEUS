@@ -3,8 +3,14 @@
  *
  * resolveEngine honours env overrides first (PROMETHEUS_PY, PYTHON/PYTHON_BIN,
  * NEMESIS_BIN) then falls back to the sibling engine that ships next to this
- * monorepo: /Users/dev/ALPHA/PROMETHEUS/{prometheus.py,nemesis}.
+ * monorepo: `<repo>/{prometheus.py,nemesis}`, found by walking up from this module.
  * prometheus.py lives next to nemesis, so a single PROMETHEUS root locates both.
+ *
+ * The last-resort root is a RELATIVE walk, never an absolute path. An absolute
+ * developer path baked in here does not just fail to resolve on anyone else's
+ * machine — it is compiled verbatim into the published CLI bundle and into the
+ * Electron app.asar, where it publishes the author's username and home layout to
+ * everyone who downloads a release.
  *
  * Resolution NEVER throws here — a missing binary is the spawn layer's concern,
  * where it becomes a fail-closed EngineError. This keeps config pure/testable.
@@ -27,8 +33,8 @@ export interface ResolvedEngine {
   nemesisBin: string;
 }
 
-/** Default install root: prometheus.py and nemesis live side by side here. */
-const SIBLING_ROOT = "/Users/dev/ALPHA/PROMETHEUS";
+/** How far up from this module the PROMETHEUS root sits: …/studio/packages/engine-bridge/(src|dist). */
+const UP_TO_ROOT = 4;
 
 /** Default fail-closed subprocess timeout (C / bridge.ts: 600s). */
 export const DEFAULT_TIMEOUT_MS = 600_000;
@@ -43,18 +49,23 @@ function firstExisting(...candidates: string[]): string | undefined {
 /**
  * Best-effort guess at the sibling PROMETHEUS root, walking up from this module.
  * studio/packages/engine-bridge/(src|dist) -> … -> studio -> PROMETHEUS.
- * Falls back to the hard-coded SIBLING_ROOT.
+ *
+ * When the walk finds no engine (a bundled CLI whose `import.meta.url` is a synthetic
+ * path, a SEA binary, an installed npm package), it returns the walked directory anyway:
+ * a wrong RELATIVE guess simply fails `existsSync` upstream and the caller falls through
+ * to the env / PATH lanes, whereas a wrong ABSOLUTE guess would ship someone's home
+ * directory to every user. `process.cwd()` is the final fallback — local to whoever runs it.
  */
 function siblingRoot(): string {
   try {
     const here = dirname(fileURLToPath(import.meta.url));
-    // …/studio/packages/engine-bridge/src  (or /dist) → up 4 = …/PROMETHEUS
-    const guess = resolve(here, "..", "..", "..", "..");
+    const guess = resolve(here, ...Array<string>(UP_TO_ROOT).fill(".."));
     if (existsSync(join(guess, "prometheus.py"))) return guess;
+    return guess;
   } catch {
     /* import.meta.url unavailable in some test harnesses — fall through */
   }
-  return SIBLING_ROOT;
+  return process.cwd();
 }
 
 /**
@@ -68,16 +79,16 @@ export function resolveEngine(config: EngineConfig = {}): ResolvedEngine {
   const prometheusPy =
     config.prometheusPy ||
     process.env.PROMETHEUS_PY ||
-    firstExisting(join(root, "prometheus.py"), join(SIBLING_ROOT, "prometheus.py")) ||
-    join(SIBLING_ROOT, "prometheus.py");
+    firstExisting(join(root, "prometheus.py")) ||
+    join(root, "prometheus.py");
 
   const pythonBin = config.pythonBin || process.env.PYTHON || process.env.PYTHON_BIN || "python3";
 
   const nemesisBin =
     config.nemesisBin ||
     process.env.NEMESIS_BIN ||
-    firstExisting(join(root, "nemesis"), join(SIBLING_ROOT, "nemesis")) ||
-    join(SIBLING_ROOT, "nemesis");
+    firstExisting(join(root, "nemesis")) ||
+    join(root, "nemesis");
 
   return { prometheusPy, pythonBin, nemesisBin };
 }

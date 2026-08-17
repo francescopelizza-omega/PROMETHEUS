@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Francesco Pelizza
 """nemesis — repo malware / supply-chain threat scanner for macOS & Linux.
 
 Defensive tool. Scans a directory tree — or a remote GitHub repo it fetches

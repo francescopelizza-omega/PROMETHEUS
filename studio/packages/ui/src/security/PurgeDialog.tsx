@@ -14,8 +14,10 @@
  * onCancel always backs out.
  */
 
-import { type ReactElement, type ReactNode, useId, useState } from "react";
+import { type ReactElement, type ReactNode, useId, useRef, useState } from "react";
 import { Button } from "../components/Button.js";
+import { useFocusTrap } from "../components/primitives/overlay.js";
+import { Z } from "../tokens/layers.js";
 import { inertText, purgeBasename, purgeNameMatches } from "./util.js";
 
 export interface PurgeDialogProps {
@@ -43,6 +45,9 @@ export function PurgeDialog({
 }: PurgeDialogProps): ReactElement {
   const [typed, setTyped] = useState("");
   const inputId = useId();
+  // §9 overlay contract: focus trap + restore + Escape (a purge is irreversible).
+  const panelRef = useRef<HTMLElement | null>(null);
+  useFocusTrap(panelRef, true, onCancel);
   const expected = purgeBasename(filename);
   const enabled = purgeNameMatches(typed, filename);
 
@@ -60,10 +65,12 @@ export function PurgeDialog({
         justifyContent: "center",
         background: "color-mix(in srgb, var(--danger) 22%, rgba(0,0,0,0.6))",
         padding: "var(--space-12, 24px)",
-        zIndex: 1000,
+        zIndex: Z.modal,
       }}
     >
       <section
+        ref={panelRef}
+        tabIndex={-1}
         style={{
           width: "min(480px, 100%)",
           display: "flex",

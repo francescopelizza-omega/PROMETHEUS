@@ -39,15 +39,19 @@ import { type Interface as ReadlineInterface, createInterface } from "node:readl
 import {
   repl,
   type AiEndpoint,
+  DEFAULT_CONTEXT_WINDOW,
   agent,
   ai,
   cliProfiles,
   loadPricing,
   mcpServer,
+  orchestration,
+  probeContextWindow,
 } from "@prometheus/core";
 
+import type { ConfirmResult } from "@prometheus/core/agent-loop";
 import { type EngineClient, createEngineClient } from "@prometheus/engine-bridge";
-import { defaultOpenEditor, loadEffectiveStartupProfile } from "../profile-store.js";
+import { defaultOpenEditor, loadEffectiveStartupProfileWithNotes } from "../profile-store.js";
 
 import { PROM_VERSION } from "../commands/help.js";
 import { runInvoke } from "../commands/invoke.js";
@@ -62,33 +66,57 @@ import { type KeymapResolution, resolveKeymap } from "../tui/keys.js";
 import { detectColorCaps } from "../tui/palette.js";
 import { runUpdates, updatesStartupNotice } from "../updates/updates-cmd.js";
 import {
+  type SessionRecord,
   type TurnLine,
+  appendTurnEvents,
   buildSessionExport,
   descriptorOf,
   formatPicker,
+  interactiveSessions,
   listSessions,
+  loadTurns,
   recordSession,
+  rotateSessions,
 } from "./history-store.js";
+import { createKeyResolver, keychainProviders } from "./key-resolver.js";
 
+import {
+  createHookRunner,
+  loadMemoryIndexBlock,
+  loadPermissionRules,
+  runSystemTool,
+} from "@prometheus/core/agent-system-host";
 import { copyReplyStatus, lastAssistantReply } from "../tui/clipboard.js";
 import {
+  type BudgetGuard,
   type ContextComponent,
   type EditRecord,
   type MessageTurnResult,
   type SessionCtx as TurnCtx,
   applyEditIntentsLocal,
+  autoCompactPolicy,
   compactSession,
   confirmPrompt,
   effectiveTools,
   makeSummarizer,
+  measuredSessionUsage,
+  rebuildThread,
   restoreCheckpoint,
   runMessageTurn,
   sessionUsage,
+  shouldAutoCompact,
+  turnsFromRecords,
   warmupLocalModel,
 } from "./agent-runtime.js";
 import { readSavedAuthLevel, saveAuthLevel } from "./authorisation-store.js";
 import { type SessionCtx as VerbCtx, execVerb } from "./command-exec.js";
 import { realGitSpawn } from "./git-helpers.js";
+
+import { loadAgentFiles } from "./agent-file-store.js";
+import { type LoadedCommand, expandCommand, loadCommandFiles } from "./command-files.js";
+import { loadGrantsInto, saveGrants } from "./grants-store.js";
+import { loadHooksDetailed } from "./hooks-config.js";
+import { type McpSession, openMcpSession, withMcpTools } from "./mcp-session.js";
 import {
   type Backends,
   backendSummary,
@@ -97,11 +125,22 @@ import {
   runPathsWizard,
   runSetup,
 } from "./onboarding.js";
-import { DEFAULT_SUBAGENTS, orchestratorNote } from "./orchestrator.js";
+import {
+  DEFAULT_SUBAGENTS,
+  detachedRunNote,
+  orchestratorNote,
+  startDetachedRun,
+} from "./orchestrator.js";
 import { completePath } from "./path-completer.js";
 import { applyRepoMapVerb, makeRepoMapState, repoMapStats } from "./repo-map-state.js";
 import { type SessionCtx as LegacySlashCtx, type SlashResult, execSlash } from "./slash-exec.js";
-import { type SlashCtx, findSlash } from "./slash-registry.js";
+import {
+  type HookListing,
+  type HookTestOutcome,
+  type SlashCtx,
+  allSlashNames,
+  findSlash,
+} from "./slash-registry.js";
 import { createSteeringController } from "./steering.js";
 import { createWorkingSet } from "./working-set.js";
 
@@ -161,6 +200,14 @@ export interface SessionDeps {
   backends?: Backends;
   /** the ~/.prometheus home root (tests point this at a temp dir to avoid touching $HOME). */
   home?: string;
+  /**
+   * The OS home the SHARED `<home>/.config/prometheus-studio` tree resolves from — where the
+   * persisted permission grants live. Separate from `home` because that tree is shared with the
+   * desktop app and is keyed off the real user home, not PROMETHEUS_HOME.
+   */
+  configHome?: string;
+  /** the session's MCP surface (tests inject; default: connect the configured servers). */
+  mcp?: McpSession;
 }
 
 // ── verb recognition: which single tokens are real §2 verbs (vs a chat message) ── //
@@ -173,6 +220,11 @@ export interface SessionDeps {
  * the verb still routes when it is the ONLY token (e.g. `scan`).
  */
 const SESSION_VERBS = new Set([
+  // `agents` — the background-run table. In-session ONLY works because `runRegistry` is a
+  // module singleton: a run started by `/background` lives in THIS process, so listing it
+  // from a second `prometheus` invocation would correctly show nothing. Routing the bare
+  // verb here is what makes the table observable at all from the session that owns it.
+  "agents",
   "scan",
   "superscan",
   "doctor",
@@ -205,15 +257,98 @@ function looksLikeVerb(tokens: string[]): boolean {
  * Falls back to the `default` profile when an unknown profile name is given.
  */
 export function seedTuning(parsed: ParsedArgs): AgentTuning {
+  return seedTuningWithNotes(parsed).tuning;
+}
+
+/**
+ * The same seed, plus what the project `.prometheus.toml` was refused.
+ *
+ * The project layer may tighten the safety posture and never loosen it — it arrives with the
+ * code, so a checked-in `gateMode = "off"` would otherwise disable the scanner for anyone who
+ * ran `prometheus` in that directory. The refusals come back here so the host can SAY so at
+ * startup rather than dropping the line in silence.
+ */
+export function seedTuningWithNotes(parsed: ParsedArgs): {
+  tuning: AgentTuning;
+  rejected: cliProfiles.ProjectLayerRejection[];
+  /** the profile's `[budget]` caps, if it declared any (CLI-030). */
+  budget?: cliProfiles.CliProfile["budget"];
+} {
   // Effective profile = builtin ⊕ user(--profile flag > persisted active) ⊕ project `.prom.toml`
-  // (project wins, CLI-046); then the §1 engine flags layer on top (flags win, CLI-044).
-  const profile = loadEffectiveStartupProfile(parsed);
+  // (project TIGHTENS ONLY, CLI-046); then the §1 engine flags layer on top (flags win, CLI-044).
+  // The flags are the human at the keyboard, so they still win outright — including downward.
+  const { profile, rejected } = loadEffectiveStartupProfileWithNotes(parsed);
   const merged = cliProfiles.mergeFlags(profile, {
     ...(parsed.gateMode ? { gateMode: parsed.gateMode } : {}),
     ...(parsed.dryRun ? { dryRun: true } : {}),
     ...(parsed.yes ? { yes: true } : {}),
   });
-  return cliProfiles.resolveTuning(merged);
+  return {
+    tuning: cliProfiles.resolveTuning(merged),
+    rejected,
+    ...(merged.budget ? { budget: merged.budget } : {}),
+  };
+}
+
+/**
+ * Build the spend guard from a profile's `[budget]` table, or undefined when it declared none.
+ *
+ * The price mapping is deliberate rather than a spread: the registry says
+ * `inputUsdPerMTok`/`outputUsdPerMTok` and the guardrail wants `pricePerMTokIn`/`pricePerMTokOut`.
+ * Every field on both is optional, so passing the wrong shape is NOT a type error — it silently
+ * prices every turn at $0 and the cap never fires. That is the exact failure this whole task is
+ * about, so it is spelled out.
+ */
+/**
+ * Is this model served from the user's own machine, and therefore genuinely free?
+ *
+ * Matches how the rest of the session decides locality (`LOCAL_PROVIDERS` + the endpoint's
+ * own `locality`), degraded to a name test because the accounting store records only a model
+ * id. A false negative here costs a fail-closed block with a nameable remedy; a false positive
+ * would silently disable the cap, so the test is deliberately narrow.
+ */
+export function isLocalModelId(model: string): boolean {
+  const m = model.toLowerCase();
+  if (m.startsWith("local:") || m.startsWith("ollama:") || m.startsWith("lmstudio:")) return true;
+  return [...LOCAL_PROVIDERS].some((p) => m.startsWith(`${p}:`) || m.startsWith(`${p}/`));
+}
+
+export function makeBudgetGuard(
+  budget: cliProfiles.CliProfile["budget"] | undefined,
+  pricing: ai.Pricing,
+  forceBudget: boolean,
+): BudgetGuard | undefined {
+  if (!budget) return undefined;
+  const config: ai.BudgetConfig = {
+    ...(budget.sessionUsd !== undefined ? { sessionUsd: budget.sessionUsd } : {}),
+    ...(budget.dailyUsd !== undefined ? { dailyUsd: budget.dailyUsd } : {}),
+    ...(budget.warnAtPercent !== undefined ? { warnAtPercent: budget.warnAtPercent } : {}),
+    ...(budget.unpricedPolicy !== undefined ? { unpricedPolicy: budget.unpricedPolicy } : {}),
+  };
+  if (config.sessionUsd === undefined && config.dailyUsd === undefined) return undefined;
+  return {
+    config,
+    /**
+     * `undefined` means WE DO NOT KNOW; `{null,null}` means known-free.
+     *
+     * The distinction decides whether a USD cap can be enforced at all. Thirteen of the
+     * eighteen cloud providers have no price entry, and an unpriced record used to contribute
+     * $0 — so a `session_usd = 1` cap let an enormous Groq session through reporting $0 spent
+     * while the same tokens on Claude blocked at $1800. `evaluateBudgets` now fails closed on
+     * ignorance, which only works if genuine zeroes are reported as zeroes.
+     *
+     * A LOCAL model is a genuine zero: it is the user's own hardware and no cap can be
+     * exceeded by it, whatever the price table does or does not contain.
+     */
+    priceFor: (model: string) => {
+      const p = ai.priceForModel(pricing, model);
+      if (p) return { pricePerMTokIn: p.inputUsdPerMTok, pricePerMTokOut: p.outputUsdPerMTok };
+      if (isLocalModelId(model)) return { pricePerMTokIn: null, pricePerMTokOut: null };
+      return undefined;
+    },
+    forceBudget,
+    warned: new Set<string>(),
+  };
 }
 
 // ── banner + footer rendering (pure presentation over render.ts helpers) ───── //
@@ -412,7 +547,11 @@ export async function launchSession(parsed: ParsedArgs, deps: SessionDeps = {}):
   process.env.PROMETHEUS_MODELS_DIR = resolveCategory("open_models", home);
 
   // Seed the PURE core REPL state from the profile (+ flags) and the cwd.
-  const tuning = seedTuning(parsed);
+  const {
+    tuning,
+    rejected: projectRejections,
+    budget: profileBudget,
+  } = seedTuningWithNotes(parsed);
   const cwd = parsed.cwd ?? process.cwd();
   let state = repl.initialReplState(tuning, cwd);
   // capture the profile's system prompt BEFORE any /system override → /system reset (CLI-017).
@@ -429,6 +568,13 @@ export async function launchSession(parsed: ParsedArgs, deps: SessionDeps = {}):
   const repoMapState = makeRepoMapState(state.cwd);
   // model-aware pricing table for /stats cost (CLI-058) — loaded once from providers.config.json.
   const pricing = loadPricing();
+  // The spend cap, if the profile declared one. `--force-budget` is a per-RUN flag and never a
+  // profile key: a config file must not be able to pre-authorise blowing through its own cap.
+  const budgetGuard = makeBudgetGuard(
+    profileBudget,
+    pricing,
+    parsed.flags["force-budget"] === true,
+  );
   // steering controller (CLI-061): AGENTS.md/CLAUDE.md/PROMETHEUS.md discovery + edit + reload.
   const steering = createSteeringController({
     cwd: () => state.cwd,
@@ -436,6 +582,77 @@ export async function launchSession(parsed: ParsedArgs, deps: SessionDeps = {}):
     openEditor: defaultOpenEditor,
     confirm: (prompt) => confirm(prompt),
   });
+  // Durable cross-session memory: the `memory_write`-authored index, re-read every turn (same
+  // "getter, not a value" posture as `steering`) so a write earlier in THIS session is visible
+  // on the next turn with no restart. null when this project has never had an entry written.
+  // `home` here is PROMETHEUS_HOME (line ~526) — the SAME root `memory_write` itself resolves
+  // to via `ctx.home` in agent-runtime's `makeToolRunner`, so the index this reads is always
+  // the one a call in this same session just wrote.
+  const loadMemory = (): string | null => loadMemoryIndexBlock(home, state.cwd);
+
+  /**
+   * LIFECYCLE HOOKS (`agent/hooks.ts`) — settings-configured shell run around the turn.
+   *
+   * Loaded ONCE per session, and only built into a runner when the user actually configured
+   * something: with an empty list `hookRunner` stays undefined and every hook seam in the loop
+   * is a cheap array check, so the zero-config path costs nothing.
+   *
+   * The runner is created HERE, in the host, because `agent/loop.ts` is pure — it may not
+   * import `node:child_process` (C5), and the desktop's copy of the loop runs in a renderer
+   * that could not spawn even if it wanted to.
+   */
+  const { hooks: sessionHooks, source: hooksSource } = loadHooksDetailed({ home, cwd: state.cwd });
+  const hookRunner =
+    sessionHooks.length > 0 ? createHookRunner({ cwd: state.cwd, env: process.env }) : undefined;
+  /**
+   * SessionStart output, captured once and replayed by the getter on every turn.
+   *
+   * Kicked off eagerly (not awaited) so a slow session-open script never delays the first
+   * prompt: whatever has landed by the time a turn assembles its thread is injected, and a hook
+   * that finishes later is picked up by the next turn. A hook that fails contributes nothing.
+   */
+  let sessionStartBlock: string | null = null;
+  if (hookRunner) {
+    void agent
+      .runSessionStartHooks(sessionHooks, hookRunner, {
+        cwd: state.cwd,
+        onError: (m) => writeLine(c.dim(`hook: ${m}`)),
+      })
+      .then((block) => {
+        sessionStartBlock = block ?? null;
+      })
+      .catch(() => {
+        /* fail-soft: hooks never take the session down */
+      });
+  }
+
+  // Remembered "don't ask again" grants, and the session task list.
+  //
+  // Both existed and were wired in the TUI host only, so which agent capabilities you had
+  // depended on which front end you happened to launch: in this host `todowrite` reported
+  // itself unavailable and every approval was asked again, every time. Same stores, same
+  // lifetimes, same rendering — the two hosts are siblings and had drifted.
+  /**
+   * The user's `[permissions]` allow/ask/deny rules — the producer the engine never had.
+   *
+   * Loaded once per session from `~/.config/prometheus-studio/config.toml` (plus a project
+   * `.prometheus.toml`, which may only TIGHTEN). `ctx.permissionRules` had two mentions in the
+   * whole repository — a declaration and a read — and no assignment, so the rule list was
+   * always empty and the documented feature could not be reached at all.
+   */
+  const permissionRules = loadPermissionRules({ home: deps.configHome, cwd });
+  /** What THIS endpoint has been observed to do about tool calls, across the whole session. */
+  let toolCapability = agent.protocol.initialCapability();
+  const grants = new agent.ScopedPermissionStore();
+  const loadedGrants = loadGrantsInto(grants, deps.configHome);
+  // Sub-agent personas from markdown. Already clamped by SCOPE inside `loadAgentFile`: a file
+  // that arrived with a cloned repo is read-only, cannot pick a model, and its text is fenced
+  // as untrusted persona guidance rather than becoming the system prompt.
+  const agentFiles = loadAgentFiles(cwd, home);
+  // User-defined `/name` commands. Built-in names are refused at load time, and the dispatcher
+  // consults the built-in registry first — a repo cannot redefine `/gate`.
+  const commandFiles = loadCommandFiles(cwd, new Set(allSlashNames()), home);
+  const todos = new agent.TodoStore();
 
   // Backend detection (fail-soft): probe for a live local runner+model, else note the
   // paid CLIs. When a local model is found, ADOPT it as the session endpoint + model so
@@ -444,6 +661,34 @@ export async function launchSession(parsed: ParsedArgs, deps: SessionDeps = {}):
     deps.backends ??
     (await detectBackends({ client }).catch(() => ({ liveRunners: [], paidClis: [] }) as Backends));
   let endpoint: AiEndpoint | undefined = backends.localEndpoint;
+  /**
+   * The cloud providers configured on this machine — the endpoints an interactive session
+   * could never reach.
+   *
+   * `detectBackends` probes exactly two hardcoded LOCAL runners, so no cloud provider was ever
+   * a candidate: `endpoint.apiKeyRef` was always undefined and the transport took its
+   * `Bearer local` branch. The swarm lane has resolved these same providers, from these same
+   * env vars and the same keychain accounts, from one call site — an ordinary chat could not.
+   *
+   * Fail-soft: a machine with no keychain tool (Windows) simply discovers whatever the
+   * environment declares.
+   */
+  const cloudKeys = await keychainProviders(orchestration.API_PROVIDER_IDS).catch(
+    () => new Set<string>(),
+  );
+  const cloudEndpoints = ai.discoverCloudEndpoints({
+    env: process.env,
+    hasKeychainKey: (id) => cloudKeys.has(id),
+  });
+  // Read per request, never cached: a resolved key held in a closure outlives the user
+  // revoking it. This assignment is what makes `SessionCtx.resolveKey` — declared, threaded
+  // and consumed all along — reachable for the first time.
+  const resolveKey = createKeyResolver();
+  // A cloud endpoint is selected only when the user has no local runner; otherwise the local
+  // one stays the default, because it is free, private and already warm.
+  if (!endpoint && cloudEndpoints.length > 0) {
+    endpoint = cloudEndpoints[0]?.endpoint;
+  }
   if (endpoint) {
     state = repl.reduce(state, {
       type: "tune",
@@ -453,6 +698,29 @@ export async function launchSession(parsed: ParsedArgs, deps: SessionDeps = {}):
     });
     // pre-load the local model NOW (fire-and-forget) so the user's first prompt is warm.
     warmupLocalModel(endpoint);
+    /**
+     * …and ask the runner how big this model's context ACTUALLY is.
+     *
+     * Every endpoint builder hard-codes 8192. TWO things budget against that number and both
+     * were wrong here by up to 32x on a 262144-window model: auto-compaction, which compacted a
+     * huge-window session as though it were about to overflow, and the TOOL PREAMBLE, whose
+     * budget decides whether the model is shown tool descriptions at all.
+     *
+     * The TUI bridge has probed since the probe existed; this host never did — the same
+     * two-hosts-drift that left it without a task list. Fire-and-forget and fail-soft: an
+     * unreachable runner keeps the documented floor.
+     */
+    if (endpoint.locality === "local" && endpoint.model) {
+      void probeContextWindow(endpoint.baseUrl, endpoint.model, fetch as never)
+        .then((r) => {
+          if (r.source !== "default" && endpoint && r.contextWindow !== endpoint.contextWindow) {
+            endpoint = { ...endpoint, contextWindow: r.contextWindow };
+          }
+        })
+        .catch(() => {
+          /* fail-soft: the documented floor stands */
+        });
+    }
   }
 
   // Orchestrator mode: when we're inside a live tmux session, start with 3 subagents by
@@ -473,7 +741,28 @@ export async function launchSession(parsed: ParsedArgs, deps: SessionDeps = {}):
       completer: (line: string): [string[], string] => (pathMode ? completePath(line) : [[], line]),
     });
 
+  // Connect the configured MCP servers so their tools join the catalog for this session.
+  // Fail-soft and, with no connectors configured, free: `openMcpSession` starts nothing.
+  const mcp = deps.mcp ?? (await openMcpSession({ home, write: writeLine }).catch(() => undefined));
+
   writeLine(banner(state, backendSummary(backends)));
+  {
+    // A project config that tried to loosen the safety posture is reported, never silently
+    // dropped: someone wrote that line expecting it to work, and this is also the only signal
+    // a user gets that a repo they just cloned tried to turn their scanner off.
+    for (const r of projectRejections) {
+      writeLine(c.yellow(`! .prometheus.toml: ${r.key} ignored — ${r.reason}`));
+    }
+    const line = mcp?.banner();
+    if (line) writeLine(c.dim(line));
+    if (loadedGrants.loaded > 0) {
+      writeLine(c.dim(`✓ ${loadedGrants.loaded} remembered permission(s) restored`));
+    }
+    // A refusal means the file on disk asked for something the UI would never have accepted.
+    if (loadedGrants.refused > 0) {
+      writeLine(c.yellow(`! ${loadedGrants.refused} saved grant(s) refused as too broad`));
+    }
+  }
   // First-run onboarding: no usable local model → show the picker hint up front.
   if (!endpoint) {
     writeLine("");
@@ -545,6 +834,32 @@ export async function launchSession(parsed: ParsedArgs, deps: SessionDeps = {}):
         const a = answer.trim().toLowerCase();
         resolveConfirm(a === "y" || a === "yes");
       });
+    });
+
+  /**
+   * The AGENT's confirm: yes/no, plus the two answers that make "don't ask again" real.
+   *
+   * `ScopedPermissionStore` has had `project` and `user` scopes from the start, the grants file
+   * has persisted them, and `withRememberedGrants` has consulted them on every call — and NO
+   * host ever returned `remember`, on any surface. The whole mechanism was reachable only by
+   * hand-editing `grants.json`. This is the missing half: `a` remembers for THIS project, `A`
+   * for every project.
+   *
+   * Anything else is a no, including a blank line and EOF — the default must never be the
+   * permanent answer.
+   */
+  const confirmTool = (prompt: string): Promise<ConfirmResult> =>
+    new Promise<ConfirmResult>((resolveConfirm) => {
+      rl.question(
+        `${c.yellow("?")} ${prompt} ${c.dim("[y/N/a=always here/A=always]")} `,
+        (answer) => {
+          const a = answer.trim();
+          if (a === "a") return resolveConfirm({ approved: true, remember: "project" });
+          if (a === "A") return resolveConfirm({ approved: true, remember: "user" });
+          const lower = a.toLowerCase();
+          resolveConfirm(lower === "y" || lower === "yes");
+        },
+      );
     });
 
   // A free-text question over readline (the /setup wizard's input seam).
@@ -634,14 +949,109 @@ export async function launchSession(parsed: ParsedArgs, deps: SessionDeps = {}):
 
   const turnCtxFor = (write: (s: string) => void): TurnCtx => ({
     client,
-    tuning: state.tuning,
+    /**
+     * Resolve a cloud endpoint's key, lazily, per request.
+     *
+     * The field was declared on `SessionCtx`, threaded through three call sites, consumed by
+     * the transport and covered by a test — and assigned by no host, on any surface. So the
+     * branch that attaches `Authorization` was unreachable and the "needs an API key but no
+     * key resolver was provided" message could never be printed either.
+     */
+    resolveKey,
+    // MCP tools are merged HERE, per turn, not baked into the seed: servers connect
+    // asynchronously and `repl.reduce` spreads `...tuning.tools` in several places, so a value
+    // written once at startup would go stale without anything saying so.
+    /**
+     * The live tuning + the autonomy POSTURE (`/permission-mode`).
+     *
+     * This host had no notion of a permission mode at all: `/plan` was a prompt MACRO that
+     * asked the model nicely to outline first, and nothing stopped it writing a file mid
+     * "plan". The TUI enforced the real read-only deny at its own confirm seam, so the same
+     * words meant two different things depending on which binary you launched. The mode now
+     * travels on the tuning and the SHARED loop enforces it, so both hosts (and headless)
+     * refuse identically.
+     */
+    tuning: {
+      ...withMcpTools(state.tuning, mcp?.tools() ?? []),
+      permissionMode: hostPermMode,
+      // Lifecycle hooks ride the TUNING, not the deps, so a `spawn_agent` child inherits them
+      // through `childTuning` — a PreToolUse guard that delegation could shed would be no guard.
+      ...(sessionHooks.length > 0 ? { hooks: sessionHooks } : {}),
+      ...(hookRunner ? { hookRunner } : {}),
+    },
     json: parsed.json,
+    // Per-turn token accounting (CLI-029). Two things depended on this field and neither host
+    // ever set it: `prometheus tokens report` read a store nothing wrote, so it was always
+    // empty; and `checkBudgetGate` returns "ok" without it, so a configured cap could not
+    // evaluate. Writing records is unconditional and gates nothing — see `budget` below for
+    // the half that can actually refuse a turn.
+    accounting: { home, sessionId },
+    // The spend cap from the profile's `[budget]` table. Parsed since CLI-030 and read by
+    // nobody, so `session_usd = 5` in a config was decoration.
+    ...(budgetGuard ? { budget: budgetGuard } : {}),
+    // The `question` tool's seam: free text back from the human, distinct from confirm's yes/no.
+    ask,
+    ...(agentFiles.length > 0 ? { agentFiles } : {}),
+    // Remembered grants + the task list, at parity with the TUI host.
+    grants,
+    // The user's allow/ask/deny rules reach the engine here — see `loadPermissionRules`.
+    permissionRules: permissionRules.rules,
+    /**
+     * PROMETHEUS_HOME and the live autonomy level — declared, consumed, assigned by nobody.
+     *
+     * `agent-runtime` writes the Phase-3 exec audit line only when `ctx.home` is set and
+     * records `ctx.authLevel` on it. Neither host ever set either, so every runner-side exec
+     * audit line was silently dropped: the record of what the agent ran, at what autonomy, did
+     * not exist. Both are optional fields, so nothing ever failed to compile.
+     */
+    home,
+    authLevel: hostAuthLevel,
+    /**
+     * The endpoint's learned tool capability, owned HERE so it outlives the per-message client.
+     *
+     * `makeLlmClient` is rebuilt for every user message, so the observation it accumulates was
+     * thrown away each time and the two-strike demotion threshold could never be reached: a
+     * model that cannot function-call was re-probed natively on every single message.
+     */
+    capability: () => toolCapability,
+    onCapability: (next) => {
+      toolCapability = next;
+    },
+    todos,
+    onTodos: (items) => write(c.dim(`  ▤ ${agent.todoSummary(items)}`)),
+    onRemember: (subject, scope) => {
+      write(c.dim(`  ✓ remembered: ${subject} (${scope})`));
+      // Persist immediately, not at exit: a session that ends in a crash or a ^C would
+      // otherwise lose exactly the answer the user took the trouble to give.
+      if (scope === "project" || scope === "user") saveGrants(grants, deps.configHome);
+    },
+    onAutoApprove: (subject) =>
+      write(c.dim(`  ↩ auto-approved from a remembered grant: ${subject}`)),
+    ...(mcp ? { callMcpTool: (id, tool, args) => mcp.callTool(id, tool, args) } : {}),
     // a detected/adopted local endpoint → the real streaming path (not the offline fallback).
     ...(endpoint ? { endpoint } : {}),
-    // agent-runtime's confirm is (call: ToolCall) — surface the tool name AND, for the file
-    // writers, the EXACT absolute target (+ a warning when it escapes the working set). The
-    // prompt is write_file's only authorization, so "run tool write_file?" was uninformed consent.
-    confirm: (call) => confirm(confirmPrompt(call, state.cwd, [state.cwd, ...ws.list()])),
+    /**
+     * The autonomy ladder decides FIRST, then the prompt — as it does in the TUI.
+     *
+     * `hostAuthLevel` was read from disk, exposed through `getAuthLevel`, written back by
+     * `/authorisation N`, persisted as the next session's default — and consulted by nothing.
+     * The TUI host consults its equivalent at eight decision points; this host had none, so
+     * `/authorisation 5` printed "(saved as default)" and changed nothing at all. A user who
+     * deliberately raised their autonomy was still asked about every single read, and a user
+     * who deliberately LOWERED it to `paranoid` was not protected: the level was inert in
+     * both directions, which is the worse half of the defect.
+     *
+     * The prompt (`confirmPrompt`) still governs everything the ladder does not auto-approve,
+     * and it names the exact command or path — so raising the level trades prompts for
+     * autonomy without ever trading away an informed decision.
+     */
+    confirm: (call) => {
+      const tool = agent.exposedTools(tuning.tools).find((t) => t.name === call.name);
+      if (agent.authDecision(hostAuthLevel, call.name, tool?.annotations) === "allow") {
+        return Promise.resolve(true as ConfirmResult);
+      }
+      return confirmTool(confirmPrompt(call, state.cwd, [state.cwd, ...ws.list()]));
+    },
     write,
     // read scope = cwd (implicit) + every /add-dir dir (CLI-004), resolved fail-closed.
     workingSet: [state.cwd, ...ws.list()],
@@ -654,9 +1064,80 @@ export async function launchSession(parsed: ParsedArgs, deps: SessionDeps = {}):
     repoMap: () => (repoMapState.enabled ? repoMapState.rendered : null),
     // steering (CLI-061): the assembled AGENTS.md/CLAUDE.md/PROMETHEUS.md block, re-read per turn.
     steering: () => steering.block(),
+    // durable cross-session memory: the `memory_write`-authored index, re-read per turn.
+    memory: loadMemory,
+    // SessionStart hook output, captured once at session start and replayed per turn.
+    sessionStartHooks: () => sessionStartBlock,
     // CLI-088: token-economy toggles (terse-output / prompt-caching), read ONCE at session start.
     tokenToggles,
   });
+
+  /**
+   * Restore a past session: rebuild the LLM thread, repaint the transcript, reset the cwd.
+   *
+   * The model and system prompt are deliberately NOT restored. They are not recorded per
+   * session (the index is metadata only), and guessing them would risk silently pulling or
+   * serving a model the user did not ask for on what looks like a read-only action.
+   */
+  const restorePastSession = (r: SessionRecord): void => {
+    /**
+     * A FAILED restore must be a no-op on live state.
+     *
+     * `history = messages` ran unconditionally, so resuming a session whose transcript is gone
+     * — rotated away, deleted, or written by a build that never persisted turn content —
+     * replaced the live conversation with an EMPTY one and then printed "\u21bb resumed session"
+     * as though it had worked. The user lost the thread they were in the middle of, and the
+     * only signal was that the agent suddenly knew nothing.
+     */
+    const records = loadTurns(home, r.id);
+    const restored = rebuildThread(records, {
+      // The restore budget is the model's, not a hard-coded 6000 — see `rebuildThread`.
+      maxTokens: agent.carryBudgetFor(endpoint?.contextWindow),
+    });
+    if (restored.messages.length === 0) {
+      writeLine(
+        c.yellow(
+          `\u26a0 session ${r.id.slice(0, 8)} has no transcript on disk \u2014 nothing to resume, so the current conversation is untouched`,
+        ),
+      );
+      return;
+    }
+    const { messages, painted, elided } = restored;
+    history = messages;
+    /**
+     * The SESSION is restored too, not just the history.
+     *
+     * `history` and `session.turns` are two views of one conversation, and compaction rebuilds
+     * the first from the second. Restoring only `history` left a fresh, EMPTY session behind
+     * it, so the first compaction (or an immediate `/condense`) replaced the entire restored
+     * conversation with `turnsToHistory([])` — nothing at all, silently.
+     */
+    if (session) session = { ...session, turns: turnsFromRecords(records) };
+    capturedResume = null;
+    continueCount = 0;
+    if (r.cwd) state = repl.reduce(state, { type: "cwd", dir: r.cwd });
+    writeLine(
+      c.bold(`↻ resumed session ${r.id.slice(0, 8)} · ${r.ts.replace("T", " ").slice(0, 16)}`),
+    );
+    if (elided > 0) {
+      writeLine(c.dim(`  restored ${messages.length} msgs · ${elided} older elided for context`));
+    }
+    writeLine(c.dim("  model + system prompt kept from the current session"));
+    for (const line of painted) {
+      const role = (line as { role?: string }).role;
+      const text = (line as { text?: string }).text ?? "";
+      if (!text) continue;
+      state = repl.reduce(state, {
+        type: "message",
+        role: role === "user" ? "you" : "prometheus",
+        text,
+      });
+      writeLine(role === "user" ? `${c.dim("you")} ${text}` : text);
+    }
+  };
+
+  /** Same cap the TUI host uses — rotation drops the oldest, never the live session. */
+  const SESSION_TRANSCRIPT_CAP_BYTES = 50 * 1024 * 1024; // 50 MiB
 
   /** Write the transcript to a file (given, or under ~/.prometheus/logs/sessions). "" on failure. */
   const exportTranscript = (file?: string): string => {
@@ -701,6 +1182,89 @@ export async function launchSession(parsed: ParsedArgs, deps: SessionDeps = {}):
     }
   };
 
+  /** Keep-recent + threshold, shared by the auto path and the manual `/compact`. */
+  const COMPACT_KEEP_RECENT = 4;
+  const COMPACT_THRESHOLD_PCT = 85;
+
+  /**
+   * Compact the transcript when it approaches the model's window.
+   *
+   * Guarded on `session` and on a live policy: `autoCompactPolicy` returns null when the
+   * threshold is 0, which DISABLES the check — that sentinel is load-bearing, so it is passed
+   * through rather than defaulted around.
+   */
+  const maybeAutoCompact = async (): Promise<void> => {
+    if (!session) return;
+    const window = endpoint?.contextWindow ?? DEFAULT_CONTEXT_WINDOW;
+    const policy = autoCompactPolicy(COMPACT_THRESHOLD_PCT, window, COMPACT_KEEP_RECENT);
+    if (!policy || !shouldAutoCompact(session, policy)) return;
+    try {
+      const { summarize, offline } = makeSummarizer(turnCtxFor(writeLine));
+      const res = await compactSession(sessionId, session, policy, summarize, now().toISOString(), {
+        offline,
+      });
+      session = res.session;
+      history = res.history;
+      writeLine(c.dim(`⎿ ${res.notice}`));
+    } catch {
+      // Fail-soft on purpose: an unreachable summarizer must not take the user's turn with it.
+    }
+  };
+
+  /**
+   * Run a user-defined `/name` command file: expand it, then send it as an ordinary prompt.
+   *
+   * The two dangerous halves are both delegated to code that already does them safely — a file
+   * read goes through the SAME working-set + secret guards `read_file` uses, and a shell
+   * injection goes through the SAME parse → nemesis → confirm path `run_command` uses, and is
+   * ALWAYS asked about regardless of authorisation level. A string stored in a markdown file
+   * months ago has not earned the ladder's auto-approval the way a command the model just
+   * composed in response to a live request has.
+   */
+  const runCommandFile = async (cmd: LoadedCommand, rest: string): Promise<void> => {
+    const argv = rest.trim() ? rest.trim().split(/\s+/) : [];
+    const { prompt, rejected } = await expandCommand(cmd, argv, {
+      readFile: async (rel) => {
+        const out = await runSystemTool(
+          "read_file",
+          { path: rel },
+          {
+            cwd: state.cwd,
+            roots: [state.cwd, ...ws.list()],
+          },
+        );
+        if (!out?.ok) throw new Error(out?.summary ?? "unreadable");
+        return out.summary;
+      },
+      runShell: async (command) => {
+        writeLine(c.dim(`  ${cmd.file.name}: wants to run  ${command}`));
+        if (!(await confirm(`run \`${command}\` from ${cmd.path}?`))) return null;
+        const out = await runSystemTool(
+          "run_command",
+          { command },
+          {
+            cwd: state.cwd,
+            roots: [state.cwd, ...ws.list()],
+            gateMode: state.tuning.gateMode,
+            home,
+            // The session's level, so this human-approved run is confined by the OS sandbox
+            // to exactly what the ladder already permits (below A5 the kernel refuses the
+            // network). Omitting it would silently pin every command-file shell to the safe
+            // default however the session is set.
+            authLevel: hostAuthLevel,
+          },
+        );
+        return out?.ok ? out.summary : null;
+      },
+    });
+    for (const r of rejected) writeLine(c.yellow(`  ! ${r.what} — ${r.reason}`));
+    if (!prompt.trim()) {
+      writeLine(c.red(`/${cmd.file.name}: expanded to nothing`));
+      return;
+    }
+    await runAgentMessage(prompt);
+  };
+
   /** Run ONE message through the agent loop (the default branch + the /macro sink). */
   const runAgentMessage = async (input: string): Promise<void> => {
     // orchestrator: under tmux, the main agent decides whether 3 subagents are enough.
@@ -709,19 +1273,74 @@ export async function launchSession(parsed: ParsedArgs, deps: SessionDeps = {}):
       if (note) writeLine(c.dim(`🛸 ${note}`));
     }
     state = repl.reduce(state, { type: "message", role: "you", text: input });
+    // AUTO-COMPACT before the turn, exactly as the TUI host does.
+    //
+    // This host had manual `/compact` only, while `tui/session-bridge.ts` compacted on a
+    // schedule — both calling the same `compactSession`. A long readline session therefore
+    // just overflowed the window, with no recovery and no warning. Fail-soft: a summarizer
+    // error leaves the transcript untouched (core's `compact()` guarantees that), so the
+    // worst case is the behaviour that existed before this line.
+    await maybeAutoCompact();
+    /**
+     * Ctrl-C has to reach the TURN, not just the prompt.
+     *
+     * `turnAbort` was created, aborted by the SIGINT handler, and never handed to anything:
+     * `runMessageTurn` takes an optional `signal` (the TUI passes it — session-bridge.ts) and
+     * this host omitted it. So Ctrl-C printed "(cancelled — press Ctrl-D or type /quit to
+     * exit)" and returned to the prompt while the turn kept running underneath: the model
+     * kept streaming, and every remaining tool in the round still executed. A user who hit
+     * Ctrl-C to stop a destructive command watched it run anyway, with the UI insisting it
+     * had been cancelled.
+     *
+     * Read into a local first: `turnAbort` is nulled in the caller's `finally`, and the
+     * property read must not race that.
+     */
+    const abort = turnAbort;
     const res: MessageTurnResult = await handlers.runMessageTurn(session, input, {
       ctx: turnCtxFor(writeLine),
       history,
+      ...(abort ? { signal: abort.signal } : {}),
     });
+    // A `once` grant answers exactly ONE turn. Leaving it in place would turn "yes, this time"
+    // into "yes, always" without the user ever choosing that.
+    grants.clearOnce();
     session = res.session;
+    /**
+     * Persist the turn transcript (CLI-012). THIS is what was missing.
+     *
+     * The TUI host has written every turn's prompt + AgentEvents to
+     * `~/.prometheus/sessions/<id>.jsonl` since the store was built; this host recorded only
+     * the INDEX entry — id, timestamp, first fifteen words, cwd. So `/recall` here could list
+     * past sessions and never restore one, because there was no transcript on disk to restore
+     * FROM. The picker was not the bug; the empty store behind it was.
+     *
+     * Fail-soft, exactly as in the TUI: a read-only home must not take the turn with it.
+     */
+    appendTurnEvents(home, sessionId, [{ role: "user", text: input }, ...res.events]);
+    rotateSessions(home, { maxBytes: SESSION_TRANSCRIPT_CAP_BYTES, liveId: sessionId });
     if (res.reply.trim()) {
       state = repl.reduce(state, { type: "message", role: "prometheus", text: res.reply });
-      history = [
-        ...history,
-        { role: "user", content: input },
-        { role: "assistant", content: res.reply },
-      ];
     }
+    /**
+     * Carry the WHOLE turn forward, tool results included — not a user/assistant text pair.
+     *
+     * `res.thread` is the post-turn thread the loop folded every call and every result into.
+     * This host rebuilt `history` from `input` + `res.reply` instead and dropped it, so the
+     * model started each turn having read nothing: it could spend six rounds reading a file,
+     * answer, and then be unable to answer a follow-up without reading it again. `carryForward`
+     * budgets it against the model's window (tool output is an order of magnitude larger than
+     * prose, so carrying it unbounded overflows in about three turns).
+     *
+     * Also unconditional now. It used to sit inside `if (res.reply.trim())`, so a turn that ran
+     * tools and produced no prose — a capped turn, an interrupted one — dropped the user's
+     * message from history entirely, and the next turn saw a conversation in which they had
+     * never asked.
+     */
+    history = res.thread?.length
+      ? agent.carryForward(res.thread, {
+          budgetTokens: agent.carryBudgetFor(endpoint?.contextWindow),
+        })
+      : [...history, { role: "user", content: input }, { role: "assistant", content: res.reply }];
     // CLI-072: a fresh (non-continued) turn resets the continue counter; stash/clear resume state.
     continueCount = 0;
     settleCap(res);
@@ -746,24 +1365,46 @@ export async function launchSession(parsed: ParsedArgs, deps: SessionDeps = {}):
     }
     continueCount++;
     const resumeThread = capturedResume;
+    // Same as `runAgentMessage`: a continuation is a full turn and must be interruptible.
+    const abort = turnAbort;
     const res: MessageTurnResult = await handlers.runMessageTurn(session, "/continue", {
       ctx: turnCtxFor(writeLine),
       resumeThread,
+      ...(abort ? { signal: abort.signal } : {}),
     });
+    grants.clearOnce();
     session = res.session;
     if (res.reply.trim()) {
       state = repl.reduce(state, { type: "message", role: "prometheus", text: res.reply });
-      // merge the continuation into the last assistant turn (keep history as user/assistant text).
-      const last = history.at(-1);
-      if (last?.role === "assistant") last.content += res.reply;
-      else history = [...history, { role: "assistant", content: res.reply }];
     }
+    /**
+     * A continuation carries its thread forward too — it used to keep only the text.
+     *
+     * This merged `res.reply` into the last assistant message and dropped `res.thread`,
+     * throwing away every tool result the continuation produced: exactly the defect fixed one
+     * function above, still live here. It matters MORE here, because a yolo run-to-done chain
+     * is nothing but continuations, so a long autonomous run remembered none of its own work.
+     */
+    history = res.thread?.length
+      ? agent.carryForward(res.thread, {
+          budgetTokens: agent.carryBudgetFor(endpoint?.contextWindow),
+        })
+      : history;
     settleCap(res);
     if (!res.capped) continueCount = 0; // chain complete
   };
 
   // the 0–7 --authorisation level for the plain host: persisted across sessions like the TUI.
   let hostAuthLevel = readSavedAuthLevel(home) ?? agent.DEFAULT_AUTH_LEVEL;
+  /**
+   * The coarse autonomy POSTURE (`/permission-mode`), session-scoped.
+   *
+   * Deliberately NOT persisted, unlike the authorisation level. `plan` is a temporary stance
+   * you take for one investigation; silently resuming it three days later would look like the
+   * agent had stopped working. The TUI's equivalent (`permMode` in session-bridge) is
+   * session-scoped for the same reason.
+   */
+  let hostPermMode: agent.PermissionModeId = agent.DEFAULT_PERMISSION_MODE;
 
   // The rich context handed to every host-side /command (slash-registry).
   const slashCtx: SlashCtx = {
@@ -775,6 +1416,39 @@ export async function launchSession(parsed: ParsedArgs, deps: SessionDeps = {}):
     setAuthLevel: (level) => {
       hostAuthLevel = agent.authLevelMeta(level).level;
       saveAuthLevel(hostAuthLevel, home); // last-set becomes the next-session default
+    },
+    getPermMode: () => hostPermMode,
+    setPermMode: (mode) => {
+      hostPermMode = mode;
+    },
+    /**
+     * `/background <task>` — run a turn DETACHED and register it so `agents list` sees it.
+     *
+     * The turn is the SAME `runMessageTurn` an ordinary message takes, with two substitutions:
+     * the write sink is the run's ring buffer (so `agents attach` can replay and follow it)
+     * instead of the pane, and the abort signal is the registry's, so `agents kill` really
+     * stops it. It gets a FRESH session rather than the live one — two turns appending to one
+     * transcript concurrently would interleave, and the detached run is not part of the
+     * conversation the user is having at the prompt.
+     */
+    startBackground: (task) => {
+      const { id } = startDetachedRun({
+        model: state.tuning.model.modelId,
+        provider: state.tuning.model.provider,
+        task,
+        run: async (rc) => {
+          // `undefined` session ⇒ runMessageTurn mints a fresh one. Deliberate: two turns
+          // appending to the live transcript concurrently would interleave, and a detached
+          // run is not part of the conversation happening at the prompt.
+          const res = await handlers.runMessageTurn(undefined, task, {
+            ctx: turnCtxFor((s) => rc.append(s)),
+            signal: rc.signal,
+          });
+          const reply = res.reply.trim();
+          return { ok: reply.length > 0, summary: reply.slice(0, 120) || "(no answer)" };
+        },
+      });
+      return detachedRunNote(id);
     },
     runVerb: async (tokens) => {
       const outcome = await handlers.execVerb(tokens, verbCtxFor(writeLine));
@@ -831,7 +1505,7 @@ export async function launchSession(parsed: ParsedArgs, deps: SessionDeps = {}):
       state = repl.reduce(state, { type: "cwd", dir });
     },
     compact: async (focus) => {
-      if (!session || session.turns.length <= 4) {
+      if (!session || session.turns.length <= COMPACT_KEEP_RECENT) {
         writeLine(c.dim("⎿ nothing to compact yet"));
         return;
       }
@@ -843,7 +1517,7 @@ export async function launchSession(parsed: ParsedArgs, deps: SessionDeps = {}):
       const res = await compactSession(
         sessionId,
         session,
-        { maxTokens: 1, keepRecentTurns: 4 },
+        { maxTokens: 1, keepRecentTurns: COMPACT_KEEP_RECENT },
         sum,
         now().toISOString(),
         { offline },
@@ -893,7 +1567,31 @@ export async function launchSession(parsed: ParsedArgs, deps: SessionDeps = {}):
       // endpoint also sets `endpoint`), fallback to the provider-name heuristic offline.
       const provider = state.tuning.model.provider;
       const isLocal = endpoint?.locality === "local" || LOCAL_PROVIDERS.has(provider);
-      return sessionUsage(history, provider, state.tuning.model.modelId, isLocal, pricing);
+      /**
+       * Prefer the PROVIDER'S counts; fall back to the estimate only when there are none.
+       *
+       * `sessionUsage` is chars/4 over the transcript, and it counts each message once — but
+       * every turn re-sends the whole thread, so on an N-turn session it undercounts the
+       * billed input by roughly a factor of N. The real counts have been written to
+       * `<id>.acct.jsonl` every round the whole time and read by nothing but the separate
+       * `prometheus tokens report`. This is the number a user checks before deciding whether
+       * they can afford to keep going, so it has to be the measured one.
+       */
+      const estimate = sessionUsage(
+        history,
+        provider,
+        state.tuning.model.modelId,
+        isLocal,
+        pricing,
+      );
+      return measuredSessionUsage(
+        home,
+        sessionId,
+        estimate,
+        state.tuning.model.modelId,
+        isLocal,
+        pricing,
+      );
     },
     runInvoke: (rest) =>
       runInvoke(rest, {
@@ -909,22 +1607,41 @@ export async function launchSession(parsed: ParsedArgs, deps: SessionDeps = {}):
           if (outcome.text) writeLine(outcome.text);
         },
       }),
-    runRecall: async () => {
-      const records = listSessions(home);
-      writeLine(formatPicker(records));
-      if (records.length === 0) return;
-      const ans = (await ask("recall #: ")).trim();
-      const n = Number(ans);
-      if (!Number.isInteger(n) || n < 1 || n > records.length) {
-        writeLine(c.dim("(cancelled)"));
-        return;
+    /**
+     * `/recall` (aliased `/resume`) — actually restore a past session.
+     *
+     * This used to print the session's metadata and then say, in dim text, that replay was "a
+     * follow-up". It also ignored its argument, so `/resume <id>` silently showed a picker. The
+     * TUI host has restored properly all along; this is the same operation, and it is the same
+     * three functions — `loadTurns`, `rebuildThread`, and a cwd reset.
+     */
+    runRecall: async (rest?: string) => {
+      // Headless runs are recorded but kept out of the picker — see `interactiveSessions`.
+      const records = interactiveSessions(listSessions(home));
+      const arg = (rest ?? "").trim();
+      let target: SessionRecord | undefined;
+      if (arg) {
+        const n = Number(arg);
+        target =
+          Number.isInteger(n) && n >= 1 && n <= records.length
+            ? records[n - 1]
+            : records.find((x) => x.id === arg || x.id.startsWith(arg));
+        if (!target) {
+          writeLine(c.red(`no session matching "${arg}"`));
+          return;
+        }
+      } else {
+        writeLine(formatPicker(records));
+        if (records.length === 0) return;
+        const ans = (await ask("recall #: ")).trim();
+        const n = Number(ans);
+        if (!Number.isInteger(n) || n < 1 || n > records.length) {
+          writeLine(c.dim("(cancelled)"));
+          return;
+        }
+        target = records[n - 1];
       }
-      const r = records[n - 1];
-      if (!r) return;
-      writeLine(c.cyan(`session ${r.id.slice(0, 8)} · ${r.ts.replace("T", " ").slice(0, 16)}`));
-      writeLine(`  ${r.descriptor}`);
-      writeLine(c.dim(`  cwd: ${r.cwd}`));
-      writeLine(c.dim("  (shows the recorded session; full context replay is a follow-up)"));
+      if (target) restorePastSession(target);
     },
     agents: {
       count: () => subagentCount,
@@ -988,6 +1705,47 @@ export async function launchSession(parsed: ParsedArgs, deps: SessionDeps = {}):
       edit: (target) => steering.edit(target),
       create: () => steering.create(),
     },
+    // lifecycle-hook diagnostics (CLI-102): /hooks list + /hooks test <event> [tool]. `test`
+    // spawns the SAME injected `hookRunner` a real turn would (§ above), with a synthesized
+    // payload on stdin — it is never wired into runPreToolUseHooks/firePostToolUseHooks/
+    // runSessionStartHooks, so it can only ever observe a hook, never gate or delay a live call.
+    hooks: {
+      list: (): HookListing[] =>
+        sessionHooks.map((h) => ({
+          event: h.event,
+          ...(h.matcher !== undefined ? { matcher: h.matcher } : {}),
+          command: h.command,
+          source: hooksSource,
+        })),
+      test: async (event, payload, tool): Promise<HookTestOutcome[]> => {
+        const matched = agent.matchingHooks(sessionHooks, event, tool);
+        if (matched.length === 0 || !hookRunner) return [];
+        const timeoutMs = agent.DEFAULT_HOOK_TIMEOUT_MS;
+        const out: HookTestOutcome[] = [];
+        for (const spec of matched) {
+          const base = spec.matcher !== undefined ? { matcher: spec.matcher } : {};
+          try {
+            const outcome = await hookRunner({
+              event,
+              command: spec.command,
+              stdin: payload,
+              timeoutMs,
+            });
+            out.push({ ...base, command: spec.command, ...outcome });
+          } catch (e) {
+            out.push({
+              ...base,
+              command: spec.command,
+              exitCode: -1,
+              stdout: "",
+              stderr: "",
+              error: e instanceof Error ? e.message : String(e),
+            });
+          }
+        }
+        return out;
+      },
+    },
     // per-component context sizes for /context (CLI-057) — the same chars the model actually sees.
     contextBreakdown: () => {
       const t = state.tuning;
@@ -1040,6 +1798,14 @@ export async function launchSession(parsed: ParsedArgs, deps: SessionDeps = {}):
         const cmd = findSlash(parsedInput.name);
         if (cmd) {
           await cmd.run(parsedInput.rest, slashCtx);
+          return;
+        }
+        // A user-defined command file — consulted ONLY after the built-in registry, so a file
+        // called `gate.md` can never change what `/gate` does. `loadCommandFiles` refuses
+        // built-in names at load time too; this ordering is the belt to that's braces.
+        const custom = commandFiles.find((c) => c.file.name === parsedInput.name);
+        if (custom) {
+          await runCommandFile(custom, parsedInput.rest);
           return;
         }
         await handleSlash(parsedInput.name, parsedInput.rest);
@@ -1105,11 +1871,21 @@ export async function launchSession(parsed: ParsedArgs, deps: SessionDeps = {}):
         state = repl.reduce(state, { type: "tune", patch: next });
         break;
       }
-      case "save":
-      case "resume":
-        // persistence is the host's concern; a no-op-with-echo until wired (the
-        // echo already printed). Kept non-throwing so the loop continues.
+      /**
+       * `/save [file]` — actually write the transcript.
+       *
+       * This printed `saving → out.jsonl…` and then did nothing, which is the worst shape a
+       * bug can take: the user is TOLD it worked. `exportTranscript` has existed and worked
+       * the whole time (it is what `/export` calls); this arm simply never called it.
+       *
+       * `case "resume"` used to sit alongside and was unreachable dead code — `/resume` is an
+       * alias of `/recall` and resolves in the registry long before this switch.
+       */
+      case "save": {
+        const out = exportTranscript(res.rest.trim() || undefined);
+        writeLine(out ? c.dim(`saved → ${out}`) : c.red("save failed (could not write the file)"));
         break;
+      }
     }
   };
 
@@ -1167,9 +1943,28 @@ export async function launchSession(parsed: ParsedArgs, deps: SessionDeps = {}):
         .finally(finish);
     });
 
+    /**
+     * `prometheus --continue` — resume the newest past session (CLI-013).
+     *
+     * The flag has existed and been parsed since CLI-013, and only the TUI host ever read it.
+     * `prometheus --plain --continue` accepted it, said nothing, and started fresh — a flag
+     * that is silently ignored is indistinguishable to the user from one that did not work.
+     */
+    if (parsed.flags.continue === true) {
+      const newest = [...interactiveSessions(listSessions(home))].sort(
+        (a, b) => b.ts.localeCompare(a.ts) || b.id.localeCompare(a.id),
+      )[0];
+      if (newest) restorePastSession(newest);
+      else writeLine(c.dim("(no past sessions to continue — starting fresh)"));
+    }
+
     // first prompt
     promptLine();
   });
+
+  // Shut the MCP transports down. Without this, every session leaves its connector
+  // subprocesses behind — the orphan class the reaper exists to clean up after.
+  await mcp?.close().catch(() => {});
 
   return exitCode;
 }

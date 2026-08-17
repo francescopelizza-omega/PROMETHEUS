@@ -34,6 +34,8 @@ import {
 } from "@prometheus/ui";
 
 import { qk } from "../renderer/query/client.js";
+import { DecisionOverlay } from "../renderer/shell/DecisionOverlay.js";
+import { ForceGate, useForceGate } from "../renderer/shell/ForceGate.js";
 import { useEnvironmentsStore } from "../renderer/stores/environments.js";
 import type {
   CudaInfoResult,
@@ -44,6 +46,7 @@ import type {
   PkgListResult,
   ProgressFeedEvent,
 } from "../shared/ipc-contract.js";
+import { cellVar, envAction, envRow } from "./workspace-view.js";
 
 /** The `window.prometheus.env` surface (typed via the contract). */
 function envApi(): Window["prometheus"]["env"] {
@@ -166,6 +169,8 @@ function isMacHost(): boolean {
 }
 
 export function EnvironmentsRoute(): ReactElement {
+  // §9: the shared typed-confirm gate for deep-red overrides on this route.
+  const force = useForceGate();
   const qc = useQueryClient();
   const envsQ = useEnvs();
   const cudaQ = useCuda();
@@ -366,6 +371,52 @@ export function EnvironmentsRoute(): ReactElement {
           envs={envRows}
           selectedId={selectedEnvId}
           onSelect={selectEnv}
+          /* handoff_3 §5: the detail line + the coloured status, per row. Both come from the
+             node:test-pinned projection so "0 packages" can never stand in for "unmeasured". */
+          renderRowExtra={(e) => {
+            const row = envRow(e as unknown as Parameters<typeof envRow>[0]);
+            return (
+              <>
+                <span
+                  style={{
+                    flex: "none",
+                    fontSize: "0.7rem",
+                    color: "var(--text-muted)",
+                    whiteSpace: "nowrap",
+                  }}
+                >
+                  {row.detail}
+                </span>
+                <span
+                  style={{
+                    flex: "none",
+                    fontSize: "0.7rem",
+                    fontWeight: 600,
+                    color: cellVar(row.status.role),
+                    whiteSpace: "nowrap",
+                  }}
+                >
+                  {row.status.text}
+                </span>
+              </>
+            );
+          }}
+          rowAction={{
+            label: (e) => envAction(envRow(e as unknown as Parameters<typeof envRow>[0])),
+            onAct: (id) => {
+              const e = envRows.find((x) => x.id === id);
+              // Activate is the only one that MUTATES; Inspect and Recreate select the row and
+              // hand the user to the detail actions, which carry their own confirms.
+              if (e && !e.active && e.health !== "broken") {
+                void envApi()
+                  .use(id)
+                  .then(refetchAll)
+                  .catch(() => {});
+              } else {
+                selectEnv(id);
+              }
+            },
+          }}
           onUse={(id) =>
             void envApi()
               .use(id)
@@ -527,26 +578,48 @@ export function EnvironmentsRoute(): ReactElement {
         </Panel>
       )}
 
-      {/* the gate decision is the ENGINE's — rendered in the shared sheet (file 03). */}
+      {/* the gate decision is the ENGINE's — rendered in the shared sheet (file 03).
+          §9: as an OVERLAY, never in-flow — a verdict that scrolls below the fold is a
+          decision the user never got to make. */}
       {pendingGate && (
-        <Panel title="Security gate" elevation="e2">
-          <GateVerdictSheet
-            gate={pendingGate.gate}
-            target={pendingGate.target}
-            onProceed={() => {
-              const proceed = { ...pendingGate.request, confirm: true };
-              void runGated(proceed, pendingGate.target);
-            }}
-            onCancel={clearPendingGate}
-            onRequestForce={() => {
-              // the deep-red override re-runs with force:true (typed confirm is
-              // collected by the shared sheet's Advanced disclosure flow).
-              const forced = { ...pendingGate.request, confirm: true, force: true };
-              void runGated(forced, pendingGate.target);
-            }}
-          />
-        </Panel>
+        <DecisionOverlay label="Security gate" onDismiss={clearPendingGate}>
+          <Panel title="Security gate" elevation="e2">
+            <GateVerdictSheet
+              gate={pendingGate.gate}
+              target={pendingGate.target}
+              onProceed={() => {
+                const proceed = { ...pendingGate.request, confirm: true };
+                void runGated(proceed, pendingGate.target);
+              }}
+              onCancel={clearPendingGate}
+              onRequestForce={() => {
+                // §9 (HIGH): typed confirm before the override. The previous comment here
+                // claimed the sheet's "Advanced disclosure flow" collected one — it does
+                // not; that disclosure only reveals a button. This is the actual confirm.
+                const req = pendingGate.request;
+                // Close the verdict overlay BEFORE raising the confirm. Both are Z.modal
+                // with their own document-capture focus trap, so leaving this one mounted
+                // stacks two traps and one Escape fires both — the other three routes
+                // (catalog/models/repos) already clear first.
+                clearPendingGate();
+                force.ask({
+                  target: pendingGate.target,
+                  blockingReasons: pendingGate.gate.reasons,
+                  // `confirmForce` pairs with `force`: main DROPS a bare force (§9a).
+                  onConfirm: () =>
+                    void runGated(
+                      { ...req, confirm: true, force: true, confirmForce: true },
+                      pendingGate.target,
+                    ),
+                });
+              }}
+            />
+          </Panel>
+        </DecisionOverlay>
       )}
+
+      {/* §9: the typed confirm that gates every deep-red override on this route. */}
+      <ForceGate gate={force} />
     </div>
   );
 }
