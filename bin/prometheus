@@ -10,10 +10,14 @@
 # / NEMESIS_BIN in the environment untouched.
 #
 # Environment:
-#   PROMETHEUS_NODE   node binary to use (default: the first usable one found)
-#   PROMETHEUS_PY     engine script      (default: <checkout>/prometheus.py)
-#   NEMESIS_BIN       security scanner   (default: <checkout>/nemesis)
-#   PROMETHEUS_CLI_JS CLI bundle         (default: <checkout>/studio/apps/cli/dist/bin.js)
+#   PROMETHEUS_NODE       node binary to use (default: the first usable one found)
+#   PROMETHEUS_PY         engine script      (default: <checkout>/prometheus.py)
+#   NEMESIS_BIN           security scanner   (default: <checkout>/nemesis)
+#   PROMETHEUS_CLI_JS     CLI bundle         (default: <checkout>/studio/apps/cli/dist/bin.js)
+#                         pinning this also opts out of the staleness check below —
+#                         an explicit bundle path is trusted as-is.
+#   PROMETHEUS_SKIP_BUILD set (to anything) to skip the staleness check and always
+#                         launch whatever dist/bin.js currently is, even if stale.
 set -eu
 
 MIN_NODE_MAJOR=20
@@ -87,8 +91,49 @@ if [ -z "$MAJOR" ] || [ "$MAJOR" -lt "$MIN_NODE_MAJOR" ]; then
   exit 127
 fi
 
-# ── locate the CLI bundle ─────────────────────────────────────────────────────
+# ── locate the CLI bundle, rebuilding it first if the sources moved on ────────
+# dist/bin.js is a bundled build artifact (git-ignored, not the TS source), produced
+# by `prepack` (tsc -b + esbuild) inlining the @prometheus/* workspace deps it uses.
+# A checkout with edited sources and a stale bundle would otherwise silently run old
+# code — see the four dirs below, which are exactly what `prepack` bundles into it.
 CLI_JS=${PROMETHEUS_CLI_JS:-$ROOT/studio/apps/cli/dist/bin.js}
+
+# true (0) if $CLI_JS is missing or any file under the bundled source trees is newer.
+# `-print -quit` stops at the first hit instead of walking the rest of the tree.
+bundle_is_stale() {
+  [ -f "$CLI_JS" ] || return 0
+  for src_dir in \
+    "$ROOT/studio/apps/cli/src" \
+    "$ROOT/studio/packages/core/src" \
+    "$ROOT/studio/packages/engine-bridge/src" \
+    "$ROOT/studio/packages/ui/src"; do
+    [ -d "$src_dir" ] || continue
+    [ -n "$(find "$src_dir" -type f -newer "$CLI_JS" -print -quit 2>/dev/null)" ] && return 0
+  done
+  return 1
+}
+
+# Skipped when PROMETHEUS_CLI_JS pins an explicit bundle (nothing to compare it
+# against), when PROMETHEUS_SKIP_BUILD is set, or when this isn't a source checkout
+# at all (a published npm install ships dist/bin.js with no src/ next to it).
+if [ -z "${PROMETHEUS_CLI_JS:-}" ] && [ -z "${PROMETHEUS_SKIP_BUILD:-}" ] \
+  && [ -d "$ROOT/studio/apps/cli/src" ] && bundle_is_stale; then
+  echo "prometheus: source changed since the last build — rebuilding…" >&2
+  if command -v pnpm >/dev/null 2>&1 || corepack enable >/dev/null 2>&1; then
+    if (
+      cd "$ROOT/studio" \
+        && { [ -d node_modules ] || pnpm install; } \
+        && pnpm --filter @prometheus/cli run prepack
+    ) >&2; then
+      echo "prometheus: rebuild done." >&2
+    else
+      echo "prometheus: rebuild failed — launching the existing build instead." >&2
+    fi
+  else
+    echo "prometheus: pnpm not found — skipping rebuild (run \`corepack enable\`)." >&2
+  fi
+fi
+
 if [ ! -f "$CLI_JS" ]; then
   cat >&2 <<EOF
 prometheus: the CLI bundle is missing.
