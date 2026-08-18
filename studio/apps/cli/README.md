@@ -81,6 +81,41 @@ prometheus chat --cli claude [--open|--tmux]   # preview the injection-safe laun
 A bare `prometheus` on a TTY opens the readline session (catalog / models / env / security / health
 panes + slash + `/help`); without tmux it stays single-window, with tmux enabled it fans out.
 
+## Headless (`-p`) — one turn, then exit
+
+`prometheus -p "<prompt>"` runs **one agentic turn** and exits. It is the scripting surface: the
+model can read files, run commands and call the same tools the interactive session exposes, and
+the whole thing is over when it answers.
+
+```sh
+prometheus -p "summarise the failing tests in this repo"
+cat task.md | prometheus -p                       # stdin is the prompt when none is given
+prometheus -p "list the TODOs" --json             # ONE machine-readable object on stdout
+prometheus -p "fix the lint error" --allow-writes # writes are REFUSED without this
+prometheus -p "run the tests and fix them" --allow-commands  # …and run commands (implies writes)
+prometheus -p "…" --session-id nightly            # name it, so `/resume` and `sessions` find it
+```
+
+**The stream split is the contract.** The *answer* goes to **stdout**; progress, warnings and
+tool activity go to **stderr**. So this captures exactly the answer and nothing else:
+
+```sh
+prometheus -p "what is the version of this package?" > answer.txt
+```
+
+**Writes are off by default.** Without `--allow-writes` a headless run may read and reason but
+not modify the working tree, and the system prompt tells the model to say plainly what it *would*
+have changed. `--allow-commands` raises it one rung further (run commands too) and implies
+`--allow-writes`. The refusal names the flag, so a script that needs one says so explicitly
+rather than discovering it by accident. Both compose with `--json`.
+
+Headless runs are recorded like interactive ones — `~/.prometheus/sessions/headless-<id>.jsonl`
+plus a token-accounting sidecar and an index entry tagged `kind: "headless"` — so
+`prometheus sessions list` shows them and a run can be resumed or forked later. Pass
+`--session-id` to choose the id instead of taking the generated one.
+
+Aliases: `--print` and `--prompt` are the same flag.
+
 ## Commands
 
 | area | verbs |

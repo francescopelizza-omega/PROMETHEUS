@@ -165,3 +165,8 @@ export {
   runMemoryTool,
   writeMemoryEntry,
 } from "./memory-store.js";
+
+// The node-backed filesystem seam behind `previewMutation` — the "what will this delete /
+// overwrite / patch?" card the three destructive mutators had no way to draw. Binary-safe,
+// size-capped, and it never follows a symlink out of the tree it is describing.
+export { PREVIEW_MAX_BYTES, PREVIEW_MAX_ENTRIES, nodePreviewIo } from "./preview-io.js";

@@ -321,7 +321,11 @@ export function buildDoctorChecks(deps: DoctorDeps): DoctorCheck[] {
           return {
             status: "fail",
             detail: `engine not found or no --version (${(v.raw ?? "").trim().slice(0, 60) || "no output"})`,
-            remedy: "place prometheus.py beside prometheus or set $PROMETHEUS_ENGINE",
+            // Names the variable `resolveEngine` actually reads. It used to say
+            // $PROMETHEUS_ENGINE, which nothing read — advice that cannot work is worse than
+            // no advice, because the user blames their own path. (That name is now accepted
+            // as an alias too, so anyone who followed the old text is not broken.)
+            remedy: "place prometheus.py beside prometheus, or set $PROMETHEUS_PY to its path",
           };
         }
         // compareSemver(engine, MIN) === -1 ⇒ engine is OLDER than the minimum.

@@ -26,6 +26,7 @@ import {
   createHookRunner,
   loadMemoryIndexBlock,
   loadPermissionRules,
+  nodePreviewIo,
 } from "@prometheus/core/agent-system-host";
 import { type EngineClient, createEngineClient } from "@prometheus/engine-bridge";
 import { loadHooksDetailed } from "../session/hooks-config.js";
@@ -58,6 +59,7 @@ import {
   applyEditIntentsLocal,
   autoCompactPolicy,
   compactSession,
+  confirmPrompt,
   effectiveTools,
   makeSummarizer,
   measuredSessionUsage,
@@ -882,12 +884,90 @@ export async function createSessionBridge(deps: BridgeDeps): Promise<SessionBrid
     return approved;
   };
 
+  /**
+   * The destructive-mutator card: `apply_patch`, `delete_file`, `move_file`.
+   *
+   * These three were approved by NAME. `confirmPrompt` later taught the plain host to name
+   * their paths, but naming a path is not showing a change, and these are precisely the calls
+   * where the change is the decision: a patch spanning six files (approved ONCE, by design),
+   * a delete whose contents are gone afterwards, an `overwrite:true` move that destroys the
+   * destination silently.
+   *
+   * `previewMutation` models a delete as a diff to the empty string and a clobbering move as a
+   * diff of the DESTINATION, so all three paint through `renderDiffCard` — the same
+   * word-level, syntax-highlighted card `propose_edit` already gets — instead of growing three
+   * bespoke renderers that would drift from it.
+   */
+  const showMutationCard = (call: ToolCall): boolean => {
+    const caps = deps.caps ?? "none";
+    const preview = agent.previewMutation(
+      call,
+      (p) => (p && isAbsolute(p) ? p : p ? resolve(state.cwd, p) : p),
+      nodePreviewIo(),
+    );
+    if (!preview) return false;
+    write(
+      preview.willFail
+        ? paint(`⚠ ${preview.headline}`, "stErr", caps)
+        : paint(preview.headline, "toolAction", caps),
+    );
+    for (const ch of preview.changes) {
+      if (ch.kind === "blocked") {
+        write(paint(`  ⎿ ${ch.path ? `${ch.path}: ` : ""}${ch.message}`, "stErr", caps));
+        continue;
+      }
+      if (ch.kind === "delete-dir") {
+        for (const e of ch.entries) write(paint(`  − ${e}`, "diffDel", caps));
+        if (ch.truncated) write(c.dim(`  … and ${ch.total - ch.entries.length} more`));
+        continue;
+      }
+      if (ch.kind === "move") {
+        write(`  ${ch.from}`);
+        write(`  → ${ch.to}`);
+        // A clobbering move is a delete of the destination — show it as one.
+        if (ch.clobbers && ch.lostText !== null) {
+          for (const ln of renderDiffCard(
+            `✗ replaced ${ch.to}`,
+            ch.lostText,
+            "",
+            ch.to,
+            caps,
+            "lost to the move",
+          )) {
+            write(ln);
+          }
+        } else if (ch.clobbers) {
+          write(paint("  ⚠ REPLACES the destination (contents not previewable)", "stErr", caps));
+        }
+        continue;
+      }
+      // an `edit` — a patched file, or a delete (newText === "").
+      const isDelete = ch.newText === "";
+      for (const ln of renderDiffCard(
+        isDelete ? `✗ delete ${ch.path}` : `✎ patch ${ch.path}`,
+        ch.oldText,
+        ch.newText,
+        ch.path,
+        caps,
+        ch.note ?? "",
+      )) {
+        write(ln);
+      }
+    }
+    return true;
+  };
+
   // authorisation-aware tool confirm: allow → run, plan-mode mutation → refusal, else → modal.
   const turnConfirm = async (call: ToolCall): Promise<agent.ConfirmResult> => {
     if (call.name === "propose_edit") return confirmEdit(call);
     if (call.name === "write_file") return confirmWrite(call);
     if (call.name === "run_command") return confirmRunCommand(call);
     if (call.name === "propose_elevated") return confirmProposeElevated(call);
+    // The card is drawn BEFORE the ladder and before plan mode, so a human who is about to be
+    // asked has already seen what they are being asked about. It is drawn before the
+    // auto-approve check too: at a raised authorisation level the agent deletes files without
+    // asking, and "without asking" must not also mean "without telling you what went".
+    const previewed = showMutationCard(call);
     // Resolve annotations from the tools ACTUALLY EXPOSED this turn, not from the 14 engine
     // verbs. This lookup used to be `PROMETHEUS_TOOLS.find(...)`, so every tool outside that
     // list — `web_fetch`, and now the whole Tier-R read set — resolved to `undefined`
@@ -906,7 +986,13 @@ export async function createSessionBridge(deps: BridgeDeps): Promise<SessionBrid
       auditBypass(call);
       return true;
     }
-    return deps.confirm(`run tool ${call.name}?`);
+    // A previewed call gets the INFORMED prompt (`confirmPrompt` names the command, the
+    // absolute paths, and whether any of them escape the working set); everything else keeps
+    // the terse form it already had. "run tool delete_file?" was never a question anyone could
+    // answer responsibly.
+    return deps.confirm(
+      previewed ? confirmPrompt(call, state.cwd, scopeRoots()) : `run tool ${call.name}?`,
+    );
   };
 
   // One store per session. `clearOnce` runs after each turn so a `once` grant cannot leak

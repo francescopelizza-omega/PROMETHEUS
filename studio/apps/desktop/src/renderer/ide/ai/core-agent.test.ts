@@ -15,10 +15,18 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import type { AgentTuning, LLMClient, Thread, ToolCall } from "@prometheus/core/agent-loop";
-import { runAgentTurn } from "@prometheus/core/agent-loop";
+import type {
+  AgentTuning,
+  LLMClient,
+  LlmTurn,
+  Thread,
+  ToolCall,
+  ToolOutcome,
+} from "@prometheus/core/agent-loop";
+import { defaultTuning, runAgentTurn } from "@prometheus/core/agent-loop";
 import { QUESTION_TOOL } from "@prometheus/core/agent-question";
 import { SPAWN_AGENT_TOOL, childTuning } from "@prometheus/core/agent-subagent";
+import { HOST_DISPATCH_TOOLS } from "@prometheus/core/agent-system";
 import { WEB_FETCH_TOOL, WEB_SEARCH_TOOL } from "@prometheus/core/agent-system";
 import { ENGINE_VERBS, exposedTools } from "@prometheus/core/agent-tools";
 import type { ToolDef } from "@prometheus/core/agent-tools";
@@ -32,6 +40,7 @@ import {
   agentPaneTuning,
   createRendererLlmClient,
   createRendererToolRunner,
+  runCoreAgentTurn,
   toOpenAiTool,
   withPersonas,
 } from "./core-agent.js";
@@ -612,4 +621,53 @@ test("a sub-agent can never spawn another, and a read-only role loses every writ
   assert.ok(child.tools.deny.includes("prometheus_install"), "a read-only child kept install");
   assert.equal(child.gateMode, parent.gateMode, "the child widened the gate");
   assert.ok(child.maxRounds !== undefined && child.maxRounds <= 12);
+});
+
+test("runCoreAgentTurn: the run's cancel reaches the LOOP, not only the model stream", async () => {
+  // Studio's stop button trips the run's AbortController. It reached `RendererLlmOptions.signal`
+  // and stopped there, so the loop went on to another round and ran more tools after the user
+  // had stopped it — the CLI's defect, in a second copy of the same wiring.
+  const ac = new AbortController();
+  let modelCalls = 0;
+  const llm: LLMClient = {
+    turn(): AsyncIterable<LlmTurn> {
+      modelCalls++;
+      return (async function* () {
+        yield {
+          kind: "tool_call",
+          call: { name: "list_dir" as ToolCall["name"], args: { path: "." }, id: `c${modelCalls}` },
+        };
+      })();
+    },
+  };
+  let toolRuns = 0;
+  const runTool = async (): Promise<ToolOutcome> => {
+    toolRuns++;
+    ac.abort(); // the human presses stop while the first tool runs
+    return { ok: true, summary: "ok" };
+  };
+
+  const thread: Thread = { messages: [{ role: "user", content: "go" }] };
+  const notes: string[] = [];
+  await runCoreAgentTurn(
+    thread,
+    {
+      ...defaultTuning({ provider: "local", name: "t" } as AgentTuning["model"]),
+      tools: { enabled: true, allow: [], deny: [], extra: [...HOST_DISPATCH_TOOLS] },
+      yes: true,
+      maxRounds: 6,
+    },
+    llm,
+    runTool,
+    {
+      signal: ac.signal,
+      onText: () => {},
+      onTurnComplete: () => {},
+      onToolNote: (n) => notes.push(n),
+      confirm: () => Promise.resolve(true),
+    },
+  );
+
+  assert.equal(modelCalls, 1, "the model was called again after the run was stopped");
+  assert.equal(toolRuns, 1, "more tools ran after the run was stopped");
 });

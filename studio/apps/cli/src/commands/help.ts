@@ -19,12 +19,32 @@ import { c } from "../render.js";
 import { ROUTED_VERBS } from "../route-table.js";
 
 /**
- * Resolve the CLI's real version from the nearest `package.json` named "@prometheus/cli", walking up
- * from THIS module (CLI-086). MODULE-relative (`import.meta.url`), never `process.cwd()`, so it holds
- * under tsx-dev, `dist/`, and bundled contexts from any working directory. Falls back to "0.0.0" only
- * when no cli package.json is locatable (a broken build) — the regression test forbids that in-tree.
+ * The version BAKED IN at bundle time.
+ *
+ * Declared, never defined: esbuild's `define` substitutes the literal string during the SEA and
+ * npm bundles, and in dev/test the identifier simply does not exist — which is why the check
+ * below is `typeof`, the one form that is safe on an undeclared name.
+ *
+ * This exists because the walk-up below CANNOT work inside a single-file executable. A SEA has
+ * no `package.json` on disk to find: `import.meta.url` is shimmed to the executable's own path,
+ * the loop walks out of the filesystem, and every packaged build of `prometheus --version`
+ * printed `0.0.0`. A version string that is always wrong is worse than no version string,
+ * because bug reports quote it.
+ */
+declare const __PROM_CLI_VERSION__: string | undefined;
+
+/**
+ * Resolve the CLI's real version: the baked-in constant first, otherwise the nearest
+ * `package.json` named "@prometheus/cli", walking up from THIS module (CLI-086). MODULE-relative
+ * (`import.meta.url`), never `process.cwd()`, so it holds under tsx-dev, `dist/`, and bundled
+ * contexts from any working directory. Falls back to "0.0.0" only when neither is available (a
+ * broken build) — the regression test forbids that in-tree.
  */
 function resolvePromVersion(): string {
+  // biome-ignore lint/complexity/useOptionalChain: `typeof` on an undeclared global is the point
+  if (typeof __PROM_CLI_VERSION__ === "string" && __PROM_CLI_VERSION__) {
+    return __PROM_CLI_VERSION__;
+  }
   try {
     let dir = dirname(fileURLToPath(import.meta.url));
     for (let i = 0; i < 8; i++) {
@@ -273,6 +293,7 @@ const usage =
 ${c.bold("USAGE")}
   prometheus [--json] [--no-color] <command> [args]
   prometheus            (no args) → the interactive single-window session
+  prometheus -p "…"     HEADLESS: run ONE agentic turn, print the answer, exit
 
 ${c.bold("INTERACTIVE SESSION")}
   ${c.cyan("prometheus")}            Unified session in ONE window: chat + agent loop + panes
@@ -331,6 +352,15 @@ ${c.bold("CONFIG · PROFILES · SESSIONS")}
   ${c.cyan("profile")} <list|use|new|edit>   ${c.cyan("config")} <get|set|list|path>   ${c.cyan("updates")} [--json]
   ${c.cyan("schedule")} <…>          Scheduled cloud agents (cron)   ${c.cyan("inventory")}   Installed-agent census
   ${c.cyan("mcp")} <list|add|remove|test>    ${c.cyan("agents")} <list|attach|kill>   ${c.cyan("localai")} <audit|list|models|…>
+
+${c.bold("HEADLESS / SCRIPTING")}
+  ${c.cyan("-p")} "<prompt>"         Run ONE agentic turn and exit. The ANSWER goes to stdout and
+                       progress to stderr, so redirecting stdout captures exactly the
+                       answer and nothing else. Aliases: --print, --prompt.
+  ${c.dim("cat task.md | prometheus -p")}      stdin is the prompt when none is given
+  ${c.dim("prometheus -p ... --json")}         one machine-readable object on stdout
+  ${c.dim("prometheus -p ... --allow-writes")} permit file writes (refused by default)
+  ${c.dim("prometheus -p ... --session-id ID")} name the session so /resume can find it
 
 ${c.bold("GLOBAL FLAGS")}
   --json               Emit one machine JSON object instead of pretty output

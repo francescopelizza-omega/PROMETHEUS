@@ -67,6 +67,16 @@ export interface ExecPipelineResult {
   stdout: string;
   stderr: string;
   timedOut: boolean;
+  /**
+   * The pipeline was CANCELLED — a job kill, or the turn's abort signal.
+   *
+   * Reported separately because the exit code cannot carry it. A child killed by SIGTERM
+   * closes with `code === null`, `typeof null !== "number"`, and the close handler therefore
+   * left `lastCode` at its initial `0` — so a cancelled `npm test` came back as `exit 0`,
+   * indistinguishable from a passing one. A model reading that concludes the tests passed and
+   * moves on, which is the worst possible reading of "the user pressed ESC".
+   */
+  aborted: boolean;
   truncated: boolean;
   durationMs: number;
   /** exactly what ran, post-parse — the audit record. */
@@ -165,6 +175,8 @@ async function runOnePipeline(
   let stderr = "";
   let truncated = false;
   let timedOut = false;
+  /** latched by `onAbort` — a cancel, not a clean exit. */
+  let aborted = false;
 
   const children: { pid?: number; kill(sig?: string): void }[] = [];
   const untrackers: (() => void)[] = [];
@@ -301,6 +313,9 @@ async function runOnePipeline(
     // An external abort (job kill / turn cancel) tears the group down the same way a timeout
     // does — SIGTERM, then SIGKILL after the grace period.
     const onAbort = (): void => {
+      // Latched BEFORE the kill, so the `close` handler that fires next cannot settle the
+      // pipeline as a clean exit before the deferred `finish(130)` ever runs.
+      aborted = true;
       for (const c of children) killGroup(c, "SIGTERM");
       setTimeout(() => {
         for (const c of children) killGroup(c, "SIGKILL");
@@ -331,10 +346,12 @@ async function runOnePipeline(
   for (const u of untrackers) u();
 
   return {
-    exitCode: timedOut ? 124 : result,
+    // 130 is the conventional "terminated by SIGINT" code, which is exactly what a cancel is.
+    exitCode: timedOut ? 124 : aborted ? 130 : result,
     stdout,
     stderr,
     timedOut,
+    aborted,
     truncated,
     durationMs: Date.now() - startedAt,
     argvExecuted: stages.map((s) => s.argv),
@@ -381,6 +398,7 @@ export async function runParsedCommand(
       stdout: "",
       stderr: `${refusal}\n`,
       timedOut: false,
+      aborted: false,
       truncated: false,
       durationMs: 0,
       argvExecuted: [],
@@ -391,6 +409,7 @@ export async function runParsedCommand(
   let err = "";
   let code = 0;
   let timedOut = false;
+  let aborted = false;
   let truncated = false;
   const argvExecuted: string[][] = [];
 
@@ -402,11 +421,25 @@ export async function runParsedCommand(
     err += r.stderr;
     code = r.exitCode;
     timedOut ||= r.timedOut;
+    aborted ||= r.aborted;
     truncated ||= r.truncated;
     argvExecuted.push(...r.argvExecuted);
     // A timeout stops the whole command — continuing would run the rest with an unknown
     // amount of the previous stage's work done.
     if (r.timedOut) break;
+    /**
+     * A CANCEL stops the whole command, deterministically.
+     *
+     * The exit code alone very nearly does this already: a cancelled part now reports 130, so
+     * an `&&` chain short-circuits on its own. Two cases it does NOT cover, which is why this
+     * is here rather than left to the code:
+     *   - `||` sequencing, where a NON-zero code is exactly the reason to run the next part;
+     *   - the race inside `runOnePipeline`, which spawns the children and only then attaches
+     *     the abort listener. A short command (`rm`) can finish in that window.
+     * Not starting the next part at all closes both. Measured, the second part is usually
+     * killed by the still-aborted signal anyway — this makes "usually" into "never".
+     */
+    if (r.aborted) break;
   }
 
   return {
@@ -414,6 +447,7 @@ export async function runParsedCommand(
     stdout: out,
     stderr: err,
     timedOut,
+    aborted,
     truncated,
     durationMs: Date.now() - started,
     argvExecuted,

@@ -69,7 +69,12 @@ async function main() {
     target: "node20",
     outfile: blobEntry,
     external: ["chalk", "ink", "ink-select-input", "ink-spinner", "react", "yargs", "node-pty"],
-    define: { "import.meta.url": "__SEA_IMPORT_META_URL__" },
+    // The version is BAKED IN. A SEA has no package.json on disk, so `resolvePromVersion`'s
+    // walk-up finds nothing and `prometheus --version` printed 0.0.0 in every packaged build.
+    define: {
+      "import.meta.url": "__SEA_IMPORT_META_URL__",
+      __PROM_CLI_VERSION__: JSON.stringify(version),
+    },
     banner: {
       js: 'const __SEA_IMPORT_META_URL__ = require("url").pathToFileURL(__filename).href;',
     },

@@ -1,7 +1,8 @@
 /**
  * config.ts — locate the Python engine + nemesis binary.
  *
- * resolveEngine honours env overrides first (PROMETHEUS_PY, PYTHON/PYTHON_BIN,
+ * resolveEngine honours env overrides first (PROMETHEUS_PY — or its PROMETHEUS_ENGINE
+ * alias — PYTHON/PYTHON_BIN,
  * NEMESIS_BIN) then falls back to the sibling engine that ships next to this
  * monorepo: `<repo>/{prometheus.py,nemesis}`, found by walking up from this module.
  * prometheus.py lives next to nemesis, so a single PROMETHEUS root locates both.
@@ -76,9 +77,19 @@ function siblingRoot(): string {
 export function resolveEngine(config: EngineConfig = {}): ResolvedEngine {
   const root = siblingRoot();
 
+  /**
+   * `PROMETHEUS_ENGINE` is honoured as an alias for `PROMETHEUS_PY`.
+   *
+   * Not a nicety: `doctor --bridge` told users to "set $PROMETHEUS_ENGINE" when it could not
+   * find the engine, and NOTHING in the codebase ever read that variable. A user following the
+   * remedy exactly got the identical failure back, with no way to tell whether they had
+   * mistyped the path or the advice. The remedy now names the real variable — and the name it
+   * used to name keeps working, because someone out there has it exported.
+   */
   const prometheusPy =
     config.prometheusPy ||
     process.env.PROMETHEUS_PY ||
+    process.env.PROMETHEUS_ENGINE ||
     firstExisting(join(root, "prometheus.py")) ||
     join(root, "prometheus.py");
 

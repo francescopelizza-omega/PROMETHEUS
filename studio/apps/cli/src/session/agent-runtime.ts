@@ -2551,6 +2551,14 @@ export function makeToolRunner(
     authLevel?: number;
     /** live output sink for `run_command` mode:"stream" — the host's terminal writer. */
     onProgress?: SystemToolDeps["onProgress"];
+    /**
+     * The turn's cancel, forwarded to every tool that can be interrupted.
+     *
+     * Today that means `run_command`'s child process. It matters most there: the loop can stop
+     * calling the model instantly, but a spawned build does not care that the user pressed
+     * ESC unless someone tells it.
+     */
+    signal?: AbortSignal;
   } = {},
 ): ToolRunner {
   const roots = opts.roots;
@@ -2576,6 +2584,8 @@ export function makeToolRunner(
         ...(opts.authLevel !== undefined ? { authLevel: opts.authLevel } : {}),
         ...(roots && roots.length > 0 ? { roots } : {}),
         ...(opts.onProgress ? { onProgress: opts.onProgress } : {}),
+        // ESC / Ctrl-C reaches the child process, not just the model stream.
+        ...(opts.signal ? { signal: opts.signal } : {}),
         ...(opts.execImpl ? { exec: opts.execImpl } : {}),
         ...(opts.spawnImpl ? { spawnImpl: opts.spawnImpl } : {}),
         ...(opts.gateImpl ? { gateImpl: opts.gateImpl } : {}),
@@ -3223,6 +3233,9 @@ export async function runMessageTurn(
       // `mode:"stream"` writes here as output arrives. The agent loop cannot carry mid-flight
       // output (a ToolRunner resolves once), so the host's own sink is the only live channel.
       onProgress: makeStreamSink((line) => ctx.write(`  ⎿ ${line}`)),
+      // ESC / Ctrl-C: the turn's cancel travels with the runner so a spawned child dies with
+      // the turn instead of outliving it.
+      ...(deps.signal ? { signal: deps.signal } : {}),
       ...(ctx.home ? { home: ctx.home } : {}),
       ...(ctx.authLevel !== undefined ? { authLevel: ctx.authLevel } : {}),
       ...(ctx.workingSet ? { roots: ctx.workingSet } : {}),
@@ -3329,7 +3342,14 @@ export async function runMessageTurn(
 
   let aborted = false;
   try {
-    for await (const ev of runAgentTurn(thread, ctx.tuning, { llm, runTool, confirm })) {
+    for await (const ev of runAgentTurn(thread, ctx.tuning, {
+      llm,
+      runTool,
+      confirm,
+      // The loop's own cancel check. Without it the abort stopped the SSE stream and the loop
+      // simply started another round.
+      ...(deps.signal ? { signal: deps.signal } : {}),
+    })) {
       // check BEFORE emit: a delta/tool_use produced after Ctrl-C is dropped, and the
       // lazy generator suspends here so the NEXT tool never dispatches (no post-abort work).
       if (deps.signal?.aborted) {

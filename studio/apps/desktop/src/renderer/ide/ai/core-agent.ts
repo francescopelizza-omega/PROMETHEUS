@@ -835,6 +835,14 @@ export interface CoreAgentSinks {
   onCapped?(rounds: number): void;
   /** ask the human about a tool call the broker routed to `confirm`. */
   confirm(call: ToolCall): Promise<ConfirmResult>;
+  /**
+   * The run's cancel — the SAME `AbortController` the pane's stop button trips.
+   *
+   * It already reached the model stream (`RendererLlmOptions.signal`) and nothing else, so
+   * stopping a run in Studio stopped the tokens and let the loop start another round and run
+   * more tools. Identical to the CLI's defect, in a second copy of the same wiring.
+   */
+  signal?: AbortSignal;
 }
 
 /**
@@ -859,6 +867,7 @@ export async function runCoreAgentTurn(
     llm,
     runTool,
     confirm: sinks.confirm,
+    ...(sinks.signal ? { signal: sinks.signal } : {}),
   })) {
     switch (ev.kind) {
       case "text":

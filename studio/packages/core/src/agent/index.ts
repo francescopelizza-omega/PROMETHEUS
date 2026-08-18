@@ -172,6 +172,22 @@ export { formatDuration } from "./duration.js";
 export type { WordSpan, DiffRow, DiffHunkView, EditView } from "./diff-view.js";
 export { buildEditView } from "./diff-view.js";
 
+// The "what will this actually change?" preview for the three mutators that had a DESCRIPTION
+// and no preview: apply_patch, delete_file, move_file. A delete is modelled as a diff to the
+// empty string so the host's existing edit card paints all three.
+export type {
+  MutationChange,
+  MutationPreview,
+  PendingCall,
+  PreviewIo,
+} from "./mutation-preview.js";
+export {
+  DELETE_DIR_SAMPLE,
+  previewMutation,
+  previewPaths,
+  renderMutationPreview,
+} from "./mutation-preview.js";
+
 // --- file 14 §3.10: named/searchable/resumable session store (shared GUI+CLI) ------- //
 export type { Session, SessionTurn, SessionQuery } from "./session-store.js";
 export {

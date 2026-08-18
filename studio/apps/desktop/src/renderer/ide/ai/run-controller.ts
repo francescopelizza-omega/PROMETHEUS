@@ -479,6 +479,9 @@ class AgentRunController {
 
     try {
       await runCoreAgentTurn(thread, tuning, llm, runTool, {
+        // The run's cancel, into the LOOP — not only into the model stream. Without it,
+        // pressing stop left the loop free to start another round and run more tools.
+        signal: deps.signal,
         onText: deps.onText,
         onTurnComplete: deps.onTurnComplete,
         onToolNote: deps.onToolNote,

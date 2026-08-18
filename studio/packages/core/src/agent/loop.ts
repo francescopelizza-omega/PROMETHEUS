@@ -213,6 +213,24 @@ export interface AgentTurnDeps {
   runTool: ToolRunner;
   /** asked before a non-auto-approvable tool runs; default = deny. */
   confirm?: (call: ToolCall) => ConfirmResult | Promise<ConfirmResult>;
+  /**
+   * Cancel the whole turn — ESC in the TUI, Ctrl-C in the readline host.
+   *
+   * Both hosts have minted an `AbortController` per turn since CLI-002, and both trip it on
+   * the interrupt key. It reached exactly one consumer: the SSE stream. So pressing ESC
+   * stopped the tokens arriving and the loop CARRIED ON — it started the next round, called
+   * the model again, and ran whatever tools that round asked for. The user had cancelled, the
+   * agent had not, and the only evidence was that the terminal went quiet for a while and then
+   * a file changed.
+   *
+   * Checked in three places below, and all three are necessary:
+   *   - before each ROUND, so a cancelled turn does not start another one;
+   *   - before each TOOL CALL, because one round can carry several and the user who pressed
+   *     ESC did not consent to the rest of the batch;
+   *   - inside the runner (via `makeToolRunner`), so an already-running child process dies
+   *     rather than finishing its `npm install` after the turn is over.
+   */
+  signal?: AbortSignal;
 }
 
 function withDryRun(args: Record<string, unknown>, dryRun: boolean): Record<string, unknown> {
@@ -306,7 +324,25 @@ export async function* runAgentTurn(
     hookErrors.push(m);
   };
 
+  /**
+   * The turn was CANCELLED by the human.
+   *
+   * Tracked separately from `repeatAbort` because it means something different to the host: a
+   * repeat-abort is the agent giving up on a model, a cancel is the user giving up on the
+   * agent. Neither emits `capped` — `/continue` would resume exactly the thing that was
+   * interrupted.
+   */
+  let cancelled = false;
+  /** Has the human asked for this turn to stop? */
+  const aborted = (): boolean => deps.signal?.aborted === true;
+
   for (let round = 0; round < maxRounds; round++) {
+    // Before the round starts: an abort that landed while the previous round's tools ran must
+    // not be answered by calling the model again.
+    if (aborted()) {
+      cancelled = true;
+      break;
+    }
     let assistantText = "";
     let sawFinal = false;
     /** This round's tool results, each tagged with the call it answers (when there was an id). */
@@ -347,6 +383,17 @@ export async function* runAgentTurn(
       }
 
       const call = turn.call;
+      /**
+       * The human cancelled — do not start this call.
+       *
+       * Checked BEFORE `roundCalls.push`, so a cancelled call is not narrated back to the
+       * model as something it asked for and got an answer to. One round can carry several
+       * tool calls; pressing ESC after the first is a refusal of the rest, not of nothing.
+       */
+      if (aborted()) {
+        cancelled = true;
+        break;
+      }
       // Recorded BEFORE any gate: a refused call is still something the model asked for, and
       // it must see that it asked, or it re-proposes the identical refused call next round.
       roundCalls.push(call);
@@ -633,6 +680,19 @@ export async function* runAgentTurn(
     // this is not a pause the human should be invited to `/continue`, it is a model that is
     // not responding to feedback, and offering to resume it would resume the loop.
     if (repeatAbort) break;
+    /**
+     * The human cancelled. Announce it and stop.
+     *
+     * The `blocked` event (rather than silence) is what makes ESC legible: the transcript
+     * shows why the agent stopped, and the reason lands in the same channel every other
+     * refusal uses, so no host needs a special case to render it. `capped` is deliberately
+     * NOT emitted — offering `/continue` after a cancel resumes the thing the user cancelled.
+     */
+    if (cancelled || aborted()) {
+      cancelled = true;
+      yield { kind: "blocked", reason: "cancelled — the turn was interrupted" };
+      break;
+    }
     // The turn completes when the model asked for no tool this round — that is the only
     // signal that means "I am answering" rather than "I am working". `sawFinal` alone cannot
     // end a round in which tools ran, because showing the model what they returned IS the

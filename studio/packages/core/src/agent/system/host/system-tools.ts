@@ -83,6 +83,17 @@ export interface SystemToolDeps {
   /** injected for tests so no suite spawns a real pipeline. */
   spawnImpl?: Parameters<typeof runParsedCommand>[1]["spawnImpl"];
   /**
+   * Cancel a RUNNING command — the turn's abort signal.
+   *
+   * `RunPipelineOptions.signal` has existed and worked since the background-job runner needed
+   * it; the FOREGROUND call site simply never passed one. So Ctrl-C during a `run_command`
+   * returned the user to their prompt while the child kept going: a `pip install` that had
+   * been cancelled finished installing, a build kept writing into `dist/`, and the process
+   * outlived the turn that had asked for it. Nothing in the type system noticed, because the
+   * field is optional on the way in.
+   */
+  signal?: AbortSignal;
+  /**
    * Live output sink for `mode:"stream"` — the host's terminal writer.
    *
    * A ToolRunner resolves once, so the agent loop cannot carry mid-flight output; this is the
@@ -789,6 +800,13 @@ async function runCommandTool(
     const job = startJob({
       command: commandText,
       tier: cls.tier,
+      /**
+       * A background job takes the JOB's signal, not the turn's — deliberately.
+       *
+       * Backgrounding exists so a long command OUTLIVES the turn that started it; cancelling
+       * the turn must not kill it, or `mode:"background"` would mean nothing. It is killed
+       * through `job_kill`, which is the handle the model was given for exactly that.
+       */
       run: ({ onOutput, signal }) =>
         runParsedCommand(parsed.command, {
           cwd,
@@ -832,6 +850,8 @@ async function runCommandTool(
     // `stream` also writes live; `collect` only captures.
     ...(mode === "stream" && deps.onProgress ? { onOutput: deps.onProgress } : {}),
     ...(deps.spawnImpl ? { spawnImpl: deps.spawnImpl } : {}),
+    // The turn's cancel reaches the CHILD. Without this the process survived the turn.
+    ...(deps.signal ? { signal: deps.signal } : {}),
   });
 
   // The model needs the exit code even when output is empty — "exit 1, no output" and "exit
@@ -848,7 +868,14 @@ async function runCommandTool(
           ? " — it produced no output at all, so it was either slower than the limit (raise timeoutSeconds, or use mode:background) or waiting for input (stdin is closed; re-run it with a non-interactive flag)."
           : ""
       }`
-    : `exit ${r.exitCode}`;
+    : r.aborted
+      ? // A CANCEL is not a result. It used to report `exit 0`, because a child killed by
+        // SIGTERM closes with `code === null` and the close handler left the code at its
+        // initial zero — so a cancelled `npm test` was indistinguishable from a passing one,
+        // and a model reading it concluded the tests passed. Say what happened, and say that
+        // the work is unfinished, because that is the fact the next decision turns on.
+        "CANCELLED by the user before it finished — whatever it was doing is incomplete, and any output above is partial"
+      : `exit ${r.exitCode}`;
   // When the SANDBOX is what refused, say so. `EPERM` on its own reads as a file-permission
   // problem, and a model that reads it that way retries with `chmod` or `sudo` rather than
   // asking for `/add-dir` — a loop the repeat guard eventually stops, having wasted the turn.
@@ -884,9 +911,12 @@ async function runCommandTool(
     );
   }
 
-  return done(r.exitCode === 0 && !r.timedOut, body, {
+  // `ok` is FALSE for a cancel. It reported true (exit 0) before, which is the same lie as
+  // the summary head and reaches the model through a field it trusts more.
+  return done(r.exitCode === 0 && !r.timedOut && !r.aborted, body, {
     exitCode: r.exitCode,
     timedOut: r.timedOut,
+    aborted: r.aborted,
     durationMs: r.durationMs,
     tier: cls.tier,
     argvExecuted: r.argvExecuted,

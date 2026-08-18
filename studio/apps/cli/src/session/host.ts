@@ -33,7 +33,7 @@
  * scripted fake driver (see host.test.ts) — no real TTY, engine, or model needed.
  */
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { isAbsolute, join, resolve } from "node:path";
 import { type Interface as ReadlineInterface, createInterface } from "node:readline";
 
 import {
@@ -84,6 +84,7 @@ import {
   createHookRunner,
   loadMemoryIndexBlock,
   loadPermissionRules,
+  nodePreviewIo,
   runSystemTool,
 } from "@prometheus/core/agent-system-host";
 import { copyReplyStatus, lastAssistantReply } from "../tui/clipboard.js";
@@ -862,6 +863,29 @@ export async function launchSession(parsed: ParsedArgs, deps: SessionDeps = {}):
       );
     });
 
+  /**
+   * Paint the "what will this actually change?" card for a destructive mutator.
+   *
+   * One node-backed IO seam per call rather than one per session: a preview reads the CURRENT
+   * bytes, and a seam captured at startup would happily show a diff against a file the agent
+   * rewrote three turns ago. `previewMutation` answers null for every tool that already has a
+   * card (or has nothing to show), so this is silent for the common case.
+   *
+   * A doomed call is announced as doomed. Approving a patch whose hunks no longer match writes
+   * NOTHING — the human should learn that here, not from a tool result afterwards.
+   */
+  const showMutationPreview = (call: { name: string; args?: Record<string, unknown> }): void => {
+    const preview = agent.previewMutation(
+      call,
+      (p) => (p && isAbsolute(p) ? p : p ? resolve(state.cwd, p) : p),
+      nodePreviewIo(),
+    );
+    if (!preview) return;
+    for (const line of agent.renderMutationPreview(preview)) {
+      write(preview.willFail ? c.yellow(line) : line);
+    }
+  };
+
   // A free-text question over readline (the /setup wizard's input seam).
   const ask = (prompt: string): Promise<string> =>
     new Promise<string>((resolveAsk) => {
@@ -1050,6 +1074,14 @@ export async function launchSession(parsed: ParsedArgs, deps: SessionDeps = {}):
       if (agent.authDecision(hostAuthLevel, call.name, tool?.annotations) === "allow") {
         return Promise.resolve(true as ConfirmResult);
       }
+      // The PREVIEW comes before the prompt, not instead of it.
+      //
+      // `confirmPrompt` names the paths; it cannot show what is in them. For `apply_patch`,
+      // `delete_file` and `move_file` that gap is the whole decision — a patch across six
+      // files, the contents of a file about to be deleted, the destination an `overwrite:true`
+      // move is about to destroy. `previewMutation` returns null for every other tool, so this
+      // adds nothing to the prompts that were already informed.
+      showMutationPreview(call);
       return confirmTool(confirmPrompt(call, state.cwd, [state.cwd, ...ws.list()]));
     },
     write,
