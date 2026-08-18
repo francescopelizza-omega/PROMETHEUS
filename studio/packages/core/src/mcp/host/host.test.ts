@@ -221,3 +221,35 @@ test("validateRemoteTransport: malformed url + non-http kind + header allowlist"
     false,
   );
 });
+
+test("a server that DIED is reaped at call time — its tools stop being advertised", async () => {
+  // `failAll` rejected the in-flight requests and said nothing else, so a server that crashed
+  // between calls left health reading "ready": the manager kept advertising its tools, the
+  // model kept calling them, and every call failed with a transport error the user had no way
+  // to connect to "that server is gone".
+  const t = new FakeTransport({ tools: [RO_TOOL, WRITE_TOOL] });
+  const store = new InMemoryConfigStore();
+  const gate = async (target: string): Promise<HostGateVerdict> => ({ verdict: "allow", target });
+  const mgr = new McpHostManager({ store, gate, transport: () => t });
+  await mgr.addServer(cfg({ autoApprove: ["read_file"] }));
+  const connected = await mgr.connect("fs");
+  assert.equal(connected.health, "ready");
+
+  t.dead = true; // the child process exits
+  await assert.rejects(() => mgr.callTool("fs", "read_file", { path: "/w/a" }), /has exited/);
+  assert.equal(store.get("fs")?.health, "error", "a crashed server stayed health:ready");
+  // …and a second call reports "not connected", because it was dropped from `live`
+  await assert.rejects(() => mgr.callTool("fs", "read_file", { path: "/w/a" }), /not connected/);
+});
+
+test("a transport with no `isDead` still works — the check is optional", async () => {
+  const t = new FakeTransport({ tools: [RO_TOOL, WRITE_TOOL] });
+  (t as unknown as { isDead?: unknown }).isDead = undefined;
+  const store = new InMemoryConfigStore();
+  const gate = async (target: string): Promise<HostGateVerdict> => ({ verdict: "allow", target });
+  const mgr = new McpHostManager({ store, gate, transport: () => t });
+  await mgr.addServer(cfg({ autoApprove: ["read_file"] }));
+  await mgr.connect("fs");
+  const r = await mgr.callTool("fs", "read_file", { path: "/w/a" });
+  assert.ok(r);
+});

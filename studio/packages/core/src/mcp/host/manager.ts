@@ -127,6 +127,23 @@ export class McpHostManager {
     const cfg = this.requireServer(id);
     const transport = this.live.get(id);
     if (!transport) throw new Error(`MCP server "${id}" is not connected`);
+    /**
+     * The server DIED since we last spoke to it — reap it here rather than calling into a
+     * corpse.
+     *
+     * Checked at call time rather than by polling, because that is the moment the answer
+     * matters and the only moment it is free. Marking it `error` and dropping it from `live`
+     * means the next `tools()` stops advertising a server that is gone, so the model stops
+     * being handed tools that cannot run. The message names the cause, which a bare transport
+     * error never did.
+     */
+    if (transport.isDead?.() === true) {
+      this.live.delete(id);
+      this.setHealth(id, "error");
+      throw new Error(
+        `MCP server "${id}" has exited — its tools are no longer available; reconnect it to use them again`,
+      );
+    }
     const descriptor = cfg.capabilities?.tools.find((t) => t.name === name);
     const granted = cfg.autoApprove.includes(name);
     if (!autoApprovable(descriptor?.annotations, granted)) {

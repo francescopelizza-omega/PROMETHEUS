@@ -150,6 +150,17 @@ export interface McpClientTransport {
   listTools(): Promise<McpToolDescriptor[]>;
   callTool(name: string, args: Record<string, unknown>): Promise<McpToolCallResult>;
   close(): Promise<void>;
+  /**
+   * Has the far side GONE — the child exited, the socket closed?
+   *
+   * Optional so a transport with no notion of dying (the fake, an in-process one) simply
+   * omits it. Without it the manager had no way to learn that a server had crashed: the
+   * transport failed its in-flight requests and said nothing else, so `health` stayed
+   * `"ready"` forever. The tools kept being advertised, the model kept calling them, and
+   * every call came back as a transport error the user could not connect to "that server
+   * died four turns ago".
+   */
+  isDead?(): boolean;
 }
 
 /** Build a transport for a server config (the real one wraps the MCP SDK Client). */
@@ -167,10 +178,16 @@ export class FakeTransport implements McpClientTransport {
   readonly calls: { name: string; args: Record<string, unknown> }[] = [];
   connected = false;
   closed = false;
+  /** flip to simulate the far side dying between calls (the crashed-server case). */
+  dead = false;
   private readonly opts: FakeTransportOptions;
 
   constructor(opts: FakeTransportOptions = {}) {
     this.opts = opts;
+  }
+
+  isDead(): boolean {
+    return this.dead;
   }
 
   async connect(): Promise<void> {

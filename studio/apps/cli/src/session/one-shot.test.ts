@@ -16,6 +16,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
+import type { agent } from "@prometheus/core";
 import type { ParsedArgs } from "../parse.js";
 import { parseArgs } from "../parse.js";
 import {
@@ -24,6 +25,7 @@ import {
   oneShotNotes,
   oneShotPrompt,
   renderOneShot,
+  runOneShot,
 } from "./one-shot.js";
 
 function args(over: Partial<ParsedArgs> = {}): ParsedArgs {
@@ -156,5 +158,94 @@ test("a failed run reports its error and nothing else", () => {
   assert.match(
     renderOneShot({ ok: false, reply: "", toolCalls: [], capped: false, error: "no model" }),
     /no model/,
+  );
+});
+
+/**
+ * A detected LOCAL runner, so `runOneShot` gets past its "no model is available" guard and
+ * reaches the part these tests are about. (That guard runs BEFORE the MCP session opens, so
+ * the early return leaks nothing — which is worth knowing and is why it is fine to skip it.)
+ */
+const FAKE_BACKENDS = {
+  liveRunners: [{ name: "ollama" }],
+  paidClis: [],
+  localRunner: { name: "ollama" },
+  localEndpoint: {
+    id: "local:ollama:test",
+    baseUrl: "http://127.0.0.1:11434/v1",
+    locality: "local" as const,
+    model: "test",
+    contextWindow: 8192,
+    supportsTools: true,
+  },
+};
+
+test("headless gets MCP tools too — the surface that had none", async () => {
+  /**
+   * Both interactive hosts open an MCP session and fold its tools into the turn. `one-shot.ts`
+   * did not mention MCP at all, so a user who configured a connector got its tools in the TUI,
+   * got them in the readline session, and got NONE of them from `prometheus -p "…"` — the
+   * surface a script or a CI job actually uses, and the one where a missing tool is hardest to
+   * notice because nobody is watching the tool list.
+   */
+  const MCP_TOOL: agent.ToolDef = {
+    name: "mcp__files__read",
+    title: "read",
+    description: "read a file over MCP",
+    schema: {},
+    annotations: { readOnlyHint: true },
+    toArgv: () => [],
+  };
+  let sawTools: string[] = [];
+  let closed = false;
+  const dispatched: string[] = [];
+  const res = await runOneShot(parseArgs(["-p", "list the files"]), "list the files", {
+    detect: async () => FAKE_BACKENDS as never,
+    mcp: {
+      tools: () => [MCP_TOOL],
+      callTool: async (id, tool) => {
+        dispatched.push(`${id}:${tool}`);
+        return { ok: true, summary: "ok" };
+      },
+      close: async () => {
+        closed = true;
+      },
+    } as never,
+    runTurn: (async (_s, _m, d: { ctx: { tuning: { tools: { extra?: { name: string }[] } } } }) => {
+      sawTools = (d.ctx.tuning.tools.extra ?? []).map((t) => t.name);
+      return { session: {}, events: [], reply: "done", jsonl: "", capped: false, thread: [] };
+    }) as never,
+  });
+
+  assert.equal(res.ok, true, res.error);
+  assert.ok(
+    sawTools.includes("mcp__files__read"),
+    `the MCP tool never reached the turn — saw: ${sawTools.join(", ")}`,
+  );
+  assert.equal(closed, true, "the connectors were left running after the headless turn");
+  assert.equal(dispatched.length, 0);
+});
+
+test("no connectors configured ⇒ no `mcp__` tool is advertised", async () => {
+  // The host tool set is always in `extra`; what must NOT appear is an MCP tool that does not
+  // exist. Advertising one the runner cannot dispatch is worse than advertising nothing.
+  let sawTools: string[] = [];
+  const res = await runOneShot(parseArgs(["-p", "hi"]), "hi", {
+    detect: async () => FAKE_BACKENDS as never,
+    mcp: {
+      tools: () => [],
+      callTool: async () => ({ ok: true, summary: "" }),
+      close: async () => {},
+    } as never,
+    runTurn: (async (_s, _m, d: { ctx: { tuning: { tools: { extra?: { name: string }[] } } } }) => {
+      sawTools = (d.ctx.tuning.tools.extra ?? []).map((t) => t.name);
+      return { session: {}, events: [], reply: "hi", jsonl: "", capped: false, thread: [] };
+    }) as never,
+  });
+  assert.equal(res.ok, true);
+  assert.equal(
+    sawTools.some((n) => n.startsWith("mcp__")),
+    false,
+    `an MCP tool was advertised with no connector configured: ${sawTools.join(", ")}`,
   );
 });

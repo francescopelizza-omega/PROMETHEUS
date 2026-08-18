@@ -16,6 +16,10 @@
 // biome-ignore lint/nursery/noRestrictedImports: deliberate Node-only mcp-node subpath (CLI-036), never in the renderer barrel.
 import { type ChildProcess, type SpawnOptions, spawn } from "node:child_process";
 
+import {
+  type ExitingChild,
+  trackChildProcess,
+} from "../../agent/system/host/reaper/child-reaper.js";
 import type { McpClientTransport, McpToolCallResult, TransportFactory } from "./transports.js";
 import type { McpServerConfig, McpToolDescriptor } from "./types.js";
 
@@ -74,6 +78,10 @@ export class StdioMcpTransport implements McpClientTransport {
   private proc: ChildProcess | null = null;
   private buf = "";
   private nextId = 1;
+  /** set once the child process has exited — see the `exit` handler in `connect`. */
+  private exited: { code: number | null } | null = null;
+  /** un-registers this child from the exit reaper; a no-op before `connect`. */
+  private untrack: () => void = () => {};
   private readonly pending = new Map<number, Pending>();
   private readonly cfg: McpServerConfig;
   private readonly spawnFn: StdioSpawn;
@@ -95,10 +103,41 @@ export class StdioMcpTransport implements McpClientTransport {
       stdio: ["pipe", "pipe", "pipe"],
     });
     this.proc = child;
+    /**
+     * The reaper, which every other spawn in this codebase is already wired to.
+     *
+     * `close()` kills the child, and `close()` was called by nothing on the exit paths that
+     * actually happen: Ctrl-C, a crash, a `process.exit`. An MCP stdio server is typically
+     * `npx some-server`, which is a Node process that will happily outlive the CLI forever —
+     * so a few start/stop cycles left a pile of orphaned servers holding their own ports and
+     * file handles. The exec runner has been tracked since the reaper was written; this spawn
+     * simply was not, and nothing in the type system connects the two.
+     *
+     * `once("exit")` auto-untracks, so a server that dies on its own is never signalled later
+     * through a recycled pid.
+     */
+    this.untrack = trackChildProcess(child as unknown as ExitingChild, {
+      label: `mcp:${this.cfg.id}`,
+      command: t.command,
+    });
     child.stdout?.setEncoding("utf8");
     child.stdout?.on("data", (chunk: string) => this.onData(chunk));
-    child.on("exit", (code) => this.failAll(new Error(`MCP server exited (${code ?? "signal"})`)));
-    child.on("error", (e) => this.failAll(e instanceof Error ? e : new Error(String(e))));
+    child.on("exit", (code) => {
+      /**
+       * The child DIED. Say so, rather than only failing the in-flight requests.
+       *
+       * `failAll` rejects what is pending and nothing else, so a server that crashed between
+       * calls left `health` reading `"ready"` — the manager kept advertising its tools, the
+       * model kept calling them, and every call failed with a transport error the user had no
+       * way to connect to "that server is gone". `exited` is the fact the manager needs.
+       */
+      this.exited = { code: code ?? null };
+      this.failAll(new Error(`MCP server exited (${code ?? "signal"})`));
+    });
+    child.on("error", (e) => {
+      this.exited = { code: null };
+      this.failAll(e instanceof Error ? e : new Error(String(e)));
+    });
 
     await this.request("initialize", {
       protocolVersion: PROTOCOL_VERSION,
@@ -133,8 +172,22 @@ export class StdioMcpTransport implements McpClientTransport {
     return { content: r?.content, isError: r?.isError === true };
   }
 
+  /**
+   * Has the child process exited?
+   *
+   * The manager reads this to decide whether a server is still serving. Without it a crashed
+   * server stayed `health:"ready"` forever: the tools kept being advertised, the model kept
+   * calling them, and each call came back as a transport error with nothing linking it to the
+   * fact that the process was gone.
+   */
+  isDead(): boolean {
+    return this.exited !== null;
+  }
+
   async close(): Promise<void> {
     this.failAll(new Error("MCP transport closed"));
+    this.untrack();
+    this.untrack = () => {};
     if (this.proc) {
       try {
         this.proc.kill("SIGKILL"); // SIGKILL, not just close the pipe, so no orphan is left

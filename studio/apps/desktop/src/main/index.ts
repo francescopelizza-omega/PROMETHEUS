@@ -81,6 +81,7 @@ import { RunHost } from "./ide/run-host.js";
 import type { TestRunSpawn } from "./ide/test-run-host.js";
 import { registerIpcHandlers } from "./ipc.js";
 import { registerMcpIpcHandlers } from "./mcp-ipc.js";
+import { migrateMcpStore, sharedMcpStorePath } from "./mcp-store-path.js";
 import { registerMetadataIpcHandlers } from "./metadata-ipc.js";
 import { registerModelIpcHandlers } from "./model-ipc.js";
 import { registerRepoIpcHandlers } from "./repo-ipc.js";
@@ -717,13 +718,25 @@ async function runHeadlessSmoke(): Promise<void> {
     profileSnapshotDir: `${app.getPath("userData")}/profile-snapshots`,
     floatingTerminal: floatingTerminalController,
   });
-  // MCP connectors (file 09 §2): the manager persists to userData + gates every server.
-  disposeMcpIpc = registerMcpIpcHandlers({
-    storePath: `${app.getPath("userData")}/mcp-servers.json`,
-  });
+  /**
+   * MCP connectors (file 09 §2), in the file the CLI also reads.
+   *
+   * These used to point at `<userData>/mcp-servers.json` — same format as the CLI's store, a
+   * different file. A connector added with `prometheus mcp add` never appeared in Studio, and
+   * one added in Studio never appeared in a terminal session; both sides reported success and
+   * listed a different set. `migrateMcpStore` folds any desktop-only entries into the shared
+   * file once, and says how many it adopted rather than doing it silently.
+   */
+  const adoptedMcp = migrateMcpStore(app.getPath("userData"));
+  if (adoptedMcp > 0) {
+    console.info(
+      `[mcp] adopted ${adoptedMcp} connector(s) from the old app-private store into ${sharedMcpStorePath()}`,
+    );
+  }
+  disposeMcpIpc = registerMcpIpcHandlers({ storePath: sharedMcpStorePath() });
   // APP-095: git-backed settings sync (reads the SAME mcp store, redacts secrets).
   disposeSettingsSyncIpc = registerSettingsSyncIpcHandlers({
-    mcpStorePath: `${app.getPath("userData")}/mcp-servers.json`,
+    mcpStorePath: sharedMcpStorePath(),
   });
   // Keyed/layered settings tree (file 13 §2.1) — global layer persists to userData;
   // the workspace layer (if any) is resolved per-call from the renderer's workspaceRoot.
@@ -942,13 +955,25 @@ async function bootstrap(): Promise<void> {
     profileSnapshotDir: `${app.getPath("userData")}/profile-snapshots`,
     floatingTerminal: floatingTerminalController,
   });
-  // MCP connectors (file 09 §2): the manager persists to userData + gates every server.
-  disposeMcpIpc = registerMcpIpcHandlers({
-    storePath: `${app.getPath("userData")}/mcp-servers.json`,
-  });
+  /**
+   * MCP connectors (file 09 §2), in the file the CLI also reads.
+   *
+   * These used to point at `<userData>/mcp-servers.json` — same format as the CLI's store, a
+   * different file. A connector added with `prometheus mcp add` never appeared in Studio, and
+   * one added in Studio never appeared in a terminal session; both sides reported success and
+   * listed a different set. `migrateMcpStore` folds any desktop-only entries into the shared
+   * file once, and says how many it adopted rather than doing it silently.
+   */
+  const adoptedMcp = migrateMcpStore(app.getPath("userData"));
+  if (adoptedMcp > 0) {
+    console.info(
+      `[mcp] adopted ${adoptedMcp} connector(s) from the old app-private store into ${sharedMcpStorePath()}`,
+    );
+  }
+  disposeMcpIpc = registerMcpIpcHandlers({ storePath: sharedMcpStorePath() });
   // APP-095: git-backed settings sync (reads the SAME mcp store, redacts secrets).
   disposeSettingsSyncIpc = registerSettingsSyncIpcHandlers({
-    mcpStorePath: `${app.getPath("userData")}/mcp-servers.json`,
+    mcpStorePath: sharedMcpStorePath(),
   });
   // Keyed/layered settings tree (file 13 §2.1) — global layer persists to userData;
   // the workspace layer (if any) is resolved per-call from the renderer's workspaceRoot.

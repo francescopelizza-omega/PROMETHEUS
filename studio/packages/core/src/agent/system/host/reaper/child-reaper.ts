@@ -141,10 +141,17 @@ export function trackChild(child: TrackedChild): () => void {
   };
 }
 
-/** Track a spawned child, auto-untracking on its own exit. */
+/**
+ * Track a spawned child, auto-untracking on its own exit.
+ *
+ * `command` is forwarded, not dropped. It is the durable registry's PID-REUSE GUARD — without
+ * it a later sweep can signal a stranger that inherited the number — and this wrapper's opts
+ * silently omitted it, so every caller that used the convenience form lost the guard that the
+ * direct `trackChild` form has.
+ */
 export function trackChildProcess(
   child: ExitingChild,
-  opts: { group?: boolean; label?: string } = {},
+  opts: { group?: boolean; label?: string; command?: string } = {},
 ): () => void {
   const untrack = trackChild({ pid: child.pid, ...opts });
   child.once("exit", untrack);

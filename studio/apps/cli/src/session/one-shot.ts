@@ -42,6 +42,7 @@ import {
 } from "./history-store.js";
 import { makeBudgetGuard, seedTuningWithNotes } from "./host.js";
 import { createKeyResolver, keychainProviders } from "./key-resolver.js";
+import { type McpSession, openMcpSession, withMcpTools } from "./mcp-session.js";
 import { type Backends, detectBackends } from "./onboarding.js";
 import { assembleSteering, discoverSteering } from "./steering.js";
 
@@ -124,6 +125,8 @@ export interface OneShotDeps {
   /** injected in tests; defaults to the real backend probe. */
   detect?: typeof detectBackends;
   write?: (line: string) => void;
+  /** injected in tests; defaults to opening the real connectors (the same seam both hosts have). */
+  mcp?: McpSession;
 }
 
 /**
@@ -257,9 +260,25 @@ export async function runOneShot(
     }
   })();
 
+  /**
+   * MCP connectors, in the UNATTENDED path too.
+   *
+   * Both interactive hosts open an MCP session and fold its tools into the turn; this one did
+   * not mention MCP at all. So a user who configured a connector got its tools in the TUI, got
+   * them in the readline session, and got none of them from `prometheus -p "…"` — the surface
+   * a script or a CI job actually uses, and the one where "the tool just isn't there" is
+   * hardest to notice, because there is nobody watching the tool list.
+   *
+   * Free when nothing is configured: `openMcpSession` starts no process in that case. Failure
+   * is soft for the same reason it is in the hosts — a broken connector must not take down a
+   * run that did not need it.
+   */
+  const mcp = deps.mcp ?? (await openMcpSession({ home, write }).catch(() => undefined));
+  const mcpTools = mcp?.tools() ?? [];
+
   const ctx: SessionCtx = {
     client,
-    tuning: liveTuning,
+    tuning: mcpTools.length > 0 ? withMcpTools(liveTuning, mcpTools) : liveTuning,
     json: parsed.json,
     endpoint,
     confirm,
@@ -289,6 +308,8 @@ export async function runOneShot(
     ...(budgetGuard ? { budget: budgetGuard } : {}),
     ...(steeringBlock ? { steering: () => steeringBlock } : {}),
     ...(memoryBlock ? { memory: () => memoryBlock } : {}),
+    // Advertising a tool the runner cannot dispatch is worse than not advertising it.
+    ...(mcp ? { callMcpTool: (id, tool, args) => mcp.callTool(id, tool, args) } : {}),
   };
 
   // Recorded BEFORE the turn: a run that crashes is exactly the one worth having a record of.
@@ -299,6 +320,17 @@ export async function runOneShot(
     cwd,
     kind: "headless",
   });
+  /**
+   * Shut the connectors down on EVERY exit path, including the throwing one.
+   *
+   * A headless run is short and the process usually ends right after — but "usually" is not a
+   * lifecycle, and a `-p` call inside a longer-lived process (a test, a wrapper) would leave a
+   * connector subprocess behind on each invocation. The reaper catches what this misses; this
+   * is the ordered shutdown that should not need it.
+   */
+  const closeMcp = async (): Promise<void> => {
+    await mcp?.close().catch(() => {});
+  };
   try {
     const res = await runTurn(undefined, prompt, { ctx });
     appendTurnEvents(home, sessionId, [{ role: "user", text: prompt }, ...res.events]);
@@ -346,6 +378,8 @@ export async function runOneShot(
       capped: false,
       error: err instanceof Error ? err.message : String(err),
     };
+  } finally {
+    await closeMcp();
   }
 }
 
