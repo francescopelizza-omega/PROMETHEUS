@@ -105,7 +105,7 @@ import {
   runPathsWizard,
   runSetup,
 } from "../session/onboarding.js";
-import { DEFAULT_SUBAGENTS, orchestratorNote } from "../session/orchestrator.js";
+import { DEFAULT_SUBAGENTS, orchestratorNote, spawnCapFor } from "../session/orchestrator.js";
 import { applyRepoMapVerb, makeRepoMapState, repoMapStats } from "../session/repo-map-state.js";
 import { maybeStopServicesOnExit } from "../session/service-shutdown.js";
 import {
@@ -455,6 +455,22 @@ export async function createSessionBridge(deps: BridgeDeps): Promise<SessionBrid
 
   const orchestrating = insideTmux();
   let subagentCount = orchestrating ? DEFAULT_SUBAGENTS : 1;
+  /**
+   * The delegation cap for the CURRENT turn, recomputed per message.
+   *
+   * Lives here rather than inside `turnCtx()` because it depends on the PROMPT (a complex one
+   * scales it up) and `turnCtx` has no prompt. Seeded with the default so a turn that somehow
+   * reaches the context before `runAgentMessage` is capped, not uncapped.
+   */
+  let spawnCap = agent.DEFAULT_MAX_SPAWNS;
+  /**
+   * The number the USER typed at `/agents`, or null while they have not.
+   *
+   * Distinct from `subagentCount`, which carries a display default (3 under tmux, 1 without)
+   * that must never become the delegation cap — capping at 1 for everyone without a
+   * multiplexer would be a silent downgrade of a setting nobody touched.
+   */
+  let explicitAgents: number | null = null;
   // per-session working set of extra readable dirs (/add-dir, CLI-004).
   const ws = createWorkingSet();
   // pre-image log for applied propose_edit calls (CLI-010) → /revert.
@@ -1069,6 +1085,14 @@ export async function createSessionBridge(deps: BridgeDeps): Promise<SessionBrid
         toolCapability = next;
       },
       todos,
+      /**
+       * The delegation cap the model actually runs under.
+       *
+       * `SessionCtx.subagentBudget` was declared, read once by `runMessageTurn`, and assigned
+       * by NO host — so `initialBudget({})` always won and `/agents N` could not move it. This
+       * is the assignment that was missing.
+       */
+      subagentBudget: { maxSpawns: spawnCap },
       onTodos: (items) => write(`  ▤ ${agent.todoSummary(items)}`),
       onRemember: (subject, scope) => {
         write(`  ✓ remembered: ${subject} (${scope})`);
@@ -1114,6 +1138,16 @@ export async function createSessionBridge(deps: BridgeDeps): Promise<SessionBrid
   };
 
   const runAgentMessage = async (input: string, opts?: { signal?: AbortSignal }): Promise<void> => {
+    /**
+     * The turn's DELEGATION CAP — a number that now does something.
+     *
+     * `subagentCount` reached exactly one consumer: the announcement string. So `/agents 5`
+     * printed "scaling 3 → 5 subagents", the user believed five agents were working, and the
+     * cap the model actually ran under stayed at its hard-coded default forever. The cap is
+     * computed here, announced here, and carried into `SubagentBudget.maxSpawns` by
+     * `turnCtx()` — one number, one meaning.
+     */
+    spawnCap = spawnCapFor(input, explicitAgents, agent.DEFAULT_MAX_SPAWNS);
     if (orchestrating) {
       const note = orchestratorNote(input, subagentCount);
       if (note) write(`🛸 ${note}`);
@@ -1568,6 +1602,8 @@ export async function createSessionBridge(deps: BridgeDeps): Promise<SessionBrid
       count: () => subagentCount,
       setCount: (n) => {
         subagentCount = n;
+        // …and this is now the REAL cap the model runs under, not just a number to print.
+        explicitAgents = n;
       },
       insideTmux: orchestrating,
       recommend: (prompt) =>

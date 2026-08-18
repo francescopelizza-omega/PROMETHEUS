@@ -130,6 +130,7 @@ import {
   DEFAULT_SUBAGENTS,
   detachedRunNote,
   orchestratorNote,
+  spawnCapFor,
   startDetachedRun,
 } from "./orchestrator.js";
 import { completePath } from "./path-completer.js";
@@ -729,6 +730,16 @@ export async function launchSession(parsed: ParsedArgs, deps: SessionDeps = {}):
   // it's a single agent. `subagentCount` is the live default the orchestrator scales from.
   const orchestrating = deps.isTty !== false && insideTmux();
   let subagentCount = orchestrating ? DEFAULT_SUBAGENTS : 1;
+  /** The delegation cap for the CURRENT turn — see the TUI host's twin. */
+  let spawnCap = agent.DEFAULT_MAX_SPAWNS;
+  /**
+   * The number the USER typed at `/agents`, or null while they have not.
+   *
+   * Distinct from `subagentCount`, which carries a display default (3 under tmux, 1 without)
+   * that must never become the delegation cap — capping at 1 for everyone without a
+   * multiplexer would be a silent downgrade of a setting nobody touched.
+   */
+  let explicitAgents: number | null = null;
 
   // `pathMode` flips the readline completer into filesystem-path tab-completion for the
   // duration of an askPath() prompt (a folder picker); otherwise tab is a no-op.
@@ -1042,6 +1053,9 @@ export async function launchSession(parsed: ParsedArgs, deps: SessionDeps = {}):
       toolCapability = next;
     },
     todos,
+    // The delegation cap the model actually runs under — see the TUI host's twin. The seam was
+    // declared, read once, and assigned by no host, so `/agents N` could not move it.
+    subagentBudget: { maxSpawns: spawnCap },
     onTodos: (items) => write(c.dim(`  ▤ ${agent.todoSummary(items)}`)),
     onRemember: (subject, scope) => {
       write(c.dim(`  ✓ remembered: ${subject} (${scope})`));
@@ -1300,6 +1314,9 @@ export async function launchSession(parsed: ParsedArgs, deps: SessionDeps = {}):
   /** Run ONE message through the agent loop (the default branch + the /macro sink). */
   const runAgentMessage = async (input: string): Promise<void> => {
     // orchestrator: under tmux, the main agent decides whether 3 subagents are enough.
+    // The turn's DELEGATION CAP — see the TUI host's twin. `/agents N` was a printed
+    // number with no consumer; this is what makes it the real `maxSpawns`.
+    spawnCap = spawnCapFor(input, explicitAgents, agent.DEFAULT_MAX_SPAWNS);
     if (orchestrating) {
       const note = orchestratorNote(input, subagentCount);
       if (note) writeLine(c.dim(`🛸 ${note}`));
@@ -1679,6 +1696,8 @@ export async function launchSession(parsed: ParsedArgs, deps: SessionDeps = {}):
       count: () => subagentCount,
       setCount: (n) => {
         subagentCount = n;
+        // …and this is now the REAL cap the model runs under, not just a number to print.
+        explicitAgents = n;
       },
       insideTmux: orchestrating,
       recommend: (prompt) =>

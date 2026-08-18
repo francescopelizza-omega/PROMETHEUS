@@ -59,11 +59,40 @@ export function decideSubagentCount(
   return Math.max(1, Math.min(max, base + hits));
 }
 
-/** A one-line orchestrator announcement for a turn (or "" when no fan-out is implied). */
+/**
+ * A one-line orchestrator announcement for a turn (or "" when the base cap is unchanged).
+ *
+ * It used to read "scaling 3 → 5 subagents for this task", which described a fan-out that did
+ * not happen: `subagentCount` reached exactly one consumer, this string, and nothing spawned
+ * anything. Sub-agents are real — the model delegates through `spawn_agent` — but the model
+ * decides WHEN, and this number's only honest meaning is the CAP on how many it may run. So
+ * the sentence says that, and `spawnCapFor` below is what makes it true.
+ */
 export function orchestratorNote(prompt: string, base: number): string {
   const n = decideSubagentCount(prompt, base);
   if (n <= base) return "";
-  return `orchestrator: this looks complex — scaling ${base} → ${n} subagents for this task`;
+  return `orchestrator: this looks complex — allowing up to ${n} delegated sub-agents this turn (was ${base})`;
+}
+
+/**
+ * The spawn cap in force for one turn — the value that reaches `SubagentBudget.maxSpawns`.
+ *
+ * The distinction that matters is whether the user has actually SET a number:
+ *
+ *  - They have not (`explicit` is null) ⇒ `fallback` (the engine's own default). `subagentCount`
+ *    is 1 when there is no tmux, and feeding THAT straight in would cap delegation at one
+ *    sub-agent for everybody not running a multiplexer — a silent downgrade for a setting they
+ *    never touched.
+ *  - They typed `/agents N` ⇒ exactly N, clamped to `[1, MAX_SUBAGENTS]`. LOWERING is the
+ *    useful direction and the one that was unreachable: `/agents 2` should mean at most two.
+ *
+ * The complexity auto-scale only ever raises an explicit number toward the ceiling, never
+ * above it, and never touches the untouched-default case — a user who set 2 asked for 2.
+ */
+export function spawnCapFor(prompt: string, explicit: number | null, fallback: number): number {
+  if (explicit === null) return fallback;
+  const asked = Math.max(1, Math.min(MAX_SUBAGENTS, explicit));
+  return Math.max(asked, Math.min(MAX_SUBAGENTS, decideSubagentCount(prompt, asked)));
 }
 
 /* ── background agent runs: detach / list / attach / kill (CLI-034) ─────────── */
