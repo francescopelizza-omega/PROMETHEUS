@@ -16,6 +16,7 @@
 import type { CSSProperties, ReactElement } from "react";
 import { useCallback, useEffect, useRef, useState } from "react";
 
+import { PERMISSION_MODES } from "@prometheus/core/agent-permission-modes";
 import { Z } from "@prometheus/ui";
 import {
   MAX_AUTH_LEVEL,
@@ -154,6 +155,8 @@ export function AuthPicker({
 }): ReactElement {
   const level = useAuthorisationStore((s) => s.level);
   const setLevel = useAuthorisationStore((s) => s.setLevel);
+  const mode = useAuthorisationStore((s) => s.permissionMode);
+  const setPermissionMode = useAuthorisationStore((s) => s.setPermissionMode);
   return (
     <div
       role="listbox"
@@ -175,6 +178,89 @@ export function AuthPicker({
         overflow: "hidden",
       }}
     >
+      {/*
+       * THE POSTURE, above the ladder — the half of this control that had no UI at all.
+       *
+       * `setPermissionMode` exists, clamps its input, persists to localStorage, drives
+       * `modeToAuthLevel`, and rides the tuning into core's loop, which enforces the plan-mode
+       * DENY. Every piece worked. Nothing called it: PLAN MODE was reachable in Studio only by
+       * hand-editing `prometheus.permissionMode.v1` in localStorage, while the CLI has offered
+       * it on Shift-Tab all along. Same product, same words, one surface where they did nothing.
+       *
+       * Placed first because it is the coarser dial: the mode SETS the level (a plan-mode pick
+       * drops the ladder to read-only), so choosing a level afterwards is the fine adjustment.
+       * Only the `inCycle` modes are offered — bypass and YOLO stay deliberate, explicit acts,
+       * exactly as they are in the TUI.
+       */}
+      <div
+        style={{
+          padding: "6px 10px 4px",
+          fontSize: 10.5,
+          fontWeight: 600,
+          letterSpacing: 0.4,
+          textTransform: "uppercase",
+          color: "var(--text-muted)",
+        }}
+      >
+        Mode
+      </div>
+      {PERMISSION_MODES.filter((m) => m.inCycle).map((m) => {
+        const active = m.id === mode;
+        return (
+          <button
+            key={m.id}
+            type="button"
+            role="option"
+            aria-selected={active}
+            onClick={() => {
+              setPermissionMode(m.id);
+              onClose();
+            }}
+            style={rowStyle(active)}
+          >
+            <span
+              style={{
+                fontFamily: "var(--font-mono)",
+                fontSize: 11,
+                width: 20,
+                flex: "none",
+                textAlign: "left",
+                color: active ? "var(--text-primary)" : "var(--text-muted)",
+              }}
+            >
+              {active ? "●" : "○"}
+            </span>
+            <span style={{ minWidth: 0, flex: 1, textAlign: "left" }}>
+              <span
+                style={{
+                  display: "block",
+                  fontSize: 12.5,
+                  fontWeight: active ? 600 : 500,
+                  color: active ? "var(--text-primary)" : "var(--text-title)",
+                }}
+              >
+                {m.label}
+              </span>
+              <span style={{ display: "block", fontSize: 11, color: "var(--text-muted)" }}>
+                {m.description}
+              </span>
+            </span>
+          </button>
+        );
+      })}
+      <div
+        style={{
+          padding: "6px 10px 4px",
+          borderTop: "1px solid var(--border-subtle)",
+          fontSize: 10.5,
+          fontWeight: 600,
+          letterSpacing: 0.4,
+          textTransform: "uppercase",
+          color: "var(--text-muted)",
+        }}
+      >
+        Level
+      </div>
       {authLevels().map((meta) => {
         const active = meta.level === level;
         const color = `var(${authLevelVar(meta.level)})`;
