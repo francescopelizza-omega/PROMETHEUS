@@ -1707,7 +1707,7 @@ export async function launchSession(parsed: ParsedArgs, deps: SessionDeps = {}):
         return cps
           .map(
             (cp) =>
-              `  ${cp.label ?? cp.id} · ${cp.createdAt.replace("T", " ").slice(0, 16)} · ${Object.keys(cp.files).length} file(s)`,
+              `  ${cp.label ?? cp.id} · ${cp.createdAt.replace("T", " ").slice(0, 16)} · ${agent.checkpointSize(cp)} file(s)`,
           )
           .join("\n");
       },

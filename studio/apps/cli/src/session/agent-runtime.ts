@@ -44,6 +44,7 @@
 import {
   chmodSync,
   closeSync,
+  existsSync,
   fsyncSync,
   lstatSync,
   mkdirSync,
@@ -965,8 +966,19 @@ export async function compactSession(
 export interface EditRecord {
   /** the absolute file path that was edited. */
   path: string;
-  /** the file's exact bytes BEFORE the edit. */
+  /** the file's exact bytes BEFORE the edit — `""` when it was empty OR did not exist. */
   preImage: string;
+  /**
+   * Did the file EXIST before this edit?
+   *
+   * The fact `preImage` cannot carry, and the reason `/revert` used to leave a trail of
+   * zero-byte files: a created file has no previous content, `preImage` was `""`, and reverting
+   * wrote that empty string back instead of removing the file. Optional so an older caller
+   * still type-checks; ABSENT is read as "existed", which is the safe reading — a revert that
+   * rewrites a file it should have deleted loses nothing, while the reverse deletes a file the
+   * user wrote.
+   */
+  existed?: boolean;
 }
 
 /** Construction seams for the AI client (injected in tests; defaults use global fetch). */
@@ -2136,7 +2148,8 @@ function applyLocalEdit(
   const via = recovered.length > 0 ? ` [recovered via ${recovered.join(", ")}]` : "";
   return {
     outcome: { ok: true, summary: `edited ${rawPath} (${res.applied} hunk(s))${via}` },
-    record: { path: abs, preImage: content },
+    // `propose_edit` only edits files it just read — the file existed by construction.
+    record: { path: abs, preImage: content, existed: true },
   };
 }
 
@@ -2202,7 +2215,8 @@ function applyWriteFile(
   const lines = content.length === 0 ? 0 : content.split("\n").length;
   return {
     outcome: { ok: true, summary: `${verb} ${rawPath} (${lines} line${lines === 1 ? "" : "s"})` },
-    record: { path: abs, preImage },
+    // `existed` is what makes a CREATE revertible to nothing rather than to an empty file.
+    record: { path: abs, preImage, existed },
   };
 }
 
@@ -2271,7 +2285,8 @@ function applyMultiFilePatch(
         records,
       };
     }
-    records.push({ path: target, preImage: preImages.get(f.path) ?? "" });
+    // `resolvePatch` refuses a missing file (`no-file`), so every patched path existed.
+    records.push({ path: target, preImage: preImages.get(f.path) ?? "", existed: true });
   }
   return {
     outcome: { ok: true, summary: agent.describePatch(result.files, result.totalHunks) },
@@ -2310,9 +2325,21 @@ function resolveMutatePath(
   return { ok: true, abs, raw: rawPath };
 }
 
-/** Restore a kept pre-image (revertLastEdit). Returns true on success. */
+/**
+ * Restore a kept pre-image (revertLastEdit). Returns true on success.
+ *
+ * A record whose file DID NOT EXIST is reverted by DELETING it. Writing `preImage` back was
+ * the old behaviour and it was wrong in the one case users notice: undoing "create this file"
+ * left a zero-byte file behind, which a build then tried to compile. `existed === undefined`
+ * still writes, so an older record keeps its old meaning.
+ */
 export function revertEdit(record: EditRecord): boolean {
   try {
+    if (record.existed === false) {
+      // Already gone is a SUCCESS: the state the caller asked for is the state on disk.
+      if (existsSync(record.path)) rmSync(record.path);
+      return true;
+    }
     atomicWrite(record.path, record.preImage);
     return true;
   } catch {
@@ -2358,23 +2385,31 @@ export interface CheckpointHook {
   now: () => string;
 }
 
-/** Fold a first-touch pre-image into this turn's checkpoint (turn-atomic grouping). */
-function captureIntoCheckpoint(hook: CheckpointHook, path: string, preImage: string): void {
+/**
+ * Fold a first-touch pre-image into this turn's checkpoint (turn-atomic grouping).
+ *
+ * `existed === false` records the path as ABSENT instead of as empty content, which is what
+ * lets `/revert` DELETE a file the agent created rather than truncating it to zero bytes.
+ */
+function captureIntoCheckpoint(hook: CheckpointHook, rec: EditRecord): void {
   const existing = hook.store.get(hook.turnId);
   const files = existing ? { ...existing.files } : {};
-  if (path in files) return; // FIRST-touch only — keep the truly pre-turn content
-  files[path] = preImage;
-  hook.store.record(
-    makeCheckpoint(
-      hook.turnId,
-      hook.sessionId,
-      hook.turnNumber,
-      hook.now(),
-      files,
-      {},
-      `turn ${hook.turnNumber}`,
-    ),
+  const absent = new Set(existing?.absent ?? []);
+  // FIRST-touch only — keep the truly pre-turn state. A path already known either way has
+  // already been captured at its earliest point in the turn.
+  if (rec.path in files || absent.has(rec.path)) return;
+  if (rec.existed === false) absent.add(rec.path);
+  else files[rec.path] = rec.preImage;
+  const cp = makeCheckpoint(
+    hook.turnId,
+    hook.sessionId,
+    hook.turnNumber,
+    hook.now(),
+    files,
+    {},
+    `turn ${hook.turnNumber}`,
   );
+  hook.store.record(absent.size > 0 ? { ...cp, absent: [...absent] } : cp);
 }
 
 /**
@@ -2600,7 +2635,7 @@ export function makeToolRunner(
          */
         onPreImage: (rec) => {
           if (opts.editHistory) opts.editHistory.push(rec);
-          if (opts.checkpoint) captureIntoCheckpoint(opts.checkpoint, rec.path, rec.preImage);
+          if (opts.checkpoint) captureIntoCheckpoint(opts.checkpoint, rec);
         },
       });
       if (sys) return sys;
@@ -2641,7 +2676,7 @@ export function makeToolRunner(
       if (record) {
         if (opts.editHistory) opts.editHistory.push(record);
         // record.preImage is the TOCTOU-safe pre-write content — snapshot per turn (CLI-015).
-        if (opts.checkpoint) captureIntoCheckpoint(opts.checkpoint, record.path, record.preImage);
+        if (opts.checkpoint) captureIntoCheckpoint(opts.checkpoint, record);
       }
       return outcome;
     }
@@ -2656,7 +2691,7 @@ export function makeToolRunner(
       );
       if (record) {
         if (opts.editHistory) opts.editHistory.push(record);
-        if (opts.checkpoint) captureIntoCheckpoint(opts.checkpoint, record.path, record.preImage);
+        if (opts.checkpoint) captureIntoCheckpoint(opts.checkpoint, record);
       }
       return outcome;
     }
@@ -2673,7 +2708,7 @@ export function makeToolRunner(
         if (opts.editHistory) opts.editHistory.push(record);
         // Every pre-image goes into the SAME turn checkpoint, so one /revert undoes the whole
         // patch rather than leaving the user to undo it file by file.
-        if (opts.checkpoint) captureIntoCheckpoint(opts.checkpoint, record.path, record.preImage);
+        if (opts.checkpoint) captureIntoCheckpoint(opts.checkpoint, record);
       }
       return outcome;
     }

@@ -31,7 +31,18 @@ import { isPathAllowed } from "./working-set.js";
 /** A captured pre-image, for a host that can undo. */
 export interface FsPreImage {
   path: string;
+  /** the bytes before the change — `""` when the path was empty OR did not exist. */
   preImage: string;
+  /**
+   * Did the path EXIST before the change?
+   *
+   * `false` means "revert by DELETING this", which is the only correct undo for a path the
+   * agent brought into existence. Without it a create reverted to a zero-byte file, and the
+   * user's tree filled up with empty files that their build then had to account for. Optional,
+   * and an absent value reads as "it existed" — the conservative direction, since rewriting a
+   * file that should have been deleted loses nothing while the reverse destroys real work.
+   */
+  existed?: boolean;
 }
 
 export interface FsMutateDeps {
@@ -110,7 +121,8 @@ export function deleteFileTool(args: Record<string, unknown>, deps: FsMutateDeps
   } catch (err) {
     return { ok: false, summary: `delete_file: failed: ${errText(err)}` };
   }
-  deps.onPreImage?.({ path: r.abs, preImage });
+  // A delete is by construction an "it existed" case — `rmSync` above would have thrown.
+  deps.onPreImage?.({ path: r.abs, preImage, existed: true });
   return { ok: true, summary: `deleted ${r.raw}` };
 }
 
@@ -137,12 +149,44 @@ export function moveFileTool(args: Record<string, unknown>, deps: FsMutateDeps):
       summary: `move_file: ${to.raw} already exists — pass overwrite:true to replace it`,
     };
   }
+  /**
+   * Capture BOTH ends before the rename — a move has two of them, and this captured neither.
+   *
+   * `move_file` fired no pre-image at all, so `/revert` silently did nothing for it: the source
+   * stayed gone and the destination stayed put. An `overwrite:true` move was worse, because the
+   * destination's old contents were destroyed with no record of them anywhere.
+   *
+   * Read the destination BEFORE the rename, or there is nothing left to read.
+   */
+  let destPre = "";
+  if (destExists) {
+    try {
+      destPre = readFileSync(to.abs, "utf8");
+    } catch {
+      // binary or unreadable: the move still happens, it just cannot be undone byte-for-byte.
+      destPre = "";
+    }
+  }
+  let sourcePre = "";
+  let sourceCapturable = false;
+  try {
+    sourcePre = readFileSync(from.abs, "utf8");
+    sourceCapturable = true;
+  } catch {
+    // a directory move, or a binary — not byte-restorable, so it is not claimed to be.
+    sourceCapturable = false;
+  }
   try {
     mkdirSync(dirname(to.abs), { recursive: true });
     renameSync(from.abs, to.abs);
   } catch (err) {
     return { ok: false, summary: `move_file: failed: ${errText(err)}` };
   }
+  // The SOURCE existed and now does not → revert by writing it back.
+  if (sourceCapturable) deps.onPreImage?.({ path: from.abs, preImage: sourcePre, existed: true });
+  // The DESTINATION either did not exist (revert by deleting) or was replaced (revert by
+  // writing its old bytes back).
+  deps.onPreImage?.({ path: to.abs, preImage: destPre, existed: destExists });
   return { ok: true, summary: `moved ${from.raw} → ${to.raw}` };
 }
 

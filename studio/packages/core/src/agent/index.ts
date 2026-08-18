@@ -240,6 +240,7 @@ export type { Checkpoint, RestorePlan, SnapshotPolicy } from "./checkpoint.js";
 export {
   CheckpointStore,
   changedPaths,
+  checkpointSize,
   makeCheckpoint,
   restorePlan,
   shouldSnapshot,
