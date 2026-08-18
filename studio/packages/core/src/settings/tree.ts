@@ -203,6 +203,10 @@ export const SETTINGS_TREE: readonly SettingsNode[] = Object.freeze([
       node("tools.network", "Server Certificates / Proxy", "Tools", "09", "page", {
         searchTerms: ["proxy", "certificate", "downloads"],
       }),
+      node("tools.pathCompletion", "Path Completion", "Tools", "13", "toggle", {
+        schemaKey: "completion.pathFrecency",
+        searchTerms: ["path", "completion", "@", "mention", "frecency", "autocomplete", "tab"],
+      }),
     ],
   }),
   node("version-control", "Version Control", "root", "07", "page", {

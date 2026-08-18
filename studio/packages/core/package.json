@@ -146,6 +146,10 @@
     "./command-gate": {
       "types": "./dist/commands/gate.d.ts",
       "import": "./dist/commands/gate.js"
+    },
+    "./path-completion": {
+      "types": "./dist/path-completion/index.d.ts",
+      "import": "./dist/path-completion/index.js"
     }
   },
   "scripts": {

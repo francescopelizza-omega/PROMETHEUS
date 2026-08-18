@@ -78,6 +78,12 @@ export interface Settings {
    * configured) — the same lenient contract `todoPatterns` uses.
    */
   hooks?: HookSpec[];
+  /**
+   * Remember this project's top-20 most-used "@"-completed paths (by the CLI's `/tab-complete`
+   * and the desktop's "@"-mention pickers alike) to rank them ahead of a plain fuzzy match —
+   * OFF by default, same "never silently flipped" posture as `telemetryEnabled`.
+   */
+  "completion.pathFrecency"?: boolean;
   /** extension-contributed keys (open) — also carries the `format.lang.<id>` booleans. */
   [key: string]: unknown;
 }
@@ -93,6 +99,7 @@ export const DEFAULT_SETTINGS: Settings = {
   allowForce: true,
   autoApprove: false,
   telemetryEnabled: false, // §8: OFF by default — explicit, never upgraded by the validator
+  "completion.pathFrecency": false, // OFF by default — explicit, never upgraded by the validator
   updateChannel: "latest",
   "format.onSave": false,
   "format.optimizeImportsOnSave": false,
@@ -160,6 +167,7 @@ export function validateSettings(value: unknown): Settings {
       case "allowForce":
       case "autoApprove":
       case "telemetryEnabled":
+      case "completion.pathFrecency":
         if (typeof v === "boolean") out[key] = v;
         break;
       case "templates.user":

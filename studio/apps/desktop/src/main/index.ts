@@ -83,6 +83,7 @@ import { registerMcpIpcHandlers } from "./mcp-ipc.js";
 import { migrateMcpStore, sharedMcpStorePath } from "./mcp-store-path.js";
 import { registerMetadataIpcHandlers } from "./metadata-ipc.js";
 import { registerModelIpcHandlers } from "./model-ipc.js";
+import { registerPathCompletionIpcHandlers } from "./path-completion-ipc.js";
 import { registerRepoIpcHandlers } from "./repo-ipc.js";
 import { repairPath } from "./resolve-path.js";
 import { registerSecurityIpcHandlers } from "./security-ipc.js";
@@ -308,6 +309,8 @@ let disposeIdeIpc: (() => void) | null = null;
 let disposeMcpIpc: (() => void) | null = null;
 let disposeSettingsSyncIpc: (() => void) | null = null;
 let disposeSettingsIpc: (() => void) | null = null;
+/** Removes the registered `pathCompletion:*` ipcMain handlers (the "@"-path feature). */
+let disposePathCompletionIpc: (() => void) | null = null;
 let disposeExtIpc: (() => void) | null = null;
 /** Removes the registered `system:telemetry` ipcMain handler (resource telemetry + guard). */
 let disposeTelemetryIpc: (() => void) | null = null;
@@ -717,6 +720,9 @@ async function runHeadlessSmoke(): Promise<void> {
     profileSnapshotDir: `${app.getPath("userData")}/profile-snapshots`,
     floatingTerminal: floatingTerminalController,
   });
+  // "@"-path fuzzy completion (shared logic with the CLI) — list one directory + rank it,
+  // and the opt-in per-workspace frecency memory ("Tools ▸ Path Completion" setting).
+  disposePathCompletionIpc = registerPathCompletionIpcHandlers();
   /**
    * MCP connectors (file 09 §2), in the file the CLI also reads.
    *
@@ -795,6 +801,8 @@ async function runHeadlessSmoke(): Promise<void> {
     disposeSettingsSyncIpc = null;
     disposeSettingsIpc?.();
     disposeSettingsIpc = null;
+    disposePathCompletionIpc?.();
+    disposePathCompletionIpc = null;
     disposeExtIpc?.();
     disposeExtIpc = null;
     disposeTelemetryIpc?.();
@@ -954,6 +962,9 @@ async function bootstrap(): Promise<void> {
     profileSnapshotDir: `${app.getPath("userData")}/profile-snapshots`,
     floatingTerminal: floatingTerminalController,
   });
+  // "@"-path fuzzy completion (shared logic with the CLI) — list one directory + rank it,
+  // and the opt-in per-workspace frecency memory ("Tools ▸ Path Completion" setting).
+  disposePathCompletionIpc = registerPathCompletionIpcHandlers();
   /**
    * MCP connectors (file 09 §2), in the file the CLI also reads.
    *
@@ -1121,6 +1132,8 @@ app.on("before-quit", (event) => {
       disposeMcpIpc = null;
       disposeSettingsIpc?.();
       disposeSettingsIpc = null;
+      disposePathCompletionIpc?.();
+      disposePathCompletionIpc = null;
       disposeExtIpc?.();
       disposeExtIpc = null;
       disposeTelemetryIpc?.();
@@ -1152,6 +1165,8 @@ app.on("before-quit", (event) => {
     disposeSettingsSyncIpc = null;
     disposeSettingsIpc?.();
     disposeSettingsIpc = null;
+    disposePathCompletionIpc?.();
+    disposePathCompletionIpc = null;
     disposeExtIpc?.();
     disposeExtIpc = null;
     disposeTelemetryIpc?.();

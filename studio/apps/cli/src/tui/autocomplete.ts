@@ -173,6 +173,10 @@ export function submitLine(state: AcState, input: string): string | null {
 export interface DropdownOpts {
   /** max visible rows (default 8); the list scrolls a window around the selection. */
   maxRows?: number;
+  /** row prefix before `item.name` (default "/" — the slash-command convention). Pass ""
+   *  for a plain listing (e.g. the "@"-path dropdown, where a name shouldn't get a "/"
+   *  glued on the front of it). */
+  sigil?: string;
 }
 
 /** Truncate to `w` visible code points, adding "…" when cut. */
@@ -196,6 +200,7 @@ export function renderDropdown(
   if (state.items.length === 0) return [];
   const p = painter(caps);
   const maxRows = Math.max(1, opts.maxRows ?? 8);
+  const sigil = opts.sigil ?? "/";
   const n = state.items.length;
   const w = Math.max(12, width);
 
@@ -208,7 +213,7 @@ export function renderDropdown(
   const rows: string[] = [];
   view.forEach((item, idx) => {
     const real = top + idx;
-    const nm = `/${item.name}`;
+    const nm = `${sigil}${item.name}`;
     const hint = item.args ? ` ${item.args}` : "";
     const label = `${nm}${hint}`.padEnd(nameW + 1);
     const line = clip(`${label} ${item.summary}`, w - 3);

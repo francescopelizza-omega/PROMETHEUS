@@ -20,7 +20,9 @@ export interface CompleterFs {
   isDir: (p: string) => boolean;
 }
 
-const defaultFs: CompleterFs = {
+/** The real filesystem — also reused by tui/path-mentions.ts's "@"-completion so both
+ *  completers share one readdir/isDir implementation. */
+export const defaultFs: CompleterFs = {
   readdirSync: (p) => readdirSync(p),
   isDir: (p) => {
     try {

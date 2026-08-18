@@ -16,14 +16,20 @@ import { createInterface } from "node:readline";
 import { StringDecoder } from "node:string_decoder";
 
 import { agent } from "@prometheus/core";
+import { frecencyForDirectory } from "@prometheus/core/path-completion";
 import type { EngineClient } from "@prometheus/engine-bridge";
 import { engineHandshake } from "../doctor-bridge.js";
-import { prometheusHome } from "../home.js";
+import { loadSettings, prometheusHome } from "../home.js";
 import type { ParsedArgs } from "../parse.js";
 import { defaultColorEnabled } from "../render.js";
 import { readSavedAuthLevel } from "../session/authorisation-store.js";
 import type { Backends } from "../session/onboarding.js";
 import { createPathCycler } from "../session/path-completer.js";
+import {
+  findProjectRoot,
+  loadPathFrecency,
+  recordPathUse,
+} from "../session/path-frecency-store.js";
 import { SLASH_REGISTRY } from "../session/slash-registry.js";
 import type { AcItem } from "./autocomplete.js";
 import {
@@ -144,6 +150,34 @@ export async function launchTui(parsed: ParsedArgs, deps: TuiDeps = {}): Promise
   } catch {
     /* fail-soft: a handshake hiccup must never stop the TUI from opening */
   }
+  // "@"-path completion (see tui/path-mentions.ts): the frecency MEMORY is opt-in (default
+  // off, toggled by `/tab-complete`); the store itself is loaded once per project root and
+  // cached (a fresh disk read on every keystroke of an open "@"-mention would otherwise
+  // re-read the WHOLE frecency file, not just the small settings blob).
+  let projectRoot: string | null = null;
+  let frecencyStore: ReturnType<typeof loadPathFrecency> | null = null;
+  const getFrecencyStore = (): ReturnType<typeof loadPathFrecency> => {
+    projectRoot ??= findProjectRoot(process.cwd());
+    frecencyStore ??= loadPathFrecency(projectRoot, home);
+    return frecencyStore;
+  };
+  // The enabled flag is re-read from disk (not cached indefinitely) so a mid-session
+  // `/tab-complete` toggle takes effect without a restart — but time-boxed, since
+  // `frecencyForDir` runs on EVERY keystroke of an open "@"-mention (even ones that reuse
+  // the cached directory listing) and the flag essentially never changes mid-keystroke-burst.
+  const FRECENCY_SETTING_TTL_MS = 1000;
+  let frecencyEnabledCache: { value: boolean; atMs: number } | null = null;
+  const isFrecencyEnabled = (): boolean => {
+    const now = Date.now();
+    if (!frecencyEnabledCache || now - frecencyEnabledCache.atMs > FRECENCY_SETTING_TTL_MS) {
+      frecencyEnabledCache = {
+        value: loadSettings(home)["completion.pathFrecency"] === true,
+        atMs: now,
+      };
+    }
+    return frecencyEnabledCache.value;
+  };
+
   const historyFile = inputHistoryPath(home);
   let state = initialTuiState({
     permMode: startMode,
@@ -416,7 +450,17 @@ export async function launchTui(parsed: ParsedArgs, deps: TuiDeps = {}): Promise
       if (k.mouse.pressed && k.mouse.button === 0) handleClick(k.mouse);
       return;
     }
-    const ctx: ReduceCtx = { items: AC_ITEMS, running };
+    const ctx: ReduceCtx = {
+      items: AC_ITEMS,
+      running,
+      pathCompletion: {
+        baseDir: process.cwd(),
+        frecencyForDir: (dirPath) =>
+          isFrecencyEnabled()
+            ? frecencyForDirectory(getFrecencyStore(), dirPath, Date.now())
+            : new Map(),
+      },
+    };
     const { state: next, effects } = reduce(state, k, ctx);
     state = next;
     dispatch(effects);
@@ -513,6 +557,13 @@ export async function launchTui(parsed: ParsedArgs, deps: TuiDeps = {}): Promise
           // Ctrl+Y (CLI-068): the OSC 52 raw write happens inside copyToClipboard; flash the status.
           renderer.printAbove(paint(session.slashCtx.copyToClipboard(), "info", caps));
           scheduleRender();
+          break;
+        case "path-completed":
+          // an "@"-path resolved to a FILE — remember it (opt-in; see getFrecencyStore above).
+          if (isFrecencyEnabled()) {
+            projectRoot ??= findProjectRoot(process.cwd());
+            frecencyStore = recordPathUse(projectRoot, e.path, Date.now(), home);
+          }
           break;
       }
     }

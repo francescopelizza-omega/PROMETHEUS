@@ -124,6 +124,15 @@ const MAP = {
   // calls the exact same functions.
   "@prometheus/core/command-loader": resolvePath(PKG_ROOT, "core", "src", "commands", "loader.ts"),
   "@prometheus/core/command-gate": resolvePath(PKG_ROOT, "core", "src", "commands", "gate.ts"),
+  // pure path-completion subpath — the "@"-path fuzzy scorer + frecency store shared by the
+  // CLI composer and the desktop renderer/main; framework-free so it's renderer-safe too.
+  "@prometheus/core/path-completion": resolvePath(
+    PKG_ROOT,
+    "core",
+    "src",
+    "path-completion",
+    "index.ts",
+  ),
 };
 
 const tsResult = (absPath) => ({

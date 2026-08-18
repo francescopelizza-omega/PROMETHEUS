@@ -16,6 +16,7 @@ import { renderInvokeOverlay } from "./invoke-overlay.js";
  * → the app snapshots this for golden-frame tests; no IO here.
  */
 import { type ColorCaps, paint, painter } from "./palette.js";
+import { isPathOpen, toAcView } from "./path-mentions.js";
 import type { TuiState } from "./reducer.js";
 import { type StatusModel, effortBadge, statusLines } from "./status.js";
 import { clipToWidth, graphemeSlice, splitGraphemes, stringWidth, wrapLine } from "./width.js";
@@ -67,9 +68,15 @@ export function renderFrame(input: FrameInput): Frame {
   const lines: string[] = [];
 
   // ── dropdown (above the box) ─────────────────────────────────────────────── //
-  // keep the whole block within `rows`: box≈3, status≈3 → cap the dropdown.
+  // keep the whole block within `rows`: box≈3, status≈3 → cap the dropdown. The slash and
+  // "@"-path dropdowns share this one slot — they're never both open (see reducer.ts's
+  // `commit()`), so at most one of the two renders produces any rows.
   const dropCap = Math.max(1, Math.min(8, rows - 7));
-  const dropdown = renderDropdown(state.ac, width, caps, { maxRows: dropCap });
+  const slashDropdown = renderDropdown(state.ac, width, caps, { maxRows: dropCap });
+  const pathDropdown = isPathOpen(state.pathAc)
+    ? renderDropdown(toAcView(state.pathAc), width, caps, { maxRows: dropCap, sigil: "" })
+    : [];
+  const dropdown = slashDropdown.length > 0 ? slashDropdown : pathDropdown;
   lines.push(...dropdown);
 
   // ── /invoke overlay (CLI-059) — modal, above the box; clamps to the free rows ─── //

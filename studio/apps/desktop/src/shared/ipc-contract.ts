@@ -370,7 +370,29 @@ export const IPC = {
   extActivate: "ext:activate",
   extDeactivate: "ext:deactivate",
   extRescan: "ext:rescan",
+  // ── "@"-path completion (shared with the CLI's @prometheus/core/path-completion) ──
+  pathCompletionList: "pathCompletion:list",
+  pathCompletionRecordUse: "pathCompletion:recordUse",
 } as const;
+
+/** One ranked directory entry for the "@"-path completion dropdown — a directory's name
+ *  carries a trailing "/"; `positions` are the matched char indices for highlighting. */
+export interface PathCompletionEntryView {
+  name: string;
+  isDir: boolean;
+  positions: number[];
+}
+
+export interface PathCompletionListResult {
+  ok: boolean;
+  entries?: PathCompletionEntryView[];
+  error?: string;
+}
+
+export interface PathCompletionRecordUseResult {
+  ok: boolean;
+  error?: string;
+}
 
 /**
  * The fire-and-forget channel the renderer uses to CANCEL a long-running op by
@@ -1393,6 +1415,9 @@ export interface PrometheusApi {
 
   /** Keyed/layered settings tree (file 13 §2.1): get/set/reset over the core layering. */
   settings: SettingsApi;
+
+  /** The "@"-path fuzzy completion feature (shared logic with the CLI). */
+  pathCompletion: PathCompletionApi;
 
   /** Extension host (file 09 §5, APP-059): install/activate/deactivate/list. */
   ext: ExtApi;
@@ -4365,6 +4390,22 @@ export interface SettingsApi {
     scope: SettingsWriteScope,
     workspaceRoot?: string,
   ): Promise<SettingsResetResult>;
+}
+
+/** The "@"-path fuzzy completion feature (shared logic with the CLI). */
+export interface PathCompletionApi {
+  /** Rank one directory's entries against `query` (fragment/fuzzy, never a rigid prefix).
+   *  Pass `useFrecency: true` (with `workspaceRoot`) to boost this project's remembered
+   *  top-used paths — the "Tools ▸ Path Completion" setting; the caller decides whether
+   *  that setting is on, this call always honors whatever it's told. */
+  list(
+    dir: string,
+    query: string,
+    workspaceRoot?: string,
+    useFrecency?: boolean,
+  ): Promise<PathCompletionListResult>;
+  /** Record that `path` was just "@"-completed, for the opt-in frecency memory. */
+  recordUse(workspaceRoot: string, path: string): Promise<PathCompletionRecordUseResult>;
 }
 
 /* ── extension host (file 09 §5, APP-059) ───────────────────────────────────

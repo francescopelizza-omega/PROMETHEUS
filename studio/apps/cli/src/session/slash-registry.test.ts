@@ -5,6 +5,9 @@
  * A fake SlashCtx captures every call — no host, no engine.
  */
 import assert from "node:assert/strict";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 
 import type { agent } from "@prometheus/core";
@@ -255,6 +258,28 @@ test("/repomap: no-arg shows stats; on|off|refresh apply the verb (CLI-053)", as
   await cmd.run("off", ctx);
   assert.deepEqual(calls.repoMapVerbs, ["on", "refresh", "off"]);
   assert.match(calls.writes.join("\n"), /repo map applied: on/);
+});
+
+test("/tab-complete: off by default, reports + persists on/off, rejects a bogus arg", async () => {
+  const { ctx, calls } = fakeCtx();
+  ctx.home = mkdtempSync(join(tmpdir(), "prom-tab-complete-"));
+  const cmd = findSlash("tab-complete");
+  assert.ok(cmd, "/tab-complete must be registered");
+  assert.equal(cmd.group, "config");
+
+  await cmd.run("", ctx);
+  assert.match(strip(calls.writes.pop() ?? ""), /off/);
+
+  await cmd.run("on", ctx);
+  assert.match(strip(calls.writes.pop() ?? ""), /→ on/);
+  await cmd.run("", ctx);
+  assert.match(strip(calls.writes.pop() ?? ""), /: on/, "the toggle persisted across calls");
+
+  await cmd.run("off", ctx);
+  assert.match(strip(calls.writes.pop() ?? ""), /→ off/);
+
+  await cmd.run("sideways", ctx);
+  assert.match(strip(calls.writes.pop() ?? ""), /usage: \/tab-complete/);
 });
 
 test("/continue dispatches to continueTurn (+ its resume alias) (CLI-072)", async () => {

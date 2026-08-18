@@ -21,6 +21,15 @@ import {
 } from "./autocomplete.js";
 import { type InvokeOverlayState, onInvokeKey } from "./invoke-overlay.js";
 import { type KeyEvent, type KeymapResolution, remapKey } from "./keys.js";
+import {
+  EMPTY_PATH_AC,
+  type PathAcState,
+  type PathCompletionCtx,
+  acceptPathAc,
+  isPathOpen,
+  movePathAc,
+  syncPathAutocomplete,
+} from "./path-mentions.js";
 import { splitGraphemes } from "./width.js";
 
 type PermissionModeId = agent.PermissionModeId;
@@ -44,6 +53,8 @@ export interface TuiState {
   goalCol: number | null;
   /** the autocomplete dropdown. */
   ac: AcState;
+  /** the "@"-path completion dropdown. Never open at the same time as `ac` — see `commit()`. */
+  pathAc: PathAcState;
   /** the active permission mode. */
   permMode: PermissionModeId;
   /** when true, the user may not switch into bypassPermissions (declined-sudo lock). */
@@ -97,7 +108,9 @@ export type TuiEffect =
   /** Ctrl+S (CLI-067) — the app exports the transcript + flashes the written path. */
   | { type: "save-transcript" }
   /** Ctrl+Y (CLI-068) — the app copies the last assistant reply to the clipboard (OSC 52). */
-  | { type: "copy-reply" };
+  | { type: "copy-reply" }
+  /** an "@"-path completion resolved to a FILE — the app records the frecency hit (IO). */
+  | { type: "path-completed"; path: string };
 
 /** Per-reduce context (the slash registry for autocomplete + whether an op is running). */
 export interface ReduceCtx {
@@ -106,6 +119,8 @@ export interface ReduceCtx {
   /** the effective keymap (CLI-096) — a rebound physical key is translated to its action's default
    *  key BEFORE the switches, so both the dropdown + composer contexts honor it. Absent ⇒ defaults. */
   keymap?: KeymapResolution;
+  /** "@"-path completion wiring; omitted ⇒ the feature is off (pathAc stays closed). */
+  pathCompletion?: PathCompletionCtx;
 }
 
 export interface ReduceResult {
@@ -122,6 +137,7 @@ export function initialTuiState(over: Partial<TuiState> = {}): TuiState {
     stash: "",
     goalCol: null,
     ac: { items: [], index: 0, query: "" },
+    pathAc: EMPTY_PATH_AC,
     permMode: "default",
     bypassLocked: false,
     pendingExit: false,
@@ -218,6 +234,17 @@ function commit(
   keepGoal = false,
 ): TuiState {
   const cur = Math.max(0, Math.min(cursor, cps(input).length));
+  const ac = syncAutocomplete(input, cur, ctx.items, state.ac);
+  // `ac` is checked FIRST, so it always wins a pathological buffer where both could trigger
+  // (e.g. "/@"): not because a following space closes it — no space is needed at all — but
+  // because rankSlash scores every real command -1 for a query containing "@" (no command
+  // name/alias contains one), so `ac` simply never opens for such a query in the first
+  // place, and `isOpen(ac)` is false, letting pathAc open instead. The two are still never
+  // open together — `ac` just doesn't happen to claim the "/@" case the way this comment
+  // used to (wrongly) describe.
+  const pathAc = isOpen(ac)
+    ? EMPTY_PATH_AC
+    : syncPathAutocomplete(input, cur, ctx.pathCompletion, state.pathAc);
   return {
     ...state,
     input,
@@ -225,7 +252,8 @@ function commit(
     histIndex: null,
     pendingExit: false,
     goalCol: keepGoal ? state.goalCol : null,
-    ac: syncAutocomplete(input, cur, ctx.items, state.ac),
+    ac,
+    pathAc,
   };
 }
 
@@ -585,6 +613,46 @@ export function reduce(state: TuiState, rawKey: KeyEvent, ctx: ReduceCtx): Reduc
         return result(insert(state, key.ch ?? "", ctx));
       case "left":
         // CLI-070: grapheme-cluster step (same unit as Backspace), even with the dropdown open.
+        return result(
+          commit(state, state.input, prevGraphemeBoundary(state.input, state.cursor), ctx),
+        );
+      case "right":
+        return result(
+          commit(state, state.input, nextGraphemeBoundary(state.input, state.cursor), ctx),
+        );
+      default:
+        break; // fall through to the composer keymap for everything else
+    }
+  }
+
+  // ── "@"-path dropdown keymap (mirrors the slash dropdown above; see `commit()` for why
+  //    the two are never open together) ────────────────────────────────────── //
+  if (isPathOpen(state.pathAc)) {
+    switch (key.name) {
+      case "up":
+        return result({ ...state, pathAc: movePathAc(state.pathAc, -1) });
+      case "down":
+        return result({ ...state, pathAc: movePathAc(state.pathAc, 1) });
+      case "tab":
+      case "enter": {
+        // Unlike the slash dropdown, Enter never SUBMITS here — a path mention is typically
+        // mid-sentence, and sending the turn early would cut the user's message off.
+        const accepted = acceptPathAc(state.input, state.pathAc);
+        if (!accepted) return result(state);
+        const next = commit(state, accepted.input, accepted.cursor, ctx);
+        return accepted.acceptedPath
+          ? result(next, [{ type: "path-completed", path: accepted.acceptedPath }])
+          : result(next);
+      }
+      case "esc":
+        return result({ ...state, pathAc: EMPTY_PATH_AC });
+      case "ctrl-c":
+        return result({ ...state, pathAc: EMPTY_PATH_AC, pendingExit: false });
+      case "backspace":
+        return result(delBack(state, ctx));
+      case "char":
+        return result(insert(state, key.ch ?? "", ctx));
+      case "left":
         return result(
           commit(state, state.input, prevGraphemeBoundary(state.input, state.cursor), ctx),
         );

@@ -40,7 +40,9 @@ import {
   type ReactElement,
   type ReactNode,
   useCallback,
+  useEffect,
   useMemo,
+  useRef,
   useState,
 } from "react";
 
@@ -49,6 +51,8 @@ import type { GateResult, ModelServeRow } from "../../shared/ipc-contract.js";
 import { deriveSystemHealthView } from "../ide/health/health-panel-view.js";
 import { useTabsStore } from "../ide/state/stores.js";
 import { qk } from "../query/client.js";
+import { PathCompletionDropdown } from "../shared/path-completion/PathCompletionDropdown.js";
+import { usePathCompletion } from "../shared/path-completion/usePathCompletion.js";
 import { PrometheusMark } from "../shell/PrometheusMark.js";
 import { useEngineStore } from "../stores/engine.js";
 import { useSecurityStore } from "../stores/features.js";
@@ -84,6 +88,7 @@ export function HomeRoute({
   const refreshing = useEngineStore((s) => s.refreshing);
   const lastVerdict = useSecurityStore((s) => s.lastVerdict);
   const setWorkspaceRoot = useTabsStore((s) => s.setWorkspaceRoot);
+  const workspaceRoot = useTabsStore((s) => s.workspaceRoot);
   const recents = useRecentsStore((s) => s.recents);
   // READ ONLY — App owns the single telemetry poll loop; a second one here would
   // double the IPC rate for the same numbers.
@@ -91,6 +96,34 @@ export function HomeRoute({
   const refreshTelemetry = useTelemetryStore((s) => s.refresh);
 
   const [draft, setDraft] = useState("");
+  const [draftCaret, setDraftCaret] = useState(0);
+  const askInputRef = useRef<HTMLInputElement>(null);
+
+  // "Tools ▸ Path Completion" — read fresh per workspace so a mid-session Settings toggle
+  // (or switching projects) takes effect without a restart.
+  const [frecencyEnabled, setFrecencyEnabled] = useState(false);
+  useEffect(() => {
+    let alive = true;
+    void window.prometheus.settings
+      .get("completion.pathFrecency", workspaceRoot ?? undefined)
+      .then((res) => {
+        if (alive) setFrecencyEnabled(res.ok === true && res.value === true);
+      });
+    return () => {
+      alive = false;
+    };
+  }, [workspaceRoot]);
+
+  const askBarCompletion = usePathCompletion(
+    askInputRef,
+    draft,
+    draftCaret,
+    (nextText, nextCaret) => {
+      setDraft(nextText);
+      requestAnimationFrame(() => askInputRef.current?.setSelectionRange(nextCaret, nextCaret));
+    },
+    { baseDir: workspaceRoot ?? "", workspaceRoot: workspaceRoot ?? undefined, frecencyEnabled },
+  );
 
   // ── reads (graceful: enabled only when the bridge exists) ─────────────────
   const hasBridge = api() !== undefined;
@@ -296,8 +329,34 @@ export function HomeRoute({
       >
         <SparkGlyph />
         <input
+          ref={askInputRef}
           value={draft}
-          onChange={(e) => setDraft(e.target.value)}
+          onChange={(e) => {
+            setDraft(e.target.value);
+            setDraftCaret(e.target.selectionStart ?? e.target.value.length);
+          }}
+          // the DOM "select" event fires on ANY selection/caret change, not just typing —
+          // a mouse click or an arrow-key/Home/End move (all unhandled below, since they
+          // fall through to native behavior) would otherwise leave draftCaret stale, so the
+          // completion hook kept ranking/accepting against wherever the caret USED to be.
+          onSelect={(e) => setDraftCaret(e.currentTarget.selectionStart ?? 0)}
+          onBlur={() => askBarCompletion.close()}
+          onKeyDown={(e) => {
+            if (!askBarCompletion.active) return;
+            if (e.key === "ArrowDown") {
+              e.preventDefault();
+              askBarCompletion.moveActive(1);
+            } else if (e.key === "ArrowUp") {
+              e.preventDefault();
+              askBarCompletion.moveActive(-1);
+            } else if (e.key === "Enter" || e.key === "Tab") {
+              e.preventDefault();
+              askBarCompletion.accept();
+            } else if (e.key === "Escape") {
+              e.preventDefault();
+              askBarCompletion.close();
+            }
+          }}
           placeholder="Ask Prometheus to build, refactor, explain, or scan…"
           aria-label="Ask Prometheus"
           style={{
@@ -314,6 +373,13 @@ export function HomeRoute({
           Ask AI <span style={{ fontSize: 15 }}>→</span>
         </button>
       </form>
+      <PathCompletionDropdown
+        box={askBarCompletion.box}
+        items={askBarCompletion.items}
+        activeIndex={askBarCompletion.activeIndex}
+        onHover={(i) => askBarCompletion.moveActive(i - askBarCompletion.activeIndex)}
+        onSelect={(i) => askBarCompletion.accept(i)}
+      />
 
       {/* ── 3. quick actions ─────────────────────────────────────────────── */}
       <div

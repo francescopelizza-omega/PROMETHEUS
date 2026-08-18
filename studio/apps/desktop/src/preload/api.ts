@@ -191,6 +191,9 @@ import {
   type ModelServeRequest,
   type ModelServeResult,
   type OpenPathResult,
+  type PathCompletionApi,
+  type PathCompletionListResult,
+  type PathCompletionRecordUseResult,
   type PkgInstallRequest,
   type PkgListResult,
   type PkgUpgradeRequest,
@@ -453,6 +456,20 @@ function createSettingsApi(): SettingsApi {
       workspaceRoot?: string,
     ): Promise<SettingsResetResult> =>
       ipcRenderer.invoke(IPC.settingsReset, { key, scope, workspaceRoot }),
+  };
+}
+
+function createPathCompletionApi(): PathCompletionApi {
+  return {
+    list: (
+      dir: string,
+      query: string,
+      workspaceRoot?: string,
+      useFrecency?: boolean,
+    ): Promise<PathCompletionListResult> =>
+      ipcRenderer.invoke(IPC.pathCompletionList, { dir, query, workspaceRoot, useFrecency }),
+    recordUse: (workspaceRoot: string, path: string): Promise<PathCompletionRecordUseResult> =>
+      ipcRenderer.invoke(IPC.pathCompletionRecordUse, { workspaceRoot, path }),
   };
 }
 
@@ -1161,6 +1178,7 @@ export function createPrometheusApi(): PrometheusApi {
     mcp: createMcpApi(),
     settingsSync: createSettingsSyncApi(),
     settings: createSettingsApi(),
+    pathCompletion: createPathCompletionApi(),
 
     // ── extension host (file 09 §5, APP-059) — install/activate/deactivate/list ──
     ext: createExtApi(),

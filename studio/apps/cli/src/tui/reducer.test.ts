@@ -5,6 +5,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
+import type { CompleterFs } from "../session/path-completer.js";
 import type { AcItem } from "./autocomplete.js";
 import { type KeyEvent, type KeyName, resolveKeymap } from "./keys.js";
 import {
@@ -32,6 +33,33 @@ const ITEMS: AcItem[] = [
   { name: "think", summary: "think", aliases: ["effort"] },
 ];
 const CTX: ReduceCtx = { items: ITEMS, running: false };
+
+/** A fake fs: a map of dir → entries, and a set of dirs (everything else is a file). */
+function fakeFs(tree: Record<string, string[]>, dirs: string[]): CompleterFs {
+  const dirSet = new Set(dirs);
+  return {
+    readdirSync: (p) => {
+      const key = p.replace(/\/$/, "") || "/";
+      const v = tree[key] ?? tree[p];
+      if (!v) throw new Error("ENOENT");
+      return v;
+    },
+    isDir: (p) => dirSet.has(p),
+  };
+}
+
+/** A ReduceCtx with "@"-path completion wired up (reducer.test.ts's other CTX fixtures
+ *  never set `pathCompletion`, so `state.pathAc` stays permanently empty for them — this
+ *  fixture is what actually exercises the new "@"-path dropdown keymap block). */
+const PATH_FS = fakeFs(
+  { "/proj": ["src", "README.md"], "/proj/src": ["reducer.ts", "autocomplete.ts"] },
+  ["/proj", "/proj/src"],
+);
+const CTX_PATH: ReduceCtx = {
+  items: ITEMS,
+  running: false,
+  pathCompletion: { baseDir: "/proj", fs: PATH_FS },
+};
 
 const k = (name: KeyName, ch?: string): KeyEvent => (ch === undefined ? { name } : { name, ch });
 
@@ -689,4 +717,127 @@ test("⌘↑/⌘↓ (history-entry-prev/next) jump whole prompts regardless of t
   assert.equal(down1.input, "second prompt");
   const down2 = run(down1, [k("history-entry-next")], ctx).state;
   assert.equal(down2.input, "draft\nline2"); // back to the parked draft
+});
+
+/* ── "@"-path completion dropdown (see tui/path-mentions.ts + tui/frame.ts) ──────────
+ * Every ctx above omits `pathCompletion`, so `state.pathAc` stays permanently empty for
+ * them — these tests are the only reducer-level coverage of the new keymap block and
+ * the ac/pathAc precedence gate in commit(). */
+
+test("typing @ opens the path dropdown, listing baseDir's entries", () => {
+  const { state } = run(initialTuiState(), typed("@"), CTX_PATH);
+  assert.ok(state.pathAc.items.length > 0, "the @ dropdown should be open");
+  assert.ok(state.pathAc.items.some((i) => i.name === "src/"));
+});
+
+test("without pathCompletion wired, @ never opens the path dropdown", () => {
+  const { state } = run(initialTuiState(), typed("@"), CTX);
+  assert.deepEqual(state.pathAc.items, []);
+});
+
+test("up/down moves the path dropdown's highlight and wraps", () => {
+  const open = run(initialTuiState(), typed("@"), CTX_PATH).state;
+  const n = open.pathAc.items.length;
+  const i0 = open.pathAc.index;
+  const down = reduce(open, k("down"), CTX_PATH).state;
+  assert.equal(down.pathAc.index, (i0 + 1) % n);
+  const up = reduce(down, k("up"), CTX_PATH).state;
+  assert.equal(up.pathAc.index, i0);
+});
+
+test("Tab on a highlighted DIRECTORY completes it, keeps the mention open one level deeper, and does NOT submit", () => {
+  const open = run(initialTuiState(), typed("@s"), CTX_PATH).state; // "src" is the only match
+  assert.ok(open.pathAc.items.some((i) => i.name === "src/"));
+  const idx = open.pathAc.items.findIndex((i) => i.name === "src/");
+  const withSrcHighlighted = { ...open, pathAc: { ...open.pathAc, index: idx } };
+  const { state, effects } = run(withSrcHighlighted, [k("tab")], CTX_PATH);
+  assert.equal(state.input, "@src/");
+  assert.deepEqual(effects, [], "a directory step must not submit or record a frecency hit");
+  assert.ok(
+    state.pathAc.items.length > 0,
+    "drilling deeper should re-open listing src/'s contents",
+  );
+});
+
+test("Tab on a highlighted FILE completes it, closes the dropdown, and emits path-completed (not submit)", () => {
+  const open = run(initialTuiState(), typed("@src/red"), CTX_PATH).state;
+  assert.ok(open.pathAc.items.some((i) => i.name === "reducer.ts"));
+  const idx = open.pathAc.items.findIndex((i) => i.name === "reducer.ts");
+  const withFileHighlighted = { ...open, pathAc: { ...open.pathAc, index: idx } };
+  const { state, effects } = run(withFileHighlighted, [k("tab")], CTX_PATH);
+  assert.equal(state.input, "@src/reducer.ts ");
+  assert.deepEqual(state.pathAc.items, [], "the dropdown must close on a file accept");
+  assert.deepEqual(effects, [{ type: "path-completed", path: "/proj/src/reducer.ts" }]);
+});
+
+test("Enter behaves exactly like Tab on the path dropdown — it never submits the turn", () => {
+  const open = run(initialTuiState(), typed("@src/red"), CTX_PATH).state;
+  const idx = open.pathAc.items.findIndex((i) => i.name === "reducer.ts");
+  const withFileHighlighted = { ...open, pathAc: { ...open.pathAc, index: idx } };
+  const { effects } = run(withFileHighlighted, [k("enter")], CTX_PATH);
+  assert.ok(
+    !effects.some((e) => e.type === "submit"),
+    "unlike the slash dropdown, Enter on a path mention must not submit — it's usually mid-sentence",
+  );
+});
+
+test("Esc closes the path dropdown without touching the buffer", () => {
+  const open = run(initialTuiState(), typed("@src"), CTX_PATH).state;
+  assert.ok(open.pathAc.items.length > 0);
+  const closed = reduce(open, k("esc"), CTX_PATH).state;
+  assert.deepEqual(closed.pathAc.items, []);
+  assert.equal(closed.input, "@src", "Esc on the path dropdown must not clear the composer");
+});
+
+test("Ctrl-C closes the path dropdown without arming the exit prompt", () => {
+  const open = run(initialTuiState(), typed("@src"), CTX_PATH).state;
+  const { state, effects } = run(open, [k("ctrl-c")], CTX_PATH);
+  assert.deepEqual(state.pathAc.items, []);
+  assert.equal(state.pendingExit, false);
+  assert.deepEqual(effects, []);
+});
+
+test("backspace/left/right pass through normally while the path dropdown is open", () => {
+  const open = run(initialTuiState(), typed("@src"), CTX_PATH).state;
+  const backed = reduce(open, k("backspace"), CTX_PATH).state;
+  assert.equal(backed.input, "@sr");
+  const left = reduce(open, k("left"), CTX_PATH).state;
+  assert.equal(left.cursor, open.cursor - 1);
+});
+
+test("after accepting a file completion, the dropdown stays closed and a later Enter submits normally", () => {
+  // Enter/Tab ACCEPT while the path dropdown is open (see above) — it only submits once
+  // the mention is resolved and the caret has moved past it (a trailing space, here).
+  const withMention = run(initialTuiState(), typed("hi @src/red"), CTX_PATH).state;
+  const idx = withMention.pathAc.items.findIndex((i) => i.name === "reducer.ts");
+  const highlighted = { ...withMention, pathAc: { ...withMention.pathAc, index: idx } };
+  const accepted = reduce(highlighted, k("tab"), CTX_PATH).state;
+  assert.deepEqual(accepted.pathAc.items, [], "the dropdown closes once the file is accepted");
+  const { state, effects } = run(accepted, [k("enter")], CTX_PATH);
+  assert.ok(
+    effects.some((e) => e.type === "submit"),
+    "Enter now submits normally — the mention is resolved and no longer active",
+  );
+  assert.equal(state.input, "");
+  assert.deepEqual(state.pathAc.items, []);
+});
+
+test("precedence: the slash and @-path dropdowns are never open at the same time, even for '/@'", () => {
+  const state = run(initialTuiState(), typed("/@"), CTX_PATH).state;
+  // rankSlash scores every real command -1 for a query containing "@" (no command name or
+  // alias contains one), so `ac` never opens for this buffer and `pathAc` opens instead —
+  // NOT the other way around (see the corrected comment in reducer.ts's commit()).
+  assert.equal(state.ac.items.length, 0);
+  assert.ok(state.pathAc.items.length > 0);
+});
+
+test("precedence: a real slash query keeps @-path closed even once an @ later appears (mid-arg)", () => {
+  // "/scan @src" — cursor still inside the leading slash word only while there's no space
+  // yet; once the space is typed, slashQuery closes ac and pathAc can open for "@src".
+  const midCommand = run(initialTuiState(), typed("/sc"), CTX_PATH).state;
+  assert.ok(midCommand.ac.items.length > 0);
+  assert.deepEqual(midCommand.pathAc.items, []);
+  const withMention = run(midCommand, typed("an @src"), CTX_PATH).state;
+  assert.equal(withMention.ac.items.length, 0, "the slash dropdown closes once a space is typed");
+  assert.ok(withMention.pathAc.items.length > 0, "and only THEN can the @ mention open");
 });

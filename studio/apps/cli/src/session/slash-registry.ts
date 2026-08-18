@@ -17,7 +17,13 @@
  */
 import { COMMAND_SPECS, agent, ai, tokenEconomy } from "@prometheus/core";
 
-import { CATEGORY_LABEL, PATH_CATEGORIES, type PathCategory } from "../home.js";
+import {
+  CATEGORY_LABEL,
+  PATH_CATEGORIES,
+  type PathCategory,
+  loadSettings,
+  saveSettings,
+} from "../home.js";
 import { c } from "../render.js";
 import { type KeymapResolution, renderKeymap } from "../tui/keys.js";
 import { clipToWidth, stringWidth } from "../tui/width.js";
@@ -1248,6 +1254,33 @@ export const SLASH_REGISTRY: readonly SlashCmd[] = Object.freeze([
     group: "config",
     summary: "View/repoint heavy-download folders (models/videos/files).",
     run: (_r, ctx) => ctx.runPaths(),
+  },
+  {
+    name: "tab-complete",
+    group: "config",
+    summary:
+      "@-path completion always fuzzy-matches; this toggles remembering your top 20 most-used " +
+      "paths per project to suggest them even faster. Off by default.",
+    args: "[on|off]",
+    run: (rest, ctx) => {
+      const arg = rest.trim().toLowerCase();
+      if (arg !== "" && arg !== "on" && arg !== "off") {
+        ctx.write(c.dim("usage: /tab-complete [on|off]"));
+        return;
+      }
+      if (arg === "") {
+        const on = loadSettings(ctx.home)["completion.pathFrecency"] === true;
+        ctx.write(
+          c.dim(
+            `@-path suggestion memory: ${on ? "on" : "off"} (per project, top 20 most-used paths)`,
+          ),
+        );
+        return;
+      }
+      const on = arg === "on";
+      saveSettings({ "completion.pathFrecency": on }, ctx.home);
+      ctx.write(c.dim(`@-path suggestion memory → ${on ? "on" : "off"}`));
+    },
   },
   {
     name: "updates",

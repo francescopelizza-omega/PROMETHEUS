@@ -72,6 +72,7 @@ const CORE_SUBPATHS: Record<string, string> = {
   "@prometheus/core/keymap": "packages/core/src/settings/keymap.ts",
   "@prometheus/core/memory": "packages/core/src/memory/index.ts",
   "@prometheus/core/migrations": "packages/core/src/migrations/index.ts",
+  "@prometheus/core/path-completion": "packages/core/src/path-completion/index.ts",
   "@prometheus/core/rules": "packages/core/src/rules/index.ts",
   "@prometheus/core/templates": "packages/core/src/templates/live.ts",
   "@prometheus/core/token-economy": "packages/core/src/token-economy/index.ts",
