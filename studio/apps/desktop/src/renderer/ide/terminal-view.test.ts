@@ -7,42 +7,15 @@ import { test } from "node:test";
 import {
   type BlockMarker,
   type CommandBlock,
-  type SessionView,
   adjacentBlockLine,
   appendScrollback,
-  groupSessions,
   joinWrappedRows,
   matchReadout,
   parseOsc133,
   reduceBlocks,
   searchLines,
-  statusGlyph,
   stepMatch,
 } from "./terminal-view.js";
-
-const sessions: SessionView[] = [
-  { id: "1", title: "zsh", status: "running", group: "project" },
-  { id: "2", title: "pytest", status: "exited", group: "project" },
-  { id: "3", title: "prometheus chat", status: "running", group: "ai" },
-  { id: "5", title: "remote ssh", status: "running", group: "floating" },
-];
-
-test("statusGlyph reflects status + group (● running ○ idle ◆ ai ⧉ floating)", () => {
-  assert.equal(statusGlyph(sessions[0] as SessionView), "●");
-  assert.equal(statusGlyph(sessions[1] as SessionView), "○");
-  assert.equal(statusGlyph(sessions[2] as SessionView), "◆");
-  assert.equal(statusGlyph(sessions[3] as SessionView), "⧉");
-});
-
-test("groupSessions orders project → AI agents → floating, dropping empties", () => {
-  const groups = groupSessions(sessions);
-  assert.deepEqual(
-    groups.map((g) => g.group),
-    ["project", "AI agents", "floating"],
-  );
-  assert.equal(groups[0]?.sessions.length, 2);
-  assert.equal(groupSessions([]).length, 0);
-});
 
 test("appendScrollback is bounded (drops the head past the cap)", () => {
   const out = appendScrollback("abcdef", "ghij", 8);

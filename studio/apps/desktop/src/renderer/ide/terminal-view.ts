@@ -8,38 +8,13 @@
  */
 
 /** A terminal session row as the renderer holds it. */
-export interface SessionView {
-  id: string;
-  title: string;
-  status: "running" | "idle" | "exited";
-  group: "project" | "ai" | "floating";
-  /** the live PTY id from window.prometheus.ide.ptySpawn, once spawned. */
-  ptyId?: string;
-}
-
-/** The §1.2 status glyph: ● running · ○ idle/exited · ◆ AI · ⧉ floating. */
-export function statusGlyph(s: SessionView): string {
-  if (s.group === "floating") return "⧉";
-  if (s.group === "ai") return "◆";
-  return s.status === "running" ? "●" : "○";
-}
-
-const GROUP_ORDER: SessionView["group"][] = ["project", "ai", "floating"];
-const GROUP_LABEL: Record<SessionView["group"], string> = {
-  project: "project",
-  ai: "AI agents",
-  floating: "floating",
-};
-
-/** Group sessions for the §1.2 left list (project → AI agents → floating). */
-export function groupSessions(
-  sessions: readonly SessionView[],
-): { group: string; sessions: SessionView[] }[] {
-  return GROUP_ORDER.map((g) => ({
-    group: GROUP_LABEL[g],
-    sessions: sessions.filter((s) => s.group === g),
-  })).filter((g) => g.sessions.length > 0);
-}
+/*
+ * `SessionView`, `statusGlyph`, `groupSessions` and their two group constants lived here for
+ * `TerminalLauncher.tsx` — the file-13 §1.2 v1 terminal, superseded by `TerminalPanel.tsx`,
+ * which `routes/editor.tsx` is what actually mounts. Launcher is deleted; these went with it.
+ * Everything below is LIVE: `appendScrollback` (Terminal, FloatingTerminalWindow, routes/chat)
+ * and the OSC-133 block/search family (Terminal).
+ */
 
 /**
  * Append PTY output to a bounded scrollback string (keeps the last `maxChars` so a

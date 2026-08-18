@@ -9,7 +9,14 @@
 import assert from "node:assert/strict";
 import { beforeEach, test } from "node:test";
 
-import { describeJob, getJob, killJob, listJobs, resetJobs, startJob } from "./exec-jobs.js";
+import {
+  describeJob,
+  getJob,
+  killJob,
+  listJobs,
+  resetJobs,
+  startJob,
+} from "@prometheus/core/agent-system-host";
 import { makeStreamSink } from "./exec-stream.js";
 import { runSystemTool } from "./system-tools.js";
 

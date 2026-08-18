@@ -529,19 +529,30 @@ export {
   isDapResponse,
 } from "./dap/protocol.js";
 
-// --- extensibility: MCP host/server, agents, extensions, secrets, settings (file 09) ---
+// --- extensibility: MCP host/server, extensions, secrets, settings (file 09) ---
 // Namespaced barrels — each cluster is large and a couple of names (e.g. ValidationResult,
 // RunResult) would clash with the flat exports above, so they're surfaced under stable
 // namespaces. All PURE: SDK / keytar / Electron / unzip live behind injected seams.
 //   mcpServer — the embedded server's 19-tool catalog + runner + isError policy (§1/§3)
 //   mcpHost   — Studio as an MCP client: manager + gate + policy + importers (§2)
-//   agents    — the agent runtime: ToolBroker + sandbox + ReAct orchestrator (§4)
 //   ext       — the extension API: manifest + permissions + loader + context (§5)
 //   secrets   — OS-keychain secret store + stderr redaction (§7.2)
 //   settings  — config layering + the built-in profiles (§7.1)
 export * as mcpServer from "./mcp/server/index.js";
 export * as mcpHost from "./mcp/host/index.js";
-export * as agents from "./agents/index.js";
+/**
+ * `agents/` is INTERNAL — no longer re-exported as a public namespace.
+ *
+ * It was `export * as agents`, which advertised a surface nobody could drive: the barrel's
+ * headline items were a second ReAct loop (`runAgent`) and its dispatcher/supervisor, whose
+ * `ToolCall` is `{ref}` where the live loop's is `{name}` — not assignable, and callable only
+ * from its own tests. Those two modules are gone. What remains is genuinely load-bearing and
+ * is imported directly by the modules that need it, which is the honest shape for it:
+ *   - `toolBroker.brokerDecision` IS the §4.3 broker in `agent/loop.ts`;
+ *   - `sandbox.isPathAllowed` / `globMatch` / `globToRegExp` back ext permissions, scopes,
+ *     checkpoints, local history and hooks;
+ *   - `types.ModelRef` and the `AgentDef` family are used across repl, profiles and modes.
+ */
 export * as ext from "./ext/index.js";
 export * as secrets from "./secrets/index.js";
 // top-level type re-exports so CLI/desktop can implement a SecretsStore without the namespace.

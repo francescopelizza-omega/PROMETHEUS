@@ -11,7 +11,7 @@ import { test } from "node:test";
 
 import { parseCommand } from "@prometheus/core/agent-exec";
 
-import { runParsedCommand } from "./exec-runner.js";
+import { runParsedCommand } from "@prometheus/core/agent-system-host";
 import { runSystemTool } from "./system-tools.js";
 
 /** A fake `spawn`: records argv, replays a scripted result per program. */

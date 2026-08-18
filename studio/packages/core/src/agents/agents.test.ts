@@ -5,8 +5,6 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import type { ToolAnnotations } from "../mcp/server/index.js";
-import { type ModelClient, type ModelTurn, type RunMessage, runAgent } from "./orchestrator.js";
-import { AgentRuntime, buildDispatcher } from "./runtime.js";
 import {
   expandWorkspace,
   globMatch,
@@ -141,92 +139,3 @@ function scriptedModel(turns: ModelTurn[]): ModelClient {
     next: async (_m: RunMessage[]) => turns[i++] ?? { kind: "final", text: "(out of script)" },
   };
 }
-
-test("orchestrator: auto-dispatches read-only, confirms destructive, blocks un-granted", async () => {
-  const dispatched: string[] = [];
-  const a = agent({
-    tools: [
-      { ref: "p:read", autoApprove: true },
-      { ref: "p:rm", autoApprove: true }, // grant present but destructive → still confirm
-    ],
-  });
-  const annotations: Record<string, ToolAnnotations> = { "p:read": RO, "p:rm": DESTRUCTIVE };
-  const turns: ModelTurn[] = [
-    { kind: "tool_call", call: { ref: "p:read", args: { x: 1 } } }, // auto
-    { kind: "tool_call", call: { ref: "p:rm", args: {} } }, // confirm (denied below)
-    { kind: "tool_call", call: { ref: "p:secret", args: {} } }, // not granted → block
-    { kind: "final", text: "done" },
-  ];
-  const res = await runAgent(a, "do it", {
-    model: scriptedModel(turns),
-    dispatch: async (call) => {
-      dispatched.push(call.ref);
-      return { ok: true };
-    },
-    annotationsFor: (ref) => annotations[ref],
-    confirm: () => false, // deny the destructive one
-  });
-  assert.equal(res.status, "done");
-  assert.deepEqual(dispatched, ["p:read"]); // only the auto read-only ran
-  assert.equal(res.steps.find((s) => s.ref === "p:rm")?.action, "denied");
-  assert.equal(res.steps.find((s) => s.ref === "p:secret")?.action, "block");
-});
-
-test("orchestrator: confirmed destructive dispatches; max-steps terminates", async () => {
-  const dispatched: string[] = [];
-  const a = agent({ tools: [{ ref: "p:rm", autoApprove: false }] });
-  const res = await runAgent(a, "rm", {
-    model: scriptedModel([
-      { kind: "tool_call", call: { ref: "p:rm", args: {} } },
-      { kind: "final", text: "ok" },
-    ]),
-    dispatch: async (c) => {
-      dispatched.push(c.ref);
-      return { removed: true };
-    },
-    annotationsFor: () => DESTRUCTIVE,
-    confirm: () => true,
-  });
-  assert.equal(res.status, "done");
-  assert.deepEqual(dispatched, ["p:rm"]);
-
-  // a model that never finalizes → max-steps (no infinite loop)
-  const res2 = await runAgent(agent({ tools: [{ ref: "p:read", autoApprove: true }] }), "loop", {
-    model: { next: async () => ({ kind: "tool_call", call: { ref: "p:read", args: {} } }) },
-    dispatch: async () => ({ ok: true }),
-    annotationsFor: () => RO,
-    maxSteps: 3,
-  });
-  assert.equal(res2.status, "max-steps");
-  assert.equal(res2.steps.length, 3);
-});
-
-test("runtime: dispatcher routing + spawn cycle/broader rejection", async () => {
-  const calls: string[] = [];
-  const dispatch = buildDispatcher({
-    mcp: async (s, t) => {
-      calls.push(`mcp:${s}:${t}`);
-      return 1;
-    },
-    engine: async (cmd) => {
-      calls.push(`engine:${cmd}`);
-      return 2;
-    },
-  });
-  await dispatch({ ref: "github:search", args: {} });
-  await dispatch({ ref: "engine:list", args: {} });
-  assert.deepEqual(calls, ["mcp:github:search", "engine:list"]);
-  await assert.rejects(() => dispatch({ ref: "ext:a:b", args: {} }), /no extension dispatcher/);
-
-  const rt = new AgentRuntime();
-  const parent = agent({ id: "coord", sandbox: DEFAULT_SANDBOX });
-  const child = agent({ id: "worker", sandbox: { ...DEFAULT_SANDBOX, network: "none" } });
-  const broad = agent({ id: "broad", sandbox: { ...DEFAULT_SANDBOX, shell: true } });
-  rt.register(parent);
-  rt.register(child);
-  rt.register(broad);
-  assert.equal(rt.canSpawn("coord", "worker", []).ok, true);
-  assert.equal(rt.canSpawn("coord", "worker", ["coord", "worker"]).ok, false); // cycle
-  assert.equal(rt.canSpawn("coord", "broad", []).ok, false); // shell broader
-  assert.equal(rt.canSpawn("coord", "missing", []).ok, false);
-});

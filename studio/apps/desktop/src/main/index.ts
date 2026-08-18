@@ -7,8 +7,7 @@
  *   - own the FOUR-process model (file 01 §5): this MAIN process, the sandboxed
  *     RENDERER, the offloaded WORKER (WorkerHost → utilityProcess), and the
  *     supervised SIDECARS (SidecarSupervisor) + long-lived servers (ServerSupervisor).
- *   - register the typed ipcMain handlers (the only EngineClient lives there);
- *     the IpcBroker mirrors that routing for testability.
+ *   - register the typed ipcMain handlers (the only EngineClient lives there).
  *   - forward the live engine progress feed MAIN→renderer (cosmetic, C5).
  *   - tear everything down cleanly on quit.
  *
