@@ -75,6 +75,7 @@ import { FsWatchHost } from "./ide/fs-watch.js";
 import { GitHost } from "./ide/git-host.js";
 import { LocalHistoryManager } from "./ide/history-store.js";
 import { type LspChild, LspHost } from "./ide/lsp-host.js";
+import { initGrantedRoots } from "./ide/path-guard.js";
 import { type PtyBackend, PtyHost, nodePtyBackend } from "./ide/pty-host.js";
 import { RunHost } from "./ide/run-host.js";
 import type { TestRunSpawn } from "./ide/test-run-host.js";
@@ -670,6 +671,15 @@ async function runHeadlessSmoke(): Promise<void> {
    * nothing (it never reads the accounting store).
    */
   initBudgetGate(app.getPath("userData"), ai.loadPricing());
+  /**
+   * The agent's write-scope ceiling, loaded before any IPC handler can serve a write.
+   *
+   * The grants are the directories a human picked in MAIN's own folder dialog. They persist
+   * because the choice does: the recents list lives in the RENDERER's localStorage, so
+   * reopening a project never touches the native picker, and without the persisted grants the
+   * scope guard would fall back to "nothing granted" on the path almost every user takes.
+   */
+  initGrantedRoots(app.getPath("userData"));
   registerAiIpc(ipcMain);
   disposeSecurityIpc = registerSecurityIpcHandlers();
   // The Package & Environment Manager surface (file 04 §1,§3) — its own handler set.
@@ -868,6 +878,15 @@ async function bootstrap(): Promise<void> {
    * session uncapped rather than merely defaulted-open.
    */
   initBudgetGate(app.getPath("userData"), ai.loadPricing());
+  /**
+   * The agent's write-scope ceiling, in the WINDOWED boot path as well as the headless one.
+   *
+   * Deliberately duplicated rather than hoisted: this file already carries a comment about a
+   * handler that existed in `runHeadlessSmoke` and never made it here, so a packaged app could
+   * not complete a turn. The same shape of mistake here would leave the scope guard unarmed
+   * for every real user while every test that boots headless passed.
+   */
+  initGrantedRoots(app.getPath("userData"));
   /**
    * `ai:stream` / `ai:cancel` (file 07 §7/§9c) — the desktop's model-streaming transport.
    *

@@ -11,9 +11,9 @@
  * Path is resolved (realpath of the nearest existing ancestor + remainder) so `..`
  * traversal and a symlink through a sensitive dir can't slip past the prefix check.
  */
-import { existsSync, realpathSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { basename, dirname, resolve, sep } from "node:path";
+import { basename, dirname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
 /** Normalize a renderer-supplied target to a real fs path: a `file://` URI (what the
@@ -155,21 +155,135 @@ export function assertNotSensitivePath(uri: string): string {
 /** The active workspace roots. Empty = unset, which means "do not gate" (see below). */
 let workingSetRoots: string[] = [];
 
+/**
+ * Roots a HUMAN chose, through main's own native folder picker.
+ *
+ * This is the ceiling. `setWorkingSetRoots` is an IPC handler, so its argument is whatever
+ * the renderer sent — and a renderer is exactly the process this guard exists to survive. It
+ * accepted that list verbatim, so a compromised or buggy renderer could declare `["/"]` and
+ * put the entire filesystem inside the working set, or declare `[]` and turn the guard off
+ * altogether. Either one defeats a check whose whole stated purpose is that "a renderer that
+ * is compromised, buggy, or simply skipped cannot write outside the working set".
+ *
+ * Main owns `dialog.showOpenDialog`, so main knows which directories a human actually picked.
+ * That fact — not the renderer's assertion — is what may widen scope.
+ */
+const grantedRoots = new Set<string>();
+
 /** Absolute paths a human explicitly approved for writing outside the working set. */
 const approvedOutside = new Set<string>();
 
 /**
- * Declare the workspace roots the agent may write inside. Called from the renderer as
- * the workspace changes. An EMPTY list disables the scope check — that is deliberate:
- * with no folder open there is no working set to be outside of, and refusing every
- * write would break "open a loose file and save it".
+ * Record a directory the HUMAN chose in main's native picker. The only widening operation.
+ *
+ * Called from the `folder:open` handler after the dialog resolves — i.e. only ever with a path
+ * the operating system's own file chooser returned, which no renderer can forge.
  */
-export function setWorkingSetRoots(roots: readonly string[]): void {
-  workingSetRoots = roots
+export function grantWorkingSetRoot(dir: string): void {
+  if (typeof dir !== "string" || !dir) return;
+  const before = grantedRoots.size;
+  grantedRoots.add(canonical(uriToFsPath(dir)));
+  if (grantedRoots.size !== before) saveGrants();
+}
+
+/** The directories a human has picked this session (canonical absolute paths). */
+export function getGrantedRoots(): readonly string[] {
+  return [...grantedRoots];
+}
+
+/** Test seam: forget every grant (a fresh app). */
+export function clearGrantedRoots(): void {
+  grantedRoots.clear();
+  persistPath = null;
+}
+
+/* ── grants survive a restart, because the human's choice did ───────────────── */
+
+/**
+ * Where the grant list is persisted, under `app.getPath("userData")`.
+ *
+ * MAIN-owned, never renderer-supplied — the whole point is that the renderer cannot add to
+ * this list. Null until `initGrantedRoots` runs, which also makes the persistence optional
+ * for unit tests.
+ */
+let persistPath: string | null = null;
+
+/**
+ * Load the persisted grants and start recording new ones.
+ *
+ * Without this the guard would be OFF for the most common way a project is opened. The
+ * recents list lives in the RENDERER's localStorage, so clicking "recent project" never
+ * touches main's folder dialog — the roots would arrive ungranted, be refused, and the
+ * fallback (no grants ⇒ no guard) would leave every agent write unchecked on the path
+ * almost every user takes. A folder in this file was chosen by a human through the OS picker
+ * at some point; that is exactly the fact the guard needs, and it does not expire when the
+ * app closes.
+ *
+ * Fail-soft: an unreadable or corrupt file yields no grants, which is the SAFE direction —
+ * the human re-picks the folder once and it is granted again.
+ */
+export function initGrantedRoots(userDataDir: string): void {
+  persistPath = join(userDataDir, "workspace-grants.json");
+  try {
+    const raw: unknown = JSON.parse(readFileSync(persistPath, "utf8"));
+    if (Array.isArray(raw)) {
+      for (const r of raw) {
+        if (typeof r === "string" && r) grantedRoots.add(canonical(uriToFsPath(r)));
+      }
+    }
+  } catch {
+    /* absent or corrupt ⇒ start with nothing granted */
+  }
+}
+
+/** Persist the grant list. Never throws — a failed write costs a re-pick, not a crash. */
+function saveGrants(): void {
+  if (!persistPath) return;
+  try {
+    mkdirSync(dirname(persistPath), { recursive: true });
+    writeFileSync(persistPath, JSON.stringify([...grantedRoots], null, 2), "utf8");
+  } catch {
+    /* best effort */
+  }
+}
+
+/**
+ * Declare the workspace roots the agent may write inside — NARROWING ONLY.
+ *
+ * The renderer says which of the human's granted directories is the current workspace. Every
+ * declared root must lie inside one the human actually picked; anything else is dropped and
+ * counted, because silently ignoring an attempt to widen scope is how a guard stops being
+ * evidence of anything. The return value reports what was refused so the caller can log it.
+ *
+ * An EMPTY (or wholly refused) declaration no longer disables the check. It used to, and that
+ * was the second half of the same hole: `setWorkingSetRoots([])` was a one-call bypass. With
+ * grants in hand the guard falls back to THEM — the human's own choices — rather than to
+ * "allow everything".
+ *
+ * With NO grants at all the guard still permits, and that is deliberate rather than an
+ * oversight: `ideFsWrite` is also the editor's ordinary save path, so a fresh window with
+ * nothing ever opened must still be able to save a loose file the user typed into. There is no
+ * working set to be outside of yet, because the human has not chosen one.
+ */
+export function setWorkingSetRoots(roots: readonly string[]): {
+  accepted: number;
+  refused: string[];
+} {
+  const declared = roots
     .filter((r): r is string => typeof r === "string" && r.length > 0)
     .map((r) => canonical(uriToFsPath(r)));
+  const refused: string[] = [];
+  const accepted: string[] = [];
+  for (const r of declared) {
+    // inside a granted root, or exactly one of them
+    if ([...grantedRoots].some((g) => r === g || isUnder(r, g))) accepted.push(r);
+    else refused.push(r);
+  }
+  // Nothing legitimate declared ⇒ fall back to the human's grants, never to "no guard".
+  workingSetRoots = accepted.length > 0 ? accepted : [...grantedRoots];
   // a root change invalidates prior approvals — they were granted against the old scope.
   approvedOutside.clear();
+  return { accepted: accepted.length, refused };
 }
 
 /** The roots currently in force (canonical absolute paths). */

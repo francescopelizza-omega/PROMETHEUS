@@ -634,8 +634,22 @@ export function registerIdeIpcHandlers(wiring: IdeIpcWiring): () => void {
       ? o.roots.filter((r): r is string => typeof r === "string")
       : [];
     try {
-      setWorkingSetRoots(roots);
-      return { ok: true };
+      // NARROWING ONLY — a declared root outside anything the human picked in main's own
+      // folder dialog is refused. Reported rather than dropped in silence: an attempt to
+      // widen the agent's write scope from the renderer is exactly the event this guard
+      // exists to notice, and a guard that discards its own evidence proves nothing.
+      const { accepted, refused } = setWorkingSetRoots(roots);
+      if (refused.length > 0) {
+        console.warn(
+          `[path-guard] refused ${refused.length} working-set root(s) not granted by a folder the user opened: ${refused.join(", ")}`,
+        );
+      }
+      return accepted > 0 || refused.length === 0
+        ? { ok: true }
+        : {
+            ok: false,
+            error: `none of the declared roots are inside a folder you opened: ${refused.join(", ")}`,
+          };
     } catch (e) {
       return { ok: false, error: errString(e) };
     }

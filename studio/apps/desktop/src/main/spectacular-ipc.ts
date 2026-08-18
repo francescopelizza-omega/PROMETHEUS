@@ -30,6 +30,7 @@ import {
   type SpectacularModelsConfig,
   type SpectacularTutorial,
 } from "../shared/ipc-contract.js";
+import { grantWorkingSetRoot } from "./ide/path-guard.js";
 import { cleanId, cleanPathToken, isSafeToken } from "./spectacular-validate.js";
 
 function errString(e: unknown): string {
@@ -222,6 +223,16 @@ export function registerSpectacularIpcHandlers(): () => void {
         properties: ["openDirectory", "createDirectory"],
       });
       const path = res.canceled || res.filePaths.length === 0 ? null : (res.filePaths[0] ?? null);
+      /**
+       * A directory the HUMAN just chose in the OS picker — the only thing that may widen the
+       * agent's write scope.
+       *
+       * Recorded HERE rather than trusting the renderer to declare it, because this is the one
+       * place in the process where the path provably came from the operating system's own file
+       * chooser. `setWorkingSetRoots` then lets the renderer pick which granted directory is
+       * the current workspace, and refuses anything outside them.
+       */
+      if (path) grantWorkingSetRoot(path);
       return { ok: true, path, canceled: res.canceled };
     } catch {
       return { ok: false, path: null, canceled: true };

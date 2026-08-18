@@ -433,7 +433,11 @@ export async function runAiStream(
       ),
       {
         model,
-        includeUsage: req.endpoint.locality === "cloud",
+        // `locality`, not `req.endpoint.locality`. The comment above the derivation says the
+        // renderer's label is never trusted; these three lines were still reading it, so a
+        // mislabelled endpoint lost its usage counters and sent Ollama's `keep_alive` to a
+        // cloud provider that answers a non-standard field with a 400. Same fact, one source.
+        includeUsage: locality === "cloud",
         ...(toWireTools(req.tools).length > 0 ? { tools: toWireTools(req.tools) } : {}),
       },
     ),
@@ -441,9 +445,9 @@ export async function runAiStream(
     // turn does not pay a cold reload per round. LOCAL only — a cloud endpoint never
     // receives a non-standard field. Recorded in `residentModels` so quitting gives the
     // RAM back rather than leaving it pinned for the next half hour.
-    ...(req.endpoint.locality === "local" ? { keep_alive: "30m" } : {}),
+    ...(locality === "local" ? { keep_alive: "30m" } : {}),
   };
-  if (req.endpoint.locality === "local") {
+  if (locality === "local") {
     const origin = originOf(req.endpoint.baseUrl);
     if (origin) {
       const set = residentModels.get(origin) ?? new Set<string>();

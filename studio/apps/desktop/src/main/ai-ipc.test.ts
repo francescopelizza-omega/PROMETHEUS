@@ -250,13 +250,54 @@ test("`keep_alive` goes to LOCAL endpoints only — a cloud provider never sees 
     return sseResponse(["data: [DONE]\n"]);
   };
   await runAiStream(req(), undefined, capture as never);
+  // A REAL cloud endpoint: a cloud URL, not merely a cloud label. The label used to be what
+  // decided this, which is the defect the next test pins.
   await runAiStream(
-    req({ endpoint: { ...LOCAL, locality: "cloud" } }),
+    req({ endpoint: { ...LOCAL, baseUrl: "https://api.example.com/v1", locality: "cloud" } }),
     undefined,
     capture as never,
   );
   assert.equal(bodies[0]?.keep_alive, "30m");
   assert.equal(bodies[1]?.keep_alive, undefined);
+  assert.deepEqual(bodies[1]?.stream_options, { include_usage: true });
+});
+
+test("the request is shaped by the URL, NOT by the renderer's `locality` label", async () => {
+  /**
+   * The comment above the derivation in ai-ipc.ts says the renderer's label is never trusted,
+   * and the security decisions (cloud-allowed, egress, budget, wire format) did re-derive it.
+   * Three request-SHAPING lines still read `req.endpoint.locality`, so a mislabelled endpoint
+   * sent Ollama's non-standard `keep_alive` to a cloud provider — which answers an unknown
+   * field with a 400 — and dropped the usage counters the billing view depends on.
+   */
+  const bodies: Record<string, unknown>[] = [];
+  const capture = async (_u: unknown, init: { body: string }): Promise<Response> => {
+    bodies.push(JSON.parse(init.body));
+    return sseResponse(["data: [DONE]\n"]);
+  };
+  // a LOCALHOST url mislabelled "cloud" — it is local, whatever the renderer says
+  await runAiStream(
+    req({ endpoint: { ...LOCAL, locality: "cloud" } }),
+    undefined,
+    capture as never,
+  );
+  assert.equal(bodies[0]?.keep_alive, "30m", "a localhost endpoint lost keep_alive to a label");
+  assert.equal(bodies[0]?.stream_options, undefined);
+
+  // a CLOUD url mislabelled "local" — it is cloud, and must not receive keep_alive
+  await runAiStream(
+    req({
+      endpoint: { ...LOCAL, baseUrl: "https://api.example.com/v1", locality: "local" },
+      neverSendToCloud: false,
+    }),
+    undefined,
+    capture as never,
+  );
+  assert.equal(
+    bodies[1]?.keep_alive,
+    undefined,
+    "a cloud provider received Ollama's keep_alive because the renderer called it local",
+  );
   assert.deepEqual(bodies[1]?.stream_options, { include_usage: true });
 });
 
@@ -393,8 +434,17 @@ test("freeLocalModels unloads exactly the LOCAL models a run pinned", async () =
   }) as never;
 
   await runAiStream(req(), undefined, async () => sseResponse(["data: [DONE]\n"]));
+  // A REAL cloud endpoint — a cloud URL. It used to be a localhost URL wearing a `"cloud"`
+  // label, which only worked while the renderer's label was what decided locality.
   await runAiStream(
-    req({ endpoint: { ...LOCAL, model: "cloudy", locality: "cloud" } }),
+    req({
+      endpoint: {
+        ...LOCAL,
+        model: "cloudy",
+        baseUrl: "https://api.example.com/v1",
+        locality: "cloud",
+      },
+    }),
     undefined,
     async () => sseResponse(["data: [DONE]\n"]),
   );
