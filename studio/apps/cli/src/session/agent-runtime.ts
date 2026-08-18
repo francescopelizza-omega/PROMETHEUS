@@ -995,6 +995,13 @@ export interface LlmClientDeps extends AiClientDeps {
   policy?: WorkspacePolicy;
   /** abort the in-flight SSE request + stop yielding deltas (Ctrl-C, CLI-002). */
   signal?: AbortSignal;
+  /**
+   * The session's `prompt-caching` token toggle. Undefined ⇒ on (the previous behaviour).
+   *
+   * Carried on the CLIENT deps because the transport is what emits `cache_control`, and the
+   * toggle is a per-session user decision rather than a per-request one.
+   */
+  promptCache?: boolean;
   /** per-turn token accounting sink (CLI-029): fed the SSE `usage`, else a chars/4 estimate. */
   onUsage?: (rec: AccountingRecord) => void;
   /** A probe-backed effort capability (e.g. from Ollama's /api/show `capabilities`). When
@@ -1264,6 +1271,17 @@ async function* toolTurn(
   aux: {
     resolveKey?: (ref: string) => Promise<string>;
     onUsage?: (u: SseTokenUsage) => void;
+    /**
+     * The user's `prompt-caching` token toggle.
+     *
+     * `shouldRequestPromptCache(toggles, runtime)` was written to combine this switch with the
+     * provider-support check and had ZERO callers; this transport called `applyPromptCache`
+     * unconditionally instead. So turning prompt caching OFF changed nothing on the path
+     * nearly every agentic turn takes — `cache_control` blocks kept going out — and
+     * `prometheus tokens report` went on pricing the savings of a technique the user had
+     * disabled. Undefined ⇒ on, which is the previous behaviour.
+     */
+    promptCache?: boolean;
   } = {},
 ): AsyncIterable<LlmTurn> {
   if (policy.neverSendToCloud && endpoint.locality === "cloud") {
@@ -1360,10 +1378,12 @@ async function* toolTurn(
             // body is built, because the cache breakpoint goes on the stable system prefix
             // and the format decides where that prefix ends up. A no-op on every provider
             // that caches on its own (or not at all) — see `ai/prompt-cache.ts`.
-            ai.applyPromptCache(
-              toWireMessages(applyEffortToMessages(messages, effort)),
-              ai.cacheDialectFor(ai.runtimeFromBaseUrl(endpoint.baseUrl, endpoint.locality)),
-            ) as ai.WireMessage[],
+            (aux.promptCache === false
+              ? toWireMessages(applyEffortToMessages(messages, effort))
+              : ai.applyPromptCache(
+                  toWireMessages(applyEffortToMessages(messages, effort)),
+                  ai.cacheDialectFor(ai.runtimeFromBaseUrl(endpoint.baseUrl, endpoint.locality)),
+                )) as ai.WireMessage[],
             {
               model,
               tools: toWireTools(tools),
@@ -1807,6 +1827,11 @@ export function makeLlmClient(endpoint: AiEndpoint, deps: LlmClientDeps = {}): L
         try {
           yield* toolTurn(endpoint, messages, tools, policy, signal, effort, deps.fetch, observed, {
             ...(deps.resolveKey ? { resolveKey: deps.resolveKey } : {}),
+            // The user's `prompt-caching` switch, honoured on the path that actually sends
+            // `cache_control`. `shouldRequestPromptCache` also answers "does this provider
+            // support it", which `applyPromptCache` already handles per dialect — so what
+            // travels here is only the half that was missing: the human's decision.
+            ...(deps.promptCache === false ? { promptCache: false } : {}),
             onUsage: (u) => {
               toolUsage = u;
             },
@@ -3131,6 +3156,15 @@ export async function runMessageTurn(
       // Without this a CLOUD endpoint's key never reaches the request — the transport
       // resolves the ref, but nothing ever handed it a resolver.
       ...(ctx.resolveKey ? { resolveKey: ctx.resolveKey } : {}),
+      /**
+       * The user's `prompt-caching` switch, finally consulted.
+       *
+       * `tokenToggles` reached the SYSTEM BLOCKS (`tokenSystemBlocks`) and stopped there, while
+       * the transport applied `cache_control` unconditionally. So switching prompt caching off
+       * changed the prompt the model was told about and not the request that was sent, and
+       * `tokens report` kept crediting savings from a technique the user had turned off.
+       */
+      ...(ctx.tokenToggles?.["prompt-caching"] === false ? { promptCache: false } : {}),
       /**
        * Carry the endpoint's LEARNED tool capability across turns.
        *

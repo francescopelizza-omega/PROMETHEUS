@@ -2906,3 +2906,75 @@ test("a session whose records are chars/4 fallbacks is still labelled an estimat
   assert.equal(out.inputTokens, 900, "the fallback records are still the best number available");
   assert.equal(out.estimated, true, "…but they must not be presented as measured");
 });
+
+/* ── the prompt-caching toggle actually reaches the wire (CLI token toggles) ─── */
+
+/** Capture the POSTed body of one agentic turn against an Anthropic-shaped endpoint. */
+async function captureCacheBody(deps: Record<string, unknown>): Promise<string> {
+  let sent = "";
+  const fakeFetch = async (_u: unknown, init: { body: string }) => {
+    sent = init.body;
+    return {
+      ok: true,
+      status: 200,
+      statusText: "OK",
+      body: streamFromString("data: [DONE]\n"),
+      async text() {
+        return "";
+      },
+    };
+  };
+  const llm = makeLlmClient(
+    {
+      id: "cloud:anthropic:claude",
+      // Anthropic is the dialect that carries an explicit `cache_control` marker; on an
+      // OpenAI-shaped endpoint the whole thing is a no-op by design (they cache on their own).
+      baseUrl: "https://api.anthropic.com/v1",
+      locality: "cloud",
+      contextWindow: 200000,
+      supportsTools: true,
+      model: "claude-x",
+    },
+    { fetch: fakeFetch as never, resolveKey: async () => "k", ...deps },
+  );
+  const tools = agent.exposedTools(fakeTuning().tools).slice(0, 1);
+  /**
+   * The system message goes in the THREAD, not the tuning.
+   *
+   * `runMessageTurn` is what prepends `tuning.systemPrompt`; `llm.turn` receives an already-
+   * assembled thread. And the prefix must clear PROMPT_CACHE_MIN_CHARS (4096) — below that
+   * `applyPromptCache` correctly marks nothing, which would make the "off" assertion pass for
+   * entirely the wrong reason.
+   */
+  const withSystem = {
+    messages: [
+      { role: "system" as const, content: "You are Prometheus. ".repeat(300) },
+      { role: "user" as const, content: "hi" },
+    ],
+  };
+  await collect(llm.turn(withSystem, fakeTuning(), tools));
+  return sent;
+}
+
+test("prompt caching is REQUESTED by default — the measured behaviour is unchanged", async () => {
+  const body = await captureCacheBody({});
+  assert.match(body, /cache_control/, "the default path stopped asking for the prompt cache");
+});
+
+test("`prompt-caching: false` stops `cache_control` reaching the wire", async () => {
+  /**
+   * `shouldRequestPromptCache(toggles, runtime)` was written to combine this switch with the
+   * provider-support check and had ZERO callers; the transport applied the cache markers
+   * unconditionally. So turning prompt caching OFF changed the system blocks the model was
+   * told about and NOT the request that was sent — and `tokens report` went on pricing the
+   * savings of a technique the user had disabled.
+   */
+  const body = await captureCacheBody({ promptCache: false });
+  assert.doesNotMatch(
+    body,
+    /cache_control/,
+    "the user turned prompt caching off and cache_control was sent anyway",
+  );
+  // …and the turn is otherwise intact: the messages still went.
+  assert.match(body, /"model":"claude-x"/);
+});
