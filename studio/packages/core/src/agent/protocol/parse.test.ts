@@ -14,6 +14,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import {
+  type ScanEvent,
   ToolCallScanner,
   hasTextToolCall,
   parseToolCalls,
@@ -480,4 +481,90 @@ test("tolerance is bounded — genuine garbage is still rejected", () => {
 test("the stray-brace form survives streaming", () => {
   const src = '<tool_call name="read_file" arguments={"path": "answer.ts"}}>';
   assert.equal(streamByChar(src).filter((e) => e.kind === "call").length, 1);
+});
+
+/* ── inline code spans (single/double backtick) ──────────────────────────────*/
+
+test("a call inside a SINGLE-backtick inline code span does NOT fire", () => {
+  // The natural way to show the syntax in one sentence — and, before this test, a real way
+  // to sneak an unconfirmed call past the reader: only ``` fences were tracked.
+  const src = 'Like this: `<tool_call>{"name":"ls"}</tool_call>` — try it.';
+  const events = scanToolCalls(src);
+  assert.equal(
+    events.some((e) => e.kind === "call"),
+    false,
+    "a call inside single-backtick inline code fired",
+  );
+  assert.equal(textOf(events), src);
+});
+
+test("a call inside a DOUBLE-backtick inline code span does NOT fire", () => {
+  const src = 'Like this: ``<tool_call>{"name":"ls"}</tool_call>`` — try it.';
+  assert.equal(hasTextToolCall(src), false);
+  assert.equal(textOf(scanToolCalls(src)), src);
+});
+
+test("inline code span suppression survives streaming one character at a time", () => {
+  const src = 'Like this: `<tool_call>{"name":"ls"}</tool_call>` — try it.';
+  const events = streamByChar(src);
+  assert.equal(
+    events.some((e) => e.kind === "call"),
+    false,
+  );
+  assert.equal(textOf(events), src);
+});
+
+test("a call AFTER a closed inline code span fires normally", () => {
+  const events = scanToolCalls(
+    'Example: `<tool_call>{"name":"ls"}</tool_call>` and now for real: ' +
+      '<tool_call>{"name":"git_status"}</tool_call>',
+  );
+  assert.deepEqual(
+    events.filter((e) => e.kind === "call").map((e) => (e.kind === "call" ? e.call.name : "")),
+    ["git_status"],
+  );
+});
+
+test("a lone backtick used as a plain apostrophe-like mark doesn't wreck the rest of the text", () => {
+  // No real closing backtick ever arrives — the span just runs to the end of the message.
+  // The content must still come through byte-for-byte; it just never un-suppresses.
+  const src = "It`s fine, no tool call follows.";
+  assert.equal(textOf(scanToolCalls(src)), src);
+});
+
+/* ── orphan closers are recorded, not merely dropped ─────────────────────────*/
+
+test("a swallowed orphan closer is reported as a malformed event, not silently discarded", () => {
+  const events = scanToolCalls("</tool_call>The answer is 42.");
+  assert.equal(textOf(events), "The answer is 42.");
+  const malformed = events.filter((e) => e.kind === "malformed");
+  assert.equal(malformed.length, 1);
+  assert.equal(malformed[0]?.kind === "malformed" ? malformed[0].error.raw : "", "</tool_call>");
+});
+
+/* ── streaming performance: a large body must not be rescanned from scratch ──*/
+
+test("a large call body streamed in small chunks parses correctly and fast (no O(n²) rescans)", () => {
+  const content = "x".repeat(300_000);
+  const src = `<tool_call>{"name":"write_file","arguments":{"path":"a.txt","content":"${content}"}}</tool_call>`;
+  const scanner = new ToolCallScanner();
+  const events: ScanEvent[] = [];
+  const started = process.hrtime.bigint();
+  for (let i = 0; i < src.length; i += 64) {
+    events.push(...scanner.push(src.slice(i, i + 64)));
+  }
+  events.push(...scanner.end());
+  const elapsedMs = Number(process.hrtime.bigint() - started) / 1_000_000;
+
+  const calls = events.filter((e) => e.kind === "call");
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0]?.kind === "call" ? calls[0].call.name : "", "write_file");
+  assert.equal(
+    calls[0]?.kind === "call" ? (calls[0].call.args.content as string).length : -1,
+    300_000,
+  );
+  assert.ok(
+    elapsedMs < 2000,
+    `streaming a 300KB call body in 64-byte chunks took ${elapsedMs}ms — the scanner is rescanning from scratch again`,
+  );
 });

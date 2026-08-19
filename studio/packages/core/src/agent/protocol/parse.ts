@@ -18,13 +18,18 @@
  * are here because a model under load reverts to whatever IT was tuned on, and refusing to
  * read Mistral's `[TOOL_CALLS]` would mean Mistral simply cannot act.
  *
- * THE RULE THAT KEEPS THIS SAFE: a call inside an ordinary fenced code block does NOT fire.
- * "Show me how I'd read that file" must print an example, not read the file. The scanner
- * tracks fence state precisely for that one reason.
+ * THE RULE THAT KEEPS THIS SAFE: a call inside an ordinary fenced code block, OR inside an
+ * inline `` `code span` ``, does NOT fire. "Show me how I'd read that file" must print an
+ * example, not read the file. The scanner tracks fence AND inline-span state precisely for
+ * that one reason.
  *
  * STREAMING: `ToolCallScanner` is incremental. A call split across SSE chunk boundaries —
  * the normal case, since a call is longer than one delta — is held back until it is whole.
- * It never emits half a call, and it never emits the leading bytes of a call as prose.
+ * It never emits half a call, and it never emits the leading bytes of a call as prose. A
+ * call's JSON body is scanned INCREMENTALLY too (see `continueJsonScan`): each delta advances
+ * a persisted cursor rather than re-walking everything buffered so far, so a large argument
+ * (e.g. `write_file`'s `content`) streamed in small deltas costs O(body length) in total, not
+ * O(body length²).
  *
  * PURE: no node, no IO.
  */
@@ -91,7 +96,7 @@ const MARKERS: readonly Marker[] = Object.freeze([
   // ONE entry for the whole `<tool_call…>` family, because a real gemma4:12b produced two
   // shapes neither a fixed `<tool_call>` string nor a hand-written corpus had anticipated:
   //   `<tool_call name="list_dir" arguments={"path": "."}/>`  — XML attributes, and an
-  //      UNQUOTED JSON attribute value, which is not valid XML;
+  //      UNQUOTED JSON attribute value, which is not valid XML; and
   //   `<tool_call1>{"name":"list_dir","arguments":{}}</tool_call1>` — the tag NUMBERED, so a
   //      literal-string match rejects it as prose and the only call in the turn is lost.
   // The form is therefore decided after the tag name is read, not by which marker matched.
@@ -158,6 +163,60 @@ export function scanJsonValue(s: string, from: number): JsonScan {
     }
   }
   return { ok: false, why: "incomplete" };
+}
+
+/** Resumable progress for a balanced-JSON scan spread across many chunks. */
+interface JsonProgress {
+  pos: number;
+  depth: number;
+  inString: boolean;
+  escaped: boolean;
+  started: boolean;
+}
+
+type JsonScanResume =
+  | { ok: true; end: number }
+  | { ok: false; why: "invalid" }
+  | { ok: false; why: "incomplete"; progress: JsonProgress };
+
+/**
+ * Same balance rules as `scanJsonValue`, but resumable: given the progress an earlier
+ * incomplete call returned, continues from exactly where it left off instead of re-walking
+ * bytes already classified.
+ *
+ * Without this, a call whose body streams in over many small deltas (a `write_file` with a
+ * large `content` argument — the ordinary case, not an edge case, for how local runtimes
+ * stream) gets rescanned from its start on every single delta: O(body length) work repeated
+ * O(body length ÷ delta size) times, i.e. quadratic in the body length. `ToolCallScanner`
+ * calls this once per call instead of `scanJsonValue`, carrying `JsonProgress` across pushes.
+ */
+function continueJsonScan(s: string, progress: JsonProgress): JsonScanResume {
+  let i = progress.pos;
+  let { depth, inString, escaped, started } = progress;
+  if (!started) {
+    while (i < s.length && /\s/.test(s[i] as string)) i += 1;
+    if (i >= s.length) return { ok: false, why: "incomplete", progress: { ...progress, pos: i } };
+    const first = s[i];
+    if (first !== "{" && first !== "[") return { ok: false, why: "invalid" };
+    started = true;
+  }
+  for (; i < s.length; i += 1) {
+    const c = s[i] as string;
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (c === "\\") escaped = true;
+      else if (c === '"') inString = false;
+      continue;
+    }
+    if (c === '"') inString = true;
+    else if (c === "{" || c === "[") depth += 1;
+    else if (c === "}" || c === "]") {
+      depth -= 1;
+      if (depth === 0) return { ok: true, end: i + 1 };
+      if (depth < 0) return { ok: false, why: "invalid" };
+    }
+  }
+  return { ok: false, why: "incomplete", progress: { pos: i, depth, inString, escaped, started } };
 }
 
 /* ── XML attribute form ──────────────────────────────────────────────────────*/
@@ -380,21 +439,46 @@ function decodePayload(
 
 /* ── the incremental scanner ─────────────────────────────────────────────────*/
 
-/** Where in `s` (at or after `from`) the earliest marker or fence starts. */
+/** The next run of one or more backticks at or after `from`, and whether it runs all the way
+ * to the end of `s` — meaning more backticks could still be coming in a later chunk. */
+function nextBacktickRun(
+  s: string,
+  from: number,
+): { at: number; len: number; boundedByEnd: boolean } | null {
+  const at = s.indexOf("`", from);
+  if (at === -1) return null;
+  let len = 1;
+  while (at + len < s.length && s[at + len] === "`") len += 1;
+  return { at, len, boundedByEnd: at + len === s.length };
+}
+
+/** Where in `s` (at or after `from`) the earliest marker, fence, or inline code span starts. */
 function nextMarker(
   s: string,
   from: number,
-): { at: number; marker: Marker } | { at: number; fence: true } | null {
-  let best: { at: number; marker?: Marker; fence?: true } | null = null;
+):
+  | { at: number; marker: Marker }
+  | { at: number; fence: true; boundedByEnd: boolean }
+  | { at: number; codeSpan: number; boundedByEnd: boolean }
+  | null {
+  let bestMarker: { at: number; marker: Marker } | null = null;
   for (const marker of MARKERS) {
     const at = s.indexOf(marker.open, from);
-    if (at !== -1 && (!best || at < best.at)) best = { at, marker };
+    if (at !== -1 && (!bestMarker || at < bestMarker.at)) bestMarker = { at, marker };
   }
-  const fenceAt = s.indexOf(FENCE, from);
-  // A tie means the fence IS the head of a ```tool_call marker — the marker wins.
-  if (fenceAt !== -1 && (!best || fenceAt < best.at)) best = { at: fenceAt, fence: true };
-  if (!best) return null;
-  return best.marker ? { at: best.at, marker: best.marker } : { at: best.at, fence: true };
+  const tick = nextBacktickRun(s, from);
+  const backtickFound:
+    | { at: number; fence: true; boundedByEnd: boolean }
+    | { at: number; codeSpan: number; boundedByEnd: boolean }
+    | null =
+    tick === null
+      ? null
+      : tick.len >= FENCE.length
+        ? { at: tick.at, fence: true, boundedByEnd: tick.boundedByEnd }
+        : { at: tick.at, codeSpan: tick.len, boundedByEnd: tick.boundedByEnd };
+  // A tie means the fence/span IS the head of a marker (e.g. ```tool_call) — the marker wins.
+  if (bestMarker && (!backtickFound || bestMarker.at <= backtickFound.at)) return bestMarker;
+  return backtickFound;
 }
 
 /** How many trailing bytes of `s` could be the start of a marker or fence. */
@@ -408,6 +492,30 @@ function holdBack(s: string): number {
   return 0;
 }
 
+/** State held across `push()` calls while a call's JSON body is still streaming in, or while
+ * we're waiting to see whether its closing tag follows. Lets `drain` resume in O(new bytes)
+ * on the next push instead of re-finding the marker and re-scanning the whole body — see
+ * `continueJsonScan`. `this.buf` is always anchored so the call starts at index 0 while this
+ * is set (holding-back always reslices to the marker start first), so `cursor`/`end` here are
+ * plain indices into the CURRENT `this.buf`. */
+type PendingCall =
+  | {
+      phase: "json";
+      marker: Marker;
+      dialect: CallDialect;
+      cursor: number;
+      fallbackName: string | undefined;
+      progress: JsonProgress;
+    }
+  | {
+      phase: "closer";
+      marker: Marker;
+      dialect: CallDialect;
+      cursor: number;
+      fallbackName: string | undefined;
+      end: number;
+    };
+
 /**
  * A stateful, chunk-at-a-time reader over a model's text stream.
  *
@@ -417,8 +525,11 @@ function holdBack(s: string): number {
  */
 export class ToolCallScanner {
   private buf = "";
-  /** true between an ORDINARY fence's open and close — calls inside are inert. */
-  private inCodeFence = false;
+  /** Non-null while inside a fence or an inline code span; holds the exact delimiter that
+   * closes it (``` for a fence, ` or `` for inline code) — a call marker is INERT in here. */
+  private codeSpanCloser: string | null = null;
+  /** Non-null while a call's JSON body (or its trailing closer) is still being awaited. */
+  private pending: PendingCall | null = null;
 
   /** Feed one delta. Returns the events that are complete as of this chunk. */
   push(chunk: string): ScanEvent[] {
@@ -443,39 +554,67 @@ export class ToolCallScanner {
   private drain(final: boolean): ScanEvent[] {
     const out: ScanEvent[] = [];
     for (;;) {
+      if (this.pending) {
+        const p = this.pending;
+        if (p.phase === "json") {
+          const r = continueJsonScan(this.buf, p.progress);
+          const outcome = this.handleJsonScanResult(r, p, 0, final, out);
+          if (outcome === "held") return out;
+          continue;
+        }
+        const outcome = this.settleJsonEnd(p, p.end, 0, final, out);
+        if (outcome === "held") return out;
+        continue;
+      }
+
       const found = nextMarker(this.buf, 0);
       if (!found) break;
 
-      // A shorter marker can still grow into a longer one. The case that matters: a bare
-      // "```" arrives one delta before "tool_call" does, and committing to "ordinary fence"
-      // there both misses the call AND flips fence state, so everything after it is
-      // suppressed. Wait until the buffer can no longer become a longer marker.
+      // A shorter marker can still grow into a longer one, and a short backtick run can still
+      // grow into a longer one (a bare "``" one delta before a 3rd backtick turns it from an
+      // inline span into a fence). Wait until the buffer can no longer become a longer match.
       if (!final) {
         const tail = this.buf.slice(found.at);
-        if (MARKERS.some((m) => m.open.length > tail.length && m.open.startsWith(tail))) {
-          return this.holdAndEmit(out, found.at);
-        }
+        const stillGrowing =
+          MARKERS.some((m) => m.open.length > tail.length && m.open.startsWith(tail)) ||
+          (!("marker" in found) && found.boundedByEnd);
+        if (stillGrowing) return this.holdAndEmit(out, found.at);
       }
 
       if ("fence" in found) {
-        // An ordinary fence. Emit everything up to and including it, and flip the state so a
-        // marker inside is treated as the illustration it is.
         const upto = found.at + FENCE.length;
         out.push({ kind: "text", text: this.buf.slice(0, upto) });
         this.buf = this.buf.slice(upto);
-        this.inCodeFence = !this.inCodeFence;
+        if (this.codeSpanCloser === null || this.codeSpanCloser === FENCE) {
+          this.codeSpanCloser = this.codeSpanCloser === FENCE ? null : FENCE;
+        }
+        // else: 3+ backticks while inside an inline span of a different length are just that
+        // span's literal content — its own (shorter) closer hasn't arrived yet.
+        continue;
+      }
+
+      if ("codeSpan" in found) {
+        const delim = "`".repeat(found.codeSpan);
+        const upto = found.at + found.codeSpan;
+        out.push({ kind: "text", text: this.buf.slice(0, upto) });
+        this.buf = this.buf.slice(upto);
+        if (this.codeSpanCloser === null) this.codeSpanCloser = delim;
+        else if (this.codeSpanCloser === delim) this.codeSpanCloser = null;
+        // else: a different-length run (or one inside a fence) is literal content — unchanged.
         continue;
       }
 
       const { at, marker } = found;
-      if (this.inCodeFence) {
-        // Inside a plain fence every marker is literal text. Emit it and move on — including
-        // a ```tool_call, whose leading ``` is what CLOSES the fence we are in.
-        if (marker.dialect === "tool_call_fence") {
+      if (this.codeSpanCloser !== null) {
+        // Inside a fence or an inline code span every marker is literal text — including a
+        // ```tool_call, whose leading ``` is what CLOSES the fence we are in (an inline span
+        // can only be closed by a matching short run, handled above, so this branch is the
+        // fence case).
+        if (marker.dialect === "tool_call_fence" && this.codeSpanCloser === FENCE) {
           const upto = at + FENCE.length;
           out.push({ kind: "text", text: this.buf.slice(0, upto) });
           this.buf = this.buf.slice(upto);
-          this.inCodeFence = false;
+          this.codeSpanCloser = null;
           continue;
         }
         const upto = at + marker.open.length;
@@ -499,6 +638,16 @@ export class ToolCallScanner {
           continue;
         }
         if (at > 0) out.push({ kind: "text", text: this.buf.slice(0, at) });
+        // Dropped from the visible reply (never shown as prose), but not silently: a
+        // `malformed` event still records it, so a stray closer isn't invisible to logs/tests.
+        out.push({
+          kind: "malformed",
+          error: {
+            raw: this.buf.slice(at, at + len),
+            dialect: marker.dialect,
+            reason: "a stray closing tag with no opener was dropped from the visible reply",
+          },
+        });
         this.buf = this.buf.slice(at + len);
         continue;
       }
@@ -577,57 +726,21 @@ export class ToolCallScanner {
         cursor = gt + 1;
       }
 
-      const scan = scanJsonValue(this.buf, cursor);
-      if (!scan.ok && scan.why === "incomplete") {
-        // Not all of the call has arrived. Emit the prose before it and wait.
-        if (!final) return this.holdAndEmit(out, at);
-        out.push({
-          kind: "malformed",
-          error: {
-            raw: this.buf.slice(at),
-            dialect: marker.dialect,
-            reason: "the call was cut off before it finished",
-          },
-        });
-        this.buf = "";
-        return out;
-      }
-      if (!scan.ok) {
-        // A marker with no JSON after it at all — the model wrote the tag and then prose.
-        out.push({ kind: "text", text: this.buf.slice(0, at + marker.open.length) });
-        this.buf = this.buf.slice(at + marker.open.length);
-        continue;
-      }
-
-      // The JSON balances — but the CLOSING tag may still be in flight. Emitting now would
-      // publish the call and then emit `</tool_call>` as prose one delta later, which is
-      // exactly what a char-at-a-time stream produces. Wait until we can tell.
-      const expectedCloser = marker.close ?? (marker.family ? `</${base}>` : undefined);
-      if (expectedCloser && !final) {
-        const trimmed = this.buf.slice(scan.end).trimStart();
-        const couldBeClose =
-          trimmed.length === 0 ||
-          // `</tool_call1>` is longer than `</tool_call>`, so a plain prefix test would stop
-          // waiting one byte early on a numbered tag.
-          (trimmed.length <= expectedCloser.length + 4 &&
-            expectedCloser.slice(0, trimmed.length).startsWith(trimmed.replace(/\d+>?$/, "")) &&
-            closerLength(this.buf, scan.end, base) === 0);
-        if (couldBeClose) return this.holdAndEmit(out, at);
-      }
-
-      if (at > 0) out.push({ kind: "text", text: this.buf.slice(0, at) });
-      const json = this.buf.slice(cursor, scan.end);
-      let after = scan.end;
-      // Consume the closing tag when the model bothered to write one, number and all.
-      if (marker.family) {
-        after += closerLength(this.buf, after, base);
-      } else if (marker.close) {
-        const rest = this.buf.slice(after);
-        const lead = rest.length - rest.trimStart().length;
-        if (rest.trimStart().startsWith(marker.close)) after += lead + marker.close.length;
-      }
-      out.push(...decodePayload(json, dialect, this.buf.slice(at, after), fallbackName));
-      this.buf = this.buf.slice(after);
+      const r = continueJsonScan(this.buf, {
+        pos: cursor,
+        depth: 0,
+        inString: false,
+        escaped: false,
+        started: false,
+      });
+      const outcome = this.handleJsonScanResult(
+        r,
+        { marker, dialect, cursor, fallbackName },
+        at,
+        final,
+        out,
+      );
+      if (outcome === "held") return out;
     }
 
     // No marker anywhere in the buffer: emit it as prose, minus any tail that could still
@@ -646,6 +759,118 @@ export class ToolCallScanner {
       this.buf = this.buf.slice(at);
     }
     return out;
+  }
+
+  /**
+   * Handle the outcome of a (fresh or resumed) `continueJsonScan` call. `at` is the marker's
+   * current offset into `this.buf` (0 whenever resuming, since the buffer is always anchored
+   * to the marker's start while `pending` is set).
+   */
+  private handleJsonScanResult(
+    r: JsonScanResume,
+    ctx: { marker: Marker; dialect: CallDialect; cursor: number; fallbackName: string | undefined },
+    at: number,
+    final: boolean,
+    out: ScanEvent[],
+  ): "held" | "done" {
+    const { marker, dialect, cursor, fallbackName } = ctx;
+    if (!r.ok && r.why === "incomplete") {
+      if (!final) {
+        if (at > 0) {
+          out.push({ kind: "text", text: this.buf.slice(0, at) });
+          this.buf = this.buf.slice(at);
+        }
+        this.pending = {
+          phase: "json",
+          marker,
+          dialect,
+          cursor: cursor - at,
+          fallbackName,
+          progress: { ...r.progress, pos: r.progress.pos - at },
+        };
+        return "held";
+      }
+      out.push({
+        kind: "malformed",
+        error: {
+          raw: this.buf.slice(at),
+          dialect: marker.dialect,
+          reason: "the call was cut off before it finished",
+        },
+      });
+      this.buf = "";
+      this.pending = null;
+      return "done";
+    }
+    if (!r.ok) {
+      // A marker with no JSON after it at all — the model wrote the tag and then prose.
+      out.push({ kind: "text", text: this.buf.slice(0, at + marker.open.length) });
+      this.buf = this.buf.slice(at + marker.open.length);
+      this.pending = null;
+      return "done";
+    }
+    return this.settleJsonEnd({ marker, dialect, cursor, fallbackName }, r.end, at, final, out);
+  }
+
+  /**
+   * The JSON balances (fresh or resumed) — decide whether the closing tag might still be in
+   * flight, or finalize the call now.
+   */
+  private settleJsonEnd(
+    ctx: { marker: Marker; dialect: CallDialect; cursor: number; fallbackName: string | undefined },
+    end: number,
+    at: number,
+    final: boolean,
+    out: ScanEvent[],
+  ): "held" | "done" {
+    const { marker, dialect, cursor, fallbackName } = ctx;
+    const base = marker.open.slice(1);
+
+    // The JSON balances — but the CLOSING tag may still be in flight. Emitting now would
+    // publish the call and then emit `</tool_call>` as prose one delta later, which is
+    // exactly what a char-at-a-time stream produces. Wait until we can tell.
+    const expectedCloser = marker.close ?? (marker.family ? `</${base}>` : undefined);
+    if (expectedCloser && !final) {
+      const trimmed = this.buf.slice(end).trimStart();
+      const couldBeClose =
+        trimmed.length === 0 ||
+        // `</tool_call1>` is longer than `</tool_call>`, so a plain prefix test would stop
+        // waiting one byte early on a numbered tag.
+        (trimmed.length <= expectedCloser.length + 4 &&
+          expectedCloser.slice(0, trimmed.length).startsWith(trimmed.replace(/\d+>?$/, "")) &&
+          closerLength(this.buf, end, base) === 0);
+      if (couldBeClose) {
+        if (at > 0) {
+          out.push({ kind: "text", text: this.buf.slice(0, at) });
+          this.buf = this.buf.slice(at);
+        }
+        this.pending = {
+          phase: "closer",
+          marker,
+          dialect,
+          cursor: cursor - at,
+          fallbackName,
+          end: end - at,
+        };
+        return "held";
+      }
+    }
+
+    if (at > 0) out.push({ kind: "text", text: this.buf.slice(0, at) });
+    const json = this.buf.slice(cursor, end);
+    let after = end;
+    // Consume the closing tag when the model bothered to write one, number and all.
+    if (marker.family) {
+      after += closerLength(this.buf, after, base);
+    } else if (marker.close) {
+      const rest = this.buf.slice(after);
+      const lead = rest.length - rest.trimStart().length;
+      if (rest.trimStart().startsWith(marker.close)) after += lead + marker.close.length;
+    }
+    out.push(...decodePayload(json, dialect, this.buf.slice(at, after), fallbackName));
+    this.buf = this.buf.slice(after);
+    this.pending = null;
+    return "done";
   }
 }
 
