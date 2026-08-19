@@ -50,6 +50,16 @@ export interface PreambleOptions {
   contextWindow?: number;
   /** chars-per-token, matching `agent/compact.ts`'s estimator. */
   charsPerToken?: number;
+  /**
+   * On `mode:"text"` only: this endpoint has ALREADY produced at least one correctly-read
+   * `<tool_call>` earlier in the session (`ToolCapabilityState.textSyntaxCalls > 0`). The
+   * syntax teaching (`TEXT_CALL_PROTOCOL`) is unconditional regardless — a model can still
+   * forget mid-session — but the per-tool DESCRIPTIONS are the expensive, re-teachable part,
+   * and a model that has already proven it can produce the syntax does not need the full
+   * catalog re-explained every round the way a first attempt does. Ignored on `native`, whose
+   * ladder is already capped at `names` for an unrelated reason (see the STAGES comment).
+   */
+  demonstrated?: boolean;
 }
 
 /** What was rendered, and what had to be given up to fit. */
@@ -269,8 +279,19 @@ export function renderToolPreamble(
   // cost ~1.2k tokens on EVERY request of EVERY round — the system prompt is rebuilt per
   // round by both hosts. What `tools[]` cannot carry is the act-don't-describe rule and the
   // PRIORITY ORDER, so on native that — and only that — is the preamble.
+  //
+  // On `text`, `demonstrated` gives the same per-round saving once the model has EARNED it:
+  // full descriptions are what a model needs to learn the syntax and pick the right tool the
+  // first time, but re-explaining all ~38 of them every subsequent round of the SAME session,
+  // to a model that has already produced a correct call, spends real tokens teaching a lesson
+  // that landed. Required-argument signatures — not bare names — stay the floor, so the model
+  // is still reminded what each tool actually needs, just not why it might want it.
   const STAGES: RenderedPreamble["detail"][] =
-    opts.mode === "native" ? ["names"] : ["full", "signatures", "required-only", "names"];
+    opts.mode === "native"
+      ? ["names"]
+      : opts.demonstrated
+        ? ["required-only", "names"]
+        : ["full", "signatures", "required-only", "names"];
   for (const detail of STAGES) {
     const text = assemble(ordered, detail, 0);
     if (approx(text, charsPerToken) <= budget) {

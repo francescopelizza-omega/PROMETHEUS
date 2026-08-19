@@ -103,6 +103,31 @@ test("text calls on a TEXT turn are not strikes — that is the transport workin
   assert.equal(state.textCallsWhileNative, 0);
 });
 
+test("textSyntaxCalls records a text-transport success and never resets — the preamble's cue to stop re-teaching", () => {
+  let state = initialCapability();
+  assert.equal(state.textSyntaxCalls, 0);
+  state = observeTurn(state, { transport: "text", nativeCalls: 0, textCalls: 1 });
+  assert.equal(state.textSyntaxCalls, 1);
+  // Accumulates across turns...
+  state = observeTurn(state, { transport: "text", nativeCalls: 0, textCalls: 2 });
+  assert.equal(state.textSyntaxCalls, 3);
+  // ...and is untouched by an UNRELATED native turn — it never regresses once earned.
+  state = observeTurn(state, { transport: "native", nativeCalls: 1, textCalls: 0 });
+  assert.equal(state.textSyntaxCalls, 3);
+});
+
+test("a native-transport text call does NOT count as demonstrated text syntax", () => {
+  // `textCallsWhileNative` and `textSyntaxCalls` measure different things: a model handed a
+  // working native channel writing `<tool_call>` prose anyway is not the same as a model
+  // that has proven it can use the text protocol WHEN THAT IS ITS ONLY CHANNEL.
+  const state = observeTurn(initialCapability(), {
+    transport: "native",
+    nativeCalls: 0,
+    textCalls: 3,
+  });
+  assert.equal(state.textSyntaxCalls, 0);
+});
+
 /* ── recognising a rejection ─────────────────────────────────────────────────*/
 
 test("a tools-specific client error is a rejection", () => {

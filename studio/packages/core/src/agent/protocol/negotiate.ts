@@ -47,11 +47,18 @@ export interface ToolCapabilityState {
   nativeCalls: number;
   /** turns where tools were offered natively but the calls came back as TEXT. */
   textCallsWhileNative: number;
+  /**
+   * Calls successfully read back out of TEXT (the `text` transport, not a native fallback).
+   * Monotonic, never reset: once a model has proven — even once — that it can produce the
+   * taught `<tool_call>` syntax, re-teaching it the full catalog of descriptions every single
+   * round is spending tokens on a lesson already learned. See `preambleModeFor`'s caller.
+   */
+  textSyntaxCalls: number;
 }
 
 /** A fresh, unopinionated state — everything still to be learned. */
 export function initialCapability(): ToolCapabilityState {
-  return { nativeRejected: false, nativeCalls: 0, textCallsWhileNative: 0 };
+  return { nativeRejected: false, nativeCalls: 0, textCallsWhileNative: 0, textSyntaxCalls: 0 };
 }
 
 /**
@@ -107,6 +114,9 @@ export function observeTurn(state: ToolCapabilityState, obs: TurnObservation): T
   }
   if (obs.transport === "native" && obs.textCalls > 0) {
     next.textCallsWhileNative += 1;
+  }
+  if (obs.transport === "text" && obs.textCalls > 0) {
+    next.textSyntaxCalls += obs.textCalls;
   }
   return next;
 }

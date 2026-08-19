@@ -178,6 +178,37 @@ test("text mode teaches the call syntax; native mode does not", () => {
   assert.ok(native.approxTokens < text.approxTokens);
 });
 
+test("`demonstrated` stops re-teaching a text model what it already proved it knows", () => {
+  const first = renderToolPreamble(FULL, { mode: "text", contextWindow: 262_144 });
+  const repeat = renderToolPreamble(FULL, {
+    mode: "text",
+    contextWindow: 262_144,
+    demonstrated: true,
+  });
+  assert.ok(
+    repeat.approxTokens < first.approxTokens,
+    `demonstrated preamble is ${repeat.approxTokens} tokens vs first ${first.approxTokens} — no saving`,
+  );
+  // The syntax teaching is unconditional either way — a model can still forget mid-session.
+  assert.ok(first.text.includes(TEXT_CALL_PROTOCOL));
+  assert.ok(repeat.text.includes(TEXT_CALL_PROTOCOL));
+  // Descriptions are what's dropped, not the required-argument shape.
+  assert.notEqual(repeat.detail, "full");
+  assert.notEqual(repeat.detail, "signatures");
+});
+
+test("`demonstrated` is ignored on native — its ladder is already just names", () => {
+  const plain = renderToolPreamble(FULL, { mode: "native", contextWindow: 262_144 });
+  const demo = renderToolPreamble(FULL, {
+    mode: "native",
+    contextWindow: 262_144,
+    demonstrated: true,
+  });
+  assert.equal(plain.text, demo.text);
+  assert.equal(plain.detail, "names");
+  assert.equal(demo.detail, "names");
+});
+
 test("both modes always carry the act-don't-describe rule", () => {
   // It survives every degrade stage because it is the rule that decides whether the turn
   // does anything at all.
