@@ -65,6 +65,11 @@ export function createEndpointLlmClient(opts: EndpointLlmOptions): LLMClient {
     policy,
     opts.fetch ? { fetch: opts.fetch as never } : {},
   );
+  // Set once this endpoint has produced at least one correctly-read `<tool_call>` — see
+  // `withPreamble`'s `demonstrated` param. Monotonic across the whole client's lifetime (one
+  // session), same as the CLI's and desktop pane's `ToolCapabilityState.textSyntaxCalls`; this
+  // host has no native transport to negotiate, so a single flag is all the state it needs.
+  let demonstrated = false;
 
   return {
     async *turn(thread: Thread, _tuning: AgentTuning, tools: ToolDef[]): AsyncIterable<LlmTurn> {
@@ -75,7 +80,7 @@ export function createEndpointLlmClient(opts: EndpointLlmOptions): LLMClient {
         role: m.role === "tool" ? "user" : m.role,
         content: m.content,
       }));
-      const outgoing = withPreamble(messages, tools, opts.endpoint.contextWindow);
+      const outgoing = withPreamble(messages, tools, opts.endpoint.contextWindow, demonstrated);
 
       const scanner = new ToolCallScanner();
       const calls: TextToolCall[] = [];
@@ -99,6 +104,7 @@ export function createEndpointLlmClient(opts: EndpointLlmOptions): LLMClient {
       }
       yield* drain(scanner.end());
 
+      if (calls.length > 0) demonstrated = true;
       for (const call of calls)
         yield { kind: "tool_call", call: { name: call.name, args: call.args } };
       // No call ⇒ the model answered. `final` carries no text: it already streamed above, and
@@ -116,11 +122,17 @@ export function createEndpointLlmClient(opts: EndpointLlmOptions): LLMClient {
  * context window sizes the budget; without it the budget is the one sized for an 8192 window,
  * which drops every tool DESCRIPTION from the listing and leaves the model guessing at schemas.
  */
-function withPreamble(messages: WireMsg[], tools: ToolDef[], contextWindow?: number): WireMsg[] {
+function withPreamble(
+  messages: WireMsg[],
+  tools: ToolDef[],
+  contextWindow?: number,
+  demonstrated?: boolean,
+): WireMsg[] {
   if (tools.length === 0) return messages;
   const opts = {
     mode: preambleModeFor("text"),
     ...(contextWindow ? { contextWindow } : {}),
+    ...(demonstrated ? { demonstrated } : {}),
   };
   const at = messages.findIndex((m) => m.role === "system");
   if (at === -1) {

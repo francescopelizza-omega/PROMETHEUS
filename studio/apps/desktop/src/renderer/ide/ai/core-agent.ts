@@ -261,7 +261,13 @@ export function createRendererLlmClient(opts: RendererLlmOptions): LLMClient {
         role: m.role === "tool" ? "user" : m.role,
         content: m.content,
       })) as AiMsg[];
-      const outgoing = withPreamble(messages, tools, transport, opts.endpoint.contextWindow);
+      const outgoing = withPreamble(
+        messages,
+        tools,
+        transport,
+        opts.endpoint.contextWindow,
+        capability.textSyntaxCalls > 0,
+      );
 
       // Deltas arrive through callbacks while `runTurn` is awaited, so they are queued and
       // drained after — an async generator cannot yield from inside a callback.
@@ -370,12 +376,17 @@ function withPreamble(
   tools: ToolDef[],
   transport: ToolTransport,
   contextWindow?: number,
+  demonstrated?: boolean,
 ): AiMsg[] {
   if (transport === "none" || tools.length === 0) return messages;
   const mode = preambleModeFor(transport);
   // The measured window sizes the budget — see the CLI's twin. Without it the budget is the one
   // sized for an 8192 window, which drops every tool DESCRIPTION from the listing.
-  const opts = { mode, ...(contextWindow ? { contextWindow } : {}) };
+  const opts = {
+    mode,
+    ...(contextWindow ? { contextWindow } : {}),
+    ...(demonstrated ? { demonstrated } : {}),
+  };
   const at = messages.findIndex((m) => m.role === "system");
   if (at === -1) {
     const { text } = renderToolPreamble(tools, opts);

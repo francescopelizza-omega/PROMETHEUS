@@ -443,16 +443,25 @@ class AgentRunController {
           : base;
         const label = persona ? `${persona.name} (${persona.scope})` : role;
         deps.onToolNote(`⤷ ${label}: ${task}`);
-        const out = await runSubagent((t, tune, d) => runAgentTurn(t, tune, d), child, task, {
-          llm,
-          runTool: (tool, a) =>
-            runToolRef
-              ? runToolRef(tool, a)
-              : Promise.resolve({ ok: false, summary: "the tool runner is not ready" }),
-          confirm: (call) => this.confirmToolCall(sid, deps, call),
-        });
-        deps.onToolNote(`⤶ sub-agent done (${out.toolCalls} tool call(s))`);
-        return { ok: out.ok, summary: out.text };
+        // `depth` tracks how many spawns are LIVE right now (see the CLI's matching comment on
+        // its own `spawnSubagent`) — incremented for exactly this child's turn and decremented
+        // once it returns, so `canSpawn` has a real backstop independent of `childTuning`'s
+        // deny-list entry for `spawn_agent`.
+        spawnBudget.depth += 1;
+        try {
+          const out = await runSubagent((t, tune, d) => runAgentTurn(t, tune, d), child, task, {
+            llm,
+            runTool: (tool, a) =>
+              runToolRef
+                ? runToolRef(tool, a)
+                : Promise.resolve({ ok: false, summary: "the tool runner is not ready" }),
+            confirm: (call) => this.confirmToolCall(sid, deps, call),
+          });
+          deps.onToolNote(`⤶ sub-agent done (${out.toolCalls} tool call(s))`);
+          return { ok: out.ok, summary: out.text };
+        } finally {
+          spawnBudget.depth -= 1;
+        }
       },
       /**
        * `question` — a free-text answer from the human, mid-turn.

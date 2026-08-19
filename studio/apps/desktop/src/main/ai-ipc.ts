@@ -39,6 +39,7 @@ import { applyEffort, applyEffortToMessages } from "@prometheus/core/ai-effort";
 import type { EffortResolution } from "@prometheus/core/ai-effort";
 import {
   describeAiFailure,
+  endpointBreaker,
   fetchModelWithRetry,
   preflightContext,
 } from "@prometheus/core/ai-retry";
@@ -547,6 +548,9 @@ export async function runAiStream(
         },
         doFetch: doFetch as never,
         signalFor: armAttempt,
+        // Fail fast on a dead endpoint instead of paying the full retry schedule on every
+        // subsequent round — see `endpointBreaker`.
+        breaker: endpointBreaker(req.endpoint.id),
         ...(retryOpts.sleep ? { sleep: retryOpts.sleep } : {}),
         ...(retryOpts.retries !== undefined ? { retries: retryOpts.retries } : {}),
         onRetry: (info) =>
