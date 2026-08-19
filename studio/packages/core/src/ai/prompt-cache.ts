@@ -125,10 +125,17 @@ export function applyPromptCache<T extends { role: string; content: string }>(
  * this repo names those rows `claude`, `chatgpt` and `gemini` — so even once it had a caller,
  * the id it would naturally have been handed could never have matched. A runtime is derived
  * from the base URL, which is the thing that actually determines the wire.
+ *
+ * Takes the already-resolved `enabled` flag, not the raw `{"prompt-caching": boolean}` toggles
+ * record: every real call site resolves the user's toggle to a plain boolean well before it
+ * decides anything about caching (the CLI's transport takes an `aux.promptCache?: boolean` for
+ * exactly this reason), so a toggles-record parameter here was a shape nothing upstream ever
+ * actually had at the point it needed an answer — which is the reason this had zero callers and
+ * the transport reimplemented the same two conditions inline instead.
  */
 export function shouldRequestPromptCache(
-  toggles: Record<string, boolean> | undefined,
+  enabled: boolean | undefined,
   runtime: EffortRuntime,
 ): boolean {
-  return toggles?.["prompt-caching"] !== false && promptCachingSupported(runtime);
+  return enabled !== false && promptCachingSupported(runtime);
 }

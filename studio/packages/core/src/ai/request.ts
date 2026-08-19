@@ -22,6 +22,7 @@
  *
  * PURE over its injected fetch: no node, no timers of its own.
  */
+import { CircuitBreaker } from "../resilience/circuitBreaker.js";
 import { retry } from "../resilience/retry.js";
 import {
   AI_RETRY_DEFAULTS,
@@ -32,6 +33,25 @@ import {
   parseRetryAfter,
   retryDelayMs,
 } from "./retry-policy.js";
+
+/**
+ * One breaker per endpoint id, shared across every call this process makes to it — so a run of
+ * failures against one dead local server fails fast without ever touching a different, healthy
+ * endpoint's own count. Populated lazily: nothing is created until `endpointBreaker` is actually
+ * called, so a caller that never asks for one (including every existing test, none of which
+ * passes `ModelRequestOptions.breaker`) is completely unaffected by it.
+ */
+const breakers = new Map<string, CircuitBreaker>();
+
+/** The shared circuit breaker for one endpoint id, created on first use. */
+export function endpointBreaker(endpointId: string): CircuitBreaker {
+  let b = breakers.get(endpointId);
+  if (!b) {
+    b = new CircuitBreaker();
+    breakers.set(endpointId, b);
+  }
+  return b;
+}
 
 /** The minimum a response must expose for this module to classify it. */
 export interface ModelResponseLike {
@@ -71,6 +91,18 @@ export interface ModelRequestOptions<R extends ModelResponseLike> {
   onRetry?: (info: { attempt: number; delayMs: number; reason: string }) => void;
   /** override the attempt count (default 2 additional attempts). */
   retries?: number;
+  /**
+   * Fail fast on a dead endpoint instead of paying the full retry schedule every turn.
+   *
+   * Wraps the WHOLE retry sequence below as one unit — a request that eventually succeeds
+   * (even after some of its own attempts failed) is one breaker SUCCESS, and only a request
+   * that exhausts every attempt without ever succeeding counts as one breaker FAILURE. That is
+   * deliberate: this only trips on sustained, request-level failure (several consecutive dead
+   * calls to the same endpoint), not on a single transient blip the retry loop above already
+   * recovers from. Omitted ⇒ no breaker at all — the previous, always-retry behaviour. Pass
+   * `endpointBreaker(opts.endpointId)` to get the one shared per-endpoint instance.
+   */
+  breaker?: CircuitBreaker;
 }
 
 /**
@@ -84,47 +116,49 @@ export interface ModelRequestOptions<R extends ModelResponseLike> {
 export async function fetchModelWithRetry<R extends ModelResponseLike>(
   opts: ModelRequestOptions<R>,
 ): Promise<R> {
-  return retry(
-    async (attempt) => {
-      const signal = opts.signalFor?.(attempt);
-      const res = await opts.doFetch(opts.url, {
-        ...opts.init,
-        ...(signal ? { signal } : {}),
-      });
-      if (!res.ok) {
-        const detail = await safeBody(res);
-        const advice = parseRetryAfter(res.headers?.get("retry-after"));
-        throw new AiHttpError({
-          endpointId: opts.endpointId,
-          status: res.status,
-          statusText: res.statusText,
-          detail,
-          ...(advice !== undefined ? { retryAfterMs: advice } : {}),
+  const run = (): Promise<R> =>
+    retry(
+      async (attempt) => {
+        const signal = opts.signalFor?.(attempt);
+        const res = await opts.doFetch(opts.url, {
+          ...opts.init,
+          ...(signal ? { signal } : {}),
         });
-      }
-      return res;
-    },
-    {
-      retries: opts.retries ?? AI_RETRY_DEFAULTS.retries,
-      baseMs: AI_RETRY_DEFAULTS.baseMs,
-      factor: AI_RETRY_DEFAULTS.factor,
-      maxMs: AI_RETRY_DEFAULTS.maxMs,
-      // The USER's signal, not a per-attempt one: a stop must end the loop, while an
-      // attempt's own timeout is just that attempt failing.
-      ...(opts.userSignal ? { signal: opts.userSignal } : {}),
-      ...(opts.sleep ? { sleep: opts.sleep } : {}),
-      ...(opts.rng ? { rng: opts.rng } : {}),
-      retryOn: (err) =>
-        isRetryableAiError(err) && !advisedWaitTooLong(err, AI_RETRY_DEFAULTS.adviceCapMs),
-      delayFor: (err, _attempt, curve) => retryDelayMs(err, curve, AI_RETRY_DEFAULTS.adviceCapMs),
-      ...(opts.onRetry
-        ? {
-            onRetry: (err: unknown, attempt: number, delayMs: number) =>
-              opts.onRetry?.({ attempt, delayMs, reason: describeAiFailure(err) }),
-          }
-        : {}),
-    },
-  );
+        if (!res.ok) {
+          const detail = await safeBody(res);
+          const advice = parseRetryAfter(res.headers?.get("retry-after"));
+          throw new AiHttpError({
+            endpointId: opts.endpointId,
+            status: res.status,
+            statusText: res.statusText,
+            detail,
+            ...(advice !== undefined ? { retryAfterMs: advice } : {}),
+          });
+        }
+        return res;
+      },
+      {
+        retries: opts.retries ?? AI_RETRY_DEFAULTS.retries,
+        baseMs: AI_RETRY_DEFAULTS.baseMs,
+        factor: AI_RETRY_DEFAULTS.factor,
+        maxMs: AI_RETRY_DEFAULTS.maxMs,
+        // The USER's signal, not a per-attempt one: a stop must end the loop, while an
+        // attempt's own timeout is just that attempt failing.
+        ...(opts.userSignal ? { signal: opts.userSignal } : {}),
+        ...(opts.sleep ? { sleep: opts.sleep } : {}),
+        ...(opts.rng ? { rng: opts.rng } : {}),
+        retryOn: (err) =>
+          isRetryableAiError(err) && !advisedWaitTooLong(err, AI_RETRY_DEFAULTS.adviceCapMs),
+        delayFor: (err, _attempt, curve) => retryDelayMs(err, curve, AI_RETRY_DEFAULTS.adviceCapMs),
+        ...(opts.onRetry
+          ? {
+              onRetry: (err: unknown, attempt: number, delayMs: number) =>
+                opts.onRetry?.({ attempt, delayMs, reason: describeAiFailure(err) }),
+            }
+          : {}),
+      },
+    );
+  return opts.breaker ? opts.breaker.exec(run) : run();
 }
 
 /** Read an error body defensively — it is only ever used for the message. */

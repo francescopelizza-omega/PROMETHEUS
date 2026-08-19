@@ -39,7 +39,7 @@ export {
   retryDelayMs,
 } from "./retry-policy.js";
 export type { ModelRequestInit, ModelRequestOptions, ModelResponseLike } from "./request.js";
-export { fetchModelWithRetry } from "./request.js";
+export { endpointBreaker, fetchModelWithRetry } from "./request.js";
 
 // Asking for the prompt cache this repo already measures.
 export type { CacheableTextBlock, PromptCacheDialect, WireMsg } from "./prompt-cache.js";

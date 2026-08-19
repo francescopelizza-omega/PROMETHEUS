@@ -23,7 +23,7 @@ import { applyEffort, applyEffortToMessages } from "./effort/apply.js";
 import { runtimeFromBaseUrl } from "./effort/rules.js";
 import type { EffortResolution } from "./effort/types.js";
 import { applyPromptCache, cacheDialectFor } from "./prompt-cache.js";
-import { fetchModelWithRetry } from "./request.js";
+import { endpointBreaker, fetchModelWithRetry } from "./request.js";
 import { ContextOverflowError, preflightContext } from "./retry-policy.js";
 import { selectWire } from "./wire.js";
 
@@ -467,6 +467,9 @@ export function createAiClient(
       url,
       init: { method: "POST", headers, body },
       doFetch,
+      // Fail fast on a dead endpoint (unreachable local runner, sidecar down) instead of
+      // paying the full retry schedule on every round of every turn — see `endpointBreaker`.
+      breaker: endpointBreaker(endpoint.id),
       ...(opts.signal ? { signalFor: () => opts.signal, userSignal: opts.signal } : {}),
       ...(deps.sleep ? { sleep: deps.sleep } : {}),
       ...(deps.rng ? { rng: deps.rng } : {}),

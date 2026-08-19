@@ -101,6 +101,6 @@ test("only the LEADING run of system messages counts as the stable prefix", () =
 
 test("the toggle can turn it OFF, and an unsupported runtime is off regardless", () => {
   assert.equal(shouldRequestPromptCache(undefined, "anthropic"), true, "defaults on where free");
-  assert.equal(shouldRequestPromptCache({ "prompt-caching": false }, "anthropic"), false);
-  assert.equal(shouldRequestPromptCache({ "prompt-caching": true }, "ollama"), false);
+  assert.equal(shouldRequestPromptCache(false, "anthropic"), false);
+  assert.equal(shouldRequestPromptCache(true, "ollama"), false);
 });

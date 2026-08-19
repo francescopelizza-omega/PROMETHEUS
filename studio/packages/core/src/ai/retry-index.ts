@@ -25,4 +25,4 @@ export {
   retryDelayMs,
 } from "./retry-policy.js";
 export type { ModelRequestInit, ModelRequestOptions, ModelResponseLike } from "./request.js";
-export { fetchModelWithRetry } from "./request.js";
+export { endpointBreaker, fetchModelWithRetry } from "./request.js";
