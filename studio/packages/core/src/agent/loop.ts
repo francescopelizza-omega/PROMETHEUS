@@ -323,6 +323,20 @@ export async function* runAgentTurn(
   const onHookError = (m: string): void => {
     hookErrors.push(m);
   };
+  /**
+   * Every `firePostToolUseHooks` promise, across every round, so the turn can wait for them
+   * ALL to settle before it ends.
+   *
+   * `firePostToolUseHooks` is deliberately fire-and-forget PER CALL (see its own doc comment):
+   * awaiting it there would put a user's shell script on the critical path of every tool call.
+   * But that meant a hook failure on a round's (or the turn's) LAST call had no later
+   * PreToolUse drain point left to surface through — the queue was pushed to after the only
+   * place that ever read it, or after `{kind:"done"}` had already been yielded. Collecting the
+   * promises here and awaiting them once, at the very end of the turn rather than after every
+   * call, keeps the per-call latency the design wants while still guaranteeing every failure
+   * gets reported before the turn is done.
+   */
+  const pendingPostHooks: Promise<void>[] = [];
 
   /**
    * The turn was CANCELLED by the human.
@@ -356,323 +370,373 @@ export async function* runAgentTurn(
       yield { kind: "status", text: `continuing — round ${round + 1}/${maxRounds}` };
     }
 
-    for await (const turn of deps.llm.turn(thread, tuning, tools)) {
-      if (turn.kind === "status") {
-        // wrapper progress note (waiting/timeout/etc.): surface live, never persist.
-        yield { kind: "status", text: turn.text };
-        continue;
-      }
-      if (turn.kind === "reasoning") {
-        // thinking tokens: surface as live feedback but NEVER fold into assistantText /
-        // the persisted thread (reasoning is ephemeral, not part of the answer).
-        yield { kind: "reasoning", text: turn.text };
-        continue;
-      }
-      if (turn.kind === "text") {
-        assistantText += turn.text;
-        yield { kind: "text", text: turn.text };
-        continue;
-      }
-      if (turn.kind === "final") {
-        if (turn.text) {
+    // `try/finally`, not straight-line code after the loop: an external consumer that stops
+    // iterating `runAgentTurn` mid-round (its own `for await` breaking, e.g. on an abort it
+    // noticed before this loop did) invokes THIS generator's `.return()`, which unwinds from
+    // wherever it was suspended — possibly between two tool calls in the same round, after the
+    // first one already succeeded and was already shown to the user. Without a `finally` here,
+    // that already-real result never reached `thread.messages` at all: the round vanished from
+    // the model's memory even though its effect (e.g. a file write) had already happened.
+    try {
+      for await (const turn of deps.llm.turn(thread, tuning, tools)) {
+        if (turn.kind === "status") {
+          // wrapper progress note (waiting/timeout/etc.): surface live, never persist.
+          yield { kind: "status", text: turn.text };
+          continue;
+        }
+        if (turn.kind === "reasoning") {
+          // thinking tokens: surface as live feedback but NEVER fold into assistantText /
+          // the persisted thread (reasoning is ephemeral, not part of the answer).
+          yield { kind: "reasoning", text: turn.text };
+          continue;
+        }
+        if (turn.kind === "text") {
           assistantText += turn.text;
           yield { kind: "text", text: turn.text };
+          continue;
         }
-        sawFinal = true;
-        break;
-      }
+        if (turn.kind === "final") {
+          if (turn.text) {
+            assistantText += turn.text;
+            yield { kind: "text", text: turn.text };
+          }
+          sawFinal = true;
+          break;
+        }
 
-      const call = turn.call;
-      /**
-       * The human cancelled — do not start this call.
-       *
-       * Checked BEFORE `roundCalls.push`, so a cancelled call is not narrated back to the
-       * model as something it asked for and got an answer to. One round can carry several
-       * tool calls; pressing ESC after the first is a refusal of the rest, not of nothing.
-       */
-      if (aborted()) {
-        cancelled = true;
-        break;
-      }
-      // Recorded BEFORE any gate: a refused call is still something the model asked for, and
-      // it must see that it asked, or it re-proposes the identical refused call next round.
-      roundCalls.push(call);
-      // INVARIANT (§4): the agent may NEVER use --force.
-      if (isForceArg(call.args)) {
-        const reason =
-          "the agent is forbidden from using --force; a human must type the confirmation";
-        yield { kind: "blocked", tool: call.name, reason };
-        toolMessages.push({
-          content: toolResultMessage(call.name, { blocked: true, reason }),
-          ...(call.id ? { callId: call.id } : {}),
-        });
-        continue;
-      }
-      // The transport telling us it could not READ a call — not the model calling a tool.
-      // Handled before the catalog lookup, because falling through to "tool is not exposed"
-      // replaces the diagnosis with a message about a tool that was never called, and the
-      // reason the transport went to the trouble of producing is exactly what the model needs.
-      if (call.name === PROTOCOL_FEEDBACK_TOOL) {
-        const reason =
-          typeof call.args.reason === "string"
-            ? call.args.reason
-            : "your last message could not be read as a tool call";
-        yield { kind: "blocked", tool: call.name, reason };
-        toolMessages.push({
-          content: protocolFeedbackMessage(call.args),
-          ...(call.id ? { callId: call.id } : {}),
-        });
-        continue;
-      }
-      const tool = byName.get(call.name);
-      if (!tool) {
-        const reason = `tool "${call.name}" is not exposed`;
-        yield { kind: "blocked", tool: call.name, reason };
-        toolMessages.push({
-          content: toolResultMessage(call.name, { blocked: true, reason }),
-          ...(call.id ? { callId: call.id } : {}),
-        });
-        continue;
-      }
+        const call = turn.call;
+        /**
+         * The human cancelled — do not start this call.
+         *
+         * Checked BEFORE `roundCalls.push`, so a cancelled call is not narrated back to the
+         * model as something it asked for and got an answer to. One round can carry several
+         * tool calls; pressing ESC after the first is a refusal of the rest, not of nothing.
+         */
+        if (aborted()) {
+          cancelled = true;
+          break;
+        }
+        // Recorded BEFORE any gate: a refused call is still something the model asked for, and
+        // it must see that it asked, or it re-proposes the identical refused call next round.
+        roundCalls.push(call);
+        // INVARIANT (§4): the agent may NEVER use --force.
+        if (isForceArg(call.args)) {
+          const reason =
+            "the agent is forbidden from using --force; a human must type the confirmation";
+          // Recorded BEFORE the yield: an external consumer that stops iterating the instant it
+          // sees this event forces a `.return()` right here, which skips any code written AFTER
+          // the yield entirely — so the fold this feeds (in the `finally` below) must already
+          // have its entry by the time the event is produced, not after.
+          toolMessages.push({
+            content: toolResultMessage(call.name, { blocked: true, reason }),
+            ...(call.id ? { callId: call.id } : {}),
+          });
+          yield { kind: "blocked", tool: call.name, reason };
+          continue;
+        }
+        // The transport telling us it could not READ a call — not the model calling a tool.
+        // Handled before the catalog lookup, because falling through to "tool is not exposed"
+        // replaces the diagnosis with a message about a tool that was never called, and the
+        // reason the transport went to the trouble of producing is exactly what the model needs.
+        if (call.name === PROTOCOL_FEEDBACK_TOOL) {
+          const reason =
+            typeof call.args.reason === "string"
+              ? call.args.reason
+              : "your last message could not be read as a tool call";
+          toolMessages.push({
+            content: protocolFeedbackMessage(call.args),
+            ...(call.id ? { callId: call.id } : {}),
+          });
+          yield { kind: "blocked", tool: call.name, reason };
+          continue;
+        }
+        const tool = byName.get(call.name);
+        if (!tool) {
+          const reason = `tool "${call.name}" is not exposed`;
+          toolMessages.push({
+            content: toolResultMessage(call.name, { blocked: true, reason }),
+            ...(call.id ? { callId: call.id } : {}),
+          });
+          yield { kind: "blocked", tool: call.name, reason };
+          continue;
+        }
 
-      /**
-       * The repeat guard runs ABOVE the broker, so it can see the calls the broker
-       * auto-approves — which is where the real loop lives. A model stuck on `read_file` never
-       * reaches a confirm at all, so a guard under the confirm path could never have seen it.
-       */
-      const verdict = repeats.observe(call);
-      if (verdict !== "ok") {
-        const reason = repeatRefusal(call, repeatLimit);
-        yield { kind: "tool_result", call, ok: false, summary: reason };
-        toolMessages.push({
-          content: toolResultMessage(call.name, { blocked: true, reason }),
-          ...(call.id ? { callId: call.id } : {}),
+        /**
+         * The repeat guard runs ABOVE the broker, so it can see the calls the broker
+         * auto-approves — which is where the real loop lives. A model stuck on `read_file` never
+         * reaches a confirm at all, so a guard under the confirm path could never have seen it.
+         */
+        const verdict = repeats.observe(call);
+        if (verdict !== "ok") {
+          const reason = repeatRefusal(call, repeatLimit);
+          toolMessages.push({
+            content: toolResultMessage(call.name, { blocked: true, reason }),
+            ...(call.id ? { callId: call.id } : {}),
+          });
+          yield { kind: "tool_result", call, ok: false, summary: reason };
+          if (verdict === "abort") {
+            // It repeated after being told. Ending the turn is the only remaining move that
+            // does not burn the user's budget on a model that is not listening.
+            repeatAbort = true;
+            yield {
+              kind: "blocked",
+              tool: call.name,
+              reason: `${call.name} repeated identically after being refused — ending the turn`,
+            };
+            break;
+          }
+          continue;
+        }
+
+        /**
+         * PERMISSION MODE (plan) — a hard DENY above the broker, below the repeat guard.
+         *
+         * Placed here on purpose: above the broker so the refusal cannot be reached by any
+         * auto-approve path (`tuning.yes` lifts read-only tools straight past `confirm`, so a
+         * check living only in a host's confirm seam never sees them), and below the repeat
+         * guard so a model that keeps re-proposing the same refused mutation still gets told to
+         * stop rather than looping on a polite "no".
+         *
+         * The refusal rides the CLI-032 tool-result channel as the structured `planModeRefusal`
+         * object, which is the SAME shape the TUI's confirm seam already returns — so a model
+         * sees one refusal contract whichever surface denied it, and can re-plan from it.
+         */
+        const mode = tuning.permissionMode;
+        if (mode && decideToolForMode(mode, tool.annotations) === "deny") {
+          const reason = JSON.stringify(planModeRefusal(call.name));
+          toolMessages.push({
+            content: toolResultMessage(call.name, { denied: true, reason }),
+            ...(call.id ? { callId: call.id } : {}),
+          });
+          yield { kind: "blocked", tool: call.name, reason: `blocked by ${mode} mode` };
+          continue;
+        }
+
+        /**
+         * PreToolUse HOOKS — a user-authored veto, above the broker, below plan mode.
+         *
+         * Above the broker for the same reason plan mode is: `tuning.yes` lifts read-only tools
+         * straight past `confirm`, so a hook that only ran at a host's confirm seam would never
+         * see the majority of calls. Below plan mode because a mode deny is cheaper and needs no
+         * subprocess — there is no point spawning a shell to ask about a call already refused.
+         *
+         * The refusal is the SAME `{denied:true, tool, …, hint}` contract plan mode uses, so a
+         * model sees one refusal shape whichever layer said no.
+         */
+        const hookDenial = await runPreToolUseHooks(tuning.hooks, tuning.hookRunner, call, {
+          onError: onHookError,
         });
-        if (verdict === "abort") {
-          // It repeated after being told. Ending the turn is the only remaining move that
-          // does not burn the user's budget on a model that is not listening.
-          repeatAbort = true;
+        // Fail-soft diagnostics: a broken hook is reported ONCE per turn as a status line, never
+        // as an error that ends anything. Drained here (not inside the catch) so the note lands
+        // in stream order next to the call it concerns.
+        while (hookErrors.length > 0) {
+          yield { kind: "status", text: `hook: ${hookErrors.shift()}` };
+        }
+        // The human may have cancelled WHILE the hook subprocess ran — a hook that took a moment
+        // to answer (or a slow/hung one that timed out) must not have its answer, allow or deny,
+        // still spend into a tool run the user already asked to stop.
+        if (aborted()) {
+          cancelled = true;
+          const reason = "cancelled — the turn was interrupted";
+          toolMessages.push({
+            content: toolResultMessage(call.name, { denied: true, reason }),
+            ...(call.id ? { callId: call.id } : {}),
+          });
+          yield { kind: "blocked", tool: call.name, reason };
+          break;
+        }
+        if (hookDenial) {
+          const reason = JSON.stringify(hookRefusal(call.name, hookDenial.command));
+          toolMessages.push({
+            content: toolResultMessage(call.name, { denied: true, reason }),
+            ...(call.id ? { callId: call.id } : {}),
+          });
           yield {
             kind: "blocked",
             tool: call.name,
-            reason: `${call.name} repeated identically after being refused — ending the turn`,
+            reason: `blocked by hook: ${hookDenial.command}`,
           };
-          break;
+          continue;
         }
-        continue;
-      }
 
-      /**
-       * PERMISSION MODE (plan) — a hard DENY above the broker, below the repeat guard.
-       *
-       * Placed here on purpose: above the broker so the refusal cannot be reached by any
-       * auto-approve path (`tuning.yes` lifts read-only tools straight past `confirm`, so a
-       * check living only in a host's confirm seam never sees them), and below the repeat
-       * guard so a model that keeps re-proposing the same refused mutation still gets told to
-       * stop rather than looping on a polite "no".
-       *
-       * The refusal rides the CLI-032 tool-result channel as the structured `planModeRefusal`
-       * object, which is the SAME shape the TUI's confirm seam already returns — so a model
-       * sees one refusal contract whichever surface denied it, and can re-plan from it.
-       */
-      const mode = tuning.permissionMode;
-      if (mode && decideToolForMode(mode, tool.annotations) === "deny") {
-        const reason = JSON.stringify(planModeRefusal(call.name));
-        yield { kind: "blocked", tool: call.name, reason: `blocked by ${mode} mode` };
-        toolMessages.push({
-          content: toolResultMessage(call.name, { denied: true, reason }),
-          ...(call.id ? { callId: call.id } : {}),
+        // §4.3 broker: read-only + tuning.yes is the only auto path; destructive always confirms.
+        const decision = brokerDecision({
+          ref: call.name,
+          annotations: tool.annotations,
+          grant: { ref: call.name, autoApprove: tuning.yes },
         });
-        continue;
-      }
-
-      /**
-       * PreToolUse HOOKS — a user-authored veto, above the broker, below plan mode.
-       *
-       * Above the broker for the same reason plan mode is: `tuning.yes` lifts read-only tools
-       * straight past `confirm`, so a hook that only ran at a host's confirm seam would never
-       * see the majority of calls. Below plan mode because a mode deny is cheaper and needs no
-       * subprocess — there is no point spawning a shell to ask about a call already refused.
-       *
-       * The refusal is the SAME `{denied:true, tool, …, hint}` contract plan mode uses, so a
-       * model sees one refusal shape whichever layer said no.
-       */
-      const hookDenial = await runPreToolUseHooks(tuning.hooks, tuning.hookRunner, call, {
-        onError: onHookError,
-      });
-      // Fail-soft diagnostics: a broken hook is reported ONCE per turn as a status line, never
-      // as an error that ends anything. Drained here (not inside the catch) so the note lands
-      // in stream order next to the call it concerns.
-      while (hookErrors.length > 0) {
-        yield { kind: "status", text: `hook: ${hookErrors.shift()}` };
-      }
-      if (hookDenial) {
-        const reason = JSON.stringify(hookRefusal(call.name, hookDenial.command));
-        yield {
-          kind: "blocked",
-          tool: call.name,
-          reason: `blocked by hook: ${hookDenial.command}`,
-        };
-        toolMessages.push({
-          content: toolResultMessage(call.name, { denied: true, reason }),
-          ...(call.id ? { callId: call.id } : {}),
-        });
-        continue;
-      }
-
-      // §4.3 broker: read-only + tuning.yes is the only auto path; destructive always confirms.
-      const decision = brokerDecision({
-        ref: call.name,
-        annotations: tool.annotations,
-        grant: { ref: call.name, autoApprove: tuning.yes },
-      });
-      if (decision.action === "block") {
-        yield { kind: "blocked", tool: call.name, reason: decision.reason };
-        toolMessages.push({
-          content: toolResultMessage(call.name, { blocked: true, reason: decision.reason }),
-          ...(call.id ? { callId: call.id } : {}),
-        });
-        continue;
-      }
-      if (decision.action === "confirm") {
-        const answer: ConfirmResult = deps.confirm ? await deps.confirm(call) : false;
-        const approved = typeof answer === "boolean" ? answer : answer.approved;
-        if (!approved) {
-          const reason = typeof answer === "object" ? answer.reason : undefined;
-          if (reason) {
-            // a REASONED rejection → a normal tool_result so the model re-plans (CLI-010).
-            yield { kind: "tool_result", call, ok: false, summary: `user rejected: ${reason}` };
-          } else {
-            yield { kind: "blocked", tool: call.name, reason: "declined at confirmation" };
+        if (decision.action === "block") {
+          toolMessages.push({
+            content: toolResultMessage(call.name, { blocked: true, reason: decision.reason }),
+            ...(call.id ? { callId: call.id } : {}),
+          });
+          yield { kind: "blocked", tool: call.name, reason: decision.reason };
+          continue;
+        }
+        if (decision.action === "confirm") {
+          const answer: ConfirmResult = deps.confirm ? await deps.confirm(call) : false;
+          // The human may have hit Ctrl-C WHILE this confirmation was pending — a host whose
+          // confirm seam doesn't itself race the abort signal (the CLI's readline prompt did
+          // not) can still resolve with a stale `true` a moment later. That must never run the
+          // tool: an abort landing here overrides whatever the answer says, approved or not.
+          if (aborted()) {
+            cancelled = true;
+            const reason = "cancelled — the turn was interrupted";
+            toolMessages.push({
+              content: toolResultMessage(call.name, { denied: true, reason }),
+              ...(call.id ? { callId: call.id } : {}),
+            });
+            yield { kind: "blocked", tool: call.name, reason };
+            break;
           }
-          // EITHER way the decline re-enters the thread so the model re-plans (CLI-032).
+          const approved = typeof answer === "boolean" ? answer : answer.approved;
+          if (!approved) {
+            const reason = typeof answer === "object" ? answer.reason : undefined;
+            // EITHER way the decline re-enters the thread so the model re-plans (CLI-032).
+            toolMessages.push({
+              content: toolResultMessage(call.name, {
+                denied: true,
+                reason: reason ?? "declined at confirmation",
+              }),
+              ...(call.id ? { callId: call.id } : {}),
+            });
+            if (reason) {
+              // a REASONED rejection → a normal tool_result so the model re-plans (CLI-010).
+              yield { kind: "tool_result", call, ok: false, summary: `user rejected: ${reason}` };
+            } else {
+              yield { kind: "blocked", tool: call.name, reason: "declined at confirmation" };
+            }
+            continue;
+          }
+        }
+
+        yield { kind: "tool_use", call };
+        let outcome: ToolOutcome;
+        try {
+          outcome = await deps.runTool(tool, withDryRun(stripForce(call.args), tuning.dryRun));
+        } catch (e) {
+          const summary = e instanceof Error ? e.message : String(e);
+          // PostToolUse still fires on a THROWN tool. An observer that only ever sees the happy
+          // path is exactly the wrong shape for the audit/alerting these hooks exist for.
+          pendingPostHooks.push(
+            ...firePostToolUseHooks(
+              tuning.hooks,
+              tuning.hookRunner,
+              call,
+              { ok: false, summary },
+              { onError: onHookError },
+            ),
+          );
           toolMessages.push({
-            content: toolResultMessage(call.name, {
-              denied: true,
-              reason: reason ?? "declined at confirmation",
-            }),
+            content: toolResultMessage(call.name, { ok: false, summary }),
             ...(call.id ? { callId: call.id } : {}),
           });
+          yield { kind: "tool_result", call, ok: false, summary };
           continue;
         }
-      }
 
-      yield { kind: "tool_use", call };
-      let outcome: ToolOutcome;
-      try {
-        outcome = await deps.runTool(tool, withDryRun(stripForce(call.args), tuning.dryRun));
-      } catch (e) {
-        const summary = e instanceof Error ? e.message : String(e);
-        // PostToolUse still fires on a THROWN tool. An observer that only ever sees the happy
-        // path is exactly the wrong shape for the audit/alerting these hooks exist for.
-        firePostToolUseHooks(
-          tuning.hooks,
-          tuning.hookRunner,
-          call,
-          { ok: false, summary },
-          { onError: onHookError },
+        /**
+         * PostToolUse — FIRE AND FORGET, deliberately not awaited HERE.
+         *
+         * A post hook is an observer. Awaiting it before the NEXT tool call would put a user's
+         * shell script on the critical path of every one of them, which is how "the agent
+         * randomly hangs" bugs are made. Its exit code is ignored: the call already happened,
+         * there is nothing left to deny. The promise is still collected in `pendingPostHooks`,
+         * so the turn waits for it (and reports any failure) before it ends — see that field.
+         */
+        pendingPostHooks.push(
+          ...firePostToolUseHooks(tuning.hooks, tuning.hookRunner, call, outcome, {
+            onError: onHookError,
+          }),
         );
-        yield { kind: "tool_result", call, ok: false, summary };
+
+        if (outcome.verdict) {
+          yield {
+            kind: "verdict",
+            tool: call.name,
+            verdict: outcome.verdict.verdict,
+            riskScore: outcome.verdict.riskScore,
+          };
+          // gate-first: a BLOCK aborts unless the human turned the gate off; a scan
+          // failure (error) aborts under enforce (fail-closed).
+          if (outcome.verdict.verdict === "block" && tuning.gateMode !== "off") {
+            const reason = "nemesis gate BLOCK — aborted";
+            toolMessages.push({
+              content: toolResultMessage(call.name, { blocked: true, reason }),
+              ...(call.id ? { callId: call.id } : {}),
+            });
+            yield { kind: "blocked", tool: call.name, reason };
+            continue;
+          }
+          if (outcome.verdict.verdict === "error" && tuning.gateMode === "enforce") {
+            const reason = "scan failed (fail-closed) — aborted";
+            toolMessages.push({
+              content: toolResultMessage(call.name, { blocked: true, reason }),
+              ...(call.id ? { callId: call.id } : {}),
+            });
+            yield { kind: "blocked", tool: call.name, reason };
+            continue;
+          }
+        }
+
         toolMessages.push({
-          content: toolResultMessage(call.name, { ok: false, summary }),
+          content: toolResultMessage(call.name, {
+            ok: outcome.ok,
+            summary: outcome.summary,
+            data: outcome.data,
+          }),
           ...(call.id ? { callId: call.id } : {}),
         });
-        continue;
-      }
-
-      /**
-       * PostToolUse — FIRE AND FORGET, deliberately not awaited.
-       *
-       * A post hook is an observer. Awaiting it would put a user's shell script on the critical
-       * path of every tool call, which is how "the agent randomly hangs" bugs are made. Its exit
-       * code is ignored: the call already happened, there is nothing left to deny.
-       */
-      firePostToolUseHooks(tuning.hooks, tuning.hookRunner, call, outcome, {
-        onError: onHookError,
-      });
-
-      if (outcome.verdict) {
         yield {
-          kind: "verdict",
-          tool: call.name,
-          verdict: outcome.verdict.verdict,
-          riskScore: outcome.verdict.riskScore,
-        };
-        // gate-first: a BLOCK aborts unless the human turned the gate off; a scan
-        // failure (error) aborts under enforce (fail-closed).
-        if (outcome.verdict.verdict === "block" && tuning.gateMode !== "off") {
-          const reason = "nemesis gate BLOCK — aborted";
-          yield { kind: "blocked", tool: call.name, reason };
-          toolMessages.push({
-            content: toolResultMessage(call.name, { blocked: true, reason }),
-            ...(call.id ? { callId: call.id } : {}),
-          });
-          continue;
-        }
-        if (outcome.verdict.verdict === "error" && tuning.gateMode === "enforce") {
-          const reason = "scan failed (fail-closed) — aborted";
-          yield { kind: "blocked", tool: call.name, reason };
-          toolMessages.push({
-            content: toolResultMessage(call.name, { blocked: true, reason }),
-            ...(call.id ? { callId: call.id } : {}),
-          });
-          continue;
-        }
-      }
-
-      yield {
-        kind: "tool_result",
-        call,
-        ok: outcome.ok,
-        summary: outcome.summary,
-        data: outcome.data,
-      };
-      toolMessages.push({
-        content: toolResultMessage(call.name, {
+          kind: "tool_result",
+          call,
           ok: outcome.ok,
           summary: outcome.summary,
           data: outcome.data,
-        }),
-        ...(call.id ? { callId: call.id } : {}),
-      });
-    }
-
-    // A tool RAN this round, so its result belongs in the thread — even if the stream also
-    // carried `final`. The two are not in conflict as far as this loop is concerned: `final`
-    // says the model stopped generating, and a tool result says there is something new for it
-    // to read. Checking `sawFinal` BEFORE this fold is what made the CLI single-round: its
-    // transport ends every turn with an unconditional `final`, so tools ran, their output was
-    // dropped on the floor, and the model was never asked what it made of them.
-    if (toolMessages.length > 0) {
-      // The assistant turn is its prose PLUS the calls it made. Folding only the prose left a
-      // model that spoke purely in tool calls with no assistant message at all, so the next
-      // round could not tell what it had asked for — see `renderToolCallRecord`.
-      const narration = [assistantText.trim(), ...roundCalls.map(renderToolCallRecord)]
-        .filter(Boolean)
-        .join("\n");
-      // The structured pairing rides ALONGSIDE the text, never instead of it: a native
-      // transport rebuilds `assistant.tool_calls` + `tool_call_id` from it, and a text
-      // transport ignores it and reads `content`, which says the same thing in prose.
-      const identified = roundCalls.filter(
-        (c): c is ToolCall & { id: string } => typeof c.id === "string" && c.id !== "",
-      );
-      if (narration) {
-        thread.messages.push({
-          role: "assistant",
-          content: narration,
-          ...(identified.length > 0
-            ? {
-                toolCalls: identified.map((c) => ({ id: c.id, name: c.name, args: c.args })),
-              }
-            : {}),
-        });
+        };
       }
-      for (const tm of toolMessages) {
-        thread.messages.push({
-          role: "tool",
-          content: tm.content,
-          ...(tm.callId ? { toolCallId: tm.callId } : {}),
-        });
+    } finally {
+      // A tool RAN this round, so its result belongs in the thread — even if the stream also
+      // carried `final`. The two are not in conflict as far as this loop is concerned: `final`
+      // says the model stopped generating, and a tool result says there is something new for it
+      // to read. Checking `sawFinal` BEFORE this fold is what made the CLI single-round: its
+      // transport ends every turn with an unconditional `final`, so tools ran, their output was
+      // dropped on the floor, and the model was never asked what it made of them.
+      //
+      // Runs on every exit from the loop above — normal completion, any `break` (final/cancel/
+      // repeat-abort), AND a `.return()`-driven teardown — so whatever was accumulated by the
+      // time this round stopped is never lost, even if the round did not finish normally.
+      if (toolMessages.length > 0) {
+        // The assistant turn is its prose PLUS the calls it made. Folding only the prose left a
+        // model that spoke purely in tool calls with no assistant message at all, so the next
+        // round could not tell what it had asked for — see `renderToolCallRecord`.
+        const narration = [assistantText.trim(), ...roundCalls.map(renderToolCallRecord)]
+          .filter(Boolean)
+          .join("\n");
+        // The structured pairing rides ALONGSIDE the text, never instead of it: a native
+        // transport rebuilds `assistant.tool_calls` + `tool_call_id` from it, and a text
+        // transport ignores it and reads `content`, which says the same thing in prose.
+        const identified = roundCalls.filter(
+          (c): c is ToolCall & { id: string } => typeof c.id === "string" && c.id !== "",
+        );
+        if (narration) {
+          thread.messages.push({
+            role: "assistant",
+            content: narration,
+            ...(identified.length > 0
+              ? {
+                  toolCalls: identified.map((c) => ({ id: c.id, name: c.name, args: c.args })),
+                }
+              : {}),
+          });
+        }
+        for (const tm of toolMessages) {
+          thread.messages.push({
+            role: "tool",
+            content: tm.content,
+            ...(tm.callId ? { toolCallId: tm.callId } : {}),
+          });
+        }
       }
     }
     // The repeat guard gave up: the model reissued an identical call after being refused, so
@@ -726,6 +790,13 @@ export async function* runAgentTurn(
     }
   }
 
+  // Give every fire-and-forget PostToolUse hook a last chance to settle and report through
+  // `onHookError` before the turn is declared done — see `pendingPostHooks`. These promises
+  // never reject (hooks.ts swallows every failure into `onError`), so this never throws.
+  await Promise.all(pendingPostHooks);
+  while (hookErrors.length > 0) {
+    yield { kind: "status", text: `hook: ${hookErrors.shift()}` };
+  }
   yield { kind: "done" };
 }
 

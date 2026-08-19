@@ -11,8 +11,8 @@ import { test } from "node:test";
 
 import type { ModelRef } from "../agents/types.js";
 import type { AgentEvent } from "./events.js";
-import type { AgentTuning } from "./loop.js";
-import { defaultTuning } from "./loop.js";
+import type { AgentTuning, LLMClient, LlmTurn, Thread, ToolRunner } from "./loop.js";
+import { defaultTuning, runAgentTurn } from "./loop.js";
 import {
   DEFAULT_CHILD_ROUNDS,
   SPAWN_AGENT_TOOL,
@@ -76,6 +76,75 @@ test("the spawn budget is per TURN, not per parent", () => {
 test("a refusal tells the model what to do instead", () => {
   const d = canSpawn(initialBudget({ depth: 1 }));
   if (!d.allowed) assert.match(d.reason, /do this part of the work yourself/);
+});
+
+async function collect(it: AsyncIterable<AgentEvent>): Promise<AgentEvent[]> {
+  const out: AgentEvent[] = [];
+  for await (const e of it) out.push(e);
+  return out;
+}
+
+test("depth is a REAL backstop: a nested spawn is refused even if a child's tools still exposed spawn_agent", async () => {
+  // Mirrors the CLI's and desktop's `spawnSubagent`/`spawn` wiring: ONE shared budget across
+  // the whole tree, `depth` incremented for exactly the duration of a live child call and
+  // decremented once it returns (see agent-runtime.ts's `spawnSubagent` and run-controller.ts's
+  // `spawn`). `childTuning` denies `spawn_agent` in practice, which is what actually stops
+  // recursion today — this proves the guard still holds even if that single deny-list entry
+  // were ever bypassed or refactored away, by deliberately NOT applying `childTuning` here.
+  const budget = initialBudget();
+  const refusals: string[] = [];
+  let calls = 0;
+  const llm: LLMClient = {
+    turn(): AsyncIterable<LlmTurn> {
+      calls += 1;
+      const n = calls;
+      return (async function* () {
+        // the root's first call, AND the child's first call, both try to spawn again.
+        if (n <= 2) {
+          yield {
+            kind: "tool_call",
+            call: { name: "spawn_agent", args: { task: "nested", role: "explore" } },
+          };
+          return;
+        }
+        yield { kind: "final", text: "done" };
+      })();
+    },
+  };
+  const runTool: ToolRunner = async (_tool, args) => {
+    const decision = canSpawn(budget);
+    if (!decision.allowed) {
+      refusals.push(decision.reason);
+      return { ok: false, summary: decision.reason };
+    }
+    budget.spawned += 1;
+    budget.depth += 1;
+    try {
+      const childThread: Thread = { messages: [{ role: "user", content: String(args.task) }] };
+      const events = await collect(
+        runAgentTurn(childThread, parent(), { llm, runTool, confirm: () => true }),
+      );
+      const text = events
+        .filter((e) => e.kind === "text")
+        .map((e) => (e.kind === "text" ? e.text : ""))
+        .join("");
+      return { ok: true, summary: text || "(no answer)" };
+    } finally {
+      budget.depth -= 1;
+    }
+  };
+
+  await collect(
+    runAgentTurn({ messages: [{ role: "user", content: "go" }] }, parent(), {
+      llm,
+      runTool,
+      confirm: () => true,
+    }),
+  );
+
+  assert.equal(refusals.length, 1, "the nested spawn should have been refused exactly once");
+  assert.match(refusals[0] ?? "", /cannot spawn another/);
+  assert.equal(budget.depth, 0, "depth must unwind back to 0 once every spawn has returned");
 });
 
 /* ── privilege can only narrow ──────────────────────────────────────────────*/

@@ -118,6 +118,48 @@ test("a cancel MID-ROUND stops the remaining tool calls in that same round", asy
   );
 });
 
+test("an external consumer that stops iterating MID-ROUND still gets completed work folded into the thread", async () => {
+  // Mirrors a host that notices its OWN abort signal and `break`s its `for await` over
+  // `runAgentTurn` — which the language runtime turns into a `.return()` call on this
+  // generator. Before the round's fold moved into a `finally`, a `.return()` landing between
+  // two tool calls in the SAME round meant the first call's already-succeeded, already-shown
+  // result never reached `thread.messages` at all — the round vanished from the model's memory
+  // even though its effect had already happened.
+  const llm: LLMClient = {
+    turn(): AsyncIterable<LlmTurn> {
+      return (async function* () {
+        yield { kind: "tool_call", call: call("list_dir", { path: "a" }, "1") };
+        yield { kind: "tool_call", call: call("list_dir", { path: "b" }, "2") };
+      })();
+    },
+  };
+  const runTool = async (_t: ToolDef, args: Record<string, unknown>): Promise<ToolOutcome> => ({
+    ok: true,
+    summary: `listed ${args.path}`,
+  });
+
+  const thread: Thread = { messages: [{ role: "user", content: "go" }] };
+  const it = runAgentTurn(thread, tuningFor(), { llm, runTool })[Symbol.asyncIterator]();
+  for (;;) {
+    const { value, done } = await it.next();
+    if (done) break;
+    const e = value as { kind: string; call?: { id?: string } };
+    if (e.kind === "tool_result" && e.call?.id === "1") {
+      // the host's own consumer stops here — BEFORE the round's second call is ever reached.
+      await it.return?.();
+      break;
+    }
+  }
+
+  const toolMsgs = thread.messages.filter((m) => m.role === "tool");
+  assert.equal(
+    toolMsgs.length,
+    1,
+    "the first call's already-completed result never reached the thread",
+  );
+  assert.match(toolMsgs[0]?.content ?? "", /listed a/);
+});
+
 test("an ALREADY-aborted signal runs nothing at all", async () => {
   const ac = new AbortController();
   ac.abort();

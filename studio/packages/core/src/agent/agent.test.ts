@@ -825,6 +825,86 @@ test("loop: PostToolUse also fires when the tool runner THREW (observers need th
   assert.match(seen[0]?.stdin ?? "", /engine down/);
 });
 
+test("loop: an abort landing WHILE confirm is pending is honored even if the answer says yes", async () => {
+  // A host whose confirm seam does not itself race the abort signal (the CLI's readline
+  // prompt did not): the user hits Ctrl-C, then a stale keystroke still resolves the prompt
+  // with an approval a moment later. That must never run the tool.
+  const ac = new AbortController();
+  const ran: string[] = [];
+  const events = await collect(
+    runAgentTurn({ messages: [] }, defaultTuning(MODEL), {
+      llm: scriptedLlm([
+        { kind: "tool_call", call: { name: "prometheus_install", args: { name: "x" } } },
+      ]),
+      runTool: async (t) => {
+        ran.push(t.name);
+        return { ok: true, summary: "" };
+      },
+      confirm: () => {
+        ac.abort();
+        return true;
+      },
+      signal: ac.signal,
+    }),
+  );
+  assert.deepEqual(ran, [], "the tool ran despite the abort landing before its confirm resolved");
+  assert.ok(events.some((e) => e.kind === "blocked" && /cancelled/i.test(e.reason ?? "")));
+});
+
+test("loop: an abort landing WHILE a PreToolUse hook runs is honored even if the hook approves", async () => {
+  const ac = new AbortController();
+  const ran: string[] = [];
+  const tuning: AgentTuning = {
+    ...defaultTuning(MODEL),
+    yes: true,
+    hooks: [{ event: "PreToolUse", command: "guard.sh" }],
+    hookRunner: async () => {
+      ac.abort();
+      return { exitCode: 0, stdout: "", stderr: "" };
+    },
+  };
+  const events = await collect(
+    runAgentTurn({ messages: [] }, tuning, {
+      llm: scriptedLlm([{ kind: "tool_call", call: { name: "prometheus_list", args: {} } }]),
+      runTool: async (t) => {
+        ran.push(t.name);
+        return { ok: true, summary: "" };
+      },
+      signal: ac.signal,
+    }),
+  );
+  assert.deepEqual(ran, [], "the tool ran despite the abort landing during its PreToolUse hook");
+  assert.ok(events.some((e) => e.kind === "blocked" && /cancelled/i.test(e.reason ?? "")));
+});
+
+test("loop: a PostToolUse failure on the turn's LAST call is still reported, not silently dropped", async () => {
+  // There is no NEXT PreToolUse hook run left to drain the error queue through — it has to be
+  // flushed at the very end of the turn instead, before `done`.
+  const tuning: AgentTuning = {
+    ...defaultTuning(MODEL),
+    yes: true,
+    hooks: [{ event: "PostToolUse", command: "broken.sh" }],
+    hookRunner: async () => {
+      throw new Error("spawn ENOENT");
+    },
+  };
+  const events = await collect(
+    runAgentTurn({ messages: [] }, tuning, {
+      llm: scriptedLlm([
+        { kind: "tool_call", call: { name: "prometheus_list", args: {} } },
+        { kind: "final", text: "done" },
+      ]),
+      runTool: async () => ({ ok: true, summary: "listed" }),
+    }),
+  );
+  const doneIdx = events.findIndex((e) => e.kind === "done");
+  const hookStatusIdx = events.findIndex(
+    (e) => e.kind === "status" && /hook: PostToolUse hook failed to run/.test(e.text),
+  );
+  assert.notEqual(hookStatusIdx, -1, "the PostToolUse failure on the last call was never reported");
+  assert.ok(hookStatusIdx < doneIdx, "the hook failure must land before the turn is done");
+});
+
 test("loop: no hooks configured ⇒ the runner is never consulted (zero-config costs nothing)", async () => {
   const { runner, seen } = hookRunnerStub({});
   const tuning: AgentTuning = { ...defaultTuning(MODEL), yes: true, hookRunner: runner };
