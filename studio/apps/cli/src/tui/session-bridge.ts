@@ -13,6 +13,7 @@
 import {
   repl,
   type AiEndpoint,
+  DEFAULT_CONTEXT_WINDOW,
   agent,
   ai,
   cliProfiles,
@@ -443,9 +444,20 @@ export async function createSessionBridge(deps: BridgeDeps): Promise<SessionBrid
     if (endpoint.locality === "local" && endpoint.model) {
       void probeContextWindow(endpoint.baseUrl, endpoint.model, fetch as never)
         .then((r) => {
-          if (r.source !== "default" && r.contextWindow !== endpoint?.contextWindow) {
-            endpoint = { ...(endpoint as AiEndpoint), contextWindow: r.contextWindow };
+          if (r.source !== "default") {
+            if (r.contextWindow !== endpoint?.contextWindow) {
+              endpoint = { ...(endpoint as AiEndpoint), contextWindow: r.contextWindow };
+            }
+            return;
           }
+          // `source:"default"` means the probe FAILED (unreachable runner, unrecognised
+          // shape, wrong runner) — not that 8192 is this model's real window. Silently
+          // keeping the floor is indistinguishable, to the user, from a real 8k model: a
+          // 128k+ model whose probe failed would compact as though it were about to
+          // overflow for the whole session with no visible sign anything went wrong.
+          deps.write(
+            `  ! could not measure ${endpoint?.model}'s real context window — using the ${DEFAULT_CONTEXT_WINDOW}-token floor (context budgeting may be too conservative)`,
+          );
         })
         .catch(() => {
           /* fail-soft: the documented floor stands */

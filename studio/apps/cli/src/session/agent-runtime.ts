@@ -70,7 +70,7 @@ import {
 } from "@prometheus/core";
 // The shared model-request path: one retrying POST, one failure classification. Every
 // transport in this repo made a single attempt before this.
-const { AiHttpError, describeAiFailure, fetchModelWithRetry } = ai;
+const { AiHttpError, describeAiFailure, endpointBreaker, fetchModelWithRetry } = ai;
 import type {
   AiClient,
   AiClientDeps,
@@ -1272,14 +1272,12 @@ async function* toolTurn(
     resolveKey?: (ref: string) => Promise<string>;
     onUsage?: (u: SseTokenUsage) => void;
     /**
-     * The user's `prompt-caching` token toggle.
+     * The user's `prompt-caching` token toggle, already resolved to a plain boolean.
      *
-     * `shouldRequestPromptCache(toggles, runtime)` was written to combine this switch with the
-     * provider-support check and had ZERO callers; this transport called `applyPromptCache`
-     * unconditionally instead. So turning prompt caching OFF changed nothing on the path
-     * nearly every agentic turn takes — `cache_control` blocks kept going out — and
-     * `prometheus tokens report` went on pricing the savings of a technique the user had
-     * disabled. Undefined ⇒ on, which is the previous behaviour.
+     * Combined with the provider-support check via `ai.shouldRequestPromptCache` at the actual
+     * `applyPromptCache` call site below — this transport used to call `applyPromptCache`
+     * unconditionally instead, so turning prompt caching OFF changed nothing on the path nearly
+     * every agentic turn takes. Undefined ⇒ on, which is the previous behaviour.
      */
     promptCache?: boolean;
   } = {},
@@ -1298,7 +1296,8 @@ async function* toolTurn(
    * drifted four ways. That is why Anthropic and Gemini could not run tools natively: not a
    * missing capability, just a hand-rolled request that only one provider understood.
    */
-  const wire = ai.selectWire(ai.runtimeFromBaseUrl(endpoint.baseUrl, endpoint.locality));
+  const runtime = ai.runtimeFromBaseUrl(endpoint.baseUrl, endpoint.locality);
+  const wire = ai.selectWire(runtime);
   const url = wire.url(endpoint.baseUrl, model);
   // accumulate tool-call fragments by their stream index (args arrive in pieces).
   const calls = new Map<number, ToolCallAccum>();
@@ -1337,6 +1336,10 @@ async function* toolTurn(
     hardTimer = setTimeout(() => ac.abort(), HARD_TIMEOUT_MS);
     return ac.signal;
   };
+  // Hoisted so the `finally` below can always release it — declared once per call (unlike
+  // `ac`), which is fine: the body is only ever read once per turn, retries happen inside
+  // `fetchModelWithRetry` before this reader is ever created.
+  let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
   try {
     yield { kind: "status", text: `→ ${model}: sending request…` };
     const headers: Record<string, string> = {
@@ -1378,12 +1381,12 @@ async function* toolTurn(
             // body is built, because the cache breakpoint goes on the stable system prefix
             // and the format decides where that prefix ends up. A no-op on every provider
             // that caches on its own (or not at all) — see `ai/prompt-cache.ts`.
-            (aux.promptCache === false
-              ? toWireMessages(applyEffortToMessages(messages, effort))
-              : ai.applyPromptCache(
+            (ai.shouldRequestPromptCache(aux.promptCache, runtime)
+              ? ai.applyPromptCache(
                   toWireMessages(applyEffortToMessages(messages, effort)),
-                  ai.cacheDialectFor(ai.runtimeFromBaseUrl(endpoint.baseUrl, endpoint.locality)),
-                )) as ai.WireMessage[],
+                  ai.cacheDialectFor(runtime),
+                )
+              : toWireMessages(applyEffortToMessages(messages, effort))) as ai.WireMessage[],
             {
               model,
               tools: toWireTools(tools),
@@ -1440,8 +1443,13 @@ async function* toolTurn(
      * All three formats carry tools now, so this is a backstop rather than the routine path
      * it used to be — but it stays, because it is the honest behaviour for any format added
      * later that cannot, and because `negotiateTransport` consults the same flag when picking
-     * the opening move. Reusing `rejectedForTools` routes the next turn through core's
-     * client, which speaks the right wire.
+     * the opening move.
+     *
+     * NO `final` here: the caller (`makeLlmClient`'s `turn()`) sees `rejectedForTools` and
+     * retries THIS SAME turn in the text protocol before yielding its own `final`. Yielding
+     * `final` from here used to end the turn immediately — the external consumer breaks its
+     * `for await` the moment it sees one — so the retry the status line promised never ran and
+     * the user's message was silently eaten.
      */
     if (!wire.supportsTools) {
       observed.rejectedForTools = true;
@@ -1449,7 +1457,6 @@ async function* toolTurn(
         kind: "status",
         text: `${model} speaks a protocol without native tool calls — using the text protocol`,
       };
-      yield { kind: "final" };
       return;
     }
 
@@ -1462,6 +1469,9 @@ async function* toolTurn(
         init: { method: "POST", headers, body: requestBody },
         doFetch,
         signalFor: armAttempt,
+        // A dead local server (down, still loading, wrong port) fails FAST after a run of
+        // exhausted turns instead of paying the full retry schedule on every subsequent round.
+        breaker: endpointBreaker(endpoint.id),
         ...(signal ? { userSignal: signal } : {}),
         onRetry: (info: { attempt: number; delayMs: number; reason: string }) =>
           retryNotes.push(
@@ -1471,17 +1481,17 @@ async function* toolTurn(
     } catch (err) {
       for (const n of retryNotes) yield { kind: "status", text: n };
       if (err instanceof AiHttpError) {
-        // Was the request refused BECAUSE it carried tools? If so the caller demotes this
-        // endpoint to the text protocol permanently, and the next turn works. A generic 4xx
-        // (context overflow, bad key) must not demote it — that would strand a perfectly
-        // capable model on the weaker transport for the rest of the session.
+        // Was the request refused BECAUSE it carried tools? If so the caller retries THIS turn
+        // in the text protocol (see the comment on the `!wire.supportsTools` branch above for
+        // why this must NOT yield `final`) and demotes the endpoint for every turn after. A
+        // generic 4xx (context overflow, bad key) must not demote it — that would strand a
+        // perfectly capable model on the weaker transport for the rest of the session.
         if (agent.protocol.looksLikeToolsRejection(err.status, err.detail)) {
           observed.rejectedForTools = true;
           yield {
             kind: "status",
             text: `${model} rejected native tool calls — retrying in text protocol`,
           };
-          yield { kind: "final" };
           return;
         }
         // The body is included now. It used to be read and discarded, so a 400 that said
@@ -1498,7 +1508,7 @@ async function* toolTurn(
       yield { kind: "final" };
       return;
     }
-    const reader = res.body.getReader();
+    reader = res.body.getReader();
     const decoder = new TextDecoder();
     let buf = "";
     let done = false;
@@ -1585,7 +1595,11 @@ async function* toolTurn(
           calls.set(idx, acc);
         }
       }
-      pendingRead = reader.read(); // queue the next chunk
+      // Only queue the next read if we're still going — `done` may have just been set by an
+      // `ev.done`/`ev.error` frame above, and queuing a read here left it dangling: the outer
+      // `while (!done)` exits before anyone awaits it, and the reader's lock never gets
+      // released either (nothing downstream ever cancels it).
+      if (!done) pendingRead = reader.read();
     }
     yield* pumpText(textScanner.end(), textCalls);
     // emit each fully-reassembled tool call (ordered by stream index).
@@ -1642,6 +1656,10 @@ async function* toolTurn(
   } finally {
     clearTimeout(hardTimer);
     if (signal) signal.removeEventListener("abort", onUserAbort);
+    // Runs on EVERY exit — normal completion, the abort break, or an error thrown above —
+    // so the reader's lock and the underlying connection are never left dangling. `cancel()`
+    // on an already-closed/errored reader is a documented no-op, not a throw.
+    await reader?.cancel().catch(() => {});
   }
   // `final` ONLY when nothing was called. This yielded unconditionally, which — combined with
   // the loop's old `if (sawFinal || …) break` — meant every native tool turn was single-round:
@@ -1769,7 +1787,10 @@ export function makeLlmClient(endpoint: AiEndpoint, deps: LlmClientDeps = {}): L
       const wireCarriesTools = ai.selectWire(
         ai.runtimeFromBaseUrl(endpoint.baseUrl, endpoint.locality),
       ).supportsTools;
-      const transport = agent.protocol.negotiateTransport({
+      // `let`, not `const`: a native attempt that gets rejected for tools falls through to a
+      // same-turn text retry below, which reassigns this so the text-transport code (and the
+      // capability observation it records) reflects what actually happened this turn.
+      let transport = agent.protocol.negotiateTransport({
         toolCount: tools.length,
         declaredNative: endpoint.supportsTools && wireCarriesTools,
         observed: capabilityState,
@@ -1805,11 +1826,12 @@ export function makeLlmClient(endpoint: AiEndpoint, deps: LlmClientDeps = {}): L
       // The preamble is merged into the OUTGOING system message only — never into the
       // persisted thread. It is derived state (it changes with the transport and with the
       // exposed tool set), so storing it would pin one turn's answer into the transcript.
-      const messages = withPreamble(
+      let messages = withPreamble(
         [...body.filter((m) => m.role === "system"), ...trimmed],
         tools,
         transport,
         endpoint.contextWindow,
+        capabilityState.textSyntaxCalls > 0,
       );
 
       if (transport === "native") {
@@ -1846,7 +1868,25 @@ export function makeLlmClient(endpoint: AiEndpoint, deps: LlmClientDeps = {}): L
           deps.onCapability?.(capabilityState);
           recordUsage(toolUsage, messages, "");
         }
-        return;
+        if (!observed.rejectedForTools) return;
+        /**
+         * The endpoint just proved (or, for a statically-known-incapable wire, confirmed) it
+         * cannot carry native tools THIS turn. `observeTurn` above already recorded the
+         * demotion for every turn after, but stopping here with no answer is exactly what
+         * silently ate the user's first message to a fresh local endpoint — see the comment
+         * on `wireCarriesTools` above. Retry the SAME turn in the text protocol rather than
+         * leaving them with nothing; `toolTurn` already told the user this was happening via
+         * its own status line, and it yielded no `final`, so we are still running normally
+         * here rather than via a `.return()`-driven teardown.
+         */
+        transport = "text";
+        messages = withPreamble(
+          [...body.filter((m) => m.role === "system"), ...trimmed],
+          tools,
+          transport,
+          endpoint.contextWindow,
+          capabilityState.textSyntaxCalls > 0,
+        );
       }
 
       // ── the TEXT transport (and the plain no-tools chat path) ──────────────────
@@ -1994,6 +2034,7 @@ function withPreamble(
   tools: ToolDef[],
   transport: agent.protocol.ToolTransport,
   contextWindow?: number,
+  demonstrated?: boolean,
 ): ThreadMsg[] {
   if (transport === "none" || tools.length === 0) return messages;
   const mode = agent.protocol.preambleModeFor(transport);
@@ -2001,7 +2042,11 @@ function withPreamble(
   // 8192 window, and with 45 tools that forces the degrade ladder down to bare signatures — so
   // the model never sees a single tool DESCRIPTION, which is the part that says which tool to
   // reach for. `probeContextWindow` measures the real number; this is what spends it.
-  const opts = { mode, ...(contextWindow ? { contextWindow } : {}) };
+  const opts = {
+    mode,
+    ...(contextWindow ? { contextWindow } : {}),
+    ...(demonstrated ? { demonstrated } : {}),
+  };
   const at = messages.findIndex((m) => m.role === "system");
   if (at === -1) {
     const { text } = agent.protocol.renderToolPreamble(tools, opts);
@@ -3274,6 +3319,14 @@ export async function runMessageTurn(
       : base;
     const label = persona ? `${persona.name} (${persona.scope})` : role;
     ctx.write(`  ⤷ ${label} sub-agent: ${task.slice(0, 80)}${task.length > 80 ? "…" : ""}`);
+    // `depth` tracks how many spawns are LIVE right now, not a running total — incremented for
+    // exactly the duration of this child's turn, and decremented once it returns, so a sibling
+    // spawned afterward at the top level still sees depth 0. `childTuning` already removes the
+    // `spawn_agent` tool from a child's catalog, which is what stops recursion in practice
+    // today — but `runTool` is the SAME closure at every level (the child reuses the parent's),
+    // so if that deny-list line were ever bypassed, `canSpawn` reading a real depth here is the
+    // backstop the budget's own field name has always promised.
+    spawnBudget.depth += 1;
     try {
       const out = await agent.runSubagent(
         (thread, tuning, d) => runAgentTurn(thread, tuning, d),
@@ -3287,6 +3340,8 @@ export async function runMessageTurn(
       return { ok: out.ok, summary: out.text };
     } catch (err) {
       return { ok: false, summary: `sub-agent failed: ${errMsg(err)}` };
+    } finally {
+      spawnBudget.depth -= 1;
     }
   };
   const runTool: ToolRunner =

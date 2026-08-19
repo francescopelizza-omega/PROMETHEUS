@@ -1970,6 +1970,126 @@ test("an UNRELATED 400 does not demote a capable endpoint", async () => {
   );
 });
 
+test("a NATIVE tools-rejection is retried in the SAME turn — the user's message isn't eaten", async () => {
+  // Before this fix, `toolTurn` yielded `final` the instant it saw the rejection, which the
+  // agent loop treats as "turn over" — the retry the status line promised only ever happened
+  // on the NEXT message the user typed. A fresh local endpoint's very first prompt got no
+  // answer at all.
+  let call = 0;
+  const fetchImpl = async () => {
+    call += 1;
+    if (call === 1) {
+      return {
+        ok: false,
+        status: 400,
+        statusText: "Bad Request",
+        body: null,
+        async text() {
+          return '{"error":{"message":"this model does not support tools"}}';
+        },
+      };
+    }
+    return {
+      ok: true,
+      status: 200,
+      statusText: "OK",
+      body: streamFromString(DONE_SSE),
+      async text() {
+        return "";
+      },
+    };
+  };
+  const llm = makeLlmClient(
+    { ...OLLAMA_ENDPOINT, supportsTools: true },
+    { fetch: fetchImpl as never },
+  );
+  const turns = await collect(
+    llm.turn(thread("read a.ts"), fakeTuning(), [fakeTool("read_file", () => ["read"])]),
+  );
+  assert.equal(call, 2, "the rejection was not retried within the same turn");
+  const text = turns
+    .filter((t) => t.kind === "text")
+    .map((t) => (t.kind === "text" ? t.text : ""))
+    .join("");
+  assert.equal(text, "ok", "the same turn's text-protocol retry never answered the user");
+  assert.ok(
+    turns.some((t) => t.kind === "final"),
+    "the retried turn must still end with final",
+  );
+});
+
+test("toolTurn releases its SSE reader once the stream completes — no leaked lock/connection", async () => {
+  const bytes = new TextEncoder().encode(DONE_SSE);
+  let sent = false;
+  let cancelCalls = 0;
+  const fetchImpl = async () => ({
+    ok: true,
+    status: 200,
+    statusText: "OK",
+    body: {
+      getReader() {
+        return {
+          async read() {
+            if (sent) return { value: undefined, done: true };
+            sent = true;
+            return { value: bytes, done: false };
+          },
+          async cancel() {
+            cancelCalls += 1;
+          },
+        };
+      },
+    },
+    async text() {
+      return "";
+    },
+  });
+  const llm = makeLlmClient(
+    { ...OLLAMA_ENDPOINT, supportsTools: true },
+    { fetch: fetchImpl as never },
+  );
+  await collect(llm.turn(thread("hi"), fakeTuning(), [fakeTool("read_file", () => ["read"])]));
+  assert.equal(cancelCalls, 1, "the reader was left unreleased after a completed native turn");
+});
+
+test("a dead endpoint trips the circuit breaker — later turns fail FAST, never touching fetch again", async () => {
+  // The breaker built in resilience/circuitBreaker.ts had zero production callers until this
+  // fix. A local endpoint id unique to this test, so tripping it cannot leak into any other
+  // test that happens to share OLLAMA_ENDPOINT's id.
+  let calls = 0;
+  const fetchImpl = async () => {
+    calls += 1;
+    return {
+      ok: false,
+      status: 400,
+      statusText: "Bad Request",
+      body: null,
+      async text() {
+        // an UNRELATED 400 — not a tools rejection, so each turn fails via the generic path,
+        // and not-retryable, so each turn costs exactly one doFetch call.
+        return '{"error":{"message":"maximum context length is 8192 tokens"}}';
+      },
+    };
+  };
+  const endpoint = { ...OLLAMA_ENDPOINT, id: "local:breaker-regression-test", supportsTools: true };
+  const llm = makeLlmClient(endpoint, { fetch: fetchImpl as never });
+  const tools = [fakeTool("read_file", () => ["read"])];
+
+  // Default failureThreshold is 5 — five exhausted turns trip the breaker.
+  for (let i = 0; i < 5; i++) {
+    await collect(llm.turn(thread("go"), fakeTuning(), tools));
+  }
+  assert.equal(calls, 5, "each of the first five turns should have reached fetch exactly once");
+
+  const turns = await collect(llm.turn(thread("go"), fakeTuning(), tools));
+  assert.equal(calls, 5, "a tripped breaker must fail fast — fetch must not run a sixth time");
+  const text = turns
+    .filter((t) => t.kind === "text")
+    .map((t) => (t.kind === "text" ? t.text : ""))
+    .join("");
+  assert.match(text, /circuit open/, "the user should be told the endpoint is being skipped");
+});
+
 /* ------------------------------------------------------------------------- *
  * Cloud auth + accounting on the NATIVE tool transport
  * ------------------------------------------------------------------------- */
@@ -2131,7 +2251,11 @@ test("a tool turn with no usage frame still records an ESTIMATE", async () => {
 
 test("a turn that produced NOTHING usable is fed back, not silently ended", async () => {
   // A real gemma4:12b opens turns with a stray `</tool_call>` and stops. The scanner
-  // correctly discards the residue; what is left is a blank reply presented as an answer.
+  // correctly discards the residue from the visible transcript, but now reports it as a
+  // `malformed` event too (rather than dropping it with no trace at all) — so this turn is
+  // fed back via that specific, more actionable diagnosis rather than the generic
+  // "nothing usable" one (which only fires when nothing at all — not even a malformed
+  // event — came out of the turn; see the next test).
   const sse = 'data: {"choices":[{"delta":{"content":"</tool_call>"}}]}\ndata: [DONE]\n';
   const llm = makeLlmClient(OLLAMA_ENDPOINT, { fetch: capturingFetch(sse).fetch as never });
   const turns = await collect(
@@ -2142,6 +2266,20 @@ test("a turn that produced NOTHING usable is fed back, not silently ended", asyn
     .map((t) => (t.kind === "text" ? t.text : ""))
     .join("");
   assert.equal(text, "", "the protocol residue leaked into the transcript");
+  const call = turns.find((t) => t.kind === "tool_call");
+  assert.ok(call, "an empty turn ended silently instead of being corrected");
+  assert.equal(call.kind === "tool_call" ? call.call.name : "", "malformed_tool_call");
+  assert.match(call.kind === "tool_call" ? String(call.call.args.reason) : "", /stray closing tag/);
+});
+
+test("a turn with NEITHER prose NOR anything malformed still gets the generic correction", async () => {
+  // The synthetic "nothing usable" correction is the fallback for when the scanner truly
+  // found nothing at all to report — e.g. the model answered with pure whitespace.
+  const sse = 'data: {"choices":[{"delta":{"content":"   "}}]}\ndata: [DONE]\n';
+  const llm = makeLlmClient(OLLAMA_ENDPOINT, { fetch: capturingFetch(sse).fetch as never });
+  const turns = await collect(
+    llm.turn(thread("read a.ts"), fakeTuning(), [fakeTool("read_file", () => ["read"])]),
+  );
   const call = turns.find((t) => t.kind === "tool_call");
   assert.ok(call, "an empty turn ended silently instead of being corrected");
   assert.equal(call.kind === "tool_call" ? call.call.name : "", "malformed_tool_call");

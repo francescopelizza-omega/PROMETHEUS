@@ -715,9 +715,20 @@ export async function launchSession(parsed: ParsedArgs, deps: SessionDeps = {}):
     if (endpoint.locality === "local" && endpoint.model) {
       void probeContextWindow(endpoint.baseUrl, endpoint.model, fetch as never)
         .then((r) => {
-          if (r.source !== "default" && endpoint && r.contextWindow !== endpoint.contextWindow) {
-            endpoint = { ...endpoint, contextWindow: r.contextWindow };
+          if (r.source !== "default") {
+            if (endpoint && r.contextWindow !== endpoint.contextWindow) {
+              endpoint = { ...endpoint, contextWindow: r.contextWindow };
+            }
+            return;
           }
+          // `source:"default"` means the probe FAILED, not that 8192 is real — see the TUI
+          // bridge's matching comment. Silently keeping the floor is indistinguishable from a
+          // genuinely small model, so a large-window model whose probe failed would compact
+          // and budget the tool preamble as if it were about to overflow all session, with no
+          // visible sign anything went wrong.
+          writeLine(
+            `  ! could not measure ${endpoint?.model}'s real context window — using the ${DEFAULT_CONTEXT_WINDOW}-token floor (context budgeting may be too conservative)`,
+          );
         })
         .catch(() => {
           /* fail-soft: the documented floor stands */
