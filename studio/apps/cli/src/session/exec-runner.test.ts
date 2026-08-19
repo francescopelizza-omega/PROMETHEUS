@@ -303,6 +303,48 @@ test("REGRESSION: a fast first stage does NOT disarm the pipeline's timeout", as
   assert.ok(procs[1]?.killed.length, "the still-running tail stage must actually be killed");
 });
 
+test("REGRESSION: the SIGKILL-escalation timer after a timeout is unref'd, like its abort-path sibling", async () => {
+  // A command that times out and does not die on SIGTERM used to hold the Node event loop
+  // open for up to KILL_GRACE_MS after `finish()` had already run — the identical escalation
+  // timer on the ESC/Ctrl-C abort path was already `.unref()`'d; this one, on the timeout
+  // path, was not.
+  const { spawnImpl, procs } = scriptedSpawn();
+  const realSetTimeout = global.setTimeout;
+  const created: NodeJS.Timeout[] = [];
+  const unrefed = new Set<NodeJS.Timeout>();
+  global.setTimeout = ((fn: (...a: never[]) => void, ms?: number, ...args: never[]) => {
+    const t = realSetTimeout(fn, ms, ...args);
+    const originalUnref = t.unref.bind(t);
+    t.unref = () => {
+      unrefed.add(t);
+      return originalUnref();
+    };
+    created.push(t);
+    return t;
+  }) as typeof global.setTimeout;
+
+  try {
+    const p = runParsedCommand(parsed("sleep"), { cwd: CWD, spawnImpl, timeoutMs: 20 });
+    // Let the killTimer fire and create its escalation timer — WITHOUT waiting the full
+    // KILL_GRACE_MS for that timer to actually elapse (the fake process never closes on its
+    // own, so the whole run would otherwise take 2+ seconds like the test above).
+    await new Promise((r) => realSetTimeout(r, 60));
+    assert.equal(created.length, 2, "expected exactly the killTimer and its escalation timer");
+    const escalation = created[1];
+    assert.ok(
+      escalation && unrefed.has(escalation),
+      "the SIGKILL-escalation timer was never unref'd",
+    );
+    // Settle the run ourselves (as if the SIGKILL the cleared timer would have sent had
+    // worked) rather than waiting out the real grace period.
+    for (const t of created) clearTimeout(t);
+    for (const proc of procs) proc.close(137);
+    await p;
+  } finally {
+    global.setTimeout = realSetTimeout;
+  }
+});
+
 test("REGRESSION: a relative redirect resolves against the SESSION cwd, not the host's", async () => {
   // The guard validated `resolve(opts.cwd, target)` while the runner called
   // `openSync(target)` — which resolves against the HOST process cwd. With `--cwd` set, the

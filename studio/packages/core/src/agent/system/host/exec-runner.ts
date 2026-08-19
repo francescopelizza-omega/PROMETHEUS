@@ -333,7 +333,7 @@ async function runOnePipeline(
       setTimeout(() => {
         for (const c of children) killGroup(c, "SIGKILL");
         finish(124);
-      }, KILL_GRACE_MS);
+      }, KILL_GRACE_MS).unref?.();
     }, timeoutMs);
 
     // The timer is cleared in `finish()` — i.e. when the LAST stage closes. Clearing it on
