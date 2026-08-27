@@ -7,6 +7,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
+import { agent } from "@prometheus/core";
+import { resolveStartAuthLevel } from "./app.js";
 import { type ModalView, applyModalKey, modalCursorCol, renderModal } from "./frame.js";
 import { stringWidth } from "./width.js";
 
@@ -136,4 +138,71 @@ test("renderModal: a hint row renders dim below the prompt, clamped (CLI-066)", 
   assert.match(lines[1] ?? "", /ALPHA\/.*AL2\/.*\+3/);
   // no hint → single line (unchanged).
   assert.equal(renderModal({ ...m, hint: undefined }, 80, "none").length, 1);
+});
+
+test("the TUI restores the saved authorisation level instead of overwriting it with the default", async () => {
+  /**
+   * `/authorisation N` says "saved as default", and it truthfully wrote the file — to the
+   * os.homedir()-rooted config tree that every writer uses. The TUI's startup READ used the
+   * `~/.prometheus` state tree instead, a directory nothing ever creates, so it always missed.
+   * The level then fell back to the sudo-derived default and `setAuthLevel` persisted THAT over
+   * the user's real choice: the posture silently reset to 1 on every launch, and the readline
+   * host was dragged down with it because the two share one file.
+   *
+   * The reader and the writer are pinned to one root here, so they cannot drift apart again.
+   */
+  const { mkdtempSync, mkdirSync, writeFileSync, readFileSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const { cliProfiles } = await import("@prometheus/core");
+
+  const configHome = mkdtempSync(join(tmpdir(), "prom-authcfg-"));
+  const dir = cliProfiles.configDir(configHome);
+  mkdirSync(dir, { recursive: true });
+  const file = join(dir, "authorisation.json");
+  writeFileSync(file, JSON.stringify({ level: 6 }));
+
+  const { readSavedAuthLevel } = await import("../session/authorisation-store.js");
+  assert.equal(readSavedAuthLevel(configHome), 6, "precondition: the store holds the saved level");
+
+  // the STATE tree is a different directory and holds nothing — reading there is the bug
+  const stateHome = mkdtempSync(join(tmpdir(), "prom-authstate-"));
+  assert.equal(
+    readSavedAuthLevel(stateHome),
+    null,
+    "precondition: the state tree has no authorisation store, so reading it always misses",
+  );
+
+  // the level the TUI actually starts at
+  assert.equal(
+    resolveStartAuthLevel(configHome, "default"),
+    6,
+    "the saved posture must survive a restart",
+  );
+  // handed the STATE tree — the old argument — the same call silently returns the default
+  assert.equal(
+    resolveStartAuthLevel(stateHome, "default"),
+    agent.modeToAuthLevel("default"),
+    "reading the state tree cannot see the saved level; that is what silently downgraded it",
+  );
+  assert.equal(
+    JSON.parse(readFileSync(file, "utf8")).level,
+    6,
+    "and the saved file must not be rewritten with a default the user never chose",
+  );
+});
+
+test("CLOCK DRIFT GUARD: the turn clock is painted by elapsed time, never as `muted` grey", async () => {
+  // A source-level guard, because the defect this replaces was NOT in a pure unit: `paintDuration`
+  // can be perfect and the TUI still print a grey clock if app.ts reverts to `paint(…, "muted")`.
+  // The raw-TTY turn loop cannot be driven from node:test, so the wiring itself is what's asserted.
+  const { readFileSync } = await import("node:fs");
+  const { fileURLToPath } = await import("node:url");
+  const src = readFileSync(fileURLToPath(new URL("./app.ts", import.meta.url)), "utf8");
+  const clock = src.split("\n").filter((l) => l.includes("⏱"));
+  assert.equal(clock.length, 1, "expected exactly one ⏱ clock line in app.ts");
+  const line = clock[0] as string;
+  assert.match(line, /paintDuration\(/, "the clock stopped using the elapsed-time painter");
+  assert.doesNotMatch(line, /"muted"/, "the clock went back to the near-invisible grey");
+  assert.match(line, /elapsedMs/, "the clock is not passing the elapsed span to the painter");
 });

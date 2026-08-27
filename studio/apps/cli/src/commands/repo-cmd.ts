@@ -31,7 +31,11 @@ import {
 const SCRIPT = "repo.py" as const;
 
 function sub(ctx: CliContext): string {
-  return ctx.args.command[1] ?? "list";
+  // see secure-cmd.ts's identical fix: `unmatchedSub` (parse.ts) distinguishes "a second word
+  // was typed but didn't match" from "no second word at all" — without it, a typo like
+  // `/repo removee myid` silently fell through to "list", discarding "removee" and "myid" both,
+  // with the switch's own "unknown repo verb" branch below never reachable from real input.
+  return ctx.args.unmatchedSub ?? ctx.args.command[1] ?? "list";
 }
 
 export async function runRepoCommand(
@@ -145,7 +149,7 @@ export async function runRepoCommand(
           `prometheus repo ${verb}: unknown repo verb.\n` +
           `  ${c.dim("try:")} add · list · status · rescan · update · pin · branch · remove · vault`,
         json: { ok: false, error: "unknown-verb", command: `repo ${verb}` },
-        exitCode: 2,
+        exitCode: 1,
       };
   }
 }
@@ -204,7 +208,7 @@ function renderRepos(e: Record<string, unknown>): CommandOutcome {
   return { text: lines.join("\n"), exitCode: 0 };
 }
 
-function renderRescan(id: string, e: Record<string, unknown>): CommandOutcome {
+export function renderRescan(id: string, e: Record<string, unknown>): CommandOutcome {
   const verdict = typeof e.verdict === "string" ? e.verdict : "unknown";
   const badge =
     verdict === "allow"
@@ -227,5 +231,21 @@ function renderRescan(id: string, e: Record<string, unknown>): CommandOutcome {
         : verdict === "error"
           ? 2
           : 0;
-  return { text: lines.join("\n"), exitCode };
+  /**
+   * The `--json` channel must mirror the tier too, not just the exit code.
+   *
+   * This returned no `json`, so the caller fell back to the engine's raw envelope — which
+   * `_envelope.emit()` stamps `"ok": true` for any scan that COMPLETED. So a repo whose live tree
+   * now scans BLOCK came back as `{"ok": true}` while the process exited 20, and a CI script
+   * branching on `.ok` (the documented envelope contract) treated it as clean. Only a script that
+   * happened to read `$?` or `.verdict` caught it.
+   *
+   * `ok = allow` is the same rule `prometheus gate` uses, so the two gate-bearing surfaces agree
+   * about what `ok` means: it answers "is this safe to use", not "did the scan run".
+   */
+  return {
+    text: lines.join("\n"),
+    json: { ...e, ok: verdict === "allow" },
+    exitCode,
+  };
 }

@@ -74,12 +74,17 @@ interface Pending {
 }
 
 /** A single JSON-RPC-over-stdio MCP client connection. */
+/** How much of a server's stderr to retain for diagnostics (bytes). */
+const STDERR_TAIL_MAX = 8192;
+
 export class StdioMcpTransport implements McpClientTransport {
   private proc: ChildProcess | null = null;
   private buf = "";
   private nextId = 1;
   /** set once the child process has exited — see the `exit` handler in `connect`. */
   private exited: { code: number | null } | null = null;
+  /** Last few KB the server wrote to stderr — kept for diagnostics, bounded so it cannot grow. */
+  private stderrTail = "";
   /** un-registers this child from the exit reaper; a no-op before `connect`. */
   private untrack: () => void = () => {};
   private readonly pending = new Map<number, Pending>();
@@ -122,6 +127,27 @@ export class StdioMcpTransport implements McpClientTransport {
     });
     child.stdout?.setEncoding("utf8");
     child.stdout?.on("data", (chunk: string) => this.onData(chunk));
+    /**
+     * DRAIN stderr. Nothing read it, and that is a deadlock, not a missing feature.
+     *
+     * The child is spawned with stderr as a PIPE, so the server's log goes into a kernel pipe
+     * buffer of about 64–128 KB. With no reader that buffer fills, the server blocks inside
+     * write(2) on stderr, and a blocked server stops reading stdin — so every later request
+     * expires at the request timeout. The process is still ALIVE, so `isDead()` stays false and
+     * the manager never reaps it: health keeps reading "ready", the tools stay advertised to the
+     * model, and every call comes back a bare timeout with nothing connecting it to the cause.
+     *
+     * It bites a server whose stderr write is a blocking syscall — a Python, Go or shell server
+     * rather than a Node one — and only once it has logged enough, so it looks like a server
+     * that worked and then mysteriously stopped.
+     *
+     * The tail is kept rather than discarded: when a server does fail, what it printed is
+     * usually the only explanation available, and `stdio: "ignore"` would throw that away.
+     */
+    child.stderr?.setEncoding("utf8");
+    child.stderr?.on("data", (chunk: string) => {
+      this.stderrTail = (this.stderrTail + chunk).slice(-STDERR_TAIL_MAX);
+    });
     child.on("exit", (code) => {
       /**
        * The child DIED. Say so, rather than only failing the in-flight requests.
@@ -132,7 +158,8 @@ export class StdioMcpTransport implements McpClientTransport {
        * way to connect to "that server is gone". `exited` is the fact the manager needs.
        */
       this.exited = { code: code ?? null };
-      this.failAll(new Error(`MCP server exited (${code ?? "signal"})`));
+      const tail = this.stderrTail.trim().split("\n").slice(-3).join(" | ").slice(0, 400);
+      this.failAll(new Error(`MCP server exited (${code ?? "signal"})${tail ? `: ${tail}` : ""}`));
     });
     child.on("error", (e) => {
       this.exited = { code: null };

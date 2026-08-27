@@ -114,6 +114,14 @@ export function contextWindowOf(
   ep: RendererEndpoint,
   catalog: readonly CatalogModelLite[] = [],
 ): { contextWindow?: number } {
+  // A MEASURED window wins over a catalogued one. `endpoint-hook.ts` asks the runner itself
+  // (`ai:probeEndpoint` → Ollama `/api/show`) and writes the answer onto the endpoint; the
+  // catalog is a published figure for a model FAMILY, which is frequently not the number the
+  // locally-served quantisation actually runs at. Call sites spread this patch OVER the
+  // endpoint, so without this line the catalogue would silently overwrite the measurement.
+  if (typeof ep.contextWindow === "number" && ep.contextWindow > 0) {
+    return { contextWindow: ep.contextWindow };
+  }
   const w = endpointMeta(ep, catalog).contextWindow;
   return typeof w === "number" && w > 0 ? { contextWindow: w } : {};
 }

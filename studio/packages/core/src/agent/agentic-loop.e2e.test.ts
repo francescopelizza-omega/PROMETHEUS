@@ -352,3 +352,74 @@ test("a DENIED call still produces a result the model can read — it is not sil
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("/dry-run on: a mutating tool is NOT executed — the real file survives the real dispatcher", async () => {
+  // regression: `withDryRun` only INJECTED `dryRun:true` into the tool args, and no filesystem
+  // tool declared the field, so it was ignored. With dry-run on, `delete_file` still deleted the
+  // file and `mkdir` still created the directory — measured against this same real dispatcher.
+  const dir = fixture();
+  try {
+    const { runTool, calls } = realRunner(dir);
+    const victim = join(dir, "answer.txt");
+    const llm = scriptedModel((_thread, round) =>
+      round === 0
+        ? [{ kind: "tool_call", call: call("delete_file", { path: victim }) }]
+        : [{ kind: "final", text: "done" }],
+    );
+    const thread: Thread = { messages: [{ role: "user", content: "delete it" }] };
+    await drain(
+      runAgentTurn(thread, tuningFor({ dryRun: true }), { llm, runTool, confirm: () => true }),
+    );
+
+    assert.equal(readFileSync(victim, "utf8"), "the magic number is 4711\n");
+    assert.deepEqual(calls, [], "the dispatcher must never be reached under dry-run");
+    const toolMsgs = thread.messages.filter((m) => m.role === "tool");
+    assert.ok(
+      toolMsgs.some((m) => m.content.includes("dry-run")),
+      `the model must be told it was a dry run, got: ${toolMsgs.map((m) => m.content).join(" | ")}`,
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("/dry-run on: READS still run — a preview the agent cannot look around in is useless", async () => {
+  const dir = fixture();
+  try {
+    const { runTool, calls } = realRunner(dir);
+    let sawBytes = false;
+    const llm = scriptedModel((thread, round) => {
+      if (round === 0)
+        return [{ kind: "tool_call", call: call("read_file", { path: "answer.txt" }) }];
+      sawBytes = thread.messages.some((m) => m.role === "tool" && m.content.includes("4711"));
+      return [{ kind: "final", text: "ok" }];
+    });
+    const thread: Thread = { messages: [{ role: "user", content: "read it" }] };
+    await drain(runAgentTurn(thread, tuningFor({ dryRun: true }), { llm, runTool }));
+    assert.deepEqual(calls, ["read_file"]);
+    assert.ok(sawBytes, "a read must still reach the model under dry-run");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("dry-run OFF: the same mutation really happens — the guard does not disarm the tool", async () => {
+  const dir = fixture();
+  try {
+    const { runTool, calls } = realRunner(dir);
+    const victim = join(dir, "answer.txt");
+    const llm = scriptedModel((_thread, round) =>
+      round === 0
+        ? [{ kind: "tool_call", call: call("delete_file", { path: victim }) }]
+        : [{ kind: "final", text: "done" }],
+    );
+    const thread: Thread = { messages: [{ role: "user", content: "delete it" }] };
+    await drain(
+      runAgentTurn(thread, tuningFor({ dryRun: false }), { llm, runTool, confirm: () => true }),
+    );
+    assert.deepEqual(calls, ["delete_file"]);
+    assert.throws(() => readFileSync(victim, "utf8"), "the real delete must still remove the file");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

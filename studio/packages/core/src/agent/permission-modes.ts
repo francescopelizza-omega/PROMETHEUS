@@ -151,14 +151,21 @@ export function cyclePermissionMode(
 
 /**
  * Classify a tool by its annotations:
- *   - readOnlyHint            → "read"  (lists/scans/info — never mutates)
- *   - openWorldHint (mutate)  → "exec"  (fetches/runs remote code: install, repo add)
- *   - else destructive        → "edit"  (local/config mutation: enable/disable/uninstall)
+ *   - openWorldHint           → "exec"  (reaches the network / runs remote code)
+ *   - readOnlyHint            → "read"  (lists/scans/info — never mutates, never leaves the box)
+ *   - else                    → "edit"  (local/config mutation: enable/disable/uninstall)
  * A tool with no hints is treated as "edit" (a mutation we should confirm), never "read".
+ *
+ * openWorldHint is tested FIRST because the hints are orthogonal and a tool may carry both.
+ * `web_search` does not mutate anything (readOnly is honest) yet still sends the query off the
+ * machine (openWorld is honest too). Testing readOnly first classified it "read", which plan
+ * mode ALLOWS — so a mode whose whole contract is "look, decide, change nothing" performed
+ * network egress. Egress is exactly what plan mode denies via "exec"; local immutability does
+ * not make it safe.
  */
 export function classifyTool(ann: ToolEffect | undefined): ToolClass {
-  if (ann?.readOnlyHint) return "read";
   if (ann?.openWorldHint) return "exec";
+  if (ann?.readOnlyHint) return "read";
   return "edit";
 }
 

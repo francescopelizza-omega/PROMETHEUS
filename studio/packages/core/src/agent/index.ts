@@ -38,6 +38,7 @@ export {
   decideAutoContinue,
   initAutoContinue,
   observeEvent,
+  progressDigest,
 } from "./auto-continue.js";
 // WRAPPER Subsystem 3: remembered "don't ask again" grants (deny-priority) over the pure engine.
 export type { GrantScope, Grant, AddResult } from "./scoped-permission.js";
@@ -313,6 +314,8 @@ export {
  * this reach for the whole group at once (`agent.protocol.renderToolPreamble`).
  */
 export * as protocol from "./protocol/index.js";
+// The inactivity-pause primitive shared by CLI + Desktop — see idle-watchdog.ts's header.
+export * as idleWatchdog from "./idle-watchdog.js";
 
 // The structured task list the agent works to. `modes.ts` declared `todowrite`/`todoread`
 // descriptors with no schema, no state and no dispatch; these are the real thing.
@@ -336,6 +339,27 @@ export {
   isSubagentRole,
   runSubagent,
 } from "./subagent.js";
+
+// Scheduled/autonomous runs: "run this task on this cron schedule, unattended, at a bounded
+// autonomy level" — see that module's own header for why the ladder is part of the type.
+export type {
+  NextRunResult,
+  ParsedCron,
+  ScheduleAutonomy,
+  ScheduledTask,
+  ScheduleRunResult,
+  ScheduleStore,
+} from "./schedule.js";
+export {
+  cronMatches,
+  isDue,
+  mergeTask,
+  nextRunAfter,
+  nextRunAfterResult,
+  parseCronExpr,
+  removeTask,
+  validateCronExpr,
+} from "./schedule.js";
 
 // web_search behind a provider seam — no provider means an honest failure, never a fake list.
 export type {

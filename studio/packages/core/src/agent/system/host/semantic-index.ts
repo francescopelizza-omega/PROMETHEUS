@@ -241,18 +241,36 @@ export function defaultOllamaEmbedder(model: string = DEFAULT_EMBED_MODEL): Embe
 }
 
 /** A tiny worker pool so N chunks embed with bounded concurrency and a hard wall-clock budget. */
-async function embedAllWithBudget(embed: EmbedFn, texts: readonly string[]): Promise<number[][]> {
+export async function embedAllWithBudget(
+  embed: EmbedFn,
+  texts: readonly string[],
+): Promise<(number[] | undefined)[]> {
+  /**
+   * PARTIAL results, not all-or-nothing.
+   *
+   * A single rejected `embed()` — one flaky HTTP call out of hundreds — threw straight out of
+   * `Promise.all`, so the whole build was discarded, NOTHING was cached, and the caller fell
+   * back to lexical search. The next query paid for every chunk again and had the same odds of
+   * losing everything to one more bad call, on a large repo effectively forever. Exceeding the
+   * wall-clock budget did the same, which is worse: the budget exists to BOUND the work, and
+   * instead it destroyed all the work that had already succeeded.
+   *
+   * Now a failed chunk is simply absent, and the deadline stops workers taking NEW work rather
+   * than throwing away what is done. The caller drops the gaps and caches the rest.
+   */
   const deadline = Date.now() + EMBED_BUDGET_MS;
-  const results: number[][] = new Array(texts.length);
+  const results: (number[] | undefined)[] = new Array(texts.length);
   let next = 0;
   async function worker(): Promise<void> {
     for (;;) {
-      if (Date.now() > deadline) {
-        throw new Error(`embedding budget (${EMBED_BUDGET_MS}ms) exceeded`);
-      }
+      if (Date.now() > deadline) return; // out of budget: stop taking work, keep what is done
       const i = next++;
       if (i >= texts.length) return;
-      results[i] = await embed(texts[i] as string);
+      try {
+        results[i] = await embed(texts[i] as string);
+      } catch {
+        /* this chunk stays unembedded; the rest of the index is still worth having */
+      }
     }
   }
   const n = Math.min(EMBED_CONCURRENCY, texts.length) || 1;
@@ -514,13 +532,23 @@ export async function semanticSearchTool(
       embed,
       chunks.map((c) => c.text),
     );
+    // Keep only the chunks that actually embedded. An index missing a few chunks still answers
+    // far better than the lexical fallback; an index with `undefined` vectors in it would score
+    // NaN and poison every future query read from the cache.
+    const embedded = chunks
+      .map((c, i) => ({ chunk: c, vector: vectors[i] }))
+      .filter(
+        (e): e is { chunk: (typeof chunks)[number]; vector: number[] } =>
+          Array.isArray(e.vector) && e.vector.length > 0,
+      );
+    if (embedded.length === 0) throw new Error("no chunk could be embedded");
     const stored: StoredIndex = {
       signature,
       model,
-      dim: vectors[0]?.length ?? 0,
+      dim: embedded[0]?.vector.length ?? 0,
       builtAt: new Date().toISOString(),
       root,
-      chunks: chunks.map((c, i) => ({ ...c, vector: vectors[i] as number[] })),
+      chunks: embedded.map((e) => ({ ...e.chunk, vector: e.vector })),
     };
     await saveIndex(cachePath, stored);
     const qVec = await embed(query);

@@ -31,7 +31,7 @@ import {
   renderOneShot,
   runOneShot,
 } from "./session/one-shot.js";
-import { readStdinPrompt, shouldReadStdinPrompt } from "./stdin.js";
+import { readStdinPrompt, stdinPromptSink } from "./stdin.js";
 import { isTerminalChatLaunch, routeTerminalChat } from "./terminal/chat-route.js";
 import { launchTmuxSession } from "./tmux/multiplexer.js";
 import { TUI_NOT_TTY, launchTui } from "./tui/index.js";
@@ -109,17 +109,24 @@ async function main(): Promise<void> {
   // prompt from stdin — `cat task.md | prometheus chat`. Done HERE, before any readline is created (else
   // the two would compete for the stream), and BEFORE the interactive check below so the injected
   // positional makes it a one-shot (a real positional message takes precedence — stdin is fallback).
-  if (
-    shouldReadStdinPrompt(parsed.command, parsed.positionals, parsed.flags, process.stdin.isTTY)
-  ) {
+  const stdinSink = stdinPromptSink(
+    parsed.command,
+    parsed.positionals,
+    parsed.flags,
+    process.stdin.isTTY,
+  );
+  if (stdinSink) {
     const piped = await readStdinPrompt();
+    const label = stdinSink === "flag" ? "prometheus -p" : "prometheus chat";
     if (piped.error) {
       if (parsed.json) emitJson({ ok: false, error: piped.error });
-      else process.stderr.write(`prometheus chat: ${piped.error}\n`);
+      else process.stderr.write(`${label}: ${piped.error}\n`);
       process.exitCode = 2;
       return;
     }
-    parsed.positionals.push(piped.text as string);
+    // The sink matters: `oneShotPrompt` reads the FLAG's value, `chat` reads a positional.
+    if (stdinSink === "flag") parsed.flags.p = piped.text as string;
+    else parsed.positionals.push(piped.text as string);
   }
 
   /**

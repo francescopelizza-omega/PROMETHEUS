@@ -8,6 +8,7 @@
  * Shift-Tab permission-mode cycle, and the two-press Ctrl-C exit. No IO — fully tested.
  */
 import { repl, agent } from "@prometheus/core";
+import { type TraitCell, type TraitCellId, moveTraitFocus } from "@prometheus/core/ai-effort";
 
 import {
   type AcItem,
@@ -21,6 +22,7 @@ import {
 } from "./autocomplete.js";
 import { type InvokeOverlayState, onInvokeKey } from "./invoke-overlay.js";
 import { type KeyEvent, type KeymapResolution, remapKey } from "./keys.js";
+import { type ListOverlayState, onListKey } from "./list-overlay.js";
 import {
   EMPTY_PATH_AC,
   type PathAcState,
@@ -65,6 +67,9 @@ export interface TuiState {
   search: SearchState | null;
   /** the `/invoke` arrow-nav overlay (CLI-059); null = inactive. Modal: owns the key pipeline. */
   invokeOverlay: InvokeOverlayState | null;
+  /** the generic pick-one overlay (CLI-1xx: `/agents`, `/think`, `/commands`, `/model` bare) —
+   *  never open at the same time as `invokeOverlay` (the app opens at most one at a time). */
+  listOverlay: ListOverlayState | null;
   /** the focused pane (CLI-060). Defaults to the composer/transcript pane so single-pane behavior
    *  is unchanged; Ctrl+G (CLI-067) cycles it via `cycleActivePane`. Shared enum with the host. */
   activePane: PaneId;
@@ -77,6 +82,13 @@ export interface TuiState {
    *  history line holds only placeholders whose content was never stored, so `pastes` is emptied
    *  during browse — else a fresh paste #N would splice into a recalled `[Pasted text #N]` (wrong). */
   pasteStash: { id: number; text: string }[];
+  /**
+   * ⌃T trait-rail focus: which cell the arrows are pointed at, or null when the rail is just a
+   * readout. A contained mode on purpose — while it is open the arrows drive the RAIL and every
+   * other key is ignored, so a user exploring it cannot wander into editing their draft. Esc
+   * (or ⌃T again) leaves.
+   */
+  traitFocus: { index: number } | null;
 }
 
 /** Reverse-i-search state: the query, the candidate history index, and the stashed buffer. */
@@ -103,6 +115,9 @@ export type TuiEffect =
   | { type: "tools-toggle" }
   /** the /invoke overlay picked an entry + args → run the nemesis-gated install (CLI-059). */
   | { type: "invoke-dispatch"; name: string; args: string }
+  /** the generic list-overlay picked an item — the app resubmits `text` through the normal
+   *  composer submit path, exactly as if the user had typed it (CLI-1xx). */
+  | { type: "list-pick"; text: string }
   /** the focused pane changed (CLI-060) — the app repaints / flashes the new pane name. */
   | { type: "pane-changed"; pane: PaneId }
   /** Ctrl+S (CLI-067) — the app exports the transcript + flashes the written path. */
@@ -110,7 +125,13 @@ export type TuiEffect =
   /** Ctrl+Y (CLI-068) — the app copies the last assistant reply to the clipboard (OSC 52). */
   | { type: "copy-reply" }
   /** an "@"-path completion resolved to a FILE — the app records the frecency hit (IO). */
-  | { type: "path-completed"; path: string };
+  | { type: "path-completed"; path: string }
+  /**
+   * The trait rail's ↑/↓ on the focused cell (⌃T mode). `delta` is +1 for "on"/raise and -1 for
+   * "off"/lower; the app maps that onto the real switch (tools, thinking, or the effort ladder)
+   * because the reducer owns no session tuning.
+   */
+  | { type: "trait-adjust"; id: TraitCellId; delta: 1 | -1 };
 
 /** Per-reduce context (the slash registry for autocomplete + whether an op is running). */
 export interface ReduceCtx {
@@ -121,6 +142,12 @@ export interface ReduceCtx {
   keymap?: KeymapResolution;
   /** "@"-path completion wiring; omitted ⇒ the feature is off (pathAc stays closed). */
   pathCompletion?: PathCompletionCtx;
+  /**
+   * The model's trait rail for THIS frame (core's `traitRail`), so ⌃T can focus a real cell and
+   * ↑/↓ know whether the cell under the cursor has a switch at all. Omitted ⇒ no rail is being
+   * painted, and ⌃T falls back to its historical blind tools flip.
+   */
+  traitCells?: readonly TraitCell[];
 }
 
 export interface ReduceResult {
@@ -143,10 +170,12 @@ export function initialTuiState(over: Partial<TuiState> = {}): TuiState {
     pendingExit: false,
     search: null,
     invokeOverlay: null,
+    listOverlay: null,
     activePane: "transcript", // core repl default = the composer/transcript pane (CLI-060)
     pastes: [],
     pasteSeq: 0,
     pasteStash: [],
+    traitFocus: null,
     ...over,
   };
 }
@@ -410,6 +439,22 @@ function reduceInvokeOverlay(state: TuiState, key: KeyEvent): ReduceResult {
 }
 
 /**
+ * The generic list-overlay's key pipeline (CLI-1xx: `/agents`, `/think`, `/commands`, `/model`
+ * bare) — same shape as `reduceInvokeOverlay`, minus an args stage: a pick already carries the
+ * full line to resubmit, so `close`/`pick` are the only two outcomes besides "still open".
+ */
+function reduceListOverlay(state: TuiState, key: KeyEvent): ReduceResult {
+  const overlay = state.listOverlay;
+  if (!overlay) return result(state);
+  const { state: next, action } = onListKey(overlay, key);
+  if (action.type === "close") return result({ ...state, listOverlay: null });
+  if (action.type === "pick") {
+    return result({ ...state, listOverlay: null }, [{ type: "list-pick", text: action.text }]);
+  }
+  return result({ ...state, listOverlay: next });
+}
+
+/**
  * Advance the focused pane through the shared PANE_CYCLE (CLI-060) and emit a `pane-changed`
  * effect so the app repaints + flashes the new pane. Pure: no IO, input buffer untouched. CLI-067's
  * Ctrl+G binds to this. Exactly ONE `pane-changed` effect per call.
@@ -548,10 +593,61 @@ function reduceSearch(state: TuiState, key: KeyEvent, ctx: ReduceCtx): ReduceRes
   }
 }
 
+/**
+ * ⌃T trait-rail focus (CLI-1xx). MODAL like reverse-i-search: ←/→ walk the rail, ↑/↓ throw the
+ * focused cell's switch, Esc (or ⌃T again) leaves, and every other key is SWALLOWED.
+ *
+ * Swallowed rather than passed through on purpose. The rail is a settings surface reached by a
+ * chord, and a mode where stray keystrokes silently edit the draft underneath is exactly the
+ * "messing around" this containment exists to prevent — the user can always leave with the key
+ * that leaves everything else in this TUI.
+ *
+ * A cell with no switch (`completion`/`vision`/`audio`, or a capability the model lacks) answers
+ * ↑/↓ with its REASON rather than nothing at all: a key that appears to do nothing is
+ * indistinguishable from a broken one.
+ */
+function reduceTraitFocus(state: TuiState, key: KeyEvent, ctx: ReduceCtx): ReduceResult {
+  const focus = state.traitFocus as { index: number };
+  const cells = ctx.traitCells ?? [];
+  const close = (effects: TuiEffect[] = []): ReduceResult =>
+    result({ ...state, traitFocus: null }, effects);
+  if (cells.length === 0) return close(); // the rail vanished under us (model swap) — don't strand
+  switch (key.name) {
+    case "left":
+      return result({ ...state, traitFocus: { index: moveTraitFocus(cells, focus.index, -1) } });
+    case "right":
+      return result({ ...state, traitFocus: { index: moveTraitFocus(cells, focus.index, 1) } });
+    case "up":
+    case "down": {
+      const cell = cells[Math.min(focus.index, cells.length - 1)];
+      if (!cell) return result(state);
+      if (!cell.actionable) {
+        return result(state, [
+          { type: "notice", text: `${cell.label}: ${cell.reason ?? "no switch here"}` },
+        ]);
+      }
+      return result(state, [
+        { type: "trait-adjust", id: cell.id, delta: key.name === "up" ? 1 : -1 },
+      ]);
+    }
+    case "esc":
+      return close();
+    case "ctrl-t":
+      return close(); // the chord that opened it also closes it
+    case "ctrl-c":
+      // leaving the mode must never cost the user an interrupt they meant for a running turn.
+      return close(ctx.running ? [{ type: "interrupt" }] : []);
+    default:
+      return result(state);
+  }
+}
+
 /** Reduce one key into (next state, effects). */
 export function reduce(state: TuiState, rawKey: KeyEvent, ctx: ReduceCtx): ReduceResult {
   // the /invoke overlay is MODAL — it owns the whole key pipeline while open (CLI-059).
   if (state.invokeOverlay) return reduceInvokeOverlay(state, rawKey);
+  // the generic list-overlay is likewise MODAL while open (CLI-1xx); the app never opens both.
+  if (state.listOverlay) return reduceListOverlay(state, rawKey);
   // reverse-i-search owns the whole key pipeline while active (CLI-019).
   if (state.search) return reduceSearch(state, rawKey, ctx);
   // CLI-096: translate a rebound physical key → its action's canonical default key BEFORE any
@@ -561,6 +657,9 @@ export function reduce(state: TuiState, rawKey: KeyEvent, ctx: ReduceCtx): Reduc
     ctx.keymap && rawKey.name !== "char" && rawKey.name !== "paste" && rawKey.name !== "mouse"
       ? { ...rawKey, name: remapKey(ctx.keymap, rawKey.name) }
       : rawKey;
+  // ⌃T trait-rail focus is modal too, but it sits AFTER the remap above so a user who rebound
+  // the arrows still drives the rail with them.
+  if (state.traitFocus) return reduceTraitFocus(state, key, ctx);
   if (key.name === "ctrl-r") return result(enterSearch(state));
   // mouse (CLI-069): wheel over an OPEN dropdown moves the highlight (mirrors ↑/↓); clicks +
   // wheel-elsewhere are NOT intercepted here (clicks need layout → the app maps them via
@@ -635,8 +734,15 @@ export function reduce(state: TuiState, rawKey: KeyEvent, ctx: ReduceCtx): Reduc
         return result({ ...state, pathAc: movePathAc(state.pathAc, 1) });
       case "tab":
       case "enter": {
-        // Unlike the slash dropdown, Enter never SUBMITS here — a path mention is typically
-        // mid-sentence, and sending the turn early would cut the user's message off.
+        // A slash-command path argument is the WHOLE line, so Enter RUNS the command and Tab is
+        // what completes it — the shell behaviour every user already has in their fingers, and
+        // the only way `/cd <dir>` can ever be submitted while the dropdown is still listing the
+        // directory that was just drilled into. Breaking out of the switch hands "enter" to the
+        // composer keymap below, which submits.
+        //
+        // An "@" mention is the opposite case: it sits mid-sentence, so Enter accepts the
+        // highlighted entry rather than sending a half-typed message.
+        if (key.name === "enter" && state.pathAc.trigger?.kind === "slash-arg") break;
         const accepted = acceptPathAc(state.input, state.pathAc);
         if (!accepted) return result(state);
         const next = commit(state, accepted.input, accepted.cursor, ctx);
@@ -772,9 +878,23 @@ export function reduce(state: TuiState, rawKey: KeyEvent, ctx: ReduceCtx): Reduc
       ]);
     case "ctrl-d":
       return state.input ? result(state) : result(state, [{ type: "exit", code: 0 }]);
-    case "ctrl-t":
-      // quick-toggle all agent tools; the app flips tuning + flashes the new state (CLI-018).
-      return result(state, [{ type: "tools-toggle" }]);
+    case "ctrl-t": {
+      /**
+       * ⌃T opens the trait rail's focus mode, starting on the `tool` cell.
+       *
+       * It used to be a blind global tools flip (CLI-018), with no indication of what it had
+       * done beyond a one-line flash. Starting on `tool` keeps that muscle memory intact — ⌃T
+       * then ↓ is the same gesture — while putting the switch, its current state, and the rest
+       * of the model's facts on screen at the moment it is thrown. With no rail to show (a
+       * surface that feeds no cells, or a model that was never probed) it still falls back to
+       * the old flip rather than becoming a dead key.
+       */
+      const cells = ctx.traitCells ?? [];
+      if (cells.length === 0) return result(state, [{ type: "tools-toggle" }]);
+      const tools = cells.findIndex((c) => c.id === "tools");
+      const first = cells.findIndex((c) => c.actionable);
+      return result({ ...state, traitFocus: { index: tools >= 0 ? tools : Math.max(0, first) } });
+    }
     case "ctrl-g":
       // plan §7 (CLI-067): cycle the focused pane. Reuses CLI-060's cycleActivePane (advances
       // activePane + emits `pane-changed`); the input buffer is untouched (pure).

@@ -6,12 +6,18 @@ import { test } from "node:test";
 
 import {
   type StatusModel,
+  TRAIT_INLINE_MAX,
+  capabilityPanel,
   composerHint,
   contextMeterSegment,
   costMeterSegment,
   effortBadge,
   justify,
+  modelTraits,
   statusLines,
+  traitCells,
+  traitRailFits,
+  traitRailLine,
 } from "./status.js";
 import { stringWidth } from "./width.js";
 
@@ -250,4 +256,154 @@ test("the effort badge does NOT leak into the status bar", () => {
   ).join("\n");
   assert.equal(withEffort.includes("effort"), false);
   assert.equal(withEffort, statusLines(BASE, 80, "none").join("\n"));
+});
+
+/* ── the model trait strip ──────────────────────────────────────────────────*/
+
+const THINKER: StatusModel = {
+  ...BASE,
+  effort: { tier: "high", available: true, degraded: false },
+};
+
+test("modelTraits: capabilities first, the one CONTROL last", () => {
+  // Properties on the left, the dial on the right. That ordering is what makes the strip read
+  // as "here is the model, and here is your knob" instead of an undifferentiated chip soup.
+  assert.deepEqual(
+    modelTraits({ ...THINKER, capabilities: ["completion", "vision", "tools", "thinking"] }),
+    ["completion", "vision", "tools", "thinking", "effort: high"],
+  );
+});
+
+test("modelTraits: the runner's own order is preserved, not sorted", () => {
+  // Ollama answers `/api/show` in a stable per-model order. Sorting would make the strip
+  // reshuffle between models for no gain.
+  assert.deepEqual(modelTraits({ ...THINKER, capabilities: ["thinking", "tools", "completion"] }), [
+    "thinking",
+    "tools",
+    "completion",
+    "effort: high",
+  ]);
+});
+
+test("modelTraits: blanks and duplicates are dropped — a doubled chip reads as a bug", () => {
+  assert.deepEqual(
+    modelTraits({ ...THINKER, capabilities: ["tools", "", "  ", "tools", "thinking"] }),
+    ["tools", "thinking", "effort: high"],
+  );
+});
+
+test("modelTraits: no capabilities probed yet ⇒ the effort cell alone", () => {
+  assert.deepEqual(modelTraits(THINKER), ["effort: high"]);
+  assert.deepEqual(modelTraits(BASE), []);
+});
+
+test("effortBadge inlines the whole strip while it fits", () => {
+  assert.equal(
+    effortBadge({ ...THINKER, capabilities: ["completion", "tools"] }),
+    "completion \u00b7 tools \u00b7 effort: high",
+  );
+});
+
+test("effortBadge yields to the panel past the threshold, rather than being dropped whole", () => {
+  // `inlayBadge` refuses to truncate (a half-shown `thinki` reads as a rendering bug), so a
+  // strip that cannot fit would vanish silently. Returning undefined hands the decision to the
+  // caller, which renders `capabilityPanel` instead.
+  const many: StatusModel = {
+    ...THINKER,
+    capabilities: ["completion", "vision", "audio", "tools", "thinking"],
+  };
+  assert.equal(modelTraits(many).length > TRAIT_INLINE_MAX, true);
+  assert.equal(effortBadge(many), undefined);
+  // …and the last-resort rendering, for a terminal too short for the panel, is the dial alone.
+  assert.equal(effortBadge(many, { traits: false }), "effort: high");
+});
+
+/** gemma4:12b's real capability list, as the live daemon reports it. */
+const GEMMA4: StatusModel = {
+  ...THINKER,
+  capabilities: ["completion", "vision", "audio", "tools", "thinking"],
+};
+/** qwen3.6:latest's real capability list — an ODD trait count once effort joins. */
+const QWEN36: StatusModel = {
+  ...THINKER,
+  capabilities: ["completion", "vision", "tools", "thinking"],
+};
+
+test("capabilityPanel: exactly two rows, tab-aligned, effort BOTTOM-RIGHT", () => {
+  const rows = capabilityPanel(GEMMA4, 76);
+  assert.ok(rows);
+  assert.equal(rows?.length, 2);
+  assert.match(rows?.[0] ?? "", /^completion\s+vision\s+audio$/);
+  assert.match(rows?.[1] ?? "", /^tools\s+thinking\s+effort: high$/);
+});
+
+test("capabilityPanel: an odd trait count pads BEFORE the dial, so it stays bottom-right", () => {
+  // Five traits ⇒ one empty cell. It must be the one to the LEFT of the effort cell: a control
+  // that wanders with the capability count is harder to find than one that is always in the
+  // same corner.
+  const rows = capabilityPanel(QWEN36, 76);
+  assert.equal(rows?.length, 2);
+  assert.match(rows?.[0] ?? "", /^completion\s+vision\s+tools$/);
+  assert.match(rows?.[1] ?? "", /^thinking\s+effort: high$/);
+  // the gap before `effort:` proves the padding went in front of it, not after.
+  assert.ok((rows?.[1]?.indexOf("effort:") ?? 0) > "thinking".length + 1);
+});
+
+test("capabilityPanel: columns line up across BOTH rows", () => {
+  const rows = capabilityPanel(GEMMA4, 76);
+  // `vision` (row 0, col 1) and `thinking` (row 1, col 1) must start at the same column.
+  assert.equal((rows?.[0] ?? "").indexOf("vision"), (rows?.[1] ?? "").indexOf("thinking"));
+});
+
+test("capabilityPanel: null below the threshold — the inline strip owns that case", () => {
+  assert.equal(capabilityPanel({ ...THINKER, capabilities: ["tools"] }, 76), null);
+  assert.equal(capabilityPanel(BASE, 76), null);
+});
+
+test("capabilityPanel: null when the grid cannot be legible — never a clipped cell", () => {
+  // A truncated `thinki` reads as a rendering bug, not as information, so a width that cannot
+  // hold the widest cell whole declines entirely and lets the caller fall back.
+  assert.equal(capabilityPanel(GEMMA4, 20), null);
+});
+
+test("capabilityPanel: no row ever exceeds the width it was given", () => {
+  for (const inner of [40, 56, 76, 100, 200]) {
+    for (const row of capabilityPanel(GEMMA4, inner) ?? []) {
+      assert.ok(stringWidth(row) <= inner, `width ${inner}: row overflowed`);
+    }
+  }
+});
+
+test("the rail-fit predicate is the same answer the painter gives", () => {
+  /**
+   * ⌃T enters a MODAL focus in which every key that is not an arrow, esc, ⌃T or ⌃C is swallowed.
+   * Its entry guard only asked whether there were cells at all — never whether the rail is on
+   * screen — while `traitRailLine` returns null whenever the rail does not fit, which on a narrow
+   * terminal it does not (the standard rail is ~35-38 columns against a budget of cols-5). The
+   * result was a composer that looked completely normal, with no rail, no focus ring and no hint
+   * row, in which every printable key, Enter, Backspace and ⌃D did nothing. The user reads that
+   * as a frozen terminal.
+   *
+   * One predicate backs both, so the key that ENTERS the mode and the code that PAINTS it cannot
+   * disagree about whether the rail is there.
+   */
+  const cells = traitCells({
+    ...BASE,
+    capabilities: ["completion", "vision", "tools", "thinking"],
+    effort: { tier: "high", available: true },
+  } as never);
+  assert.ok(cells.length > 0, "precondition: the model produced a rail");
+
+  const wide = 200;
+  const narrow = 4;
+  assert.equal(traitRailFits(cells, wide), true);
+  assert.equal(traitRailFits(cells, narrow), false);
+
+  // the painter must agree at BOTH widths — that agreement is the whole point
+  assert.notEqual(traitRailLine(cells, null, wide, "none"), null);
+  assert.equal(traitRailLine(cells, null, narrow, "none"), null);
+
+  // an empty rail never fits, so ⌃T falls back to its blind flip rather than trapping the user
+  assert.equal(traitRailFits([], wide), false);
+  assert.equal(traitRailLine([], null, wide, "none"), null);
 });

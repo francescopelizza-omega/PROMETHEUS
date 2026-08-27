@@ -141,6 +141,10 @@ function makeFakeIpcMain() {
     removeAllListeners(channel: string): void {
       listeners.delete(channel);
     },
+    /** the registered handler, so a test can actually INVOKE a channel. */
+    handlerFor(channel: string): ((ev: unknown, arg: unknown) => Promise<unknown>) | undefined {
+      return handlers.get(channel) as ((ev: unknown, arg: unknown) => Promise<unknown>) | undefined;
+    },
     handledChannels(): Set<string> {
       return new Set(handlers.keys());
     },
@@ -204,4 +208,65 @@ test("registerIdeIpcHandlers: register -> dispose -> register again never throws
   );
   dispose2?.();
   assert.equal(fakeIpcMain.handledChannels().size, 0, "the second dispose must also be complete");
+});
+
+test("an ELEVATED desktop clamps the operator's authorisation level, in MAIN", async () => {
+  /**
+   * The CLI stops for a red acknowledgement before opening a session as root, and its readline
+   * and headless hosts clamp too. The desktop had no notion of elevation at all: launched under
+   * `sudo`, it restored whatever level the operator had persisted and auto-approved against it as
+   * the superuser — where one auto-approved `run_command` or `write_file` reaches the whole
+   * machine, not just the workspace.
+   *
+   * The clamp belongs in MAIN, not the renderer. The renderer is the least-trusted surface in our
+   * own app and it supplies `authLevel` on every request, so a warning painted in the UI would be
+   * advisory only; enforcing it here means no renderer — ours or a compromised one — can hand the
+   * system-tool path a full-autonomy level while running as root.
+   */
+  const { clampAuthLevelForElevation } = await import("./ide-ipc.js");
+  const realUser = process.env.SUDO_USER;
+  const realUid = process.env.SUDO_UID;
+  try {
+    process.env.SUDO_USER = "someone";
+    assert.equal(clampAuthLevelForElevation(7), 5, "a root session kept the full-autonomy tier");
+    assert.equal(clampAuthLevelForElevation(6), 5);
+    // below the ceiling nothing changes — an elevated session stays usable
+    assert.equal(clampAuthLevelForElevation(5), 5);
+    assert.equal(clampAuthLevelForElevation(1), 1);
+    assert.equal(clampAuthLevelForElevation(0), 0);
+
+    Reflect.deleteProperty(process.env, "SUDO_USER");
+    Reflect.deleteProperty(process.env, "SUDO_UID");
+    if (process.getuid?.() !== 0) {
+      assert.equal(clampAuthLevelForElevation(7), 7, "an ordinary session must not be clamped");
+    }
+  } finally {
+    if (realUser === undefined) Reflect.deleteProperty(process.env, "SUDO_USER");
+    else process.env.SUDO_USER = realUser;
+    if (realUid === undefined) Reflect.deleteProperty(process.env, "SUDO_UID");
+    else process.env.SUDO_UID = realUid;
+  }
+});
+
+test("a no-auto-approve posture clamps the ladder to ask-before-everything", async () => {
+  /**
+   * The Security-strict profile's stated posture is "gate --strict, NO auto-approve", and it set
+   * `autoApprove: false` — which nothing read. Selecting it tightened the gate and the force ban
+   * and left auto-approval exactly as it was, so read-only tools kept being auto-approved by the
+   * ladder. Level 0 ("paranoid — ask before EVERY action, even reading a file") is what that
+   * setting means once it is honoured.
+   *
+   * The DEFAULT stays untouched: only an explicit `false` clamps, so a user who never chose the
+   * profile keeps the ladder they have.
+   */
+  const { clampAuthLevelForPosture } = await import("./ide-ipc.js");
+  assert.equal(
+    clampAuthLevelForPosture(7, { autoApprove: false }),
+    0,
+    "an explicit no-auto-approve did not clamp",
+  );
+  assert.equal(clampAuthLevelForPosture(2, { autoApprove: false }), 0);
+  // absent or true ⇒ the operator's level stands
+  assert.equal(clampAuthLevelForPosture(7, { autoApprove: true }), 7);
+  assert.equal(clampAuthLevelForPosture(7, {}), 7);
 });

@@ -13,7 +13,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { discoverProjectAgentsDir, loadAgentFiles } from "./agent-files-host.js";
+import {
+  discoverProjectAgentsDir,
+  loadAgentFiles,
+  loadImportedAgentFiles,
+} from "./agent-files-host.js";
 
 function tmp(): string {
   return mkdtempSync(join(tmpdir(), "prom-agent-files-"));
@@ -77,6 +81,93 @@ test("loadAgentFiles: a USER persona wins a name collision over a PROJECT one", 
     assert.equal(personas.length, 1);
     assert.equal(personas[0]?.scope, "user");
     assert.equal(personas[0]?.description, "user version");
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("loadImportedAgentFiles: loads ~/.prometheus/agents/imported/*.md as IMPORTED scope, clamped", () => {
+  const home = tmp();
+  try {
+    mkdirSync(join(home, "agents", "imported"), { recursive: true });
+    writeFileSync(
+      join(home, "agents", "imported", "shared.md"),
+      "---\nmode: build\nmodel: ollama:evil\n---\nA persona someone else shared with me.",
+    );
+    const personas = loadImportedAgentFiles(home);
+    assert.equal(personas.length, 1);
+    assert.equal(personas[0]?.scope, "imported");
+    // clamped exactly like project: writable role refused, model refused.
+    assert.equal(personas[0]?.base, "explore");
+    assert.equal(personas[0]?.model, undefined);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("loadAgentFiles: the imported/ subdirectory is never mistaken for a user-scope *.md file", () => {
+  // readdirSync(join(home,"agents")) also sees the "imported" subdirectory entry; the existing
+  // `*.md`-only filter must keep skipping it (this is the whole reason the subdir was placed
+  // INSIDE agents/ rather than requiring a new top-level directory + loader change).
+  const home = tmp();
+  const root = tmp();
+  try {
+    mkdirSync(join(home, "agents", "imported"), { recursive: true });
+    writeFileSync(join(home, "agents", "imported", "shared.md"), "A shared persona.");
+    const personas = loadAgentFiles(root, home);
+    assert.equal(personas.length, 1);
+    assert.equal(personas[0]?.name, "shared");
+    assert.equal(personas[0]?.scope, "imported");
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("loadAgentFiles: USER wins over PROJECT wins over IMPORTED on a 3-way name collision", () => {
+  const home = tmp();
+  const root = tmp();
+  try {
+    mkdirSync(join(home, "agents", "imported"), { recursive: true });
+    writeFileSync(join(home, "agents", "same.md"), "---\ndescription: user version\n---\nUser.");
+    mkdirSync(join(root, ".prometheus", "agents"), { recursive: true });
+    writeFileSync(
+      join(root, ".prometheus", "agents", "same.md"),
+      "---\ndescription: project version\n---\nProject.",
+    );
+    writeFileSync(
+      join(home, "agents", "imported", "same.md"),
+      "---\ndescription: imported version\n---\nImported.",
+    );
+    const personas = loadAgentFiles(root, home);
+    assert.equal(personas.length, 1);
+    assert.equal(personas[0]?.scope, "user");
+    assert.equal(personas[0]?.description, "user version");
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("loadAgentFiles: PROJECT wins over IMPORTED when the user has no persona of that name", () => {
+  const home = tmp();
+  const root = tmp();
+  try {
+    mkdirSync(join(home, "agents", "imported"), { recursive: true });
+    mkdirSync(join(root, ".prometheus", "agents"), { recursive: true });
+    writeFileSync(
+      join(root, ".prometheus", "agents", "same.md"),
+      "---\ndescription: project version\n---\nProject.",
+    );
+    writeFileSync(
+      join(home, "agents", "imported", "same.md"),
+      "---\ndescription: imported version\n---\nImported.",
+    );
+    const personas = loadAgentFiles(root, home);
+    assert.equal(personas.length, 1);
+    assert.equal(personas[0]?.scope, "project");
+    assert.equal(personas[0]?.description, "project version");
   } finally {
     rmSync(home, { recursive: true, force: true });
     rmSync(root, { recursive: true, force: true });

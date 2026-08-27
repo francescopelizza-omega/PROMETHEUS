@@ -21,7 +21,7 @@ All of these route through **`prometheus.py`** (the zero-dependency Python engin
 its **`nemesis`** security gate. The agent loop itself — sub-agents, a lifecycle-hooks system,
 cross-session memory, multi-provider model support, and a real per-command OS sandbox
 (macOS Seatbelt today; Linux via bubblewrap, unit-tested but not yet run on a real Linux
-kernel) — lives once in `packages/core` and is shared by every surface above, not
+kernel) — lives once in `studio/packages/core` and is shared by every surface above, not
 reimplemented per host.
 
 > **Status:** active development. APIs and layout may change.
@@ -44,6 +44,7 @@ reimplemented per host.
 - [Studio — the desktop app](#studio--the-desktop-app)
 - [`prometheus` — the CLI / TUI](#prom--the-cli--tui)
 - [The plugin — drive it from any AI agent](#the-plugin--drive-it-from-any-ai-agent)
+- [The AI agent loop — tools, permissions and mechanics](#the-ai-agent-loop--tools-permissions-and-mechanics)
 - [Install & run](#install--run)
 - [Configuration, state & exit codes](#configuration-state--exit-codes)
 - [Security model](#security-model)
@@ -330,31 +331,204 @@ per-agent adapter** — fully gated, one machine-readable result returned.
 
 ---
 
+## The AI agent loop — tools, permissions and mechanics
+
+Every surface — Studio's AI rail, the `prometheus` CLI/TUI, the VS Code extension, and any
+external agent talking through the MCP plugin above — drives the **same** agent loop, implemented
+once in `studio/packages/core/src/agent/` and shared, never reimplemented per host.
+
+### Tool catalog
+
+The model is never handed a shell directly — it calls typed tools, each independently gated:
+
+| Category | Tools |
+|---|---|
+| **Read / inspect** | `read_file`, `list_dir`, `stat_path`, `grep`, `glob`, `semantic_search`, `git_status`, `git_diff`, `git_log`, `git_show`, `system_info`, `gpu_info`, `process_list`, `which`, `package_list`, `env_get`, `job_status`, `job_output` |
+| **Write / edit** | `propose_edit` (deterministic patching, below), `write_file`, `delete_file`, `move_file`, `mkdir` |
+| **Execute** | `run_command` (parsed argv, never a shell string), `job_kill`, `propose_elevated` (drafts a privileged command for a *human* to run themselves — the agent never executes it) |
+| **Network** | `web_fetch`, `web_search` |
+| **Memory** | `memory_write`, `memory_read` |
+| **Delegation** | `spawn_agent`, `question` (ask the human mid-turn) |
+| **Desktop-only** | `browser_navigate`, `browser_screenshot`, `browser_extract_text` |
+| **Engine** | `prometheus_scan` / `superscan` / `list` / `info` / `where` / `status` / `audit` / `matrix` / `skills_list` / `vault_status` (read-only) and `prometheus_install` / `uninstall` / `enable` / `disable` — gated exactly like a human typing the same command |
+
+### The authorization ladder — A0 through A7
+
+One knob controls how much the agent may do without asking, each rung unlocking one more risk
+category: read < write < config < command < install < destructive.
+
+| Level | Name | Auto-approves |
+|---|---|---|
+| A0 | paranoid | nothing — asks before every action, including reads |
+| A1 | readonly (**default**) | reads |
+| A2 | edits | + file writes |
+| A3 | config | + local settings changes |
+| A4 | commands | + shell commands |
+| A5 | installs | + installs / network calls |
+| A6 | trusted | everything the engine allows |
+| A7 | runall | + runs to completion with no per-turn pauses |
+
+Two things never move with the ladder: `propose_elevated` is never auto-approved at any level, and
+the **nemesis** security check can still hard-block a dangerous action regardless of level —
+autonomy is not the same as safety. A separate **permission-mode** layer sits alongside the ladder
+and can only *narrow* it further, never widen it: `default` (ask before each change), `acceptEdits`
+(auto-run local file edits only), `plan` (read-only — proposes a plan instead of acting),
+`bypassPermissions` (auto-run everything the engine allows), and `yolo` (bypass, plus no per-turn
+pauses on a long task). nemesis still blocks a dangerous action even under `bypassPermissions`/`yolo`.
+
+### `propose_edit` — deterministic patch application
+
+File edits never go through a diff-and-hope-it-lands. A five-rung fallback ladder — **exact match
+→ trailing-whitespace-insensitive → indent-insensitive → blank-line-insensitive → anchor match** —
+is tried in order, and every rung is *unique-or-ambiguous*: a rung that matches more than one site
+in the file fails outright with a structured retry hint, rather than guessing which site the model
+meant. There is no fuzzy/edit-distance fallback, by design — byte-preserving on every region the
+patch doesn't touch (CRLF, BOM, trailing newline included).
+
+### The command sandbox
+
+An approved `run_command` still runs inside an OS-level confinement, applied last, after every
+app-layer check has already passed: **Seatbelt** on macOS, **bubblewrap** on Linux. It restricts
+writes outside the working set and network access below A5; it does **not** restrict file reads
+(the read-only inspection tools need the whole machine readable by design), CPU/memory limits, or
+fork bombs. A missing sandbox driver on Linux runs the command unconfined and says so in the log —
+an honest absence, never a silent downgrade; a broken one on macOS refuses to run at all
+(fail-closed). See [Honest limits](#honest-limits) for the full, current caveat list.
+
+### Lifecycle hooks
+
+`PreToolUse`, `PostToolUse`, and `SessionStart` hooks run your own script around every tool call or
+at session open — a linter before every write, a notification after every install, project context
+injected at start. Only `PreToolUse` can refuse a call (a clean nonzero exit denies it; a timeout,
+crash, or missing binary all fail *soft*, as if no hook existed at all). Your own global hooks
+always run. A **workspace's** own hook config — the one checked into a repo you cloned — is trusted
+far less: any command that isn't byte-identical to one you already had globally is scanned by
+nemesis and needs a one-time human confirmation, cached per exact novel set, so a hook someone else
+added to the repo can't start silently running on your machine, and a repo that later *changes*
+that hook re-prompts rather than reusing your old approval.
+
+### Cross-session memory
+
+`memory_write` / `memory_read` persist markdown notes per project — scoped to the repo root, so any
+subdirectory of a monorepo shares one store — plus an auto-maintained index folded into every new
+session's context. The agent can leave itself notes that survive a restart.
+
+### Sub-agent delegation
+
+`spawn_agent` runs a child agent turn to completion and returns only its final answer, keeping
+exploratory noise (every file it read, every command it ran along the way) out of the parent's
+context. Delegation can only narrow privilege from parent to child, never widen it, and is
+depth-capped (a child cannot itself spawn) and budget-capped per turn, so a runaway fan-out can't
+happen by accident. Four built-in roles ship — `explore`, `scout` (read-only lookups), `plan`
+(read-only, returns an ordered plan instead of acting), `build` (read/write, still gated per call)
+— and custom personas are markdown files with a small frontmatter: your own
+(`~/.prometheus/agents/*.md`) are trusted as written; a project's own
+(`<repo>/.prometheus/agents/*.md`) is clamped — forced read-only, can't choose its own model, and
+its instructions can only narrow the tools available to the child, never widen them.
+
+### Custom slash commands
+
+`/name` commands are markdown files under `~/.prometheus/command/` (global) or
+`<repo>/.prometheus/command/` (project), supporting `$ARGUMENTS`, positional `$1`–`$9`, `@file`
+references, and `` !`shell command` `` interpolation. The same trust asymmetry as hooks applies: a
+project-scope command can reference workspace files but can never embed a shell command — a repo
+you clone cannot smuggle in a command that runs something the moment you type `/deploy` — only your
+own global commands can, and even those still pass through the nemesis gate and a confirmation like
+any other command.
+
+### Token economy
+
+A built-in **repo map** (`/repomap`) walks the tree once (gitignore-aware, symlink-safe) and
+extracts exported symbols per language into a token-budgeted map, so the agent can answer "where is
+X defined?" without a grep round-trip, degrading gracefully as the budget tightens. Terse-output
+prompting and prompt-caching guidance are wired into runtime behavior today; a broader technique
+catalog (local code RAG, structured outputs, LLMLingua-2, server-side compaction, …) is documented
+with install steps rather than reimplemented, and scored honestly rather than oversold.
+
+### Connecting external tools — the MCP client
+
+Point the agent at any MCP server — a spawned stdio subprocess or a streamable-HTTP endpoint, with
+keychain-backed bearer auth so a secret never sits in a config file — and its tools join the
+catalog above. Adding a server runs its launch command (or, for a marketplace entry, its source
+repo) through the nemesis gate first, exactly like a plugin install: a blocked verdict means the
+server is never spawned. Read-only tools you've pre-approved run without asking; anything with a
+`destructiveHint` never auto-runs, no matter what you granted.
+
+**Tool-descriptor pinning.** The add-time scan only sees the launch command — not what a server's
+tools *say* they do. So on every later reconnect, PROMETHEUS hashes the server's full tool
+descriptor set (name, description, schema, annotations, compared order-independently) against the
+hash pinned at the last clean connection. Any drift — even one that reads perfectly innocent on its
+own — blocks the server outright and tears the connection down; a deliberate re-add is required to
+approve the new definition. A server that redefines itself after you've already trusted it doesn't
+get to vouch for its own new description.
+
+### Model providers
+
+Native tool-calling support for **OpenAI**, **Anthropic**, and **Gemini**'s own protocols; every
+other provider (OpenRouter, Groq, DeepSeek, and more) speaks the OpenAI-compatible dialect. A
+**local** tier runs entirely offline through Ollama, including a one-step "repoint" that swaps a
+metered open-weight model for its free local pull. A reasoning-effort knob (off / low / medium /
+high / max) adapts per model and runtime, preferring a live capability probe over guessing from a
+model's name.
+
+### Exposing PROMETHEUS's own tools outward
+
+`studio/apps/mcp-server` runs the inverse direction of the client above: a real MCP server exposing
+PROMETHEUS's own agent tool catalog to **other** MCP clients — read-only only (`scan`, `list`,
+`info`, `status`, `audit`, …), enforced by a fail-closed double check at both load time and dispatch
+time, since a headless JSON-RPC caller has no human on the other end to answer a confirmation
+prompt.
+
+---
+
 ## Install & run
 
-> **Status of the published routes.** Neither published route works yet, and the reasons are
-> unrelated to the code:
->
-> - The `curl … install.sh` line below fetches from the `main` branch. `install.sh` is not on
->   `main` yet, so that URL 404/403s. Until it is pushed there, use **[From source](#from-source)**
->   or pass an explicit `--ref`.
-> - The `npx -y @prometheus-plugin/*` commands 404 because those packages have **never been
->   published to npm**. Their manifests are publish-ready; the publish simply has not happened.
->   Until it does, register the MCP server from a source checkout (see
->   `prometheus_plugin/README.md`).
->
-> `studio/scripts/release-preflight.mjs` checks both of these and fails loudly, so they cannot
-> silently regress again once fixed.
+> **Status of the published routes.** The `npx -y @prometheus-plugin/*` commands below 404 —
+> those packages have **never been published to npm**; their manifests are publish-ready but the
+> publish itself hasn't happened yet. Register the MCP server from a source checkout instead (see
+> `prometheus_plugin/README.md`) until that changes. The `curl … install.sh` route should work —
+> `install.sh` is present on this project's `main` branch — but hasn't been re-verified against the
+> live GitLab raw-content URL from outside this checkout; if it 404s for you, use
+> [From source](#from-source-both-linux-and-macos) below, or pass an explicit `--ref` pointing at a
+> tagged release. `studio/scripts/release-preflight.mjs` checks both routes and fails loudly, so a
+> regression here can't go unnoticed again.
 
-### Quick install
+### Linux
 
 ```bash
 curl -fsSL https://gitlab.com/red-beard-phoenix/PROMETHEUS/-/raw/main/install.sh | bash
 ```
 
-Installs to `~/.prometheus`, links **`prometheus`** (CLI/TUI) and **`prometheus-app`**
-(the Studio desktop app) into `~/.local/bin`, and adds that to your `PATH`. No `sudo`,
-nothing written outside your home directory.
+Installs to `~/.prometheus`, links **`prometheus`** (CLI/TUI) and **`prometheus-app`** (the Studio
+desktop app) into `~/.local/bin`, and patches that onto `PATH` in your shell profile (bash/zsh/fish
+— open a new terminal, or re-source your profile, to pick it up). No `sudo`, nothing written
+outside your home directory.
+
+Studio's per-command OS sandbox uses **bubblewrap** (`bwrap`) on Linux. It's optional — its
+absence is handled as an honest, logged "ran unconfined," never a silent downgrade — but install it
+first if you want `run_command` calls actually confined at the kernel level:
+
+```bash
+sudo apt install bubblewrap      # Debian / Ubuntu
+sudo dnf install bubblewrap      # Fedora
+sudo pacman -S bubblewrap        # Arch
+```
+
+### macOS
+
+```bash
+curl -fsSL https://gitlab.com/red-beard-phoenix/PROMETHEUS/-/raw/main/install.sh | bash
+```
+
+Same script, same destination — `~/.local/bin` on your `PATH`, nothing outside your home directory.
+macOS's per-command sandbox uses the OS's own **Seatbelt** (`sandbox-exec`); there's nothing extra
+to install.
+
+> A Finder/Dock-launched Studio build repairs its `PATH` at startup so Homebrew/`~/.local` tools
+> (`git`, `ollama`, `hf`, …) stay visible to the engine's install and detection steps — a
+> GUI-launched app doesn't inherit your shell's `PATH` the way a terminal-launched one does.
+
+### Both
 
 ```bash
 prometheus              # the interactive TUI
@@ -380,39 +554,31 @@ cloning anything.
 
 ### Requirements
 
-- **macOS or Linux** (Windows: use WSL), a stock **`python3`** (3.9+) — the engine and
-  nemesis are standard-library only, **zero pip deps**.
-- **Node ≥ 20** — the installer builds the CLI bundle from source. `pnpm` comes from
-  `corepack`, which ships with Node.
+- **Linux or macOS** (Windows: use WSL) — a stock **`python3`** (3.9+); the engine and nemesis
+  are standard-library only, **zero pip dependencies**.
+- **Node ≥ 20** — the installer builds the CLI bundle from source. `pnpm` comes from `corepack`,
+  which ships with Node.
 - `git` on `PATH` (installs stage via git clone).
 
-### 1) The engine directly (no build step)
+### From source (both Linux and macOS)
 
 ```bash
+# 1) the engine directly — no build step, works the moment you have python3
 python3 prometheus.py wizard            # interactive menu
 python3 prometheus.py scan              # detect installed AI agents
 python3 prometheus.py install caveman   # gated install into every supported agent
 ./nemesis scan owner/repo               # standalone security scan
-```
 
-### 2) Register into your AI agent (MCP)
-
-```bash
+# 2) register into your AI agent (MCP)
 npx -y @prometheus-plugin/installer --py "$PWD/prometheus.py"
-```
 
-### 3) Studio desktop (from source)
-
-```bash
+# 3) Studio desktop
 cd studio
 corepack enable && pnpm install
 pnpm dev                 # run the desktop app (electron-vite dev)
 pnpm package             # build a distributable (staged engine + pyruntime + electron-builder)
-```
 
-### 4) `prometheus` CLI (from source)
-
-```bash
+# 4) `prometheus` CLI
 cd studio
 pnpm install
 pnpm dev:cli             # run the CLI/TUI in dev
@@ -422,10 +588,6 @@ pnpm --filter @prometheus/cli run prepack   # build the bundle bin/prometheus la
 `bin/prometheus` and `bin/prometheus-app` work straight out of a checkout — put `bin/` on
 your `PATH`, or let `./install.sh --from-local .` link them for you. Both resolve the
 checkout from their own location, so symlinking them anywhere is safe.
-
-> **macOS note:** a Finder/Dock-launched Studio build repairs its `PATH` at startup so
-> Homebrew/`~/.local` tools (git, ollama, hf, …) are visible to the engine's install
-> and detection steps.
 
 ---
 
@@ -475,6 +637,47 @@ pre-scan; the deep gate still runs), `--no-gate` (disable the gate this run),
   spawns `python3` / `nemesis`, with a curated child environment that strips
   loader/interpreter-hijack variables (`LD_PRELOAD`, `DYLD_*`, `PYTHONPATH`, …).
 
+### Defending the agent loop against prompt injection
+
+`nemesis` gates fetched *code*. A separate set of defenses gates fetched *text* — the biggest
+attack surface an agent loop actually has, since anything the model reads that a third party
+controls (a file in a cloned repo, an MCP server's response, a PR comment, a sub-agent's own
+report) can carry instructions trying to redirect it. This is treated as **untrusted by
+construction**, not by best-effort detection:
+
+- **Structural framing, always.** MCP tool results, PR titles/descriptions/comments/diffs, a
+  sub-agent's report (once it touches any untrusted surface), and repo file content — `read_file`,
+  `grep`, `git log`, and their `run_command` equivalents alike, so `cat secret.env` isn't a
+  lower-friction way to read the same bytes than `read_file` is — are wrapped in an explicit
+  `<<untrusted-…-data>>` marker before they ever reach the model's context. The frame applies
+  unconditionally, whether or not anything looks suspicious — it is the actual protection.
+- **Pattern scanning on top, advisory.** A lightweight, in-process scanner flags override / persona
+  / exfiltration / tool-invocation phrasing and hidden Unicode characters, appending a visible
+  warning when it fires. It is a heuristic layered *on top of* the frame above, not a substitute
+  for it — an attacker who phrases around every pattern still lands inside the unconditional frame.
+- **A canary tripwire.** Each agent turn plants a random, never-to-be-repeated token in the model's
+  own context, with an explicit instruction never to reveal it. If that token ever shows up in the
+  model's output, something upstream got it to act against an explicit instruction — a
+  near-zero-false-positive signal that a defense layer was bypassed, written to an audit log rather
+  than silently missed.
+- **Workspace-hook and steering-file trust.** A cloned repo's own `.prometheus/settings.json` can
+  only *narrow* your existing hooks, never introduce a new command unscanned and unconfirmed (see
+  [Lifecycle hooks](#lifecycle-hooks) above); project-scope `AGENTS.md` / `CLAUDE.md` content is
+  labeled as repo-supplied advisory context and explicitly told it cannot grant tools or relax the
+  approval ladder.
+- **MCP tool-descriptor pinning** closes the "rug pull" case where a server redefines its own tools
+  after you've already approved it (see [Connecting external tools](#connecting-external-tools--the-mcp-client)
+  above).
+
+None of this claims prompt injection is *solved* — see [Honest limits](#honest-limits) below — it's
+defense in depth applied at every point untrusted text crosses into the model's context, with the
+same fail-closed instinct the rest of this project applies to fetched code. One real, deliberate
+trade-off: MCP tool-descriptor pinning hard-blocks on ANY drift, including a routine, benign
+upstream update to a server you run via a floating version (`npx pkg@latest`) — that's treated as
+the safer failure mode than trusting a server's own claim that its new definition is fine, but it
+does mean an innocent version bump can require you to manually re-approve a server you did nothing
+wrong with.
+
 ---
 
 ## Honest limits
@@ -494,7 +697,7 @@ project's own dev machine; no Linux kernel was available to verify enforcement l
 has no equivalent primitive and runs unconfined at the OS level — the app-layer confirm/gate
 still applies there, it's just not backed by a kernel sandbox. Neither sandbox restricts file
 *reads*, CPU/memory/disk, or the temp/toolchain-cache directories a sandboxed command needs
-to be writable to actually run — see `packages/core/src/agent/system/host/exec-sandbox.ts`'s
+to be writable to actually run — see `studio/packages/core/src/agent/system/host/exec-sandbox.ts`'s
 own header comment for the precise, current list of what is and isn't confined.
 
 ---

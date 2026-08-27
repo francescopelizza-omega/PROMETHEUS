@@ -15,9 +15,11 @@ import { test } from "node:test";
 
 import {
   DEFAULT_CONTEXT_WINDOW,
+  PROBE_TIMEOUT_MS,
   contextFromModelsEntry,
   contextFromOllamaShow,
   probeContextWindow,
+  revisionFromOllamaShow,
 } from "./context-window.js";
 
 /** A fetch stub: route → payload, anything else is a 404. */
@@ -116,4 +118,91 @@ test("a runner that answers with a shape we do not know yields the floor", async
   const r = await probeContextWindow("http://x", "m", fetchLike);
   assert.equal(r.source, "default");
   assert.equal(r.contextWindow, DEFAULT_CONTEXT_WINDOW);
+});
+
+/* ── the cache-invalidation token ───────────────────────────────────────────*/
+
+test("revision prefers a content DIGEST wherever a build reports one", () => {
+  assert.equal(revisionFromOllamaShow({ digest: "sha256:abc", modified_at: "t" }), "sha256:abc");
+  assert.equal(
+    revisionFromOllamaShow({ details: { digest: "sha256:def" }, modified_at: "t" }),
+    "sha256:def",
+  );
+});
+
+test("revision falls back to modified_at — Ollama 0.32.6's /api/show carries no digest", () => {
+  // Verified against the live daemon: the top-level keys are license/modelfile/parameters/
+  // template/details/model_info/tensors/capabilities/modified_at. No digest anywhere. A
+  // re-pull rewrites `modified_at`, so it invalidates — it just also invalidates on a no-op
+  // re-pull, which costs one redundant probe and never a stale answer.
+  assert.equal(
+    revisionFromOllamaShow({ modified_at: "2026-07-24T05:25:11.337173291+02:00" }),
+    "2026-07-24T05:25:11.337173291+02:00",
+  );
+});
+
+test("revision is undefined when the runner reports no identity at all", () => {
+  // Not "" and not a fabricated key: a cache must be able to tell "unverifiable" from
+  // "verified as X", because only the first one has to fall back to a time bound.
+  assert.equal(revisionFromOllamaShow({ model_info: {} }), undefined);
+  assert.equal(revisionFromOllamaShow({ digest: "" }), undefined);
+  assert.equal(revisionFromOllamaShow(null), undefined);
+  assert.equal(revisionFromOllamaShow("nope"), undefined);
+});
+
+test("probeContextWindow carries the revision through alongside the window", async () => {
+  const { fetchLike } = stub({
+    "/api/show": {
+      model_info: { "qwen3moe.context_length": 262144 },
+      capabilities: ["completion", "tools", "thinking"],
+      modified_at: "2026-07-24T05:25:11Z",
+    },
+  });
+  const r = await probeContextWindow("http://127.0.0.1:11434/v1", "qwen3.6:latest", fetchLike);
+  assert.deepEqual(r, {
+    contextWindow: 262144,
+    source: "ollama",
+    capabilities: ["completion", "tools", "thinking"],
+    revision: "2026-07-24T05:25:11Z",
+  });
+});
+
+/* ── V0: every probe request is BOUNDED ─────────────────────────────────────*/
+
+test("a runner that accepts the socket and never answers does NOT hang the probe", async () => {
+  // The nasty case, and the one `/model` made load-bearing: a refused connection fails fast on
+  // its own, but a process that ACCEPTS and then goes silent hangs forever. `/model` awaits
+  // this probe before reporting the switch, so an unbounded request hangs the command itself
+  // with no output and no way back short of Ctrl-C.
+  const seen: Array<AbortSignal | undefined> = [];
+  const silent = ((_url: string, init?: { signal?: AbortSignal }) => {
+    seen.push(init?.signal);
+    return new Promise<never>((_res, rej) => {
+      // resolve only if the caller aborts — i.e. never, unless the timeout fires.
+      init?.signal?.addEventListener("abort", () => rej(new Error("aborted")));
+    });
+  }) as never;
+
+  const started = Date.now();
+  const r = await probeContextWindow("http://127.0.0.1:1/v1", "m", silent, 25);
+  assert.deepEqual(r, { contextWindow: DEFAULT_CONTEXT_WINDOW, source: "default" });
+  assert.ok(Date.now() - started < 2000, "the probe did not return promptly");
+  assert.ok(seen.length >= 1 && seen[0] instanceof AbortSignal, "no abort signal was passed");
+});
+
+test("the default ceiling is short — this is a loopback call, not a model request", () => {
+  assert.equal(PROBE_TIMEOUT_MS, 2_500);
+});
+
+test("a 200 whose body is not JSON falls through to the floor rather than THROWING", async () => {
+  // `probeContextWindow`'s whole contract is that it never throws at its caller: a proxy error
+  // page served with a 200 must read as "could not measure", like any other failure.
+  const html = (async () => ({
+    ok: true,
+    json: async () => {
+      throw new SyntaxError("Unexpected token < in JSON");
+    },
+  })) as never;
+  const r = await probeContextWindow("http://x/v1", "m", html);
+  assert.deepEqual(r, { contextWindow: DEFAULT_CONTEXT_WINDOW, source: "default" });
 });

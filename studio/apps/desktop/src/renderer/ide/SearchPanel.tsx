@@ -19,6 +19,7 @@ import { type CSSProperties, type ReactElement, useCallback, useMemo, useState }
 
 import type { IdeStructMatch } from "../../shared/ipc-contract.js";
 import { detectLanguage } from "./state/lang-detect.js";
+import { applyReplacements } from "./state/replace-apply.js";
 import {
   type FileMatches,
   type SearchQuery,
@@ -204,7 +205,14 @@ function SearchView({ root }: { root: string }): ReactElement {
         setNotice("skipped: the file changed since this preview — re-run the search");
         return;
       }
-      await api.fsWrite(fm.uri, r.text);
+      // A discarded write result reported "replaced 1 match" over a file that never changed —
+      // and then re-previewed from the text it BELIEVED it had written, so the match vanished
+      // from the tree too. Surface the refusal instead.
+      const wrote = await api.fsWrite(fm.uri, r.text).catch(() => null);
+      if (!wrote?.ok) {
+        setNotice(`not replaced: ${wrote?.error ?? "write failed"}`);
+        return;
+      }
       setConfirmPlan(null); // results changed under a staged confirm — restage it
       // re-preview the file from the written text so remaining offsets stay honest.
       const fresh = ranQuery ? matchFile(fm.uri, r.text, ranQuery.q, ranQuery.replaceWith) : null;
@@ -265,27 +273,14 @@ function SearchView({ root }: { root: string }): ReactElement {
     if (!api || busy) return;
     setBusy(true);
     try {
-      let files = 0;
-      let matches = 0;
-      let skipped = 0;
-      for (const fm of results) {
-        const accepted = selection[fm.uri] ?? [];
-        if (accepted.length === 0) continue;
-        const read = await api.fsRead(fm.uri);
-        if (!read?.ok || read.text === undefined) {
-          skipped += 1;
-          continue;
-        }
-        const r = applyToFreshText(fm, accepted, read.text);
-        if (!r.ok) {
-          skipped += 1;
-          continue;
-        }
-        if (r.applied === 0) continue;
-        await api.fsWrite(fm.uri, r.text);
-        files += 1;
-        matches += r.applied;
-      }
+      // The loop and its counting rule live in `state/replace-apply.ts` so they can be tested
+      // without a renderer — the panel is a .tsx the node:test harness cannot load.
+      const { files, matches, skipped, failed } = await applyReplacements(
+        { read: (uri) => api.fsRead(uri), write: (uri, text) => api.fsWrite(uri, text) },
+        results,
+        (fm) => selection[fm.uri] ?? [],
+        (fm, ids, text) => applyToFreshText(fm, ids as string[], text),
+      );
       setConfirmPlan(null);
       setResults([]);
       setSelection({});
@@ -293,6 +288,10 @@ function SearchView({ root }: { root: string }): ReactElement {
         `replaced ${matches} match${matches === 1 ? "" : "es"} in ${files} file${files === 1 ? "" : "s"}${
           skipped > 0
             ? `; ${skipped} file${skipped === 1 ? "" : "s"} skipped (changed since preview)`
+            : ""
+        }${
+          failed.length > 0
+            ? `; ${failed.length} NOT written (${failed[0]?.error ?? "write failed"})`
             : ""
         }`,
       );

@@ -104,3 +104,58 @@ export function resolveSudoDecision(elevation: Elevation, answer: string | null)
     note: "Elevated privileges acknowledged — you may switch modes (incl. bypass) with Shift-Tab / /permissions.",
   };
 }
+
+/* ── the shared gate runner (CLI-0xx: it used to exist only inside the TUI) ─────────────── */
+
+/** IO seams so every host can run the SAME gate with its own prompt + paint. */
+export interface ElevationGateIo {
+  /** write one line (the host's normal output sink). */
+  write: (line: string) => void;
+  /**
+   * Ask the human the acknowledgement question and resolve their raw answer.
+   *
+   * ABSENT means nobody is there to answer — a headless run, a pipe, a scheduled task. That is
+   * not a reason to skip the gate: it is a reason to take its SAFE branch, so the decision
+   * resolves as a decline (ask-before-everything, bypass locked) rather than silently
+   * inheriting whatever posture was persisted.
+   */
+  ask?: (prompt: string) => Promise<string>;
+  /** paint a line as the red warning banner (identity when the host has no colour). */
+  red?: (s: string) => string;
+}
+
+/**
+ * Run the elevated-privilege startup gate for ANY host.
+ *
+ * The warning, the acknowledgement and the bypass lock lived inside `tui/app.ts` and nowhere
+ * else, so `sudo prometheus --plain`, `--tmux`, `-p` and every scheduled task started under root
+ * with no warning, no acknowledgement and no clamp — while the same `sudo prometheus` in the
+ * default TUI stopped for a full-screen red prompt first. `--plain`/`--tmux` is precisely the
+ * surface used over SSH and inside tmux, which is where a sudo launch is MOST likely.
+ *
+ * Returns the no-op decision when the process is not elevated, so a host can call it
+ * unconditionally.
+ */
+export async function runElevationGate(io: ElevationGateIo): Promise<SudoDecision> {
+  const elevation = detectElevation();
+  if (elevation === null) return resolveSudoDecision(null, null);
+
+  const red = io.red ?? ((s: string) => s);
+  for (const line of sudoWarningLines(elevation).slice(0, -1)) {
+    io.write(line === "" ? "" : red(` ${line} `));
+  }
+  let answer: string | null = null;
+  if (io.ask) {
+    try {
+      answer = await io.ask(`${red(` ${SUDO_ACK_PROMPT} `)} `);
+    } catch {
+      answer = null; // a failed prompt is a decline, never an authorisation
+    }
+  } else {
+    io.write("No interactive terminal to acknowledge on — running in ask-before-everything mode.");
+  }
+  const decision = resolveSudoDecision(elevation, answer);
+  io.write("");
+  io.write(decision.note);
+  return decision;
+}

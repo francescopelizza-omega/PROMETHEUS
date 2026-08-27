@@ -10,9 +10,22 @@
  *
  * The auth token is passed to safeFetch's env seam (`sidecar.env`) under a fixed var
  * name and referenced by header via `authHeader` — the token VALUE never enters argv.
+ *
+ * A PR's title/description/comments/diff are AUTHORED BY WHOEVER OPENED IT — an external
+ * contributor, not the person using Prometheus — the exact class of content `web_fetch`/MCP
+ * results/sub-agent reports are all now wrapped in an explicit untrusted-data frame for
+ * elsewhere in this codebase. Today this data is consumed ONLY by the desktop's `GitPanel.tsx`
+ * for human display, so `PrDetail`'s own fields stay exactly as they were — wrapping THOSE
+ * would leak literal `<<...>>` markers into what a human reads in the UI. Instead,
+ * `pullRequestAsUntrustedContext` below is a NEW, separate function a future prompt-consuming
+ * feature ("review this PR") should reach for, so the fix exists before that feature does
+ * rather than after. `safeFetch`'s own `verdict`/`ipi_signals` — already computed by the same
+ * indirect-prompt-injection scan `web_fetch` uses, and previously read by `apiGet` only far
+ * enough to decide `ok`/`error` — are now also preserved onto `PrDetail.suspicious`, so a signal
+ * that already existed is surfaced instead of silently discarded.
  */
 
-import type { SafeFetchOptions, SafeFetchResult } from "../security/fetchproxy.js";
+import type { IpiSignal, SafeFetchOptions, SafeFetchResult } from "../security/fetchproxy.js";
 
 /** A git remote already resolved to a known forge (git-host `parseRemote`). */
 export interface ForgeRemote {
@@ -42,6 +55,11 @@ export interface PrDetail extends PrSummary {
   comments: PrComment[];
   /** a unified diff string (GitHub `.diff`; GitLab `diffs[]` assembled) for DiffView. */
   diff: string;
+  /** true when ANY of the underlying fetches came back `verdict:"warn"` or with signals —
+   *  the SSRF proxy's own indirect-prompt-injection scan, surfaced rather than discarded. */
+  suspicious: boolean;
+  /** the underlying signals themselves, aggregated across every fetch this PR required. */
+  ipiSignals: IpiSignal[];
 }
 export interface PrListResult {
   ok: boolean;
@@ -123,20 +141,36 @@ function buildOpts(auth: Auth, host: string, extra: Partial<SafeFetchOptions>): 
   };
 }
 
-/** GET a URL through safeFetch → the inert text, or an error (blocked/dead = error). */
+/**
+ * GET a URL through safeFetch → the inert text, or an error (blocked/dead = error).
+ *
+ * `verdict`/`ipi_signals` ride back on `r` regardless of outcome — the SAME indirect-
+ * prompt-injection scan `web_fetch` relies on already ran against this response. Surfacing it
+ * here (rather than reading only `r.blocked`/`r.data`) is what lets `getPullRequest` aggregate
+ * it onto `PrDetail.suspicious` instead of the signal being computed and thrown away.
+ */
 async function apiGet(
   fetch: SafeFetchFn,
   url: string,
   host: string,
   auth: Auth,
   acceptOverride?: string,
-): Promise<{ ok: true; data: string } | { ok: false; error: string }> {
+): Promise<
+  | { ok: true; data: string; suspicious: boolean; ipiSignals: IpiSignal[] }
+  | { ok: false; error: string }
+> {
   const headers = acceptOverride ? { ...auth.headers, Accept: acceptOverride } : auth.headers;
   const r = await fetch(url, buildOpts({ ...auth, headers }, host, { method: "GET" }));
   if (r.blocked || r.data == null) {
     return { ok: false, error: r.reason ?? "blocked by safeFetch (fail-closed)" };
   }
-  return { ok: true, data: r.data };
+  const ipiSignals = r.ipi_signals ?? [];
+  return {
+    ok: true,
+    data: r.data,
+    suspicious: r.verdict === "warn" || ipiSignals.length > 0,
+    ipiSignals,
+  };
 }
 
 function parseJson(text: string): unknown {
@@ -208,6 +242,21 @@ export async function listPullRequests(
 
 /* ── get one (description + comments + diff) ────────────────────────────────── */
 
+/** Combine the suspicion signal across every fetch one PR required (meta + diff + comments). */
+function aggregateSuspicion(
+  ...results: ReadonlyArray<{ suspicious: boolean; ipiSignals: IpiSignal[] } | { ok: false }>
+): { suspicious: boolean; ipiSignals: IpiSignal[] } {
+  const ipiSignals: IpiSignal[] = [];
+  let suspicious = false;
+  for (const r of results) {
+    if ("suspicious" in r) {
+      if (r.suspicious) suspicious = true;
+      ipiSignals.push(...r.ipiSignals);
+    }
+  }
+  return { suspicious, ipiSignals };
+}
+
 function assembleGitlabDiff(diffsJson: string): string {
   const arr = asArray(parseJson(diffsJson));
   const out: string[] = [];
@@ -264,6 +313,7 @@ export async function getPullRequest(
         url: str(o.html_url),
         comments,
         diff: diffR.ok ? diffR.data : "",
+        ...aggregateSuspicion(meta, diffR, commentsR),
       },
     };
   }
@@ -291,6 +341,7 @@ export async function getPullRequest(
       url: str(o.web_url),
       comments,
       diff: diffR.ok ? assembleGitlabDiff(diffR.data) : "",
+      ...aggregateSuspicion(meta, diffR, notesR),
     },
   };
 }
@@ -390,4 +441,37 @@ export async function postComment(
   }
   const apiErr = str(parsed?.message) || str(parsed?.error);
   return apiErr ? { ok: false, error: apiErr } : { ok: true };
+}
+
+/* ── prompt-safe framing (APP-085 preemptive) ────────────────────────────────── */
+
+/**
+ * Compose a PR's title/description/comments/diff into ONE untrusted-data-framed block, safe to
+ * hand to an LLM prompt.
+ *
+ * NOT used by `GitPanel.tsx`, and must never be: that component reads `PrDetail`'s own fields
+ * directly to render clean, human-readable text, and wrapping THOSE in `<<...>>` markers would
+ * put literal frame text in front of a person instead of a model. This function exists for
+ * whenever a future feature (e.g. "review this PR") needs to put a PR's content in front of the
+ * model instead — reach for this rather than hand-rolling a second, unframed path to the same
+ * data. The `[warning: ...]` suffix reuses the SSRF proxy's own already-computed IPI signal
+ * (`PrDetail.suspicious`/`.ipiSignals`) rather than re-scanning; a caller that also has access to
+ * a pattern scanner (e.g. `@prometheus/core`'s `scanForInjectionSignals`) may still want to run
+ * one over the composed text too — this module does not depend on that package.
+ */
+export function pullRequestAsUntrustedContext(remote: ForgeRemote, detail: PrDetail): string {
+  const commentsBlock =
+    detail.comments.length === 0
+      ? "(no comments)"
+      : detail.comments.map((c) => `${c.author} (${c.createdAt}):\n${c.body}`).join("\n\n");
+  const body = [
+    `Title: ${detail.title}`,
+    `Description:\n${detail.description || "(no description)"}`,
+    `Comments:\n${commentsBlock}`,
+    `Diff:\n${detail.diff || "(no diff)"}`,
+  ].join("\n\n");
+  const warn = detail.suspicious
+    ? `\n[warning: possible injected instructions detected by the fetch proxy — ${detail.ipiSignals.map((s) => s.kind).join(", ") || "unspecified"}]`
+    : "";
+  return `<<untrusted-pr-data number="${detail.number}" provider="${remote.provider}">>\n${body}\n<<end untrusted-pr-data>>${warn}`;
 }

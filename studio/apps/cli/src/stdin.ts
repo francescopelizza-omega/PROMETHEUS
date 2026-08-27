@@ -21,10 +21,52 @@ export function shouldReadStdinPrompt(
   flags: Record<string, unknown>,
   isTTY: boolean | undefined,
 ): boolean {
-  return (
-    command[0] === "chat" && positionals.length === 0 && flags.cli === undefined && isTTY !== true
-  );
+  return stdinPromptSink(command, positionals, flags, isTTY) !== null;
 }
+
+/** Where a stdin-sourced prompt has to be DELIVERED for the run to actually use it. */
+export type StdinPromptSink =
+  /** `chat` reads its message from `positionals[0]`. */
+  | "positional"
+  /** the headless one-shot reads its prompt from the `-p` flag's VALUE. */
+  | "flag";
+
+/**
+ * Which sink should a piped prompt fill — or null when stdin is not the prompt source?
+ *
+ * `chat` was the only case this knew about, so the OTHER documented form silently did nothing:
+ * `--help` line 74 advertises `cat task.md | prometheus -p` ("stdin is the prompt when none is
+ * given"), but a bare `-p` parses as the BOOLEAN `true` rather than a string, `oneShotPrompt`
+ * requires a non-empty string, and the run fell through to the help screen and exited 0 — the
+ * piped task discarded, with a success code. Measured against the built binary.
+ *
+ * The two sinks are genuinely different destinations, which is why this reports which one rather
+ * than just "yes": pushing a positional would not reach `oneShotPrompt`, and setting the flag
+ * would not reach `chat`.
+ */
+export function stdinPromptSink(
+  command: readonly string[],
+  positionals: readonly string[],
+  flags: Record<string, unknown>,
+  isTTY: boolean | undefined,
+): StdinPromptSink | null {
+  // A real TTY means a human is typing; the interactive readline owns the stream.
+  if (isTTY === true) return null;
+  if (command[0] === "chat" && positionals.length === 0 && flags.cli === undefined) {
+    return "positional";
+  }
+  // A BARE `-p` / `--print` / `--prompt`: present, but with no value of its own. A flag that
+  // already carries a string is an explicit prompt and takes precedence — stdin is the fallback.
+  const bareOneShot = ONE_SHOT_FLAGS.some((k) => flags[k] === true);
+  const valued = ONE_SHOT_FLAGS.some((k) => typeof flags[k] === "string" && flags[k] !== "");
+  if (bareOneShot && !valued && positionals.length === 0 && flags.cli === undefined) {
+    return "flag";
+  }
+  return null;
+}
+
+/** The flags `session/one-shot.ts`'s `oneShotPrompt` reads, in its order. */
+const ONE_SHOT_FLAGS = ["p", "print", "prompt"] as const;
 
 /** The outcome of a stdin-prompt read: the trimmed-non-empty prompt, or a clear error string. */
 export interface StdinPromptResult {

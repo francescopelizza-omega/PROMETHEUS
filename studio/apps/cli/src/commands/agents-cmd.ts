@@ -49,7 +49,22 @@ export async function runAgentsCommand(
   ctx: CliContext,
   deps: AgentsDeps = defaultAgentsDeps(),
 ): Promise<CommandOutcome> {
-  const sub = ctx.args.command[1] ?? "list";
+  // `unmatchedSub` (parse.ts) distinguishes "a second word WAS typed but didn't match
+  // list/attach/kill" from "nothing was typed" — without it, `agents kli <id>` (typo of
+  // `kill`) silently fell through to the "list" branch below (command[1] was undefined for
+  // a TWO_WORD mismatch), discarding both the typo and the id with no indication anything
+  // was wrong.
+  const sub = ctx.args.unmatchedSub ?? ctx.args.command[1] ?? "list";
+
+  if (sub !== "list" && sub !== "kill" && sub !== "attach") {
+    return {
+      text: c.red(
+        `prometheus agents ${sub}: unknown agents verb.\n  ${c.dim("try:")} list · attach · kill`,
+      ),
+      json: { ok: false, error: "unknown-verb", command: `agents ${sub}` },
+      exitCode: 1,
+    };
+  }
 
   if (sub === "kill") {
     const id = ctx.args.positionals[0];

@@ -46,6 +46,12 @@ export type Role =
   | "accent"
   | "muted"
   | "heading"
+  // the model's trait rail: a capability that is LIVE this turn vs one the user switched off.
+  // Green/amber and not the generic info/warn pair, because these two are read as a matched
+  // set — "is this on or off" — and a shared vocabulary for a binary is what makes the rail
+  // scannable without a legend.
+  | "traitOn"
+  | "traitOff"
   // syntax-highlight token roles (WRAPPER Subsystem 2). The exact hues come from the Pelly
   // scheme (tokens/pelly-syntax) on truecolor/256; the ramp/ANSI-16 maps below are the fallback.
   | "synKeyword"
@@ -107,6 +113,8 @@ const ROLE_RAMP: Record<Role, [RampName, keyof Ramp]> = {
   accent: ["cyan", 400],
   muted: ["neutral", 500],
   heading: ["violet", 200],
+  traitOn: ["green", 400],
+  traitOff: ["amber", 400],
   synKeyword: ["violet", 400],
   synString: ["green", 400],
   synDoc: ["green", 300],
@@ -165,6 +173,8 @@ const ROLE_ANSI16: Record<Role, AnsiColorName> = {
   accent: "cyan",
   muted: "brightBlack",
   heading: "brightMagenta",
+  traitOn: "green",
+  traitOff: "yellow",
   synKeyword: "brightYellow",
   synString: "brightBlue",
   synDoc: "brightGreen",
@@ -387,4 +397,104 @@ export function selectionBar(text: string, width: number, caps: ColorCaps): stri
   // bright-white bold foreground over the moving gradient background = high contrast.
   const body = chars.map((ch, i) => `${ESC}[1;97;${bgCode(stops[i] ?? a, caps)}m${ch}`).join("");
   return `${body}${ESC}[0m`;
+}
+
+/* ── the elapsed-turn clock ("⏱ 3h 7m 44s") ───────────────────────────────── */
+
+/**
+ * How long the turn took, as a COLOR BAND.
+ *
+ * The clock used to paint `muted` (neutral.500, no bold) — a dark grey on a dark terminal,
+ * which is the one thing a wall-clock must not be: unreadable. It is also the only number in
+ * the session that carries a verdict, so it now says how long WITHOUT being read: cool while
+ * the turn is quick, warming as it drags, and unmistakable once it has run for hours.
+ *
+ * Bands are [lower, upper) — a turn at exactly 30m is `lt1h`, not `lt30m` — so every instant
+ * belongs to exactly one band and the boundary is never ambiguous.
+ */
+export type DurationTier = "lt30m" | "lt1h" | "lt2h" | "lt3h" | "lt5h" | "lt7h" | "gte7h";
+
+const MINUTE_MS = 60_000;
+const HOUR_MS = 3_600_000;
+
+/** Upper bound (exclusive) → band. Ordered; the first bound the elapsed time is under wins. */
+const DURATION_BANDS: readonly (readonly [number, DurationTier])[] = [
+  [30 * MINUTE_MS, "lt30m"],
+  [1 * HOUR_MS, "lt1h"],
+  [2 * HOUR_MS, "lt2h"],
+  [3 * HOUR_MS, "lt3h"],
+  [5 * HOUR_MS, "lt5h"],
+  [7 * HOUR_MS, "lt7h"],
+];
+
+/**
+ * Which band an elapsed span falls in. PURE.
+ *
+ * A negative / NaN span floors to 0 for the same reason `formatDuration` does: a clock that
+ * throws or blanks on a clock-skewed `Date.now()` difference loses the whole turn's timing.
+ */
+export function durationTier(ms: number): DurationTier {
+  const safe = Number.isFinite(ms) && ms > 0 ? ms : 0;
+  for (const [upper, tier] of DURATION_BANDS) {
+    if (safe < upper) return tier;
+  }
+  return "gte7h";
+}
+
+/** Blend two token colors — how the two hues the ramps do not carry are DERIVED, not invented. */
+function mix(a: Rgb, b: Rgb, t: number): Rgb {
+  return {
+    r: Math.round(a.r + (b.r - a.r) * t),
+    g: Math.round(a.g + (b.g - a.g) * t),
+    b: Math.round(a.b + (b.b - a.b) * t),
+  };
+}
+
+/**
+ * band → truecolor hue.
+ *
+ * Five come straight off a token ramp. Orange and rubine have no ramp of their own, so they are
+ * MIXED from two that do rather than hard-coded — the palette's rule is that no color here is
+ * invented, and a blend of amber+red / red+violet keeps them moving with the tokens if a ramp is
+ * ever re-tuned.
+ */
+const DURATION_RGB: Record<DurationTier, Rgb> = {
+  lt30m: { ...ACCENT_RGB }, //                                    light blue  #16b3f5
+  lt1h: rampRgb("green", 400), //                                 green       #34c46a
+  lt2h: rampRgb("amber", 300), //                                 yellow      #fbbf4a
+  lt3h: mix(rampRgb("amber", 400), rampRgb("red", 400), 0.5), //  orange
+  lt5h: rampRgb("red", 400), //                                   bright red  #f24343
+  lt7h: mix(rampRgb("red", 600), rampRgb("violet", 700), 0.35), // dark rubine
+  gte7h: rampRgb("violet", 400), //                               purple      #b266ff
+};
+
+/**
+ * band → ANSI-16 fallback.
+ *
+ * All seven bands get a DISTINCT code, but sixteen colors have no orange and no rubine, so the
+ * two warm pairs separate only by brightness (brightYellow/yellow, brightRed/red) and may read
+ * as one hue on a low-contrast theme. The SWEEP — cyan → green → yellow → red → magenta — is what
+ * survives intact, and it is the part that carries the meaning.
+ */
+const DURATION_ANSI16: Record<DurationTier, AnsiColorName> = {
+  lt30m: "brightCyan",
+  lt1h: "brightGreen",
+  lt2h: "brightYellow",
+  lt3h: "yellow",
+  lt5h: "brightRed",
+  lt7h: "red",
+  gte7h: "brightMagenta",
+};
+
+/**
+ * Paint the turn clock: ALWAYS bold, hue from how long the turn ran.
+ *
+ * `caps='none'` returns the text untouched — NO_COLOR / a pipe gets an escape-free clock, the
+ * same contract every other painter here honors.
+ */
+export function paintDuration(text: string, elapsedMs: number, caps: ColorCaps): string {
+  if (caps === "none") return text;
+  const tier = durationTier(elapsedMs);
+  if (caps === "ansi16") return sgr(text, String(ANSI_SGR[DURATION_ANSI16[tier]]), "1;");
+  return sgr(text, fgCode(DURATION_RGB[tier], caps), "1;");
 }

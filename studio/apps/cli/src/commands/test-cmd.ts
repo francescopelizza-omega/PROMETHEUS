@@ -761,14 +761,18 @@ export async function runTest(
   ctx: CliContext,
   deps: SidecarDeps = defaultSidecarDeps,
 ): Promise<CommandOutcome> {
-  const verb = ctx.args.command[1];
+  // `unmatchedSub` (parse.ts) distinguishes "a second word WAS typed but didn't match
+  // discover/run/coverage/watch" from "nothing was typed" — without it, a typo (command[1] is
+  // undefined for a TWO_WORD mismatch) rendered as "unknown verb (none)" instead of naming
+  // the actual typo.
+  const verb = ctx.args.unmatchedSub ?? ctx.args.command[1];
   if (verb === "discover") return discover(ctx, deps);
   if (verb === "run") return run(ctx, deps);
   if (verb === "coverage") return coverage(ctx, deps);
   if (verb === "watch") return runWatch(ctx, deps);
   return {
     text: `prometheus test: unknown verb ${verb ? `"${verb}"` : "(none)"} — valid: ${VERBS.join(", ")}`,
-    json: { ok: false, error: "unknown-verb", valid: VERBS },
-    exitCode: 2,
+    json: { ok: false, error: "unknown-verb", verb: verb ?? null, valid: VERBS },
+    exitCode: 1,
   };
 }

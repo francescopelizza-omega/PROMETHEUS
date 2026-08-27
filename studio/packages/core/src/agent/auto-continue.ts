@@ -82,6 +82,24 @@ export interface AutoContinueInput {
  * done, the turn actually capped, no BLOCK was seen, every budget still has room, and the round made
  * progress. Any stop carries a human-readable reason for the audit line.
  */
+/**
+ * A stable digest of one round's tool activity — an identical repeat means no progress was made,
+ * which is what halts an auto-continue chain that has started spinning.
+ *
+ * This lived as a private closure inside the TUI's session bridge. When the readline host gained
+ * run-to-done it needed the same function, and copying it would have recreated exactly the drift
+ * that left the two hosts disagreeing about what `yolo` means in the first place: the policy
+ * (`decideAutoContinue`) already lives here, so its input should too.
+ */
+export function progressDigest(events: readonly AgentEvent[]): string {
+  const parts: string[] = [];
+  for (const e of events) {
+    if (e.kind === "tool_use") parts.push(`u:${e.call.name}`);
+    else if (e.kind === "tool_result") parts.push(`r:${e.call.name}:${e.ok}`);
+  }
+  return parts.join("|").slice(0, 2000);
+}
+
 export function decideAutoContinue(input: AutoContinueInput): AutoDecision {
   const { mode, capped, state, budget, nowMs, tokensSpent, progressDigest } = input;
   if (!isRunToDoneMode(mode)) return { resume: false, reason: "not a run-to-done mode", state };

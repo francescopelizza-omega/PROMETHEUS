@@ -15,6 +15,13 @@ import { listCommandSpecs } from "@prometheus/core";
  * `index.ts` builds its `RECOGNIZED` Set from this — keep it the ground truth of direct routing.
  */
 export const RECOGNIZED_VERBS: readonly string[] = [
+  // Directly routed in `index.ts` but absent from this list until now, so neither the shell
+  // completion nor the router's "did you mean" could offer them even though all three run:
+  // `prometheus completion bash`, `prometheus man`, `prometheus ls`. This list's own docstring
+  // calls itself the ground truth of direct routing, so the omission was the bug.
+  "completion",
+  "man",
+  "ls",
   "scan",
   "superscan",
   "doctor",
@@ -44,6 +51,10 @@ export const RECOGNIZED_VERBS: readonly string[] = [
   "session",
   "sessions",
   "schedule",
+  "tasks",
+  "persona",
+  "budget",
+  "meet",
   "profile",
   "config",
   "updates",

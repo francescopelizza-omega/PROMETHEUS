@@ -300,6 +300,12 @@ def v_scrub(argv: Sequence[str]) -> int:
             return fail("scrub", "verification failed (tags not reduced) — original left intact")
         # atomic replace (same dir → same filesystem)
         shutil.copystat(path, tmp)  # keep perms; timestamps normalized below if requested
+        # `copystat` also copies EXTENDED ATTRIBUTES on Linux, which put back everything
+        # `_strip_to_copy` had just removed — including the `user.xdg.origin.url` /
+        # `user.xdg.referrer.url` that browsers stamp on a download, i.e. exactly the
+        # provenance a user runs this tool to erase. The report still said `xattrsRemoved: N`
+        # while the attributes survived intact. Strip them again, AFTER copystat.
+        _remove_xattrs(tmp)
         os.replace(tmp, path)
     except OSError as exc:
         if os.path.exists(tmp):

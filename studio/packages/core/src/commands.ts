@@ -21,6 +21,16 @@
  * engine call; `gate` renders the nemesis verdict the engine-bridge computed.
  * Node built-ins only — the registry is data + thin closures.
  */
+/**
+ * TYPE-ONLY, deliberately.
+ *
+ * Every one of these is erased at compile time, which is what lets a BROWSER bundle import this
+ * registry: the desktop's help browser (`routes/docs.tsx`) renders `COMMAND_SPECS` as data, and
+ * a single VALUE import from the engine bridge here pulled `node:fs`/`node:child_process` into
+ * the renderer graph and failed the whole renderer build with `"existsSync" is not exported by
+ * "__vite-browser-external"`. The engine gateway reaches this module through `RouterContext`
+ * (C5: `ctx.client` is the ONLY way out) — never through a module-scope import.
+ */
 import type {
   EngineClient,
   EngineEnvelope,
@@ -480,17 +490,48 @@ function nameSpec(
   init: Omit<SpecInit, "run" | "binding" | "argsSchema"> & {
     subcommand: PrometheusSubcommand;
     call?: (ctx: RouterContext, name: string) => Promise<EngineEnvelope>;
+    /**
+     * Extra `<name>`-command flags beyond the shared globals (e.g. audit's `--revoke`,
+     * scaffold-skill's `--description`/`--body`/`--tools`/`--manual`). `nameSpec` used to
+     * hard-code `argsSchema: NAME_ARG` with no way for a caller to add its own — so every
+     * flag a `<name>`-only command declared past its own name was silently stripped by
+     * validateArgs before run() ever saw it (the same "globals leak" class already fixed for
+     * enable/disable/bundle/sync/auto, missed here because this whole spec shape had no seam).
+     */
+    extraFlags?: readonly ArgSpec[];
+    /** flag names (from extraFlags) to forward to the engine. */
+    flagForward?: readonly string[];
   },
 ): CommandSpec {
+  const { extraFlags, flagForward, call, ...rest } = init;
+  // Only a caller that declares extraFlags opts into a "real" flag surface (+ the shared
+  // globals threaded alongside it) — read-only verbs like describe/tutorial/methods/where/
+  // info/status take NAME_ARG only, exactly as before. A blanket GLOBAL_FLAG_SPECS merge here
+  // regressed `describe foo --force` into forwarding --force to a command that never mutates
+  // and never asks the engine to do anything with it (test: command-exec.test.ts's
+  // "never-force: --force on a READ-ONLY verb is inert").
+  const hasFlagSurface = extraFlags !== undefined;
   return spec({
-    ...init,
+    ...rest,
     binding: { kind: "prometheus", subcommand: init.subcommand },
-    argsSchema: NAME_ARG,
+    argsSchema: hasFlagSurface
+      ? { positionals: NAME_ARG.positionals, flags: [...extraFlags, ...GLOBAL_FLAG_SPECS] }
+      : NAME_ARG,
     run: async (ctx, args) => {
       const name = arg0(args);
-      const env = init.call
-        ? await init.call(ctx, name)
-        : await ctx.client.runPrometheus([init.subcommand, name], ctx.opts);
+      const env = call
+        ? await call(ctx, name)
+        : await ctx.client.runPrometheus(
+            hasFlagSurface
+              ? [
+                  ...globalFlagArgv(args.flags),
+                  init.subcommand,
+                  name,
+                  ...forwardFlags(args.flags, flagForward ?? []),
+                ]
+              : [init.subcommand, name],
+            ctx.opts,
+          );
       return envResult(init.id, env);
     },
   });
@@ -567,13 +608,30 @@ export const COMMAND_SPECS: readonly CommandSpec[] = Object.freeze([
     subcommand: "matrix",
     call: (ctx) => ctx.client.matrix(ctx.opts),
   }),
-  roSpec({
+  spec({
     id: "inventory",
     title: "Re-scan installed",
     group: "inventory",
     description:
       "Re-scan every detected agent for ALL installed plugins/skills/MCP (managed + foreign).",
-    subcommand: "inventory",
+    binding: { kind: "prometheus", subcommand: "inventory" },
+    // This used to call `rawEngine` directly, because `cmd_inventory` printed a human table with
+    // no JSON_OUT branch and `runPrometheus` (which REQUIRES a JSON envelope) threw
+    // "prometheus.py stdout was not valid JSON" on every invocation. The engine has since grown
+    // the envelope — `inventory --json` answers `{command, action, ok, lines:[…]}`, carrying the
+    // very `lines[]` shape `render/envelope-view.ts` special-cases for this command — so the
+    // workaround is not just unnecessary, it was the one thing forcing a VALUE import of the
+    // engine bridge into this module (see the import block above for what that cost).
+    argsSchema: {
+      flags: [{ name: "host", kind: "flag", type: "string" }],
+    },
+    run: async (ctx, args) => {
+      const env = await ctx.client.runPrometheus(["inventory", ...hostArgv(args.flags)], {
+        timeoutMs: 60_000,
+        ...ctx.opts,
+      });
+      return envResult("inventory", env);
+    },
   }),
   nameSpec({
     id: "where",
@@ -632,8 +690,11 @@ export const COMMAND_SPECS: readonly CommandSpec[] = Object.freeze([
     title: "Audit plugin",
     group: "security",
     description:
-      "Security-scan a plugin's install artifacts — registry NAME only, no --target (C4).",
+      "Security-scan a plugin's install artifacts — registry NAME only, no --target (C4). " +
+      "--revoke clears remembered trust for it.",
     subcommand: "audit",
+    extraFlags: [{ name: "revoke", kind: "flag", type: "boolean" }],
+    flagForward: ["revoke"],
   }),
   spec({
     id: "secure",
@@ -666,6 +727,11 @@ export const COMMAND_SPECS: readonly CommandSpec[] = Object.freeze([
       "One-command full safe maintenance: refresh nemesis feeds + audit/pin installed sources " +
       "(quarantine drift) + integrate nemesis-green skills (prometheus.py auto).",
     binding: { kind: "prometheus", subcommand: "auto" },
+    // --dry-run/--yes/--force were undeclared here (and never forwarded), so validateArgs
+    // silently stripped them before run() ever saw them — the same "globals leak" bug already
+    // fixed for enable/disable/bundle/sync, missed for this one. `auto` performs REAL mutations
+    // (quarantine, re-pin, skill integration), so a typed `--dry-run` silently running for real
+    // is the dangerous direction to get wrong.
     argsSchema: {
       flags: [
         {
@@ -674,23 +740,36 @@ export const COMMAND_SPECS: readonly CommandSpec[] = Object.freeze([
           type: "boolean",
           description: "also wipe non-official URLs from installed sources",
         },
+        ...GLOBAL_FLAG_SPECS,
       ],
     },
     mutates: true,
     run: async (ctx, args) => {
-      const argv = ["auto"];
+      const argv = [...globalFlagArgv(args.flags), "auto"];
       if (args.flags.defang === true) argv.push("--defang");
       const env = await ctx.client.runPrometheus(argv, ctx.opts);
       return envResult("auto", env);
     },
   }),
-  roSpec({
+  spec({
     id: "bundle",
     title: "Install official bundle",
     group: "catalog",
     description: "Install the official Anthropic bundle in one run (nemesis-gated).",
-    subcommand: "bundle",
+    binding: { kind: "prometheus", subcommand: "bundle" },
     mutates: true,
+    // roSpec's bare-subcommand default silently dropped EVERY flag the user typed, including
+    // --host (a real engine flag) and, more seriously, --dry-run/--yes/--force: a confirmed
+    // `/bundle --force` typed-confirm never actually reached the engine, so the override the
+    // user just confirmed was silently defeated (the real, un-forced call ran instead).
+    argsSchema: {
+      flags: [{ name: "host", kind: "flag", type: "string" }, ...GLOBAL_FLAG_SPECS],
+    },
+    run: async (ctx, args) => {
+      const f = args.flags;
+      const argv = [...globalFlagArgv(f), "bundle", ...hostArgv(f)];
+      return envResult("bundle", await ctx.client.runPrometheus(argv, ctx.opts));
+    },
   }),
 
   /* ---- catalog cards (SPECTACULAR): describe / tutorial / methods ------- */
@@ -827,17 +906,23 @@ export const COMMAND_SPECS: readonly CommandSpec[] = Object.freeze([
       "Re-arm a disabled plugin/component (settings.json / on-disk); --component hooks|mcp, --host for foreign.",
     binding: { kind: "prometheus", subcommand: "enable" },
     mutates: true,
+    // --dry-run/--yes/--force used to be undeclared here, so validateArgs silently stripped
+    // them before run() ever saw them (and run() never called globalFlagArgv either) — a typed
+    // `/enable foo --dry-run` always performed the REAL re-arm with no indication the flag had
+    // been ignored, unlike install/uninstall which correctly declare + forward these.
     argsSchema: {
       positionals: [{ name: "name", kind: "positional", type: "string", required: true }],
       flags: [
         { name: "only", kind: "flag", type: "string" },
         { name: "component", kind: "flag", type: "enum", choices: ["hooks", "mcp"] },
         { name: "host", kind: "flag", type: "string" },
+        ...GLOBAL_FLAG_SPECS,
       ],
     },
     run: async (ctx, args) => {
       const f = args.flags;
       const argv = [
+        ...globalFlagArgv(f),
         "enable",
         arg0(args),
         ...forwardFlags(f, ["only", "component"]),
@@ -854,17 +939,21 @@ export const COMMAND_SPECS: readonly CommandSpec[] = Object.freeze([
       "Turn off a plugin/component WITHOUT uninstalling (reversible); same flags as enable.",
     binding: { kind: "prometheus", subcommand: "disable" },
     mutates: true,
+    // same defect as enable (see its comment): the global safety flags were undeclared and
+    // unforwarded, so a typed `/disable foo --dry-run --yes` always performed the real disable.
     argsSchema: {
       positionals: [{ name: "name", kind: "positional", type: "string", required: true }],
       flags: [
         { name: "only", kind: "flag", type: "string" },
         { name: "component", kind: "flag", type: "enum", choices: ["hooks", "mcp"] },
         { name: "host", kind: "flag", type: "string" },
+        ...GLOBAL_FLAG_SPECS,
       ],
     },
     run: async (ctx, args) => {
       const f = args.flags;
       const argv = [
+        ...globalFlagArgv(f),
         "disable",
         arg0(args),
         ...forwardFlags(f, ["only", "component"]),
@@ -873,27 +962,58 @@ export const COMMAND_SPECS: readonly CommandSpec[] = Object.freeze([
       return envResult("disable", await ctx.client.runPrometheus(argv, ctx.opts));
     },
   }),
-  nameSpec({
+  spec({
     id: "sync",
     title: "Sync skill across agents",
     group: "skills",
     description: "Replicate an installed SKILL.md into other agents (cross-CLI portability).",
-    subcommand: "sync",
+    binding: { kind: "prometheus", subcommand: "sync" },
     mutates: true,
+    // nameSpec's default forwarded only the name, silently dropping the engine's real `--to
+    // <agents>` scoping flag — `/sync my-skill --to claude` always fell through to the engine's
+    // default (ALL agents with a skills dir), a materially broader outcome than requested.
+    argsSchema: {
+      positionals: [{ name: "name", kind: "positional", type: "string", required: true }],
+      flags: [
+        {
+          name: "to",
+          kind: "flag",
+          type: "string",
+          description: "target agents (comma-sep) or 'all' (default: all with a skills dir)",
+        },
+        ...GLOBAL_FLAG_SPECS,
+      ],
+    },
+    run: async (ctx, args) => {
+      const f = args.flags;
+      const argv = [...globalFlagArgv(f), "sync", arg0(args), ...forwardFlags(f, ["to"])];
+      return envResult("sync", await ctx.client.runPrometheus(argv, ctx.opts));
+    },
   }),
   nameSpec({
     id: "scaffold-skill",
     title: "Scaffold a skill",
     group: "skills",
-    description: "Write an auto-firing SKILL.md into ~/.claude/skills/.",
+    description:
+      "Write an auto-firing SKILL.md into ~/.claude/skills/. --description/--body/--tools " +
+      "fill in the content (omitted ⇒ the engine's generic placeholder); --manual disables " +
+      "model auto-invocation.",
     subcommand: "scaffold-skill",
     mutates: true,
+    extraFlags: [
+      { name: "description", kind: "flag", type: "string" },
+      { name: "body", kind: "flag", type: "string" },
+      { name: "tools", kind: "flag", type: "string" },
+      { name: "manual", kind: "flag", type: "boolean" },
+    ],
+    flagForward: ["description", "body", "tools", "manual"],
   }),
   managerSpec({
     id: "skills",
     title: "Skills manager",
     group: "skills",
-    description: "list / enable / disable / mute installed SKILL.md folders.",
+    description:
+      "list / enable / disable / mute installed SKILL.md folders; `audit` = re-scan + pin installed sources.",
     subcommand: "skills",
     argsSchema: {
       positionals: [
@@ -902,11 +1022,34 @@ export const COMMAND_SPECS: readonly CommandSpec[] = Object.freeze([
           kind: "positional",
           type: "enum",
           required: false,
-          choices: ["list", "enable", "disable", "mute"],
+          // engine choices (prometheus.py's `p_sk.add_argument("action", ...)`) also include
+          // unmute/audit/integrate — missing here meant `skills audit`/`skills unmute <x>`
+          // were rejected client-side even though the spec's own description advertises audit.
+          choices: ["list", "enable", "disable", "mute", "unmute", "audit", "integrate"],
         },
         { name: "name", kind: "positional", type: "string", required: false },
       ],
+      flags: [
+        { name: "no-quarantine", kind: "flag", type: "boolean" },
+        { name: "restore", kind: "flag", type: "string" },
+        { name: "list-quarantine", kind: "flag", type: "boolean" },
+        { name: "defang-urls", kind: "flag", type: "boolean" },
+        { name: "defang-mode", kind: "flag", type: "enum", choices: ["star", "remove"] },
+        { name: "defang-scope", kind: "flag", type: "enum", choices: ["urls", "all"] },
+        { name: "defang-keep", kind: "flag", type: "enum", choices: ["none", "trusted", "vault"] },
+        { name: "list-trusted-urls", kind: "flag", type: "boolean" },
+      ],
     },
+    flagForward: [
+      "no-quarantine",
+      "restore",
+      "list-quarantine",
+      "defang-urls",
+      "defang-mode",
+      "defang-scope",
+      "defang-keep",
+      "list-trusted-urls",
+    ],
   }),
 
   /* ---- security ([[03]]) — the C4 arbitrary-target gate ---------------- */
@@ -986,9 +1129,17 @@ export const COMMAND_SPECS: readonly CommandSpec[] = Object.freeze([
     id: "purge",
     title: "Purge a forgotten agent",
     group: "security",
-    description: "Back up + remove a forgotten agent's config/state (not the binary).",
+    description:
+      "Back up + remove a forgotten agent's config/state (not the binary). Plan-by-default; " +
+      "--yes plus --confirm <agent> (must match the name) executes.",
     subcommand: "purge",
     mutates: true,
+    // Same "globals leak" bug already fixed for auto: --dry-run/--yes/--force were undeclared,
+    // so validateArgs silently stripped them before run() ever saw them. --confirm was ALSO
+    // undeclared — the engine's own --yes+--confirm double-gate (`_cmd_purge_json`) could
+    // never actually execute through this spec, only ever preview, regardless of --yes.
+    extraFlags: [{ name: "confirm", kind: "flag", type: "string" }],
+    flagForward: ["confirm"],
   }),
   roSpec({
     id: "harden",
@@ -1115,7 +1266,11 @@ export const COMMAND_SPECS: readonly CommandSpec[] = Object.freeze([
           kind: "positional",
           type: "enum",
           required: false,
-          choices: ["status", "invoke", "invoke-all", "rollback"],
+          // engine choices are `["list","status","invoke","invoke-all","rollback"]` with
+          // default "list" (prometheus.py's own `p_vault.add_argument`) — "list" was missing
+          // here, so `prometheus vault list` (the obvious, documented way to ask for it) was
+          // rejected client-side before ever reaching the engine.
+          choices: ["list", "status", "invoke", "invoke-all", "rollback"],
         },
       ],
     },

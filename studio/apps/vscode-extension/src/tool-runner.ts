@@ -28,6 +28,7 @@ import {
   secretPathReason,
   secretRefusal,
 } from "@prometheus/core/agent-system";
+import { FILE_CONTENT_TOOLS, frameFileContent } from "@prometheus/core/agent-system-host";
 import { TODO_TOOLS, TodoStore, runTodoTool } from "@prometheus/core/agent-todo";
 import type { ToolDef } from "@prometheus/core/agent-tools";
 
@@ -76,9 +77,126 @@ export interface VsCodeToolDeps {
   onToolNote(note: string): void;
   /** Per-session task list. Injected so it outlives a single turn. */
   todos?: TodoStore;
+  /** Test seam for `grep`'s bounded matcher — a real worker thread in production. */
+  makeGrepWorker?: MakeGrepWorker;
 }
 
 const MAX_READ_LINES = 2000;
+/**
+ * Wall-clock budget for one `grep`, enforced in a worker thread.
+ *
+ * The pattern comes from the MODEL, and JavaScript's regex engine has no timeout: a
+ * catastrophically-backtracking pattern runs until it finishes, which for `(a+)+$` against a
+ * 61-character line is longer than five minutes (measured — it never returned). Matching on the
+ * extension host's own thread therefore froze the entire window: no confirm, no cancel, no way
+ * back. The matching runs in a worker so it can be TERMINATED.
+ */
+const GREP_BUDGET_MS = 5_000;
+
+/**
+ * Match `pattern` across already-read files, with a hard wall-clock bound.
+ *
+ * Returns the hits found, plus whether the budget ran out — a timeout is reported to the model
+ * as a real failure rather than as "no matches", because those two answers would send it in
+ * opposite directions.
+ */
+async function grepBounded(
+  pattern: string,
+  flags: string,
+  files: readonly { file: string; text: string }[],
+  cap: number,
+  budgetMs: number,
+  makeWorker: MakeGrepWorker = defaultGrepWorker,
+): Promise<{ hits: string[]; timedOut: boolean }> {
+  const worker = makeWorker(pattern, flags);
+  const hits: string[] = [];
+  const deadline = Date.now() + budgetMs;
+  try {
+    for (const f of files) {
+      if (hits.length >= cap) break;
+      const left = deadline - Date.now();
+      if (left <= 0) return { hits, timedOut: true };
+      const got = await worker.match(f.file, f.text, left);
+      if (got === null) return { hits, timedOut: true };
+      for (const h of got) {
+        if (hits.length >= cap) break;
+        hits.push(h);
+      }
+    }
+    return { hits, timedOut: false };
+  } finally {
+    await worker.dispose();
+  }
+}
+
+/** The seam the tests replace — a real worker thread in production. */
+export interface GrepWorker {
+  /** hits for one file, or `null` when `budgetMs` elapsed first. */
+  match(file: string, text: string, budgetMs: number): Promise<string[] | null>;
+  dispose(): Promise<void>;
+}
+export type MakeGrepWorker = (pattern: string, flags: string) => GrepWorker;
+
+/** Worker source. Kept inline so esbuild's single-file bundle stays single-file. */
+const GREP_WORKER_SRC = `
+const { parentPort, workerData } = require("node:worker_threads");
+let re = null;
+try { re = new RegExp(workerData.pattern, workerData.flags); } catch { re = null; }
+parentPort.on("message", (msg) => {
+  if (!re) { parentPort.postMessage({ hits: [] }); return; }
+  const out = [];
+  const lines = String(msg.text).split("\\n");
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i] === undefined ? "" : lines[i];
+    if (re.test(line)) out.push(msg.file + ":" + (i + 1) + ": " + line.trim().slice(0, 200));
+  }
+  parentPort.postMessage({ hits: out });
+});
+`;
+
+function defaultGrepWorker(pattern: string, flags: string): GrepWorker {
+  let worker: import("node:worker_threads").Worker | undefined;
+  let dead = false;
+  return {
+    async match(file, text, budgetMs) {
+      if (dead) return null;
+      if (!worker) {
+        const { Worker } = await import("node:worker_threads");
+        worker = new Worker(GREP_WORKER_SRC, { eval: true, workerData: { pattern, flags } });
+        worker.unref();
+      }
+      const w = worker;
+      return await new Promise<string[] | null>((resolve) => {
+        let settled = false;
+        const finish = (v: string[] | null): void => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          w.off("message", onMessage);
+          w.off("error", onError);
+          resolve(v);
+        };
+        const onMessage = (m: { hits?: string[] }): void => finish(m?.hits ?? []);
+        const onError = (): void => finish(null);
+        const timer = setTimeout(() => {
+          // The worker is wedged inside the regex engine and will never answer. Killing it is
+          // the only way back, and a killed worker cannot be reused.
+          dead = true;
+          void w.terminate();
+          finish(null);
+        }, budgetMs);
+        w.on("message", onMessage);
+        w.on("error", onError);
+        w.postMessage({ file, text });
+      });
+    },
+    async dispose() {
+      if (worker) await worker.terminate().catch(() => undefined);
+      worker = undefined;
+    },
+  };
+}
+
 const MAX_GREP_MATCHES = 200;
 const MAX_GLOB_RESULTS = 500;
 
@@ -90,7 +208,23 @@ export function createVsCodeToolRunner(
   return async (tool, args) => {
     deps.onToolNote(toolNote(tool.name, args));
     try {
-      return await dispatch(tool.name, args, deps.io, todos);
+      const outcome = await dispatch(tool.name, args, deps.io, todos, deps.makeGrepWorker);
+      /**
+       * File/repo CONTENT is untrusted input and is framed as such, exactly as the other hosts
+       * do it.
+       *
+       * `read_file`, `grep`, `glob` and `list_dir` output went into the model's context as plain
+       * unframed text on this host: no `<<untrusted-file-data>>` boundary, and no injection scan.
+       * A repo file — a README, a dependency's source, a generated fixture — carrying injected
+       * instructions was therefore presented to the model exactly like the user's own words.
+       * Core calls the frame "the real protection", the CLI and desktop both apply it at their
+       * dispatch boundary, and this host simply did not, silently: the README's own "Scoped out"
+       * list never mentioned it either.
+       *
+       * Applied HERE rather than in each `case`, and using core's own `frameFileContent` rather
+       * than a local copy, so there is one implementation and one gate list to keep in step.
+       */
+      return FILE_CONTENT_TOOLS.has(tool.name) ? frameFileContent(tool.name, outcome) : outcome;
     } catch (e) {
       // A thrown FileSystemError (ENOENT, EISDIR, permission) is an ordinary tool FAILURE, not
       // a crashed turn: it comes back as `ok:false` so the model can re-plan, which is the
@@ -105,6 +239,7 @@ async function dispatch(
   args: Record<string, unknown>,
   io: WorkspaceIo,
   todos: TodoStore,
+  makeGrepWorker?: MakeGrepWorker,
 ): Promise<ToolOutcome> {
   switch (name) {
     case "read_file":
@@ -114,7 +249,7 @@ async function dispatch(
     case "glob":
       return globFiles(args, io);
     case "grep":
-      return grep(args, io);
+      return grep(args, io, makeGrepWorker);
 
     case "propose_edit":
       return proposeEdit(args, io);
@@ -204,7 +339,15 @@ async function globFiles(args: Record<string, unknown>, io: WorkspaceIo): Promis
   const pattern = str(args.pattern);
   if (!pattern) return bad("`pattern` is required");
   const hits = await io.findFiles(pattern, MAX_GLOB_RESULTS);
-  return { ok: true, summary: hits.length > 0 ? hits.join("\n") : `no files match ${pattern}` };
+  // Same silent cap as `grep`: a listing cut off at MAX_GLOB_RESULTS reads as the whole workspace.
+  const capped =
+    hits.length >= MAX_GLOB_RESULTS
+      ? `\n…[listing truncated at ${MAX_GLOB_RESULTS} files — narrow the pattern to see the rest]`
+      : "";
+  return {
+    ok: true,
+    summary: hits.length > 0 ? `${hits.join("\n")}${capped}` : `no files match ${pattern}`,
+  };
 }
 
 /**
@@ -216,7 +359,11 @@ async function globFiles(args: Record<string, unknown>, io: WorkspaceIo): Promis
  * VS Code's filesystem layer and therefore still correct on Remote-SSH and virtual workspaces.
  * A ripgrep subprocess would be faster and would read the wrong machine.
  */
-async function grep(args: Record<string, unknown>, io: WorkspaceIo): Promise<ToolOutcome> {
+async function grep(
+  args: Record<string, unknown>,
+  io: WorkspaceIo,
+  makeGrepWorker?: MakeGrepWorker,
+): Promise<ToolOutcome> {
   const pattern = str(args.pattern) ?? str(args.query);
   if (!pattern) return bad("`pattern` is required");
   let re: RegExp;
@@ -229,10 +376,24 @@ async function grep(args: Record<string, unknown>, io: WorkspaceIo): Promise<Too
   const glob = str(args.glob) ?? "**/*";
   const scope = rel(args.path);
   const candidates = await io.findFiles(scope ? `${scope}/${glob}` : glob, MAX_GLOB_RESULTS);
+  // How many the workspace layer actually handed back — `>= MAX_GLOB_RESULTS` means the list was
+  // cut off and anything past it was never looked at.
+  const scanned = candidates.length;
 
-  const hits: string[] = [];
+  const readable: { file: string; text: string }[] = [];
   for (const file of candidates) {
-    if (hits.length >= cap) break;
+    /**
+     * The SAME credential-file refusal `readFile` above applies.
+     *
+     * This loop read every candidate with no such check, so `grep` returned the contents of
+     * `.env` / `*.pem` / `~/.ssh/*` that `read_file` refuses by name — and grep is read-tier, so
+     * it is auto-approved at the default authorisation level with no human prompt. Core's own
+     * host had the identical gap and was fixed at its dispatch chokepoint; this host has its own
+     * separate implementation, so it needed the same guard here. Skipped rather than refused:
+     * one credential file in a wide glob should not fail the whole search, and `glob: ".env"`
+     * simply finds nothing.
+     */
+    if (isSecretPath(file)) continue;
     let text: string;
     try {
       text = await io.readFile(file);
@@ -242,16 +403,48 @@ async function grep(args: Record<string, unknown>, io: WorkspaceIo): Promise<Too
     // A NUL byte is the cheap binary sniff: matching a regex line-by-line against a decoded
     // binary produces megabytes of mojibake "hits" that poison the model's context.
     if (text.includes("\u0000")) continue;
-    const lines = text.split("\n");
-    for (let i = 0; i < lines.length && hits.length < cap; i++) {
-      const line = lines[i] ?? "";
-      if (re.test(line)) hits.push(`${file}:${i + 1}: ${line.trim().slice(0, 200)}`);
-    }
+    readable.push({ file, text });
   }
-  return {
-    ok: true,
-    summary: hits.length > 0 ? redactSecrets(hits.join("\n")).text : `no matches for ${pattern}`,
-  };
+
+  // Matching happens under a wall-clock bound, in a worker — see `grepBounded`. `re` above is
+  // still built here so an invalid pattern is rejected before any of this work starts.
+  const { hits, timedOut } = await grepBounded(
+    pattern,
+    args.ignoreCase === true ? "i" : "",
+    readable,
+    cap,
+    GREP_BUDGET_MS,
+    makeGrepWorker,
+  );
+  if (timedOut) {
+    return bad(
+      `the search for /${pattern}/ ran longer than ${Math.round(GREP_BUDGET_MS / 1000)}s and was stopped${hits.length > 0 ? ` after ${hits.length} match(es)` : ""}. That pattern backtracks catastrophically on this input — simplify it (avoid nested quantifiers such as \`(a+)+\`) or narrow \`glob\`/\`path\`, then try again.`,
+    );
+  }
+  /**
+   * A TRUNCATED search must never report "no matches".
+   *
+   * `findFiles` is capped at MAX_GLOB_RESULTS candidates, and the cap is silent — so in a
+   * workspace with more files than that, a symbol living in an uncapped file produced
+   * `{ok: true, "no matches for <pattern>"}`, which is what the model reads as "this symbol does
+   * not exist anywhere". Measured: 601 files, the definition in the 601st, `no matches`.
+   *
+   * Saying how many files were actually searched turns a false negative into a narrower question
+   * the model can act on (`glob`/`path`).
+   */
+  const truncated = scanned >= MAX_GLOB_RESULTS;
+  const note = truncated
+    ? ` (searched the first ${scanned} files only — this workspace has more; narrow \`glob\` or \`path\` to cover the rest)`
+    : "";
+  if (hits.length === 0) {
+    return {
+      ok: true,
+      summary: truncated
+        ? `no matches for ${pattern} in the first ${scanned} files searched — the workspace has more files than that, so this is NOT proof the pattern is absent. Narrow \`glob\` or \`path\` and search again.`
+        : `no matches for ${pattern}`,
+    };
+  }
+  return { ok: true, summary: `${redactSecrets(hits.join("\n")).text}${note}` };
 }
 
 /* ── mutations (all through ONE WorkspaceEdit) ───────────────────────────────*/

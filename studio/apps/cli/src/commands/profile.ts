@@ -73,7 +73,10 @@ export function runProfile(
   ctx: CliContext,
   deps: ProfileCmdDeps = defaultProfileDeps,
 ): CommandOutcome {
-  const sub = path[1] ?? "list";
+  // `unmatchedSub` (parse.ts) distinguishes "a second word WAS typed but didn't match
+  // list/use/edit/new" from "nothing was typed" — without it a typo silently defaulted to
+  // `list` instead of reaching the "unknown action" fallback below.
+  const sub = ctx.args.unmatchedSub ?? path[1] ?? "list";
   const name = ctx.args.positionals[0];
 
   if (sub === "list") {
@@ -195,12 +198,28 @@ export function runProfile(
     };
   }
 
-  return { text: `prometheus profile: unknown action "${sub}"`, json: { ok: false }, exitCode: 2 };
+  // `{ ok: false }` and nothing else: a script learned only THAT it failed, never
+  // what was wrong or what to type instead — the human line said "unknown action" and
+  // the machine payload dropped it. Class 1 per CLI-084 (a typo is bad args, not a
+  // security block); the shape now matches every other unknown-verb path.
+  return {
+    text: `prometheus profile: unknown action "${sub}"`,
+    json: {
+      ok: false,
+      error: "unknown-verb",
+      command: `profile ${sub}`,
+      valid: ["list", "show", "use", "new", "edit", "path"],
+    },
+    exitCode: 1,
+  };
 }
 
 /** `prometheus config [path|get <key>|set <key> <value>]` — real TOML-backed reads/writes. */
 export function runConfig(path: string[], ctx: CliContext): CommandOutcome {
-  const sub = path[1] ?? "path";
+  // `unmatchedSub` (parse.ts) distinguishes "a second word WAS typed but didn't match
+  // get/set/path/list" from "nothing was typed" — without it a typo silently defaulted to
+  // `path` instead of reaching the "unknown action" fallback below.
+  const sub = ctx.args.unmatchedSub ?? path[1] ?? "path";
   if (sub === "path") {
     const dir = cliProfiles.configDir();
     return { text: dir, json: { ok: true, configDir: dir }, exitCode: 0 };
@@ -313,5 +332,18 @@ export function runConfig(path: string[], ctx: CliContext): CommandOutcome {
     return { text: lines.join("\n"), exitCode: 0 };
   }
 
-  return { text: `prometheus config: unknown action "${sub}"`, json: { ok: false }, exitCode: 2 };
+  // `{ ok: false }` and nothing else: a script learned only THAT it failed, never
+  // what was wrong or what to type instead — the human line said "unknown action" and
+  // the machine payload dropped it. Class 1 per CLI-084 (a typo is bad args, not a
+  // security block); the shape now matches every other unknown-verb path.
+  return {
+    text: `prometheus config: unknown action "${sub}"`,
+    json: {
+      ok: false,
+      error: "unknown-verb",
+      command: `config ${sub}`,
+      valid: ["path", "get", "set"],
+    },
+    exitCode: 1,
+  };
 }

@@ -232,6 +232,56 @@ export const SETTINGS_TREE: readonly SettingsNode[] = Object.freeze([
           "matcher",
         ],
       }),
+      node("ai-agents.effort", "Reasoning Effort", "AI & Agents", "11", "select", {
+        // The `/think` ladder's starting tier for the desktop, mirroring the CLI's
+        // `[agent] effort` in the profile TOML — the same split `budget.*` already uses, where
+        // the schema key is the GUI's surface and the TOML is the CLI's.
+        //
+        // Registering it here is not decoration: `settings-ipc.ts` gates get/set/reset on
+        // `findNodeBySchemaKey`, so a schema key absent from this tree cannot be read or
+        // written at all. Both of these keys were exactly that until now.
+        schemaKey: "ai.effort",
+        searchTerms: ["effort", "think", "reasoning", "tier", "thinking", "depth", "budget"],
+      }),
+      node("ai-agents.effortForce", "Force Reasoning Effort", "AI & Agents", "11", "toggle", {
+        // Off by default, and it re-opens the failure `ai/effort` exists to close — a forwarded
+        // `reasoning_effort` is a hard 400 on a GPT-4-class model. It is here for the model
+        // released after the capability table was written; every resolution it produces is
+        // marked `degraded.reason: "forced"`.
+        schemaKey: "ai.effortForce",
+        searchTerms: ["effort", "force", "override", "capability", "reasoning", "unsupported"],
+      }),
+    ],
+  }),
+  /**
+   * Budget & Spend — the four keys the desktop's Budget page writes.
+   *
+   * They were absent from this tree entirely, and `settings-ipc.ts` gates get/set/reset on
+   * `findNodeBySchemaKey`, so every "Save" on that page came back
+   * `unknown settings key: budget.sessionUsd` and no cap was ever persisted. The spend cap was
+   * reachable only by hand-editing settings.json. This is the identical omission the comment on
+   * `ai-agents.effort` above records having fixed for the effort keys — the budget keys were
+   * left behind.
+   */
+  node("budget", "Budget & Spend", "root", "11", "page", {
+    searchTerms: ["budget", "spend", "cost", "cap", "usd", "limit", "money", "quota"],
+    children: [
+      node("budget.sessionUsd", "Session cap (USD)", "Budget & Spend", "11", "number", {
+        schemaKey: "budget.sessionUsd",
+        searchTerms: ["session", "cap", "usd", "spend", "budget", "limit"],
+      }),
+      node("budget.dailyUsd", "Daily cap (USD)", "Budget & Spend", "11", "number", {
+        schemaKey: "budget.dailyUsd",
+        searchTerms: ["daily", "day", "cap", "usd", "spend", "budget", "limit"],
+      }),
+      node("budget.warnAtPercent", "Warn at (% of cap)", "Budget & Spend", "11", "number", {
+        schemaKey: "budget.warnAtPercent",
+        searchTerms: ["warn", "percent", "threshold", "budget", "alert"],
+      }),
+      node("budget.unpricedPolicy", "Unpriced models", "Budget & Spend", "11", "select", {
+        schemaKey: "budget.unpricedPolicy",
+        searchTerms: ["unpriced", "unknown", "price", "block", "warn", "policy"],
+      }),
     ],
   }),
   node("security", "Security (nemesis)", "root", "03", "select", {

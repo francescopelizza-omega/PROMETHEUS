@@ -81,6 +81,9 @@ export const IPC = {
   aiCancel: "ai:cancel",
   /** Task #18: probe a LOCAL runner's served models in MAIN (see AiProbeModelsResult). */
   aiProbeModels: "ai:probeModels",
+  /** Measure ONE local model — real context window + runner capabilities (see
+   *  AiProbeEndpointResult). Same MAIN detour, same CSP reason as `ai:probeModels`. */
+  aiProbeEndpoint: "ai:probeEndpoint",
   securityRemediate: "security:remediate",
   securityThreatdb: "security:threatdb",
   securityTrust: "security:trust",
@@ -133,6 +136,14 @@ export const IPC = {
   modelServing: "model:serving",
   modelEndpoints: "model:endpoints",
   modelRepoint: "model:repoint",
+  // /hug: bring in a model from a local folder or Hugging Face — fetch (if needed) →
+  // convert (always via llama.cpp's own tools) → install into ollama/llama.cpp/vllm/
+  // lmstudio, one physical copy shared across all of them (never re-downloaded).
+  modelFetchHf: "model:fetchHf",
+  modelInstallHfCli: "model:installHfCli",
+  modelConvert: "model:convert",
+  modelInstallConverter: "model:installConverter",
+  modelInstallTarget: "model:installTarget",
   // ── whole-machine resource telemetry (CPU/GPU/NPU/RAM/DISK) + launch guard ──
   // Read-only native probe (node:os/statfs/nvidia-smi); the renderer polls it to
   // draw the bottom-bar strip + System panel. The `guard` field is the same verdict
@@ -210,6 +221,8 @@ export const IPC = {
   // The RUN-GATE (`ide:gate`, §5.2/§9) reuses the REAL engine-bridge gate; JS
   // never decides "safe" (C5). fs read/write/tree are the MAIN-owned fs path.
   ideFsRead: "ide:fs.read",
+  /** the GLOBAL (`~/.prometheus`) steering tier — main owns the home path, not the renderer. */
+  ideSteeringGlobal: "ide:steering.global",
   ideFsWrite: "ide:fs.write",
   /** handoff §3: declare the workspace roots MAIN gates every write against. */
   ideSetWorkingSet: "ide:workingSet.set",
@@ -301,6 +314,8 @@ export const IPC = {
   agentEngineTool: "agent:engineTool",
   /** run ONE user-configured lifecycle hook (PreToolUse/PostToolUse/SessionStart) in MAIN. */
   agentHookRun: "agent:hookRun",
+  /** record a tripped canary token (point 6b) — the renderer detects it, MAIN owns the disk. */
+  agentCanaryTrip: "agent:canaryTrip",
   // Remembered "don't ask again" grants, on the SAME disk file the CLI uses.
   agentGrantsList: "agent:grants.list",
   agentGrantsAdd: "agent:grants.add",
@@ -373,6 +388,23 @@ export const IPC = {
   // ── "@"-path completion (shared with the CLI's @prometheus/core/path-completion) ──
   pathCompletionList: "pathCompletion:list",
   pathCompletionRecordUse: "pathCompletion:recordUse",
+  // ── model health (shared with the CLI's @prometheus/core ai/model-health) ──
+  modelHealthList: "modelHealth:list",
+  modelHealthRecord: "modelHealth:record",
+  // ── scheduled/autonomous runs (shared with the CLI's @prometheus/core agent/schedule) ──
+  scheduleList: "schedule:list",
+  scheduleUpsert: "schedule:upsert",
+  scheduleRemove: "schedule:remove",
+  // ── persona sharing (shared with the CLI's @prometheus/core agent/agent-files) ──
+  personaList: "persona:list",
+  personaExport: "persona:export",
+  personaImportText: "persona:importText",
+  personaImportPath: "persona:importPath",
+  personaRemove: "persona:remove",
+  // ── budget & spend visibility (roadmap point 4) — SETTING a cap reuses settings:set/get ──
+  budgetStatus: "budget:status",
+  // ── "meet your codebase" (roadmap point 6) ──
+  codebaseOverview: "codebase:overview",
 } as const;
 
 /** One ranked directory entry for the "@"-path completion dropdown — a directory's name
@@ -391,6 +423,165 @@ export interface PathCompletionListResult {
 
 export interface PathCompletionRecordUseResult {
   ok: boolean;
+  error?: string;
+}
+
+/** One endpoint's transport/breaker/context-window health, as of its last turn — mirrors
+ *  @prometheus/core's `EndpointHealthRecord` (this file cannot import core's TS types across the
+ *  preload/renderer sandbox boundary the way main.ts can, so the shape is restated here). */
+export interface ModelHealthRecordView {
+  endpointId: string;
+  model: string;
+  locality: "local" | "cloud";
+  transport: "native" | "text";
+  demonstrated: boolean;
+  nativeCalls: number;
+  textCallsWhileNative: number;
+  textSyntaxCalls: number;
+  nativeRejected: boolean;
+  breakerState: "closed" | "open" | "half-open";
+  breakerFailures: number;
+  breakerOpenedAt: number | null;
+  contextWindow: number;
+  contextWindowSource: "ollama" | "openai-models" | "default" | "declared";
+  lastUsedIso: string;
+}
+
+export type ModelHealthStoreView = Record<string, ModelHealthRecordView>;
+
+export interface ModelHealthListResult {
+  ok: boolean;
+  store?: ModelHealthStoreView;
+  error?: string;
+}
+
+export interface ModelHealthRecordResult {
+  ok: boolean;
+  error?: string;
+}
+
+/** One scheduled/autonomous task, as the renderer receives it — mirrors @prometheus/core's
+ *  `agent.ScheduledTask` (restated here since this file cannot import core's TS types across
+ *  the preload/renderer sandbox boundary the way main.ts can, same reasoning as
+ *  ModelHealthRecordView above). */
+export interface ScheduledTaskView {
+  id: string;
+  name: string;
+  cronExpr: string;
+  task: string;
+  cwd?: string;
+  autonomy: "readonly" | "edits" | "commands";
+  enabled: boolean;
+  createdIso: string;
+  lastRunIso?: string;
+  lastResult?: {
+    ok: boolean;
+    summary: string;
+    ranIso: string;
+    toolCalls: string[];
+  };
+}
+
+export interface ScheduleListResult {
+  ok: boolean;
+  store?: Record<string, ScheduledTaskView>;
+  error?: string;
+}
+
+export interface ScheduleUpsertResult {
+  ok: boolean;
+  error?: string;
+}
+
+export interface ScheduleRemoveResult {
+  ok: boolean;
+  error?: string;
+}
+
+/** One persona in the shared catalog, as the renderer receives it — mirrors @prometheus/core's
+ *  `agent.LoadedAgent`, minus its `path` field: a real absolute filesystem path must never cross
+ *  the sandbox boundary to the renderer (main strips it before returning). "imported" is clamped
+ *  IDENTICALLY to "project" by core's `loadAgentFile` (model refused, forced read-only, tools
+ *  only narrow) — this is the entire safety property that makes persona sharing safe to ship. */
+export interface PersonaFileView {
+  name: string;
+  scope: "user" | "project" | "imported";
+  description: string;
+}
+
+export interface PersonaListResult {
+  ok: boolean;
+  personas?: PersonaFileView[];
+  error?: string;
+}
+
+export interface PersonaExportResult {
+  ok: boolean;
+  markdown?: string;
+  scope?: "user" | "project" | "imported";
+  error?: string;
+}
+
+export interface PersonaImportResult {
+  ok: boolean;
+  name?: string;
+  replaced?: boolean;
+  error?: string;
+}
+
+export interface PersonaRemoveResult {
+  ok: boolean;
+  error?: string;
+}
+
+/** The resolved budget caps, restated as plain data — mirrors @prometheus/core's
+ *  `ai.BudgetConfig` (this file cannot import core's TS types across the preload/renderer
+ *  sandbox boundary the way main.ts can, same reasoning as ModelHealthRecordView above). */
+export interface BudgetConfigView {
+  sessionUsd?: number;
+  dailyUsd?: number;
+  warnAtPercent?: number;
+  unpricedPolicy?: "block" | "warn";
+}
+
+/** One counted bucket (a file extension or a top-level directory) — mirrors @prometheus/core's
+ *  `tokenEconomy.OverviewCount`. */
+export interface CodebaseOverviewCountView {
+  key: string;
+  count: number;
+}
+
+/** A friendly first-look read of the open workspace — mirrors @prometheus/core's
+ *  `tokenEconomy.CodebaseOverview` (this file cannot import core's TS types across the
+ *  preload/renderer sandbox boundary the way main.ts can, same reasoning as ModelHealthRecordView
+ *  above). */
+export interface CodebaseOverviewView {
+  fileCount: number;
+  truncated: boolean;
+  topExtensions: CodebaseOverviewCountView[];
+  topDirs: CodebaseOverviewCountView[];
+  detectedStacks: string[];
+  readmePath?: string;
+  sampleSymbols: string[];
+}
+
+export interface CodebaseOverviewResult {
+  ok: boolean;
+  overview?: CodebaseOverviewView;
+  error?: string;
+}
+
+/** Response to `budget:status` — a read-only spend snapshot (roadmap point 4). SETTING a cap is
+ *  NOT a separate write here: it reuses the existing `settings:set` keys
+ *  (`budget.sessionUsd`/`budget.dailyUsd`/`budget.warnAtPercent`/`budget.unpricedPolicy`). */
+export interface BudgetStatusResult {
+  ok: boolean;
+  capped?: boolean;
+  config?: BudgetConfigView;
+  sessionSpentUsd?: number;
+  dailySpentUsd?: number;
+  /** distinct model ids with no price entry — excluded from both totals above. */
+  unpriced?: string[];
   error?: string;
 }
 
@@ -715,6 +906,15 @@ export interface SecurityUrlAuditResult {
   };
   /** present for op:"list" — the quarantine vault entries. */
   quarantine?: Array<Record<string, unknown>>;
+  /**
+   * The engine's OWN payload for op:"audit" — a count map by status, and one row per source.
+   *
+   * `result` above is DERIVED from `skills` by engine-bridge's `urlSourceAudit`; the engine has
+   * never emitted a `result` field. Reading only `result` is why the panel rendered nothing after
+   * a full 45-source scan. Both are forwarded so a consumer can use the grouping or the rows.
+   */
+  summary?: Record<string, number>;
+  skills?: Array<Record<string, unknown>>;
   error?: string;
 }
 
@@ -791,6 +991,10 @@ export interface AiStreamRequest {
   effort?: unknown;
   /** the workspace "never send to cloud" policy (§7.5). */
   neverSendToCloud?: boolean;
+  /** (A) the user's inactivity-pause threshold in ms (default 10 min). Undefined ⇒ the
+   *  default applies. Threaded across the IPC boundary so a desktop settings field (not
+   *  built here) can eventually override it per-request. */
+  idleTimeoutMs?: number;
 }
 
 /** One presentational delta on the `ai:progress` feed. */
@@ -818,6 +1022,29 @@ export interface AiStreamResult {
   toolCalls: AiToolCall[];
   usage?: { inputTokens: number; outputTokens: number; totalTokens: number };
   timing?: { requestAt: number; firstByteAt?: number; firstTokenAt?: number; lastByteAt: number };
+  /** the per-endpoint circuit breaker's state as of this call — main is the only process that
+   *  holds the real instance, so it rides back here for the renderer's Model Health record. */
+  breaker?: { state: "closed" | "open" | "half-open"; failures: number; openedAt: number | null };
+  /**
+   * (A)/(E) true iff this call ended because the INACTIVITY watchdog fired — a PAUSE, not a
+   * completion and not a user cancel (`ai:cancel` still reports `ok:true` with `paused` simply
+   * OMITTED, not an explicit `false` — the field is only ever set when it is `true`).
+   * `text`/`toolCalls` carry whatever had already streamed before the pause, so the renderer's
+   * LLMClient can fold it and surface a resumable `paused` LlmTurn instead of a silent `final`.
+   */
+  paused?: boolean;
+  /**
+   * True iff the endpoint refused the request BECAUSE it carried tools.
+   *
+   * Only main can tell: the renderer sees an error STRING, while the decision needs the HTTP
+   * status and the response body (`agent/protocol/negotiate.ts`'s `looksLikeToolsRejection`
+   * requires both, because a 400 for a context overflow or a bad key has nothing to do with
+   * tool support and demoting on one would strand a capable model on the weaker transport for
+   * the rest of the session). The agentic CLI has acted on this since the text protocol
+   * existed; the desktop never received it, so a tool-incapable endpoint failed every turn,
+   * forever, with no path to the fallback that would have worked.
+   */
+  toolsRejected?: boolean;
 }
 
 /**
@@ -842,6 +1069,49 @@ export interface AiProbeModelsRequest {
 export interface AiProbeModelsResult {
   ok: boolean;
   models: string[];
+  error?: string;
+}
+
+/**
+ * `ai:probeEndpoint` — MEASURE one local model rather than guess at it.
+ *
+ * `ai:probeModels` above answers "which models does this runner serve"; this answers "and what
+ * is that one actually like": its real context window, and the runner's own `capabilities`
+ * array (`["completion","tools","thinking","vision",…]`).
+ *
+ * Both matter and neither was ever asked for in Studio. The window sizes the tool preamble and
+ * compaction — every desktop endpoint carried the hard-coded 8192 floor, wrong by 32x for a
+ * 262144-window model. The capability array is the ONLY thing that makes the effort chip work
+ * on a locally-served model: `ai/effort/rules.ts`'s probe-driven rules outrank every model-name
+ * guess, and without this the renderer's `effortFor()` had nothing to give them, so every local
+ * model resolved to `UNKNOWN_CAPABILITY` and the chip reported "not available" — including for
+ * models that advertise `thinking` in as many words.
+ *
+ * In MAIN for exactly the reason `ai:probeModels` is: the production CSP (`connect-src 'self'`)
+ * refuses a renderer `fetch` to `http://127.0.0.1:<port>`, so the renderer reaches the runner
+ * across the contextBridge or not at all (C5).
+ */
+export interface AiProbeEndpointRequest {
+  /** the local runner's base URL, e.g. `http://127.0.0.1:11434/v1`. */
+  baseUrl: string;
+  /** the served model name, e.g. `qwen3.6:latest`. */
+  model: string;
+}
+
+/**
+ * Fail-soft by design, and the failure is REPORTABLE rather than silent: `source: "default"`
+ * means the probe ran and got nothing usable, which is a different thing from a model that
+ * genuinely has an 8192 window. A caller must not present the former as the latter.
+ */
+export interface AiProbeEndpointResult {
+  ok: boolean;
+  contextWindow: number;
+  /** `"ollama"` / `"openai-models"` ⇒ measured. `"default"` ⇒ the probe failed. */
+  source: "ollama" | "openai-models" | "default";
+  /** the runner's own capability array, when it reported one. */
+  capabilities?: string[];
+  /** opaque build identity for cache invalidation — see core's `ContextWindowResult.revision`. */
+  revision?: string;
   error?: string;
 }
 
@@ -1227,6 +1497,9 @@ export interface AiApi {
   onProgress(listener: (event: AiProgressEvent) => void): () => void;
   /** Task #18: probe a LOCAL runner's served models (see AiProbeModelsResult for why in MAIN). */
   probeModels(baseUrl: string): Promise<AiProbeModelsResult>;
+  /** Measure ONE local model: real context window + runner capabilities (see
+   *  AiProbeEndpointResult — this is what makes the effort chip work on a local model). */
+  probeEndpoint(baseUrl: string, model: string): Promise<AiProbeEndpointResult>;
 }
 
 export interface PrometheusApi {
@@ -1418,6 +1691,21 @@ export interface PrometheusApi {
 
   /** The "@"-path fuzzy completion feature (shared logic with the CLI). */
   pathCompletion: PathCompletionApi;
+
+  /** Per-endpoint transport/breaker/context-window health, surfaced in Settings. */
+  modelHealth: ModelHealthApi;
+
+  /** Scheduled/autonomous cron-triggered agent runs, surfaced in Settings. */
+  schedule: ScheduleApi;
+
+  /** Persona sharing: export/import of sub-agent persona files, surfaced in Settings. */
+  persona: PersonaApi;
+
+  /** Budget & spend visibility, surfaced in Settings. */
+  budget: BudgetApi;
+
+  /** "Meet your codebase": an on-demand first-look overview of the open workspace. */
+  codebaseOverview: CodebaseOverviewApi;
 
   /** Extension host (file 09 §5, APP-059): install/activate/deactivate/list. */
   ext: ExtApi;
@@ -1686,6 +1974,98 @@ export interface ModelRepointRequest {
   baseUrl: string;
 }
 
+/* ── /hug: fetch (if needed) → convert → install-target, one copy shared everywhere ── */
+
+/** Options for `model:fetchHf` — the ACTUAL raw-weights fetch (via HF's own `hf` CLI). */
+export interface ModelFetchHfRequest {
+  repo: string;
+  out?: string;
+  revision?: string;
+  runId?: string;
+}
+
+/** Response to `model:fetchHf`. `installable:true` ⇒ offer `model:installHfCli`. */
+export interface ModelFetchHfResult {
+  ok: boolean;
+  repo?: string;
+  path?: string;
+  installable?: boolean;
+  error?: string;
+}
+
+/** Response to `model:installHfCli` (`pip install huggingface_hub[cli]`, once). */
+export interface ModelInstallHfCliResult {
+  ok: boolean;
+  installed?: boolean;
+  manual?: boolean;
+  install?: string;
+  error?: string;
+}
+
+/** Options for `model:convert` — HF dir → GGUF (+ quantize), llama.cpp's own tools only. */
+export interface ModelConvertRequest {
+  src: string;
+  quant?: string;
+  id?: string;
+  out?: string;
+  runId?: string;
+}
+
+/**
+ * Response to `model:convert`. `installable:true` ⇒ offer `model:installConverter`.
+ * `lowDisk:true` ⇒ the 7%-floor disk guard refused BEFORE writing anything (`hint`
+ * carries the actionable next step: free space / remove a model / pick another disk).
+ */
+export interface ModelConvertResult {
+  ok: boolean;
+  id?: string;
+  path?: string;
+  /** the canonical open_models path — a symlink to `path` when `--out` pointed elsewhere. */
+  canonicalPath?: string;
+  quant?: string;
+  sizeBytes?: number;
+  sizeGb?: number;
+  installable?: boolean;
+  lowDisk?: boolean;
+  hint?: string;
+  error?: string;
+}
+
+/** Response to `model:installConverter` (fetch llama.cpp's own converter, once). */
+export interface ModelInstallConverterResult {
+  ok: boolean;
+  installed?: boolean;
+  path?: string;
+  manual?: boolean;
+  install?: string;
+  error?: string;
+}
+
+/** Options for `model:installTarget` — wire a converted/GGUF model into ONE runtime. */
+export interface ModelInstallTargetRequest {
+  target: "ollama" | "llamacpp" | "vllm" | "lmstudio";
+  id: string;
+  /** required for llamacpp/lmstudio/ollama — an existing GGUF path. */
+  gguf?: string;
+  /** required for vllm — the HF-format directory (vLLM never needs the GGUF). */
+  src?: string;
+  quant?: string;
+  runId?: string;
+}
+
+/** Response to `model:installTarget`. Never duplicates bytes — see the sidecar's own
+ *  per-target notes surfaced in `note` (e.g. "no install step needed — vLLM reads..."). */
+export interface ModelInstallTargetResult {
+  ok: boolean;
+  target?: string;
+  id?: string;
+  path?: string;
+  endpoint?: string;
+  method?: string;
+  note?: string;
+  error?: string;
+}
+
 /**
  * A MAIN→renderer Model-Hub progress / status event (IPC_EVENTS.modelProgress).
  * For a download: cosmetic `{pct}` staging lines (the gate VERDICT rides back in
@@ -1762,6 +2142,28 @@ export interface ModelApi {
   endpoints(): Promise<ModelEndpointsResult>;
   /** LIVE repoint env diff (localai show <tool> passthrough, §6). Non-secret only. */
   repoint(req: ModelRepointRequest): Promise<ModelRepointResult>;
+  /**
+   * /hug — the ACTUAL raw-weights fetch for an HF repo, via HF's own `hf`/
+   * `huggingface-cli` downloader (never a hand-rolled HTTP client). Feeds `convert`'s
+   * `src`. `installable:true` ⇒ the hf CLI isn't on PATH yet — offer `installHfCli`.
+   */
+  fetchHf(req: ModelFetchHfRequest): Promise<ModelFetchHfResult>;
+  /** /hug — install HF's own `hf` CLI on the user's behalf (`pip install`), once. */
+  installHfCli(): Promise<ModelInstallHfCliResult>;
+  /**
+   * /hug — HF directory → GGUF (+ quantize), ALWAYS via llama.cpp's own tools
+   * (convert_hf_to_gguf.py / llama-quantize — never re-implemented here).
+   * `installable:true` ⇒ offer `installConverter`; `lowDisk:true` ⇒ the sidecar's
+   * own 7%-floor disk guard refused before writing anything.
+   */
+  convert(req: ModelConvertRequest): Promise<ModelConvertResult>;
+  /** /hug — fetch llama.cpp's OWN convert_hf_to_gguf.py (a shallow git clone), once. */
+  installConverter(): Promise<ModelInstallConverterResult>;
+  /**
+   * /hug — wire an already-converted (or already-GGUF) model into ONE target
+   * runtime (ollama / llama.cpp / vLLM / LM Studio), never duplicating the payload.
+   */
+  installTarget(req: ModelInstallTargetRequest): Promise<ModelInstallTargetResult>;
   /**
    * Subscribe to the Model-Hub progress / serve-status feed. Returns an
    * unsubscribe fn. Download lines are cosmetic; serve lines carry the live §2.4
@@ -2221,10 +2623,32 @@ export interface IdeFsReadResult {
   error?: string;
 }
 
+/**
+ * Response to `ide:steering.global` — the loaded `~/.prometheus` rule files.
+ *
+ * A dedicated channel rather than `fsRead` because the renderer does not know (and must not be
+ * told how to construct) the home path: `fsRead` takes a `file://` URI that main path-guards,
+ * and teaching it to expand `~` would widen that guard for every caller. Main resolves
+ * `prometheusHome()` itself and hands back only these two files.
+ */
+export interface IdeSteeringGlobalResult {
+  ok: boolean;
+  sources: { kind: "agents" | "claude"; path: string; content: string }[];
+  error?: string;
+}
+
 /** A generic plain ok/err for fs write / watch / pty write etc. */
 export interface IdeOkResult {
   ok: boolean;
   error?: string;
+  /**
+   * Roots a PARTIALLY successful `ide:workingSet.set` refused.
+   *
+   * `ok:true` with some roots dropped is still a narrower scope than the renderer asked for, and
+   * the caller could not tell: the refusals only reached main's stderr via `console.warn`, which
+   * no user sees. Present only when non-empty.
+   */
+  refused?: readonly string[];
 }
 
 /** Response to `ide:lsp.ensure`: the stable serverId the renderer routes through. */
@@ -2887,6 +3311,21 @@ export interface AgentHookRunResult {
   };
 }
 
+/**
+ * `agent:canaryTrip` — the renderer's proxy for recording a tripped canary token (point 6b, see
+ * `@prometheus/core`'s `agent/canary.ts`). Core's loop detects the trip (it owns the token and
+ * the model's streamed text); the renderer cannot write the audit file itself (C5), so it
+ * forwards the trip here and MAIN appends it to `canary-audit.jsonl`.
+ */
+export interface AgentCanaryTripRequest {
+  /** the streamed text chunk that contained the token, for the audit record. */
+  textSnippet: string;
+}
+
+export interface AgentCanaryTripResult {
+  ok: boolean;
+}
+
 /** The result of `agent:systemTool` — core's `ToolOutcome`, flattened for IPC. */
 export interface AgentSystemToolResult {
   ok: boolean;
@@ -3168,6 +3607,17 @@ export type IdeEvent =
   // APP-090: a torn-out terminal's float window returned (closed / re-dock button) — the
   // main window re-shows that session's tab. Carries the ptyId the float was hosting.
   | { channel: "floatingTerminal.returned"; ptyId: string }
+  /**
+   * An OS drag-and-drop landed on a window and MAIN resolved it.
+   *
+   * The path comes from Chromium's own drop machinery (the `will-navigate` a dropped file
+   * triggers), NOT from renderer JavaScript — which is the whole point. A renderer-supplied path
+   * could not be trusted to earn a working-set grant, because self-granting is exactly what that
+   * guard exists to prevent; a path main reads off the drop event is a real user gesture main can
+   * verify. Main has already recorded the grant (folder) or the single-path approval (file) by
+   * the time this event is sent.
+   */
+  | { channel: "shell.dropped"; path: string; kind: "folder" | "file" }
   | { channel: "run.data"; runId: string; data: string }
   | { channel: "run.exit"; runId: string; exitCode: number; signal?: number; killed: boolean }
   | { channel: "fs.change"; root: string; paths: string[] }
@@ -3394,6 +3844,14 @@ export interface IdeProfileResult {
   sawTasks?: boolean;
   /** a short human note about the result (approx/partial/not-async). */
   note?: string;
+  /**
+   * The profiled script's OWN error, when it crashed.
+   *
+   * A run whose target raised still profiles successfully — the sampler ran, it just sampled
+   * import machinery. `ok:true` with no signal read as "here is your profile", so this is the
+   * field that distinguishes a real measurement from a flame graph of runpy.
+   */
+  runError?: string;
 }
 
 /* ── APP-089: saved-snapshot metadata + compare (delta) shapes ─────────────────*/
@@ -3657,6 +4115,8 @@ export interface IdeApi {
   // ── fs (MAIN owns the filesystem; renderer never touches node:fs) ─────────
   fsRead(uri: string): Promise<IdeFsReadResult>;
   fsWrite(uri: string, text: string): Promise<IdeOkResult>;
+  /** the user's own `~/.prometheus` AGENTS.md / CLAUDE.md (the `global` tier of the chain). */
+  steeringGlobal(): Promise<IdeSteeringGlobalResult>;
   /**
    * handoff §3: declare the workspace roots MAIN gates every mutating fs call against.
    * An EMPTY list disables the scope check (no folder open ⇒ no working set).
@@ -3874,6 +4334,8 @@ export interface IdeApi {
   systemTool(req: AgentSystemToolRequest): Promise<AgentSystemToolResult>;
   /** list, or run, one of the user's configured lifecycle hooks (main owns the spawn). */
   hookRun(req: AgentHookRunRequest): Promise<AgentHookRunResult>;
+  /** record a tripped canary token (point 6b) — main owns the audit file, renderer cannot (C5). */
+  canaryTrip(req: AgentCanaryTripRequest): Promise<AgentCanaryTripResult>;
   /** run one `prometheus_*` engine verb — the product's own surface, which the pane lacked. */
   engineTool(req: AgentEngineToolRequest): Promise<AgentSystemToolResult>;
   /** the persisted "don't ask again" grants (shared with the CLI). */
@@ -4028,6 +4490,9 @@ export interface FolderOpenResult {
   ok: boolean;
   path: string | null;
   canceled: boolean;
+  /** present when the user's chosen folder was inside Prometheus's OWN repo and `path` was
+   *  redirected to the user's home directory instead — the ORIGINAL folder they picked. */
+  redirectedFromOwnRepo?: string;
 }
 
 /** Result of opening a path with the OS default handler (external, outside the app). */
@@ -4406,6 +4871,56 @@ export interface PathCompletionApi {
   ): Promise<PathCompletionListResult>;
   /** Record that `path` was just "@"-completed, for the opt-in frecency memory. */
   recordUse(workspaceRoot: string, path: string): Promise<PathCompletionRecordUseResult>;
+}
+
+/** Model health: per-endpoint transport/breaker/context-window state, persisted globally
+ *  (never workspace-scoped — endpoints are not tied to one project). */
+export interface ModelHealthApi {
+  /** Every endpoint this install has ever recorded a turn against. */
+  list(): Promise<ModelHealthListResult>;
+  /** Persist one endpoint's health record after a turn (fire-and-forget from the caller's
+   *  point of view; the returned promise is there for callers that want to know it landed). */
+  record(record: ModelHealthRecordView): Promise<ModelHealthRecordResult>;
+}
+
+/** Scheduled/autonomous runs: cron-triggered agent turns, bounded by a per-task autonomy
+ *  ladder (readonly/edits/commands) — persisted globally (never workspace-scoped). MAIN owns
+ *  the store at a fixed userData path; the renderer only ever sees these plain task views. */
+export interface ScheduleApi {
+  /** Every scheduled task this install has registered. */
+  list(): Promise<ScheduleListResult>;
+  /** Create or update one task (keyed by `id`). */
+  upsert(task: ScheduledTaskView): Promise<ScheduleUpsertResult>;
+  /** Remove one task by id. A no-op (not an error) when the id is already gone. */
+  remove(id: string): Promise<ScheduleRemoveResult>;
+}
+
+/** Persona sharing: export one of the user's OWN personas as plain text, and import a persona
+ *  someone else shared — ALWAYS as "imported" scope, clamped identically to "project" (model
+ *  refused, forced read-only, tools only narrow) regardless of what the shared file requests. */
+export interface PersonaApi {
+  /** Every persona in the shared catalog (user's own, this project's, and imported). */
+  list(): Promise<PersonaListResult>;
+  /** One persona's raw markdown, verbatim, for the user to copy/paste or hand to someone else. */
+  export(name: string): Promise<PersonaExportResult>;
+  /** Import pasted/typed markdown text as a new persona (always written to the imported scope). */
+  importText(suggestedName: string, markdown: string): Promise<PersonaImportResult>;
+  /** Import a LOCAL file by absolute path (from the native file picker) — never a URL. */
+  importPath(path: string): Promise<PersonaImportResult>;
+  /** Remove an imported persona by name. Cannot touch the user's own or a project's personas. */
+  remove(name: string): Promise<PersonaRemoveResult>;
+}
+
+/** Budget & spend visibility (roadmap point 4). Read-only — setting a cap goes through the
+ *  existing `window.prometheus.settings.set("budget.sessionUsd", …, "global")` etc. */
+export interface BudgetApi {
+  status(): Promise<BudgetStatusResult>;
+}
+
+/** "Meet your codebase" (roadmap point 6): an on-demand, friendly first-look overview of the
+ *  currently open workspace. Nothing runs until the renderer explicitly calls `generate()`. */
+export interface CodebaseOverviewApi {
+  generate(): Promise<CodebaseOverviewResult>;
 }
 
 /* ── extension host (file 09 §5, APP-059) ───────────────────────────────────

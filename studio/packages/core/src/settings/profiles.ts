@@ -62,3 +62,53 @@ export function getProfile(id: string): Profile | undefined {
 export function applyProfile(base: Settings, profile: Profile): Settings {
   return deepMerge(base, profile.settings) as Settings;
 }
+
+/* ── the ACTIVE profile layer (APP-058 §7.1) ──────────────────────────────────── */
+
+/**
+ * Resolve the profile layer that sits above the user's global settings.
+ *
+ * A profile the user CHOSE may do anything, including loosen: picking "Power-dev" is a decision.
+ * An IMPLICIT profile — the fallback used when `profileId` was never set, which is the shipped
+ * state for every user who has not visited the profile picker — may only TIGHTEN.
+ *
+ * Without that distinction the default profile silently reverted the user's own security keys.
+ * `power-dev` hard-asserts `cloudModelsEnabled: true`, `defaultNetwork: "mcp-only"`,
+ * `gateStrict: false` and `allowForce: true`, and it layers ABOVE global, so a user who wrote
+ * `{"gateStrict": true, "cloudModelsEnabled": false, "defaultNetwork": "none",
+ * "allowForce": false}` into their own settings.json got all four values flipped back to the
+ * permissive ones by a profile they never picked. Verified against the real layering before this
+ * existed: user asked for all-strict, effective came back all-permissive.
+ *
+ * The workspace layer already had exactly this protection, for exactly this reason — the comment
+ * on it says an unfiltered repo layer "would make the whole profile mechanism decorative one
+ * level down". An unchosen default is the same problem one level up, so it reuses the same
+ * tighten-only filter.
+ */
+export function resolveProfileLayer(
+  global: Record<string, unknown>,
+  deps: {
+    defaults: Settings;
+    layer: (defaults: Settings, global?: Settings, profile?: Partial<Settings>) => Settings;
+    sanitize: (
+      layer: Record<string, unknown>,
+      base: Settings,
+    ) => { layer: Record<string, unknown>; refused: string[] };
+  },
+): {
+  profileId: string;
+  implicit: boolean;
+  profile: Partial<Settings> | undefined;
+  refused: string[];
+} {
+  const chosen = typeof global.profileId === "string" ? global.profileId : undefined;
+  const profileId = chosen ?? DEFAULT_PROFILE_ID;
+  const found = getProfile(profileId)?.settings;
+  if (chosen !== undefined || !found) {
+    return { profileId, implicit: chosen === undefined, profile: found, refused: [] };
+  }
+  // implicit: it may tighten the user's posture, never widen it
+  const userBase = deps.layer(deps.defaults, global as Settings);
+  const { layer, refused } = deps.sanitize(found as Record<string, unknown>, userBase);
+  return { profileId, implicit: true, profile: layer as Partial<Settings>, refused };
+}

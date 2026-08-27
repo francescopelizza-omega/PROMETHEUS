@@ -428,11 +428,22 @@ def _build_rules() -> list[Rule]:
              "Inspect .envrc before allowing it (direnv allow); remove fetch/exec lines.",
              flags=I, globs=("*.envrc", ".envrc")),
         # --- Destructive -------------------------------------------------- #
+        # The flag bundle must contain BOTH r and f, in EITHER order, case-insensitively, and may
+        # be preceded by other flags. The old pattern hard-coded `r` before `f` and was
+        # case-sensitive, so `rm -fr /`, `rm -Rf $HOME` and — worst — the canonical
+        # `rm --no-preserve-root -rf /` all sailed past a CRITICAL rule. The target alternation
+        # also required the path to END right after `/`, so `rm -rf /*` (the form a wiper
+        # actually ships, because bare `/` is refused by GNU rm without --no-preserve-root) never
+        # matched either: 9 of 12 real wiper spellings were invisible while the rule's own
+        # description claimed "root, home or wildcard". The trailing (\s|$) still keeps scoped
+        # deletes like `rm -rf ./build` or `rm -rf ~/projects/app` out.
         Rule("DESTRUCT-001", "rm -rf of root/home", "destructive", "CRITICAL",
-             r"\brm\s+-[a-zA-Z]*r[a-zA-Z]*f[a-zA-Z]*\s+(/|~|\$HOME|\*)(\s|$)",
+             r"\brm\s+(?:--?[a-z][a-z-]*\s+)*"
+             r"-[a-z]*(?:r[a-z]*f|f[a-z]*r)[a-z]*\s+"
+             r"(/\*?|~/?\*?|\$HOME/?\*?|\*)(\s|$)",
              "Recursive force-delete of root, home or wildcard — wiper behaviour.",
              "Delete the line unless you are certain of a sandboxed, scoped target.",
-             flags=M),
+             flags=M | I),
         Rule("DESTRUCT-002", "disk overwrite (dd/mkfs)", "destructive", "CRITICAL",
              r"\b(dd\s+if=/dev/(zero|u?random)\s+of=/dev/|mkfs\.\w+\s+/dev/|>\s*/dev/sd[a-z])",
              "Overwrites a raw block device — destroys data.",
@@ -3809,6 +3820,9 @@ def scan_tree_archives(scanner: "Scanner", root: str,
 # --------------------------------------------------------------------------- #
 # Remediation
 # --------------------------------------------------------------------------- #
+# Formats where a line comment is not a comment but a SYNTAX ERROR. Neutralizing by commenting
+# would leave the user with a file nothing can parse — strictly worse than the finding.
+_NO_COMMENT_SYNTAX = {".json", ".lock", ".plist", ".xml", ".svg", ".csv", ".tsv"}
 _COMMENT_HASH = {".py", ".sh", ".bash", ".zsh", ".rb", ".pl", ".yaml", ".yml",
                  ".toml", ".cfg", ".ini", ".r", ".tcl", ".ps1", ""}
 _COMMENT_SLASH = {".js", ".mjs", ".cjs", ".ts", ".tsx", ".jsx", ".c", ".h",
@@ -3961,6 +3975,19 @@ class Remediator:
             text = raw.decode("latin-1")
             codec = "latin-1"
         lines = text.splitlines(keepends=True)
+        # JSON has NO comment syntax, so line-commenting it does not neutralize the threat — it
+        # DESTROYS the file. `--fix` on an mcp-servers.json turned it into
+        # `{ "servers": [ # NEMESIS-NEUTRALIZED ... ] }`, which no parser accepts; and a config
+        # that no longer parses is read as EMPTY by most of this project's loaders, so the user
+        # silently loses every entry, not just the flagged one. Refuse and say so: the finding
+        # stands, the file is untouched, and quarantine (or a hand edit against the .bak) is the
+        # correct remediation for a data file.
+        if os.path.splitext(path)[1].lower() in _NO_COMMENT_SYNTAX:
+            self.errors.append(
+                f"{path}: refusing to line-comment a data file with no comment syntax — "
+                f"the finding stands; quarantine it or edit it by hand"
+            )
+            return
         _backup(path)
         prefix = _comment_prefix(path)
         date = datetime.now(timezone.utc).date()
@@ -4020,7 +4047,35 @@ class Remediator:
                 self.neutralized.append((path, f.line))
             return leftover
         _backup(path)
-        removed = {k: scripts.pop(k) for k in hit}
+        # Keep the audit record, but store it INERT.
+        #
+        # This wrote the removed lifecycle command back into the SAME FILE verbatim under
+        # `_nemesis_removed_scripts`. npm no longer runs it — but every rule that matched it
+        # still matches, so a rescan of a "disinfected" package.json returned the identical
+        # BLOCK with the identical 3 HIGH findings, and disinfection could never converge. The
+        # live payload was also still sitting there to be copy-pasted back.
+        #
+        # The record is worth keeping (a user must be able to see what was taken out), so it is
+        # defanged with the same machinery `defang_path` uses on URLs and prefixed so it can
+        # never be mistaken for a runnable command, plus the sha256 of the original for anyone
+        # who needs to correlate it with the backup written above.
+        removed_raw = {k: scripts.pop(k) for k in hit}
+        removed: dict = {}
+        for k, cmd in removed_raw.items():
+            b = str(cmd).encode("utf-8", "replace")
+            # A FINGERPRINT, never the payload in any form. Writing the command back verbatim
+            # left every rule that matched it still matching, so a "disinfected" package.json
+            # rescanned to the identical BLOCK and disinfection could never converge. Base64 is
+            # no better — this scanner decodes embedded base64 and scans the result (it shows up
+            # as `<file>~b64`), which is exactly the behaviour that makes it a scanner. The
+            # `.nemesis.bak` written just above IS the audit copy; this record only has to let a
+            # user correlate with it.
+            removed[k] = {
+                "note": "removed by `nemesis --fix` — the original command is in the "
+                        ".nemesis.bak file written beside this one",
+                "bytes": len(b),
+                "sha256": hashlib.sha256(b).hexdigest(),
+            }
         data.setdefault("_nemesis_removed_scripts", {}).update(removed)
         try:
             with open(path, "w", encoding="utf-8") as fh:
@@ -4605,15 +4660,38 @@ _VERDICT_EXIT = {"allow": 0, "warn": 10, "block": 20, "error": 2}
 _SCAN_EXIT = {"allow": 0, "warn": 1, "block": 3}
 
 
+# Provenance key stamped onto the policy dict by `load_policy`, read back by `build_verdict`.
+# Underscored so it can never collide with a real policy setting; consumers read named settings.
+_POLICY_SOURCE_KEY = "__policy_source__"
+
+
 def load_policy(path: Optional[str] = None) -> dict:
+    """Load the effective policy, RECORDING whether an operator file actually contributed.
+
+    The verdict's `policy` field is the only thing telling an auditor whether stock rules or a
+    supplied policy decided the outcome, and it was derived by comparing the dict to
+    `_DEFAULT_POLICY`. That comparison can never be equal: `run_scan` does
+    `policy.setdefault("url_blind_ceiling", gate)` on every path and `_DEFAULT_POLICY`
+    deliberately omits that key, so the field read "custom" on a completely stock box. A planted
+    `~/.nemesis/policy.json` that relaxes the gate therefore looked byte-identical, in that field,
+    to a machine with no policy file at all — in the signed record prometheus stores verbatim in
+    `gate-audit.jsonl`. Recording the provenance at the point it is known is not defeatable by a
+    later mutation of the dict.
+    """
     policy = dict(_DEFAULT_POLICY)
     candidate = path or os.path.join(_NEMESIS_HOME, "policy.json")
+    source = "default"
     if os.path.exists(candidate):
         try:
             with open(candidate, encoding="utf-8") as fh:
-                policy.update(json.load(fh))
+                loaded = json.load(fh)
+            policy.update(loaded)
+            # An unreadable or malformed file contributes NOTHING, so it is not "custom" —
+            # but a present-and-empty one is still an operator file and is reported as such.
+            source = candidate
         except (OSError, json.JSONDecodeError):
-            pass
+            source = "default"
+    policy[_POLICY_SOURCE_KEY] = source
     return policy
 
 
@@ -4646,12 +4724,74 @@ _DOC_NAME_RX = re.compile(
     r"contributing|code_of_conduct|authors|maintainers)$", re.I)
 
 
+# Markdown that an AI AGENT reads as instructions is not documentation — it is a script whose
+# interpreter happens to be a language model. `SKILL.md`, `AGENTS.md`, `CLAUDE.md` and the
+# per-host command/rule files below are loaded into an agent's context and acted on, so a
+# `curl … | sudo bash` inside one is a live dropper, not prose about a dropper.
+#
+# Without this exception the doc-suppression below silently disarmed the entire skill-audit
+# pipeline: prometheus.py pins exactly these files, re-gates them on drift, and quarantines the
+# ones that gate `block` — but every one of them is a `.md`, so every dropper in a skill scored
+# HIGH, was suppressed to `warn`, and was never quarantined. The suppression is meant for
+# READMEs, and it has to stay that narrow.
+_AGENT_DOC_NAMES = frozenset({
+    "skill.md", "skill.md.disabled", "agents.md", "claude.md", "gemini.md",
+    "copilot-instructions.md", "cursorrules.md", ".cursorrules", "windsurfrules.md",
+})
+# Directories whose Markdown IS agent input whatever the file is called (slash commands,
+# rule packs, prompt libraries). These are the USER-LEVEL install paths.
+_AGENT_DOC_DIRS = (
+    "/.claude/commands/", "/.claude/agents/", "/.claude/skills/", "/.codex/prompts/",
+    "/.cursor/rules/", "/.github/prompts/", "/.gemini/commands/", "/prometheus_skills/",
+    "/.opencode/command/", "/.windsurf/rules/",
+)
+
+# The SAME directories as they appear in a plugin/marketplace REPO, before installation.
+#
+# The user-level list above only matches an already-installed tree. A Claude Code plugin ships
+# its slash commands and subagents as top-level `commands/*.md` and `agents/*.md`, and the gate
+# scans the temp CLONE — whose path contains neither "/.claude/commands/" nor the installed
+# marketplace path. `_AGENT_DOC_NAMES` did not save them either, because a command file is named
+# after the command (`deploy.md`, `write-spec.md`), not `SKILL.md`. So the exact same bytes that
+# BLOCK at `<tree>/.claude/commands/deploy.md` were suppressed to an advisory `warn` at
+# `<tree>/commands/deploy.md` — and because suppressed findings are excluded from `high_n` and
+# `block_score_sum`, no amount of them could ever reach `block` by accumulation either.
+#
+# Matched as a path SEGMENT anywhere in the tree, which is deliberately broad: a repository that
+# keeps ordinary prose in a `commands/` directory now has a dropper there treated as executable
+# rather than as prose. That is the safe direction for a security scanner — the cost of the
+# stricter reading is a louder verdict on a file that was probably not prose anyway, while the
+# cost of the looser one is a live dropper downgraded to advisory.
+_AGENT_DOC_REPO_DIRS = (
+    "/commands/", "/agents/", "/skills/", "/prompts/", "/rules/", "/command/",
+)
+
+
+def _is_agent_instruction_doc(path: str) -> bool:
+    """True for Markdown an AI agent LOADS AND ACTS ON (skills, agent rules, slash commands)."""
+    norm = (path or "").replace("\\", "/").lower()
+    base = norm.rsplit("/", 1)[-1]
+    if base in _AGENT_DOC_NAMES:
+        return True
+    ext = os.path.splitext(base)[1]
+    if ext not in _DOC_EXTS and ext != ".mdc":
+        return False
+    if any(d in norm for d in _AGENT_DOC_DIRS):
+        return True
+    # plugin/marketplace repo layout, and the support files a SKILL.md tells the agent to read
+    return any(d in norm for d in _AGENT_DOC_REPO_DIRS)
+
+
 def _is_nonexec_doc(path: str) -> bool:
     """True ONLY for real documentation files that are never executed on install:
     a recognised doc EXTENSION (.md/.rst/.txt/…), or an EXTENSIONLESS canonical doc name
     (README/LICENSE/CHANGELOG). Anything carrying a code/script extension (.py/.sh/.js/…) —
-    including `security.py`, `readme.sh` — is NOT a doc and its findings still block."""
+    including `security.py`, `readme.sh` — is NOT a doc and its findings still block.
+    An AGENT-INSTRUCTION doc (SKILL.md, AGENTS.md, .claude/commands/*.md …) is never a doc
+    here: an agent executes it."""
     base = (path or "").replace("\\", "/").lower().rsplit("/", 1)[-1]
+    if _is_agent_instruction_doc(path):
+        return False
     ext = os.path.splitext(base)[1]
     if ext in _DOC_EXTS:
         return True
@@ -4818,7 +4958,11 @@ def build_verdict(findings: list[Finding], scanner: Scanner, target: str,
             "sca_unscanned_ecosystems": sorted(getattr(scanner, "sca_unscanned", set())),
             "extract_tier": _LAST_EXTRACT_TIER,
         },
-        "policy": "default" if policy == _DEFAULT_POLICY else "custom",
+        "policy": "default" if policy.get(_POLICY_SOURCE_KEY, "default") == "default" else "custom",
+        # the path an operator policy came from (absent when the stock rules decided) — an
+        # auditor reading a `custom` verdict needs to know WHICH file to go and look at.
+        **({} if policy.get(_POLICY_SOURCE_KEY, "default") == "default"
+           else {"policy_source": policy[_POLICY_SOURCE_KEY]}),
         "host": sys.platform,
     }
 
@@ -4848,9 +4992,39 @@ def _cache_dir() -> str:
     return os.path.join(_NEMESIS_HOME, "cache")
 
 
+_SELF_SHA: Optional[str] = None
+
+
+def _self_sha() -> str:
+    """A hash of this scanner's OWN source, cached per process.
+
+    `__version__` and `_ruleset_sha()` already key the cache, but neither moves when the
+    VERDICT LOGIC changes: fixing which findings block (say, un-suppressing droppers inside
+    agent-instruction Markdown) alters no rule and no version string, so every artifact already
+    in the cache kept serving the OLD, weaker verdict — a security fix that silently did not
+    take effect for exactly the files most likely to have been scanned before.
+
+    Hashing the file itself makes that correct by construction instead of by remembering to bump
+    a constant. One ~400KB read per process, against a scan that reads far more.
+    """
+    global _SELF_SHA
+    if _SELF_SHA is None:
+        try:
+            with open(os.path.abspath(__file__), "rb") as fh:
+                _SELF_SHA = hashlib.sha256(fh.read()).hexdigest()[:16]
+        except OSError:
+            # unreadable (frozen/zipapp) — fall back to the version string rather than
+            # crashing; the cache is then only as precise as it was before.
+            _SELF_SHA = __version__
+    return _SELF_SHA
+
+
 def _db_fingerprint() -> str:
     h = hashlib.sha256()
     h.update(_ruleset_sha().encode())
+    # the scanner's own verdict logic is part of what produced the cached answer.
+    h.update(b"|self:")
+    h.update(_self_sha().encode())
     # stat-fingerprint of the DB files actually loaded (set by load_db; "none" when
     # --no-feeds skipped it) — content changes flip it even at equal set sizes
     h.update(b"|dbsig:")
@@ -7889,7 +8063,13 @@ def main(argv: Optional[list[str]] = None) -> int:
         try:
             with open(args.file, encoding="utf-8") as fh:
                 v = json.load(fh)
-        except (OSError, json.JSONDecodeError) as e:
+        # ValueError, not just JSONDecodeError: a file that is not UTF-8 at all raises
+        # UnicodeDecodeError from the DECODE, before json ever sees it. Both are ValueError
+        # subclasses; only one was caught, so `nemesis verify <binary>` printed a raw Python
+        # traceback and exited 1 — "signature INVALID", i.e. it reported an untrusted verdict for
+        # a file it had not managed to read. "Cannot read" is exit 2 here, and that distinction
+        # is the whole point of the two codes.
+        except (OSError, ValueError) as e:
             print(_c(f"cannot read verdict: {e}", _SEV_COLOR["HIGH"]), file=sys.stderr)
             return 2
         if verify_verdict(v):

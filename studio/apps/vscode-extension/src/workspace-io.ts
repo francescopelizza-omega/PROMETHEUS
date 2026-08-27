@@ -197,8 +197,31 @@ export function createVsCodeWorkspaceIo(folder: vscode.WorkspaceFolder): Workspa
             // step. `overwrite: true` on createFile discards the old content outside the undo
             // stack in some VS Code versions, so the content is written as a text edit instead.
             edit.createFile(uri, { ignoreIfExists: true, contents: enc.encode("") });
-            const existing = await readIfPresent(uri);
-            edit.replace(uri, fullRange(existing ?? ""), m.content);
+            /**
+             * The replace range must come from the BUFFER when one exists, not from disk.
+             *
+             * This read the file with `vscode.workspace.fs.readFile` and built `fullRange` from
+             * those bytes, then applied the edit to the open TEXT DOCUMENT. For a file the user
+             * has open with unsaved changes the two disagree, so the range covered only as much
+             * text as the on-disk version had, and the tail of their buffer survived: the file
+             * became `<new content><leftover of the dirty buffer>` while the tool reported
+             * `ok: true`. The reverse case was worse — unreadable on disk but open in the editor
+             * gave `fullRange("")`, an empty range, so the new content was INSERTED ahead of the
+             * old rather than replacing it.
+             *
+             * The sibling `case "replace"` above already opens the document for exactly this
+             * reason, and its header says reading bytes instead "would clobber unsaved changes".
+             * An open document cannot be opened here unconditionally, though: a brand-new file
+             * has no document yet and `createFile` is still only QUEUED on the edit, so the
+             * already-open list is consulted and disk is used only when there is no buffer.
+             */
+            const open = vscode.workspace.textDocuments.find(
+              (d) => d.uri.toString() === uri.toString(),
+            );
+            const range = open
+              ? open.validateRange(new vscode.Range(0, 0, open.lineCount, Number.MAX_SAFE_INTEGER))
+              : fullRange((await readIfPresent(uri)) ?? "");
+            edit.replace(uri, range, m.content);
             break;
           }
           case "delete":

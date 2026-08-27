@@ -12,6 +12,7 @@ import {
   mkdirSync,
   readFileSync,
   readdirSync,
+  renameSync,
   rmSync,
   statSync,
   writeFileSync,
@@ -22,7 +23,7 @@ export interface SessionRecord {
   id: string;
   /** ISO timestamp. */
   ts: string;
-  /** the first 15 words of the opening prompt (hard-chunked). */
+  /** the first 15 words of the opening prompt (hard-chunked) — a STABLE identity label. */
   descriptor: string;
   cwd: string;
   /**
@@ -34,6 +35,16 @@ export interface SessionRecord {
    * `prometheus -p` invocations would otherwise bury.
    */
   kind?: "headless";
+  /**
+   * The FRESHEST one-line "what actually happened", refreshed after every completed turn
+   * (`turn-summary.ts`'s `turnSummaryOf`, written via `updateSessionSummary`). Unlike
+   * `descriptor` this changes over the session's life — it is what `/restore` (`/recall`) shows
+   * next to the id, so a session with ten turns reads as "edited 3 files · ran 2 commands", not
+   * whatever the very first prompt happened to say. Absent on a session that recorded but never
+   * completed a turn, or one written before this field existed — the picker falls back to
+   * `descriptor`.
+   */
+  lastSummary?: string;
 }
 
 /** First 15 words of a prompt, hard-chunked + whitespace-collapsed (the `/recall` summary). */
@@ -67,6 +78,108 @@ export function recordSession(home: string, rec: SessionRecord): void {
  */
 export function interactiveSessions(records: readonly SessionRecord[]): SessionRecord[] {
   return records.filter((r) => r.kind !== "headless");
+}
+
+/**
+ * Replace `path`'s content ATOMICALLY (temp file + rename). Node's plain `writeFileSync`
+ * truncates the target at open() time, strictly BEFORE the write completes — a crash, a full
+ * disk, or an I/O error in that window leaves a zero-byte file, and `index.jsonl` has no other
+ * copy of what it held. A rename is a single filesystem operation: readers see either the whole
+ * old file or the whole new one, never a partial one.
+ */
+function atomicWriteFile(path: string, body: string): void {
+  const tmp = `${path}.${process.pid}.tmp`;
+  writeFileSync(tmp, body);
+  renameSync(tmp, path);
+}
+
+/**
+ * An index.jsonl rewrite older than this is treated as ABANDONED by a crashed process, not as a
+ * genuinely in-progress one — these rewrites complete in microseconds, so anything still holding
+ * the lock this long can only be a process that died mid-write.
+ */
+const INDEX_LOCK_STALE_MS = 5_000;
+
+function indexLockPath(home: string): string {
+  return join(sessionsDir(home), "index.jsonl.lock");
+}
+
+function tryCreateIndexLock(path: string): boolean {
+  try {
+    writeFileSync(path, `${process.pid}\n`, { flag: "wx" }); // O_EXCL — fails if it already exists
+    return true;
+  } catch {
+    return false; // EEXIST (or anything else) — someone else holds it right now
+  }
+}
+
+/**
+ * Claim the whole-file index.jsonl rewrite lock (shared by `updateSessionSummary`,
+ * `pruneIndex` and `deleteSession` — the operations that read-modify-write the whole file, as
+ * opposed to `recordSession`'s plain atomic append). Returns `true` if claimed (the caller MUST release it),
+ * `false` if another process's rewrite is genuinely in flight right now.
+ *
+ * On a `false`, the caller should SKIP its rewrite rather than block or spin waiting for it: two
+ * interactive Prometheus sessions sharing one `~/.prometheus` home is the only way to contend
+ * this at all, `updateSessionSummary` runs again on the very next turn, and `pruneIndex` only
+ * matters for eventual cleanup — neither is worth stalling a user's prompt over.
+ */
+function claimIndexLock(home: string): boolean {
+  const path = indexLockPath(home);
+  try {
+    mkdirSync(sessionsDir(home), { recursive: true });
+  } catch {
+    return false; // an unwritable home is a reason to skip the rewrite, not to crash it
+  }
+  if (tryCreateIndexLock(path)) return true;
+  try {
+    if (Date.now() - statSync(path).mtimeMs <= INDEX_LOCK_STALE_MS) return false; // genuinely held
+    rmSync(path, { force: true }); // abandoned by a crashed process — reclaim it
+  } catch {
+    return false; // couldn't inspect/clear it — safest is to skip, not to double-write
+  }
+  return tryCreateIndexLock(path);
+}
+
+function releaseIndexLock(home: string): void {
+  try {
+    rmSync(indexLockPath(home), { force: true });
+  } catch {
+    /* best-effort — a lock that outlives this process is caught by the staleness check above */
+  }
+}
+
+/**
+ * Refresh a session's `lastSummary` in place (best-effort; a write failure, a missing record, or
+ * a contended lock is silently swallowed — the picker just falls back to `descriptor`, or to
+ * whatever `lastSummary` it last had, this run; the very next turn tries again).
+ *
+ * A full rewrite of `index.jsonl`, same as `pruneIndex` below — the file is capped at
+ * `SESSION_INDEX_MAX_RECORDS` (small), so this costs nothing appreciable once per turn. Guarded
+ * by `claimIndexLock` (see its own header) since this now runs unconditionally after EVERY turn
+ * of every interactive session, not just on the rare occasions `pruneIndex` actually prunes
+ * something.
+ */
+export function updateSessionSummary(home: string, id: string, summary: string): void {
+  if (!claimIndexLock(home)) return;
+  try {
+    const all = listSessions(home, 1_000_000); // newest-first
+    const idx = all.findIndex((r) => r.id === id);
+    if (idx === -1) return; // no index record for this session yet — nothing to refresh
+    if (all[idx]?.lastSummary === summary) return; // unchanged — nothing to rewrite for
+    all[idx] = { ...(all[idx] as SessionRecord), lastSummary: summary };
+    atomicWriteFile(
+      indexPath(home),
+      `${[...all]
+        .reverse() // back to append (oldest-first) order
+        .map((r) => JSON.stringify(r))
+        .join("\n")}\n`,
+    );
+  } catch {
+    /* read-only home — the picker keeps showing the last summary it had (or the descriptor) */
+  } finally {
+    releaseIndexLock(home);
+  }
 }
 
 /** All recorded sessions, NEWEST FIRST. Unreadable/garbage lines are skipped. */
@@ -636,7 +749,7 @@ function pruneIndex(home: string, pruned: ReadonlySet<string>, opts: RotateOptio
     const all = listSessions(home, 1_000_000);
     const kept = all.filter((r) => !pruned.has(r.id)).slice(0, max);
     if (kept.length === all.length) return; // nothing to do — do not rewrite for nothing
-    const write = opts.writeFn ?? ((p: string, body: string) => writeFileSync(p, body));
+    const write = opts.writeFn ?? atomicWriteFile;
     write(
       indexPath(home),
       kept.length
@@ -735,29 +848,60 @@ export function deleteSession(home: string, id: string): boolean {
       /* no such artifact (a metadata-only session) — still prune the index below */
     }
   }
+  /**
+   * The index rewrite is the THIRD read-modify-write of this file, and it took neither of the
+   * protections the other two take.
+   *
+   * `claimIndexLock`'s own doc names "`updateSessionSummary` and `pruneIndex` — the two
+   * operations that read-modify-write the whole file", which stopped being true when this one
+   * was added. And it used a plain `writeFileSync`, which TRUNCATES before it writes: an
+   * interactive session in another terminal appending a record in that window loses it, and a
+   * crash mid-write leaves a truncated index — every session before the cut simply gone from
+   * `/recall`.
+   *
+   * `atomicWriteFile` (tmp + rename) closes the truncation window unconditionally. The lock is
+   * taken when it can be — a delete is explicit user intent, so if another process genuinely
+   * holds the lock we still prune rather than silently leaving the entry the user asked to
+   * remove; that is strictly better than the unlocked, non-atomic write this replaces.
+   */
+  const locked = claimIndexLock(home);
   try {
     // rewrite index.jsonl WITHOUT the record (oldest-first append order restored).
     const kept = listSessions(home, 100000)
       .filter((r) => r.id !== clean)
       .reverse();
-    writeFileSync(
+    atomicWriteFile(
       indexPath(home),
       kept.length ? `${kept.map((r) => JSON.stringify(r)).join("\n")}\n` : "",
     );
     removed = true;
   } catch {
     /* read-only home — nothing to prune */
+  } finally {
+    if (locked) releaseIndexLock(home);
   }
   return removed;
 }
 
-/** Render the picker list: "  N) <id>  <ts>  — <descriptor>". Pure (caller colors it). */
+/**
+ * Render the `/restore` (`/recall`) picker: a numbered two-column list — the FULL session id on
+ * the left (so it reads the way Prometheus mints it, five dash-joined hex groups), the freshest
+ * one-line summary of what that session actually did on the right (falling back to the opening
+ * prompt's `descriptor` for a session with no turns recorded yet), with the timestamp trailing.
+ * Column-aligned to the widest id in THIS list. Pure (caller colors it).
+ */
 export function formatPicker(records: readonly SessionRecord[]): string {
   if (records.length === 0) return "No past sessions recorded yet.";
-  const lines = ["Recall a session:"];
+  const idW = Math.max(...records.map((r) => r.id.length));
+  const lines = ["Restore a session:"];
   records.forEach((r, i) => {
     const when = r.ts.replace("T", " ").slice(0, 16);
-    lines.push(`  ${String(i + 1).padStart(2)}) ${r.id.slice(0, 8)}  ${when}  — ${r.descriptor}`);
+    // Whitespace-collapsed defensively, not just trusted from the writer: an old record (written
+    // before turn-summary.ts sanitized MCP tool names), or a hand-edited index.jsonl, could still
+    // carry an embedded newline — one would otherwise split this numbered entry across two
+    // physical lines and shift every entry below it out of alignment with its own number.
+    const summary = (r.lastSummary ?? r.descriptor).replace(/\s+/g, " ").trim();
+    lines.push(`  ${String(i + 1).padStart(2)}) ${r.id.padEnd(idW)}  ${summary}  (${when})`);
   });
   lines.push("Pick a number (or Enter to cancel).");
   return lines.join("\n");

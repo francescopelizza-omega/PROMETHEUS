@@ -180,3 +180,31 @@ for (const p of ALLOWED) {
     assert.equal(isSecretPath(p), false, `${p} was refused but is not a credential file`);
   });
 }
+
+test("a credential DIRECTORY is refused as an operand, not only the files inside it", () => {
+  // regression: the dot-directory patterns required a trailing slash, so only paths INSIDE
+  // matched. `cp -r ~/.docker dk` was permitted and `read_file dk/config.json` then returned the
+  // registry credential verbatim — measured end to end against the compiled runner. Both slash
+  // forms were allowed, so the trailing slash was never the deciding factor: the directory
+  // simply never matched.
+  for (const dir of [
+    "/home/u/.ssh",
+    "/home/u/.aws",
+    "/home/u/.gnupg",
+    "/home/u/.docker",
+    "/home/u/.kube",
+  ]) {
+    assert.ok(isSecretPath(dir), `${dir} (bare directory) must be refused`);
+    assert.ok(isSecretPath(`${dir}/`), `${dir}/ must be refused`);
+  }
+  // contents still refused
+  assert.ok(isSecretPath("/home/u/.aws/credentials"));
+  assert.ok(isSecretPath("/home/u/.docker/config.json"));
+  // the .ssh carve-outs survive the broadening
+  assert.equal(isSecretPath("/home/u/.ssh/known_hosts"), false);
+  assert.equal(isSecretPath("/home/u/.ssh/config"), false);
+  // and an ordinary source directory is NOT a credential: this repo has core/src/secrets, and
+  // treating a DIRECTORY by the file rule made `grep -r` unusable across the whole tree.
+  assert.equal(isSecretPath("/repo/src/dockerfiles"), false);
+  assert.equal(isSecretPath("/repo/src/environments"), false);
+});

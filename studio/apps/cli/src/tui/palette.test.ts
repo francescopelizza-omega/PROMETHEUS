@@ -7,9 +7,11 @@ import { test } from "node:test";
 
 import {
   detectColorCaps,
+  durationTier,
   gradientStops,
   hexToRgb,
   paint,
+  paintDuration,
   painter,
   rgbTo256,
   selectionBar,
@@ -86,4 +88,83 @@ test("rgbTo256: a pure-255 non-gray channel stays in the 16..231 color cube (no 
   const idx = rgbTo256({ r: 255, g: 100, b: 100 });
   assert.ok(idx >= 16 && idx <= 231, `expected a cube index 16..231, got ${idx}`);
   assert.ok(rgbTo256({ r: 255, g: 0, b: 255 }) <= 231);
+});
+
+/* ── the elapsed-turn clock ────────────────────────────────────────────────── */
+
+const MIN = 60_000;
+const HR = 3_600_000;
+
+test("durationTier: every band is [lower, upper) — the boundary belongs to the SLOWER band", () => {
+  assert.equal(durationTier(0), "lt30m");
+  assert.equal(durationTier(29 * MIN + 59_999), "lt30m");
+  assert.equal(durationTier(30 * MIN), "lt1h"); // exactly 30m has left the fast band
+  assert.equal(durationTier(59 * MIN), "lt1h");
+  assert.equal(durationTier(1 * HR), "lt2h");
+  assert.equal(durationTier(2 * HR - 1), "lt2h");
+  assert.equal(durationTier(2 * HR), "lt3h");
+  assert.equal(durationTier(3 * HR - 1), "lt3h");
+  assert.equal(durationTier(3 * HR), "lt5h");
+  assert.equal(durationTier(5 * HR - 1), "lt5h");
+  assert.equal(durationTier(5 * HR), "lt7h");
+  assert.equal(durationTier(7 * HR - 1), "lt7h");
+  assert.equal(durationTier(7 * HR), "gte7h");
+  assert.equal(durationTier(400 * HR), "gte7h");
+});
+
+test("durationTier: a skewed/NaN span floors to the fast band instead of throwing", () => {
+  assert.equal(durationTier(-5), "lt30m");
+  assert.equal(durationTier(Number.NaN), "lt30m");
+  assert.equal(durationTier(Number.POSITIVE_INFINITY), "lt30m");
+});
+
+test("paintDuration: ALWAYS bold, and the hue walks blue→green→yellow→orange→red→rubine→purple", () => {
+  const at = (ms: number): string => paintDuration("⏱ x", ms, "truecolor");
+  // every band is bold — the SGR opens with the bold parameter, not just a colour
+  for (const ms of [0, 45 * MIN, 90 * MIN, 150 * MIN, 4 * HR, 6 * HR, 8 * HR]) {
+    assert.match(at(ms), /^\x1b\[1;38;2;/, `not bold at ${ms}ms`);
+  }
+  // under 30m is the operator accent (#16b3f5), NOT the old neutral.500 grey (#727d8e)
+  assert.ok(at(5_000).startsWith("\x1b[1;38;2;22;179;245m"));
+  assert.ok(!at(5_000).includes("114;125;142"));
+  // green.400 / amber.300 / red.400 / violet.400 come straight off the token ramps
+  assert.ok(at(45 * MIN).startsWith("\x1b[1;38;2;52;196;106m"));
+  assert.ok(at(90 * MIN).startsWith("\x1b[1;38;2;251;191;74m"));
+  assert.ok(at(4 * HR).startsWith("\x1b[1;38;2;242;67;67m"));
+  assert.ok(at(8 * HR).startsWith("\x1b[1;38;2;178;102;255m"));
+  // all seven bands are visually DISTINCT at truecolor (an orange that equals the yellow, or a
+  // rubine that equals the red, would make the whole scheme unreadable)
+  const hues = [0, 45 * MIN, 90 * MIN, 150 * MIN, 4 * HR, 6 * HR, 8 * HR].map(at);
+  assert.equal(new Set(hues).size, 7);
+});
+
+test("paintDuration: orange sits between yellow and red; rubine is DARKER than the red above it", () => {
+  const rgb = (ms: number): number[] => {
+    const m = /38;2;(\d+);(\d+);(\d+)m/.exec(paintDuration("x", ms, "truecolor"));
+    assert.ok(m, "no truecolor triple");
+    return [Number(m[1]), Number(m[2]), Number(m[3])];
+  };
+  const [, yG] = rgb(90 * MIN) as [number, number, number];
+  const [, oG] = rgb(150 * MIN) as [number, number, number];
+  const [, rG] = rgb(4 * HR) as [number, number, number];
+  assert.ok(oG < yG && oG > rG, `orange green-channel ${oG} not between ${yG} and ${rG}`);
+  const lum = (c: number[]): number =>
+    0.299 * (c[0] ?? 0) + 0.587 * (c[1] ?? 0) + 0.114 * (c[2] ?? 0);
+  assert.ok(lum(rgb(6 * HR)) < lum(rgb(4 * HR)), "rubine is not darker than the bright red");
+});
+
+test("paintDuration: ansi16 keeps the sweep, caps='none' emits ZERO escape bytes", () => {
+  assert.equal(paintDuration("⏱ 8h", 8 * HR, "none"), "⏱ 8h");
+  assert.ok(!paintDuration("⏱ 8h", 8 * HR, "none").includes("\x1b"));
+  const a16 = (ms: number): string => paintDuration("x", ms, "ansi16");
+  for (const ms of [0, 45 * MIN, 8 * HR]) assert.match(a16(ms), /^\x1b\[1;\d+m/);
+  // cyan → green → magenta survives the downgrade even where adjacent warm bands collapse
+  assert.notEqual(a16(0), a16(45 * MIN));
+  assert.notEqual(a16(45 * MIN), a16(8 * HR));
+  assert.notEqual(a16(0), a16(8 * HR));
+});
+
+test("paintDuration: ansi256 downsamples rather than emitting a truecolor triple", () => {
+  const out = paintDuration("x", 6 * HR, "ansi256");
+  assert.match(out, /^\x1b\[1;38;5;\d+m/);
 });

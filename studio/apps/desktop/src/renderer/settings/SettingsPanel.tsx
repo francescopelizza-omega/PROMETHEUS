@@ -29,11 +29,16 @@ import {
 import { type CSSProperties, type ReactElement, useMemo, useState } from "react";
 
 import { AppearancePage } from "./AppearancePage.js";
+import { BudgetPage } from "./BudgetPage.js";
+import { CodebaseOverviewPage } from "./CodebaseOverviewPage.js";
 import { FontsPage } from "./FontsPage.js";
 import { FormatPage } from "./FormatPage.js";
 import { HooksPage } from "./HooksPage.js";
 import { KeymapPage } from "./KeymapPage.js";
 import type { KeyConflictView } from "./KeymapPage.js";
+import { ModelHealthPage } from "./ModelHealthPage.js";
+import { PersonasPage } from "./PersonasPage.js";
+import { ScheduledTasksPage } from "./ScheduledTasksPage.js";
 import { SettingsTreePage } from "./SettingsTreePage.js";
 import { TemplatesPage } from "./TemplatesPage.js";
 import {
@@ -46,7 +51,19 @@ import {
 } from "./keymap-overrides.js";
 import type { KeyBindingView } from "./settings-view.js";
 
-type Page = "appearance" | "fonts" | "keymap" | "format" | "templates" | "hooks" | "all";
+type Page =
+  | "appearance"
+  | "fonts"
+  | "keymap"
+  | "format"
+  | "templates"
+  | "hooks"
+  | "model-health"
+  | "scheduled-tasks"
+  | "personas"
+  | "budget"
+  | "codebase-overview"
+  | "all";
 
 const NAV: { id: Page; label: string }[] = [
   { id: "appearance", label: "Appearance" },
@@ -55,6 +72,11 @@ const NAV: { id: Page; label: string }[] = [
   { id: "format", label: "Formatting" },
   { id: "templates", label: "Live Templates" },
   { id: "hooks", label: "Lifecycle Hooks" },
+  { id: "model-health", label: "Model Health" },
+  { id: "scheduled-tasks", label: "Scheduled Tasks" },
+  { id: "personas", label: "Personas" },
+  { id: "budget", label: "Budget & Spend" },
+  { id: "codebase-overview", label: "Meet Your Codebase" },
   { id: "all", label: "All Settings" },
 ];
 
@@ -261,6 +283,11 @@ export function SettingsPanel({ workspaceRoot }: SettingsPanelProps = {}): React
         {page === "format" && <FormatPage />}
         {page === "templates" && <TemplatesPage />}
         {page === "hooks" && <HooksPage {...(workspaceRoot ? { workspaceRoot } : {})} />}
+        {page === "model-health" && <ModelHealthPage />}
+        {page === "scheduled-tasks" && <ScheduledTasksPage />}
+        {page === "personas" && <PersonasPage />}
+        {page === "budget" && <BudgetPage />}
+        {page === "codebase-overview" && <CodebaseOverviewPage />}
         {page === "keymap" && (
           <KeymapPage
             presets={KEYMAP_PRESETS}

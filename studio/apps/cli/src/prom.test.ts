@@ -3,7 +3,7 @@
  * profiles, and the doctor --bridge probe.
  */
 import assert from "node:assert/strict";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
@@ -19,6 +19,7 @@ import {
 } from "./commands/generic.js";
 import { PROM_VERSION, renderCommandHelp, runVersion } from "./commands/help.js";
 import { specIdFor } from "./commands/route.js";
+import { usageError } from "./commands/sidecar-cmd.js";
 import { makeContext } from "./context.js";
 import {
   type HandshakeCache,
@@ -38,7 +39,12 @@ import {
   table,
 } from "./render.js";
 import { RECOGNIZED_VERBS, ROUTED_VERBS } from "./route-table.js";
-import { STDIN_PROMPT_CAP_BYTES, readStdinPrompt, shouldReadStdinPrompt } from "./stdin.js";
+import {
+  STDIN_PROMPT_CAP_BYTES,
+  readStdinPrompt,
+  shouldReadStdinPrompt,
+  stdinPromptSink,
+} from "./stdin.js";
 import { globalArgv, toEngineArgv } from "./toEngineArgv.js";
 import { renderVerdictCard, tierLabel, verdictCardFromEnvelope } from "./verdict-view.js";
 
@@ -223,6 +229,32 @@ test("parseArgs: boolean flags never swallow the next positional (CLI-001)", () 
   const shortYes = parseArgs(["install", "-y", "foo"]);
   assert.equal(shortYes.yes, true);
   assert.deepEqual(shortYes.positionals, ["foo"]);
+  // gate --fresh/--sign, env create/remove --conda/--keep-pin, model serve --autostart:
+  // all presence-only booleans consumed via flagSet() — none were in BOOLEAN_FLAGS, so each
+  // ate its command's REQUIRED positional (`gate --fresh .` reported "missing target").
+  const gateFresh = parseArgs(["gate", "--fresh", "."]);
+  assert.equal(gateFresh.flags.fresh, true);
+  assert.deepEqual(gateFresh.positionals, ["."]);
+  const gateSign = parseArgs(["gate", "--sign", "."]);
+  assert.equal(gateSign.flags.sign, true);
+  assert.deepEqual(gateSign.positionals, ["."]);
+  const envConda = parseArgs(["env", "create", "--conda", "myenv"]);
+  assert.equal(envConda.flags.conda, true);
+  assert.deepEqual(envConda.positionals, ["myenv"]);
+  const envKeepPin = parseArgs(["env", "remove", "--keep-pin", "myenv", "mypkg"]);
+  assert.equal(envKeepPin.flags["keep-pin"], true);
+  assert.deepEqual(envKeepPin.positionals, ["myenv", "mypkg"]);
+  const modelAutostart = parseArgs(["model", "serve", "--autostart", "myid"]);
+  assert.equal(modelAutostart.flags.autostart, true);
+  assert.deepEqual(modelAutostart.positionals, ["myid"]);
+  // secure trust log --blocks/--forced/--last24h, secure db update --all: same class, found by
+  // a full mechanical cross-reference of every flagSet() call against BOOLEAN_FLAGS.
+  const secureBlocks = parseArgs(["secure", "trust", "--blocks", "log"]);
+  assert.equal(secureBlocks.flags.blocks, true);
+  assert.deepEqual(secureBlocks.positionals, ["log"]);
+  const secureAll = parseArgs(["secure", "db", "--all", "update"]);
+  assert.equal(secureAll.flags.all, true);
+  assert.deepEqual(secureAll.positionals, ["update"]);
 });
 
 test("toEngineArgv: globals come BEFORE the subcommand (§1 contract)", () => {
@@ -275,6 +307,7 @@ test("single-token registry verbs are REACHABLE (in ONE_WORD — not swallowed t
     "where",
     "purge",
     "vault",
+    "auto",
   ]) {
     const p = parseArgs([v, "x"]);
     assert.deepEqual(p.command, [v], `${v} should parse as a single-token command`);
@@ -284,7 +317,7 @@ test("single-token registry verbs are REACHABLE (in ONE_WORD — not swallowed t
   }
 });
 
-test("isManagerRead: apps/worldsim/models/localai are whole-family human-text; pentest splits; others are JSON", () => {
+test("isManagerRead: apps/worldsim/models/localai/pentest are whole-family human-text; others are JSON", () => {
   // whole-family human-text → rawEngine (reads AND mutations) — no bad_json over the table
   assert.equal(isManagerRead(["apps", "list"]), true);
   assert.equal(isManagerRead(["apps", "install", "yt-dlp"]), true);
@@ -292,10 +325,19 @@ test("isManagerRead: apps/worldsim/models/localai are whole-family human-text; p
   assert.equal(isManagerRead(["models", "config"]), true);
   assert.equal(isManagerRead(["localai", "audit"]), true);
   assert.equal(isManagerRead(["apps"]), true); // bare family → list → text
-  // pentest: reads are text, sandbox mutations keep the JSON path
+  // Regression: pentest used to split — only its READS (list/scope/status/runtimes/logs) went
+  // through rawEngine; every mutating action (build/install/shell/run/destroy) stayed on the
+  // JSON-envelope path even though the engine's cmd_pentest and every pentest/pentagent helper
+  // never call emit_json for ANY action — so a successful destroy, a clean ROE-gate refusal,
+  // and a genuine crash were all indistinguishable, all rendered as the identical
+  // "prometheus.py produced no JSON on stdout (crashed before emitting)" error. pentest's WHOLE
+  // surface is human-text now, matching apps/worldsim/models/localai.
   assert.equal(isManagerRead(["pentest", "list"]), true);
-  assert.equal(isManagerRead(["pentest", "run"]), false);
-  assert.equal(isManagerRead(["pentest", "shell"]), false);
+  assert.equal(isManagerRead(["pentest", "run"]), true);
+  assert.equal(isManagerRead(["pentest", "shell"]), true);
+  assert.equal(isManagerRead(["pentest", "build"]), true);
+  assert.equal(isManagerRead(["pentest", "destroy"]), true);
+  assert.equal(isManagerRead(["pentest"]), true); // bare family → list → text
   // JSON-envelope families are NOT human-text
   assert.equal(isManagerRead(["plugin", "list"]), false);
   assert.equal(isManagerRead(["vault", "status"]), false);
@@ -750,4 +792,132 @@ test("CLI-097: color/unicode default predicates honor NO_COLOR presence + FORCE_
     set("FORCE_COLOR", save.FORCE_COLOR);
     set("TERM", save.TERM);
   }
+});
+
+test("a --args value may start with a dash — it is someone else's command line", () => {
+  /**
+   * The generic rule refuses to treat the next token as a value when it looks like a flag, which
+   * is right for `--json --quiet` and wrong for a flag whose whole job is to carry another
+   * program's arguments. `prometheus mcp add fs --cmd npx --args "-y @modelcontextprotocol/
+   * server-filesystem /tmp"` silently stored `args: []`, so the MCP server was registered with
+   * NO arguments — unusable, and nothing said so. The `--args=…` form always worked, which is
+   * what made it hard to see.
+   */
+  const spaced = parseArgs([
+    "mcp",
+    "add",
+    "fs",
+    "--cmd",
+    "npx",
+    "--args",
+    "-y @modelcontextprotocol/server-filesystem /tmp",
+  ]);
+  assert.equal(spaced.flags.args, "-y @modelcontextprotocol/server-filesystem /tmp");
+  assert.equal(spaced.flags.cmd, "npx");
+  assert.deepEqual(spaced.positionals, ["fs"]);
+
+  // the equals form keeps working, and both agree
+  const equals = parseArgs([
+    "mcp",
+    "add",
+    "fs",
+    "--cmd",
+    "npx",
+    "--args=-y @modelcontextprotocol/server-filesystem /tmp",
+  ]);
+  assert.equal(equals.flags.args, spaced.flags.args);
+
+  // …and an ordinary flag still refuses to eat the next flag as its value
+  const ordinary = parseArgs(["scan", "--label", "--quiet"]);
+  assert.equal(ordinary.flags.label, true, "an ordinary flag swallowed the next flag");
+  assert.equal(ordinary.quiet, true);
+
+  // a trailing `--args` with nothing after it is still just a boolean, not a crash
+  assert.equal(parseArgs(["mcp", "add", "fs", "--args"]).flags.args, true);
+});
+
+test("a TYPED but unrecognized plugin/skill verb reaches the engine instead of defaulting to list", () => {
+  // regression: `plugin` and `skill` are TWO_WORD commands, so an unrecognized verb leaves
+  // `command` as `["plugin"]` and parks the typo in `positionals`. Both branches defaulted to
+  // `list` on that, so `prometheus --json plugin uninstal skills` printed the catalog with
+  // `ok:true` and exit 0 — a mistyped uninstall reporting success. Measured against the built
+  // binary before the fix; after it the engine refuses with "invalid choice" and exit 2.
+  assert.deepEqual(engineSubcommand(["plugin"], ["uninstal", "skills"]), ["uninstal", "skills"]);
+  assert.deepEqual(engineSubcommand(["plugin"], ["remove", "skills"]), ["remove", "skills"]);
+  assert.deepEqual(engineSubcommand(["skill"], ["bogusverb"]), ["skills", "bogusverb"]);
+  // a TRULY bare command still defaults to list — "bare" means no second word at all.
+  assert.deepEqual(engineSubcommand(["plugin"], []), ["list"]);
+  assert.deepEqual(engineSubcommand(["skill"], []), ["skills", "list"]);
+  // and a recognized verb is unchanged.
+  assert.deepEqual(engineSubcommand(["plugin", "install"], ["foo"]), ["install", "foo"]);
+  assert.deepEqual(engineSubcommand(["skill", "enable"], ["x"]), ["skills", "enable", "x"]);
+});
+
+test("a piped prompt for a BARE -p goes to the FLAG sink — the documented `cat task.md | prometheus -p`", () => {
+  // regression: `--help` line 74 advertises "cat task.md | prometheus -p  stdin is the prompt when
+  // none is given", but the gate only knew about `chat`. A bare `-p` parses as boolean `true`,
+  // `oneShotPrompt` needs a non-empty STRING, so the run printed the help screen and exited 0
+  // with the piped task discarded. Measured against the built binary.
+  for (const flag of ["p", "print", "prompt"]) {
+    assert.equal(
+      stdinPromptSink([], [], { [flag]: true }, undefined),
+      "flag",
+      `a bare --${flag} must take its prompt from stdin`,
+    );
+  }
+  // chat keeps its own sink — a positional, which is where `chat` reads its message from.
+  assert.equal(stdinPromptSink(["chat"], [], {}, undefined), "positional");
+  // an EXPLICIT prompt wins: stdin is the fallback source, never an override.
+  assert.equal(stdinPromptSink([], [], { p: "already a prompt" }, undefined), null);
+  // a real TTY means a human is typing — the readline owns the stream.
+  assert.equal(stdinPromptSink([], [], { p: true }, true), null);
+  // --cli is the terminal hand-off path, not an agent turn.
+  assert.equal(stdinPromptSink([], [], { p: true, cli: "claude" }, undefined), null);
+  // a positional alongside a bare -p is already a prompt source.
+  assert.equal(stdinPromptSink([], ["something"], { p: true }, undefined), null);
+  // no prompt flag at all and not chat → stdin is not the prompt.
+  assert.equal(stdinPromptSink(["scan"], [], {}, undefined), null);
+  // the old predicate stays true wherever a sink exists (its callers are unchanged).
+  assert.equal(shouldReadStdinPrompt([], [], { p: true }, undefined), true);
+  assert.equal(shouldReadStdinPrompt(["scan"], [], {}, undefined), false);
+});
+
+test("CLI-084: a usage error is class 1, so `$? -eq 2` still means a security block", () => {
+  // regression: `usageError` hard-coded exit 2 — the code `context.ts`'s table reserves for a
+  // fail-closed SECURITY/ENGINE block and calls "load-bearing for CI". So a plain typo was
+  // indistinguishable from a nemesis BLOCK, while the SAME mistake caught one layer earlier by
+  // core's command-registry validation came back as 1 through `outcomeFromError`. Measured on
+  // the built binary: `--json info` exited 2 and `--json where` exited 1 for the identical
+  // class of user error. The table's own words settled which one moved: "a command hand-rolling
+  // its own error→code mapping is a divergence to fix".
+  const out = usageError("model info", "<id>");
+  assert.equal(out.exitCode, 1);
+  assert.equal((out.json as { ok: boolean; error: string }).ok, false);
+  assert.equal((out.json as { error: string }).error, "missing-argument");
+});
+
+test("CLI-084 drift guard: no bad-args refusal in the tree may exit 2", () => {
+  /**
+   * Source-level, because this is a contract that splits SILENTLY. Round 18 moved `usageError`
+   * from 2 to 1; round 19 found the same divergence still live in twelve `unknown-verb` branches,
+   * two bare `{ok:false}` returns, and the top-level `unknown-command` — so a typo still set
+   * `$? -eq 2`, the code `context.ts` reserves for a fail-closed security block and calls
+   * "load-bearing for CI". A per-site fix without this guard just waits for the next branch.
+   *
+   * Only the BAD-ARGS family is checked. A nemesis BLOCK, an option-shaped-id refusal and an
+   * engine transport failure are all correctly 2 and must stay 2.
+   */
+  const dir = join(dirname(fileURLToPath(import.meta.url)), "commands");
+  const offenders: string[] = [];
+  for (const file of readdirSync(dir)) {
+    if (!file.endsWith(".ts") || file.endsWith(".test.ts")) continue;
+    const src = readFileSync(join(dir, file), "utf8");
+    // each `error: "<bad-args-kind>"` payload, paired with the exitCode that follows it
+    for (const m of src.matchAll(
+      /error: "(unknown-verb|unknown-command|missing-argument)"[\s\S]{0,300}?exitCode: (\d)/g,
+    )) {
+      if (m[2] !== "1") offenders.push(`${file}: ${m[1]} → exit ${m[2]}`);
+    }
+  }
+  assert.deepEqual(offenders, [], `bad-args refusals must exit 1, not 2:\n${offenders.join("\n")}`);
 });

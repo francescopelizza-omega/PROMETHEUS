@@ -85,3 +85,36 @@ export {
 
 // Result conversion, shared by the CLI session and the desktop main process.
 export { MAX_MCP_RESULT_CHARS, mcpOutcome, renderMcpContent } from "./mcp-tools.js";
+
+// The preamble DISPATCH PIPELINE — the single assembly point every host uses (CLI, Desktop,
+// VS Code, spawn_agent children). See `preamble-dispatch.ts`'s module doc comment.
+export type {
+  PreambleAssembly,
+  PreambleContributor,
+  PreambleCtx,
+  PreambleMergeTarget,
+  PreambleSurface,
+  PreambleUnit,
+  RenderedContribution,
+} from "./preamble-dispatch.js";
+export {
+  INSTRUCTION_BUDGET_MAX,
+  INSTRUCTION_BUDGET_MIN,
+  INSTRUCTION_BUDGET_SHARE,
+  assemblePreamble,
+  instructionBudget,
+} from "./preamble-dispatch.js";
+export {
+  CORE_ROUND_CONTRIBUTORS,
+  CORE_TURN_CONTRIBUTORS,
+  FLIGHT_CHECK_LOCAL_SUFFIX,
+  FLIGHT_CHECK_TEXT,
+  READ_ONLY_TOOL_DISCIPLINE,
+  effortText,
+  effortTextContributor,
+  flightCheckText,
+  preWriteRecheckContributor,
+  toolCatalogContributor,
+  toolDisciplineContributor,
+  toolDisciplineText,
+} from "./contributors/index.js";

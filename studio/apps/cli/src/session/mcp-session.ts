@@ -26,8 +26,8 @@
  *     an error payload as an answer.
  */
 import { agent, mcpHost, type mcpServer } from "@prometheus/core";
-import { createMcpTransportFactory } from "@prometheus/core/mcp-node";
-import { type EngineConfig, type VerdictTier, gate as engineGate } from "@prometheus/engine-bridge";
+import { appendMcpAudit, createMcpTransportFactory } from "@prometheus/core/mcp-node";
+import { type EngineConfig, createMcpGateRunner } from "@prometheus/engine-bridge";
 
 import { prometheusHome } from "../home.js";
 import { CliMcpConfigStore, mcpStorePath } from "../mcp-store.js";
@@ -36,7 +36,8 @@ import { createCliSecretsStore } from "../secrets-backend.js";
 type ToolDef = mcpServer.ToolDef;
 
 /** The keychain service `--auth-secret <ref>` bearer tokens live under (never in the config). */
-const MCP_AUTH_SERVICE = "prometheus-mcp-auth";
+// one canonical service name, shared with the desktop — see core's mcpHost.
+const MCP_AUTH_SERVICE = mcpHost.MCP_AUTH_SERVICE;
 
 /** How long one server gets to hand back its tool list before the session moves on without it. */
 export const CONNECT_TIMEOUT_MS = 15_000;
@@ -62,14 +63,11 @@ export interface McpSession {
 
 /** The real nemesis gate (mirrors `mcp-cmd.ts` — fail-closed to `error`). */
 function createCliMcpGate(config: EngineConfig = {}): mcpHost.NemesisGate {
-  return async (target: string): Promise<mcpHost.HostGateVerdict> => {
-    try {
-      const v = await engineGate(target, {}, config);
-      return { verdict: v.verdict, riskScore: v.risk_score, target, findings: v.findings.length };
-    } catch {
-      return { verdict: "error" as VerdictTier, target, findings: 0 };
-    }
-  };
+  // The runner lives in engine-bridge: this file, its sibling in session/, and the desktop each
+  // had their own copy, and all three fed the target to nemesis's FILE scanner — so `npx` scored
+  // `error`/risk 100, every server was persisted `health:"blocked"`, and no MCP connector could
+  // be added at all. `createMcpGateRunner` judges a launch command as command TEXT instead.
+  return createMcpGateRunner(config) as mcpHost.NemesisGate;
 }
 
 /** Build the manager a chat session drives. Separate from `mcp-cmd`'s so neither owns the other. */
@@ -81,6 +79,7 @@ export function createSessionMcpManager(home: string = prometheusHome()): mcpHos
     transport: createMcpTransportFactory({
       resolveAuth: (ref: string) => secrets.get(MCP_AUTH_SERVICE, ref),
     }),
+    onToolDrift: (info) => appendMcpAudit(home, { event: "tool-drift", ...info }),
   });
 }
 
@@ -191,8 +190,15 @@ export async function openMcpSession(opts: OpenMcpOptions = {}): Promise<McpSess
         });
         return agent.protocol.mcpOutcome(serverId, tool, res);
       } catch (err) {
+        // A THROW here can be a local transport failure (not connected, ENOENT) OR a
+        // server-authored JSON-RPC protocol-level error (`msg.error.message`) — the transports
+        // reject/throw with the server's own error string verbatim, and there is no way to
+        // tell the two apart at this catch site. Routing through mcpOutcome (rather than
+        // hand-building the summary) means a server that returns its injection payload as a
+        // JSON-RPC error instead of `isError:true` content gets the SAME frame + scan as every
+        // other call result, not a silent bypass of both.
         const detail = err instanceof Error ? err.message : String(err);
-        return { ok: false, summary: `${tool} on ${serverId} failed: ${detail}` };
+        return agent.protocol.mcpOutcome(serverId, tool, { content: detail, isError: true });
       }
     },
     banner() {

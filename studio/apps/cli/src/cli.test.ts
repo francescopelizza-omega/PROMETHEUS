@@ -10,8 +10,8 @@
  * native type-stripping (node --test src/cli.test.ts). No test framework.
  */
 import assert from "node:assert/strict";
-import { existsSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { dirname, extname, join, resolve } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
@@ -43,6 +43,37 @@ test("parseArgs: gate with positional target", () => {
   const p = parseArgs(["gate", "/tmp/foo"]);
   assert.deepEqual(p.command, ["gate"]);
   assert.deepEqual(p.positionals, ["/tmp/foo"]);
+});
+
+/**
+ * Regression: "nemesis" was missing from ONE_WORD, so it fell into the "unknown command" branch
+ * (help:true) — and since "nemesis" IS a real registered CommandSpec id, dispatch() rendered its
+ * help synopsis (exit 0, json {ok:true}) instead of ever routing to the real command, which calls
+ * client.gate(). The "FREE nemesis threat scan" never actually scanned anything, for any input.
+ */
+test("parseArgs: nemesis is a recognized ONE_WORD command, not an 'unknown command' help fallthrough", () => {
+  const p = parseArgs(["nemesis", "owner/repo"]);
+  assert.equal(p.help, false);
+  assert.deepEqual(p.command, ["nemesis"]);
+  assert.deepEqual(p.positionals, ["owner/repo"]);
+});
+
+/**
+ * Regression: a mistyped second word for a TWO_WORD command (e.g. "secure trussed") used to be
+ * silently absorbed into positionals with no trace that it was an attempted (invalid) subcommand
+ * — indistinguishable from the user having typed no subcommand at all. `unmatchedSub` preserves
+ * that word so a command's own switch can report it as unknown instead of silently defaulting.
+ */
+test("parseArgs: an invalid TWO_WORD subcommand is preserved as unmatchedSub, not silently dropped", () => {
+  const p = parseArgs(["secure", "trussed"]);
+  assert.deepEqual(p.command, ["secure"]);
+  assert.equal(p.unmatchedSub, "trussed");
+  assert.deepEqual(p.positionals, ["trussed"]); // unchanged — existing positional semantics preserved
+
+  // a genuinely bare command (no second word at all) leaves unmatchedSub unset.
+  assert.equal(parseArgs(["secure"]).unmatchedSub, undefined);
+  // a VALID second word also leaves it unset.
+  assert.equal(parseArgs(["secure", "trust", "list"]).unmatchedSub, undefined);
 });
 
 test("parseArgs: --json is a global flag anywhere", () => {
@@ -173,3 +204,88 @@ test(
     assert.ok(Array.isArray(env.environments));
   },
 );
+
+test("a MISTYPED command is reported as a command, not as an unknown help topic", async () => {
+  /**
+   * `parse.ts` marks an unknown verb with `help = true` so callers print usage — which left the
+   * dispatcher unable to tell `prometheus keys` from `prometheus keys --help`. It looked the typo
+   * up as a HELP TOPIC, so a user who mistyped a command was told about a help system they never
+   * invoked, and offered the nearest topic instead of the nearest command.
+   */
+  const bad = await dispatch(parseArgs(["nosuchverb"]));
+  assert.equal(bad.exitCode, 1);
+  assert.match(bad.text ?? "", /unknown command: nosuchverb/);
+  assert.equal((bad.json as { error?: string }).error, "unknown-command");
+
+  // an explicit help request for a missing TOPIC keeps its own, correct wording
+  const topic = await dispatch(parseArgs(["help", "nosuchtopic"]));
+  assert.match(topic.text ?? "", /unknown help topic: nosuchtopic/);
+
+  // and a real command is unaffected
+  const good = await dispatch(parseArgs(["keymap"]));
+  assert.equal(good.exitCode, 0);
+});
+
+test("no source file smuggles a RAW control byte where an escape belongs", () => {
+  /**
+   * A regex class written with literal bytes — `/[<NUL>-<US><DEL>]/` instead of
+   * `/[\x00-\x1f\x7f]/` — behaves identically at runtime, so nothing failed. What it breaks is
+   * every tool that reads the file as text: a NUL makes grep and ripgrep classify the source as
+   * BINARY and skip it silently. Twenty-three files were affected, among them the entire
+   * renderer-arg validation layer (validate.ts, arg-guards.ts, env-validate.ts, ide-validate.ts,
+   * metadata-validate.ts), the secrets keychain, git-host, sql-host and pr-gateway.
+   *
+   * The failure mode is a search that returns nothing and looks like an answer: grepping
+   * arg-guards.ts for its own exports printed zero matches, which reads as "this module exports
+   * nothing" rather than "this file was skipped". Code review sees the same thing — git renders
+   * a NUL-bearing file as binary — so the least-trusted-input validators were the least
+   * reviewable files in the repo.
+   *
+   * Tab, newline and CR are ordinary text and stay exempt.
+   */
+  const offenders: string[] = [];
+  // build output, vendored downloads and the python runtime staging tree are not our source.
+  const skipDirs = new Set([
+    "node_modules",
+    "dist",
+    "out",
+    ".git",
+    ".turbo",
+    ".vscode-test",
+    "coverage",
+    "staging",
+  ]);
+  const exts = new Set([".ts", ".tsx", ".js", ".mjs", ".py"]);
+  const walk = (dir: string): void => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      if (entry.isDirectory()) {
+        if (!skipDirs.has(entry.name)) walk(join(dir, entry.name));
+        continue;
+      }
+      const p = join(dir, entry.name);
+      if (!exts.has(extname(p))) continue;
+      const buf = readFileSync(p);
+      for (const byte of buf) {
+        if (
+          byte <= 0x08 ||
+          byte === 0x0b ||
+          byte === 0x0c ||
+          (byte >= 0x0e && byte <= 0x1f) ||
+          byte === 0x7f
+        ) {
+          offenders.push(
+            `${p.slice(REPO_ROOT.length + 1)} (byte 0x${byte.toString(16).padStart(2, "0")})`,
+          );
+          break;
+        }
+      }
+    }
+  };
+  walk(join(REPO_ROOT, "studio"));
+
+  assert.deepEqual(
+    offenders,
+    [],
+    `write these as \\xNN escapes so the file stays searchable:\n  ${offenders.join("\n  ")}`,
+  );
+});

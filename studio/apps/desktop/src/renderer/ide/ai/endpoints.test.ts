@@ -9,7 +9,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { localityOf, toEndpoints } from "./endpoints.js";
+import { contextWindowOf, localityOf, toEndpoints } from "./endpoints.js";
 
 test("localityOf: loopback / unix / .local are local, the rest is cloud", () => {
   assert.equal(localityOf("http://localhost:11434"), "local");
@@ -112,4 +112,59 @@ test("formatContextWindow: K/M compaction", () => {
   assert.equal(formatContextWindow(1_000_000), "1M");
   assert.equal(formatContextWindow(0), undefined);
   assert.equal(formatContextWindow(undefined), undefined);
+});
+
+/* ── measured beats catalogued ──────────────────────────────────────────────*/
+
+const WIN_CATALOG = [{ id: "qwen3.6", family: "qwen3", contextLen: 32768, tags: ["tool-use"] }];
+
+test("contextWindowOf: a MEASURED window on the endpoint wins over the catalogue figure", () => {
+  // Call sites spread this patch OVER the endpoint (`{...active, ...contextWindowOf(...)}`), so
+  // without the precedence the catalogue silently overwrites what the runner actually said.
+  // The catalogue is a published number for a model FAMILY; the endpoint's is what this
+  // quantisation is really serving, measured through `ai:probeEndpoint`.
+  const measured = contextWindowOf(
+    {
+      id: "ollama · qwen3.6:latest",
+      baseUrl: "http://127.0.0.1:11434/v1",
+      locality: "local",
+      model: "qwen3.6:latest",
+      contextWindow: 262144,
+    },
+    WIN_CATALOG,
+  );
+  assert.deepEqual(measured, { contextWindow: 262144 });
+});
+
+test("contextWindowOf: with nothing measured it still falls back to the catalogue", () => {
+  const fallback = contextWindowOf(
+    {
+      id: "ollama · qwen3.6:latest",
+      baseUrl: "http://127.0.0.1:11434/v1",
+      locality: "local",
+      model: "qwen3.6:latest",
+    },
+    WIN_CATALOG,
+  );
+  assert.deepEqual(fallback, { contextWindow: 32768 });
+});
+
+test("contextWindowOf: an implausible measured value does not shadow the catalogue", () => {
+  const zero = contextWindowOf(
+    {
+      id: "x",
+      baseUrl: "http://127.0.0.1:11434/v1",
+      locality: "local",
+      model: "qwen3.6:latest",
+      contextWindow: 0,
+    },
+    WIN_CATALOG,
+  );
+  assert.deepEqual(zero, { contextWindow: 32768 });
+});
+
+test("contextWindowOf: unknown everywhere is an EMPTY patch, never an explicit undefined", () => {
+  // An explicit `contextWindow: undefined` would override a value already on the endpoint when
+  // spread — "I don't know" must not be able to erase "I do".
+  assert.deepEqual(contextWindowOf({ id: "z", baseUrl: "https://api", locality: "cloud" }), {});
 });

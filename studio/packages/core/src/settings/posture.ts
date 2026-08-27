@@ -34,6 +34,8 @@ export interface SecurityPosture {
   minGateMode: "off" | "warn" | "enforce";
   /** false ⇒ `--force` and its kin are refused. (They already are; this keeps the two agreeing.) */
   allowForce: boolean;
+  /** false ⇒ the authorisation ladder may auto-approve NOTHING; every action is asked. */
+  autoApprove: boolean;
 }
 
 /** The gate postures ordered by how much they protect. Higher = stricter. */
@@ -70,6 +72,17 @@ export function securityPosture(settings: Settings | undefined): SecurityPosture
     // caller's own gate mode stands, which is why the floor is `off` rather than `warn`.
     minGateMode: s.gateStrict === true ? "enforce" : "off",
     allowForce: s.allowForce !== false,
+    /**
+     * May the authorisation ladder auto-approve anything at all?
+     *
+     * `Settings.autoApprove` was declared, defaulted, validated and SET by the Security-strict
+     * profile — whose whole stated posture is "gate --strict, NO auto-approve" — and then read
+     * by nothing. Every other `autoApprove` in the codebase is the unrelated per-grant
+     * `AgentToolGrant.autoApprove` the tool broker uses, which is driven by the ladder and never
+     * consults settings. So selecting that profile tightened the gate and the force ban while
+     * leaving auto-approval exactly as it was.
+     */
+    autoApprove: s.autoApprove !== false,
   };
 }
 

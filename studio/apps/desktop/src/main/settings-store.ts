@@ -156,9 +156,12 @@ export async function loadEffective(
 ): Promise<EffectiveLayers> {
   const global = await readLayer(globalPath);
   const workspace = workspaceRoot ? await readLayer(workspaceSettingsPath(workspaceRoot)) : {};
-  const profileId =
-    typeof global.profileId === "string" ? global.profileId : coreSettings.DEFAULT_PROFILE_ID;
-  const profile = coreSettings.getProfile(profileId)?.settings;
+  // An IMPLICIT profile may only TIGHTEN the user's own posture — see `resolveProfileLayer`.
+  const { profile } = coreSettings.resolveProfileLayer(global as Record<string, unknown>, {
+    defaults: coreSettings.DEFAULT_SETTINGS,
+    layer: coreSettings.layerSettings,
+    sanitize: coreSettings.sanitizeWorkspaceLayer,
+  });
   // The posture the USER chose: defaults ◀ global ◀ profile, before the repository gets a say.
   const userPosture = coreSettings.layerSettings(
     coreSettings.DEFAULT_SETTINGS,

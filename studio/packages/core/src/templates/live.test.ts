@@ -169,3 +169,23 @@ test("receiverExpression: empty when nothing precedes", () => {
   assert.equal(receiverExpression(""), "");
   assert.equal(receiverExpression("  "), "");
 });
+
+test("a substituted value is LITERAL text — its $ never becomes snippet syntax", () => {
+  /**
+   * `$` and `\` are Monaco snippet syntax, but `$EXPR$` / `$CLIPBOARD$` / `$FILE_NAME$` carry
+   * the user's buffer text, clipboard and filename — not template authoring. Unescaped, a
+   * postfix expansion over `cost$1` produced a real TABSTOP: the text vanished and the caret
+   * jumped there. `$name` (PHP), `$1` (a regex replacement), `$0` (awk) and `${arr}` are all
+   * ordinary code that a paste or a postfix silently mangled.
+   */
+  assert.equal(toMonacoSnippet("log($EXPR$)", { receiver: "cost$1" }), "log(cost\\$1)");
+  assert.equal(toMonacoSnippet("log($EXPR$)", { receiver: "$name" }), "log(\\$name)");
+  assert.equal(toMonacoSnippet("log($EXPR$)", { receiver: "a${b}c" }), "log(a\\${b}c)");
+  assert.equal(toMonacoSnippet("log($CLIPBOARD$)", { clipboard: "C:\\temp" }), "log(C:\\\\temp)");
+
+  // the TEMPLATE's own tabstops and the intentional macros are untouched
+  assert.equal(toMonacoSnippet("f(${1:a}, $2)$END$", { receiver: "x" }), "f(${1:a}, $2)$0");
+  assert.equal(toMonacoSnippet("$SELECTION$", {}), "${TM_SELECTED_TEXT}");
+  // and plain text still passes straight through
+  assert.equal(toMonacoSnippet("log($EXPR$)", { receiver: "foo.bar" }), "log(foo.bar)");
+});

@@ -26,12 +26,23 @@
  *   It supplies NO `ask` in either posture: nobody is there. The `question` tool already
  *   refuses honestly in that case and tells the model to state its assumption instead.
  */
+import { randomBytes } from "node:crypto";
+import { isAbsolute, resolve } from "node:path";
+
 import { agent, ai, cliProfiles, loadPricing, orchestration } from "@prometheus/core";
-import { loadMemoryIndexBlock, loadPermissionRules } from "@prometheus/core/agent-system-host";
+import {
+  createHookRunner,
+  isPathAllowed,
+  loadMemoryIndexBlock,
+  loadPermissionRules,
+  resolveEffectiveHooks,
+} from "@prometheus/core/agent-system-host";
 import { createEngineClient } from "@prometheus/engine-bridge";
 
+import { resolveCwd } from "../cwd-guard.js";
 import { prometheusHome } from "../home.js";
 import type { ParsedArgs } from "../parse.js";
+import { runElevationGate } from "../tui/sudo.js";
 import { type SessionCtx, runMessageTurn } from "./agent-runtime.js";
 import {
   SESSION_STORE_MAX_BYTES,
@@ -40,11 +51,13 @@ import {
   recordSession,
   rotateSessions,
 } from "./history-store.js";
+import { loadHooksDetailed } from "./hooks-config.js";
 import { makeBudgetGuard, seedTuningWithNotes } from "./host.js";
 import { createKeyResolver, keychainProviders } from "./key-resolver.js";
 import { type McpSession, openMcpSession, withMcpTools } from "./mcp-session.js";
 import { type Backends, detectBackends } from "./onboarding.js";
 import { assembleSteering, discoverSteering } from "./steering.js";
+import { execVarsFromEnv } from "./system-tools.js";
 
 /** What a one-shot run produced, for the caller to render or serialize. */
 export interface OneShotResult {
@@ -180,7 +193,7 @@ export async function runOneShot(
     };
   }
 
-  const cwd = parsed.cwd ?? process.cwd();
+  const cwd = resolveCwd(parsed.cwd, write);
   /**
    * A headless run is a SESSION, recorded through the same three primitives the two
    * interactive hosts use.
@@ -198,7 +211,17 @@ export async function runOneShot(
   const budgetGuard = makeBudgetGuard(budget, loadPricing(), parsed.flags["force-budget"] === true);
   const explicitId =
     typeof parsed.flags["session-id"] === "string" ? parsed.flags["session-id"] : "";
-  const sessionId = explicitId.trim() || `headless-${Date.now().toString(36)}`;
+  /**
+   * A millisecond timestamp is NOT unique across concurrent processes.
+   *
+   * `headless-${Date.now().toString(36)}` gave two runs started in the same millisecond the SAME
+   * id, and their transcripts interleaved into one file. Measured: four concurrent
+   * `prometheus -p` runs produced two session files, not four — and the one surface that runs
+   * unattended in CI is exactly where several runs start at once. The random suffix is what makes
+   * the id unique; the timestamp stays because it keeps ids sortable by start time.
+   */
+  const sessionId =
+    explicitId.trim() || `headless-${Date.now().toString(36)}-${randomBytes(4).toString("hex")}`;
   const liveTuning = {
     ...tuning,
     model: { provider: backends.localRunner?.name ?? "ollama", modelId: endpoint.model ?? "" },
@@ -215,11 +238,75 @@ export async function runOneShot(
    *
    * `headlessAuthLevel` is the only thing that can raise it, and only from an explicit flag.
    */
-  const level = headlessAuthLevel(parsed);
+  /**
+   * ELEVATED-PRIVILEGE CLAMP — a headless run under sudo cannot acknowledge anything.
+   *
+   * The TUI stops for a red acknowledgement before opening a session as root. This path had no
+   * notion of elevation at all, so `sudo prometheus -p "..."` — and every scheduled task on an
+   * elevated agent — ran at whatever level the flags asked for, auto-approving writes and
+   * commands as the superuser with nothing printed.
+   *
+   * There is nobody here to answer the acknowledgement, so the gate takes its SAFE branch:
+   * ask-before-everything, bypass locked. Unattended is not a reason to skip the gate; it is a
+   * reason to take the conservative side of it. `write` sends the notice to stderr, so a
+   * `--json` consumer's stdout stays exactly one document.
+   */
+  const elevation = await runElevationGate({ write });
+  let level = headlessAuthLevel(parsed);
+  if (elevation.bypassLocked && level > 5) level = 5;
   const allowWrites = level > agent.DEFAULT_AUTH_LEVEL;
-  const confirm = (call: { name: string }): { approved: boolean; reason?: string } | true => {
+  const confirm = (call: {
+    name: string;
+    args?: Record<string, unknown>;
+  }): { approved: boolean; reason?: string } | true => {
     const tool = agent.exposedTools(liveTuning.tools).find((t) => t.name === call.name);
-    if (agent.authDecision(level, call.name, tool?.annotations) === "allow") {
+    /**
+     * SCOPED, same as the TUI's confirmWrite and the desktop's permission-gate: a `write_file`
+     * whose target lands outside the run's own working set (cwd — a headless run has no
+     * `/add-dir`) must never be auto-approved by the coarse authorisation level alone, because
+     * there is no human here to actually see the out-of-scope path and answer for it. Without
+     * this, `--allow-writes`/`--allow-commands` would silently let an unattended run (a
+     * scheduled task, a CI job) write anywhere the OS process can reach — `~/.ssh`, `~/.zshrc`
+     * — the exact escape `scopedWriteDecision` exists to close, already wired into every
+     * interactive host but missing here.
+     */
+    const rawPath = call.args?.path;
+    const path = typeof rawPath === "string" ? rawPath : undefined;
+    // No path on a write-classified call is treated as OUTSIDE (fail-closed), matching
+    // scopedWriteDecision's own "an unresolvable target counts as outside" contract.
+    const insideWorkingSet =
+      path !== undefined && isPathAllowed(isAbsolute(path) ? path : resolve(cwd, path), [cwd]);
+    /**
+     * `run_command`'s risk is its COMMAND, not its name.
+     *
+     * `scopedWriteDecision` grades a PATH; it cannot see that `npm install x` is an install and
+     * `rm -rf /` is destructive, so it answered for `run_command` on the strength of the level
+     * alone. That made this the weakest of the three hosts for exec — and the one that runs
+     * UNATTENDED, from a scheduled task or a CI job, with no human to catch it. The tier-aware
+     * ladder is the same one the TUI and `--plain` hosts use.
+     *
+     * Fail-closed: an unparseable or unclassifiable command is never auto-approved.
+     */
+    if (call.name === "run_command") {
+      const line = typeof call.args?.command === "string" ? call.args.command : "";
+      const parsedCmd = line ? agent.parseCommand(line, { vars: execVarsFromEnv() }) : null;
+      const cls = parsedCmd?.ok ? agent.classifyCommand(parsedCmd.command) : null;
+      if (cls?.ok && agent.execAuthDecision(level, cls.tier) === "allow") return true;
+      const remedy = allowWrites
+        ? "This run permits some changes but not this command's risk tier."
+        : "Re-run with --allow-commands to permit commands.";
+      return {
+        approved: false,
+        reason: `run_command needs a human approval and this is a non-interactive run. Do NOT retry it. ${remedy}`,
+      };
+    }
+    const decision = agent.scopedWriteDecision(
+      level,
+      call.name,
+      tool?.annotations,
+      insideWorkingSet,
+    );
+    if (decision === "allow") {
       return true;
     }
     return {
@@ -276,9 +363,47 @@ export async function runOneShot(
   const mcp = deps.mcp ?? (await openMcpSession({ home, write }).catch(() => undefined));
   const mcpTools = mcp?.tools() ?? [];
 
+  /**
+   * A headless run honours the user's LIFECYCLE HOOKS too — it did not.
+   *
+   * Both interactive hosts resolve hooks and put them on the tuning; this path built its
+   * `SessionCtx` by hand and set neither `hooks` nor `hookRunner`, so every hook seam in the
+   * shared loop was inert here. A `PreToolUse` hook written specifically to DENY something
+   * simply did not run on `-p` or on any scheduled task — the two surfaces that execute with
+   * nobody watching, which is exactly where a deny guard earns its keep. It is the same
+   * omission already fixed twice on this object, for `permissionRules` and for `budget`.
+   *
+   * WORKSPACE hooks are deliberately NOT trusted here. The interactive hosts can afford to ask,
+   * because a human is present to read the nemesis verdict and answer; unattended, the confirm
+   * seam auto-approves whatever the autonomy ladder allows, and routing a repo-supplied command
+   * through that would hand any cloned repository code execution in CI. So the confirm passed to
+   * the resolver always declines: the user's own GLOBAL hooks apply, a workspace list that only
+   * re-selects hooks the user already has still works (the resolver returns early when nothing
+   * is novel), and a genuinely new repo-supplied hook is refused and reported rather than run.
+   */
+  const rawHooks = loadHooksDetailed({ home, cwd });
+  const { hooks: sessionHooks, refused: hookRefusals } = await resolveEffectiveHooks({
+    home,
+    cwd,
+    globalHooks: rawHooks.globalHooks,
+    workspaceHooks: rawHooks.workspaceHooks,
+    confirm: async () => false,
+  });
+  for (const r of hookRefusals) {
+    write(`hook refused (${r.event}): ${r.command} — ${r.reason}`);
+  }
+  const hookRunner =
+    sessionHooks.length > 0 ? createHookRunner({ cwd, env: process.env }) : undefined;
+
+  const baseTuning = mcpTools.length > 0 ? withMcpTools(liveTuning, mcpTools) : liveTuning;
   const ctx: SessionCtx = {
     client,
-    tuning: mcpTools.length > 0 ? withMcpTools(liveTuning, mcpTools) : liveTuning,
+    tuning: {
+      ...baseTuning,
+      // Hooks ride the TUNING so a `spawn_agent` child inherits them through `childTuning`.
+      ...(sessionHooks.length > 0 ? { hooks: sessionHooks } : {}),
+      ...(hookRunner ? { hookRunner } : {}),
+    },
     json: parsed.json,
     endpoint,
     confirm,
@@ -298,6 +423,17 @@ export async function runOneShot(
      * not reach the one surface that runs unattended.
      */
     permissionRules: loadPermissionRules({ cwd }).rules,
+    /**
+     * The run's REAL authorisation level, recorded on every exec-audit line.
+     *
+     * This literal never set it, so `ctx.authLevel` was undefined and the runner fell back to
+     * `-1` — on the ONE surface that runs unattended, where the audit is the only record of what
+     * an agent was permitted to do. `--allow-commands` runs at level 4 and every line still said
+     * `authLevel:-1`, so the log could not distinguish an elevated CI run from a default one.
+     * `level` is the same value the confirm seam above decides with, so the audit now agrees
+     * with the policy that was actually applied.
+     */
+    authLevel: level,
     /**
      * The USD spend cap applies to UNATTENDED runs too — it did not.
      *

@@ -22,12 +22,13 @@ function makeCtx(
   positionals: string[] = [],
   flags: Record<string, string | true> = {},
   json = false,
+  unmatchedSub?: string,
 ): CliContext {
   const force = flags.force === true;
   return {
     client: undefined as unknown as CliContext["client"],
     json,
-    args: { command, positionals, flags, json, force } as unknown as ParsedArgs,
+    args: { command, positionals, flags, json, force, unmatchedSub } as unknown as ParsedArgs,
   };
 }
 
@@ -88,11 +89,21 @@ test("--json emits the raw envelope", async () => {
   assert.equal(out.exitCode, 0);
 });
 
-test("unknown verb → exit 2 listing valid verbs", async () => {
+test("unknown verb → exit 1 listing valid verbs", async () => {
   const { deps, calls } = fakeDeps(UML_ENV);
   const out = await runDiagram(makeCtx(["diagram"], []), deps);
-  assert.equal(out.exitCode, 2);
+  assert.equal(out.exitCode, 1);
   assert.match(out.text ?? "", /uml, deps/);
+  assert.equal(calls.length, 0);
+});
+
+test("a typo'd verb names the ACTUAL typo, not '(none)' — regression for unmatchedSub", async () => {
+  // command[1] is undefined for a TWO_WORD mismatch (parse.ts sets `unmatchedSub` instead),
+  // so this used to render "unknown verb (none)" instead of naming the typo.
+  const { deps, calls } = fakeDeps(UML_ENV);
+  const out = await runDiagram(makeCtx(["diagram"], [], {}, false, "umll"), deps);
+  assert.equal(out.exitCode, 1);
+  assert.match(out.text ?? "", /unknown verb "umll"/);
   assert.equal(calls.length, 0);
 });
 
@@ -146,4 +157,39 @@ test("--summary renders a terse pane view", async () => {
   assert.match(out.text ?? "", /diagram uml/);
   assert.match(out.text ?? "", /1 classes/);
   assert.match(out.text ?? "", /use --out/);
+});
+
+test("--json --out WRITES the file: the format decides how to report, never whether it happens", async () => {
+  // regression: the `--json` early return sat ABOVE the --out block, so
+  // `--json diagram deps <path> --out f.md` wrote nothing and still reported ok:true, while
+  // the identical command without --json wrote the file. Measured against the built binary.
+  const dir = mkdtempSync(join(tmpdir(), "prom-diagram-json-"));
+  const target = join(dir, "graph.md");
+  const { deps } = fakeDeps(DEPS_ENV);
+  const out = await runDiagram(makeCtx(["diagram", "deps"], ["/fix"], { out: target }, true), deps);
+  assert.equal(out.exitCode, 0);
+  const body = readFileSync(target, "utf8");
+  assert.match(body, /^```mermaid\n/, "a .md target is still fenced under --json");
+  assert.match(body, /graph LR/);
+  const json = out.json as { ok?: boolean; out?: string; written?: boolean };
+  assert.equal(json.written, true, "the envelope must say the artifact was written");
+  assert.equal(json.out, target);
+});
+
+test("--json without --out still returns the sidecar envelope untouched", async () => {
+  const { deps } = fakeDeps(DEPS_ENV);
+  const out = await runDiagram(makeCtx(["diagram", "deps"], ["/fix"], {}, true), deps);
+  assert.equal(out.exitCode, 0);
+  assert.deepEqual(out.json, DEPS_ENV);
+});
+
+test("--json --out still refuses to clobber an existing file without --force", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "prom-diagram-clobber-"));
+  const target = join(dir, "graph.md");
+  writeFileSync(target, "PRECIOUS", "utf8");
+  const { deps } = fakeDeps(DEPS_ENV);
+  const out = await runDiagram(makeCtx(["diagram", "deps"], ["/fix"], { out: target }, true), deps);
+  assert.equal(out.exitCode, 2);
+  assert.equal((out.json as { error?: string }).error, "exists");
+  assert.equal(readFileSync(target, "utf8"), "PRECIOUS");
 });

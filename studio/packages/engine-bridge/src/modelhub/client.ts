@@ -34,6 +34,26 @@ export type { GateBadge } from "../security/verdict.js";
 
 export interface ModelHubClientOptions extends SidecarOptions {}
 
+/**
+ * Refuse a sidecar envelope that reports failure, or that carries no payload at all.
+ *
+ * The schemas in `types.ts` are DEFAULTING parsers: they fill in every field they cannot find so
+ * a partial-but-real envelope still yields a usable object. That is right for a real scan and
+ * catastrophic for a failed one — a failure envelope has none of the fields, so every default
+ * fires at once and the result reads as a real answer about a machine that does not exist.
+ */
+function assertScanSucceeded(env: SidecarEnvelope, what: string): void {
+  if (env.ok === false) {
+    const detail = typeof env.error === "string" && env.error ? env.error : "no reason given";
+    throw new Error(`${what} failed: ${detail}`);
+  }
+  // An envelope with no keys beyond the envelope's own is not a scan result either.
+  const payloadKeys = Object.keys(env).filter(
+    (k) => k !== "ok" && k !== "command" && k !== "_exit",
+  );
+  if (payloadKeys.length === 0) throw new Error(`${what} returned no data`);
+}
+
 // ── progress (the JSON-lines stderr stream, C2/C6) ────────────────────────────
 
 /** One `{"event":"progress",...}` JSON-line the sidecar streams on stderr. */
@@ -361,6 +381,172 @@ export interface RepointOptions {
   baseUrl: string;
 }
 
+// ── /hug: fetch → convert → install-target (each a thin marshaller, same discipline) ──
+
+export interface FetchHfOptions {
+  repo: string;
+  out?: string;
+  revision?: string;
+}
+
+/** The ACTUAL raw-weights fetch for an HF repo (via HF's own `hf`/`huggingface-cli`
+ *  downloader) — `download()` above never fetches bytes itself; this does. */
+export interface FetchHfResult {
+  ok: boolean;
+  command?: string;
+  repo?: string;
+  path?: string;
+  /** true when the failure is "no hf CLI on PATH" (actionable — offer installHfCli). */
+  installable?: boolean;
+  error?: string;
+  raw: SidecarEnvelope;
+}
+
+function toFetchHfResult(env: SidecarEnvelope): FetchHfResult {
+  return {
+    ok: env.ok !== false,
+    command: env.command,
+    repo: typeof env.repo === "string" ? env.repo : undefined,
+    path: typeof env.path === "string" ? env.path : undefined,
+    installable: env.installable === true ? true : undefined,
+    error: typeof env.error === "string" ? env.error : undefined,
+    raw: env,
+  };
+}
+
+/** `pip install huggingface_hub[cli]` on the user's behalf — the one-time
+ *  "detect absence, offer install" step for the HF fetch tool. */
+export interface InstallHfCliResult {
+  ok: boolean;
+  installed?: boolean;
+  manual?: boolean;
+  install?: string;
+  error?: string;
+  raw: SidecarEnvelope;
+}
+
+function toInstallHfCliResult(env: SidecarEnvelope): InstallHfCliResult {
+  return {
+    ok: env.ok !== false,
+    installed: env.installed === true,
+    manual: env.manual === true ? true : undefined,
+    install: typeof env.install === "string" ? env.install : undefined,
+    error: typeof env.error === "string" ? env.error : undefined,
+    raw: env,
+  };
+}
+
+export interface ConvertOptions {
+  src: string;
+  quant?: string;
+  id?: string;
+  out?: string;
+}
+
+/**
+ * HF directory → GGUF (+ quantize), ALWAYS by shelling out to llama.cpp's own tools
+ * (convert_hf_to_gguf.py / llama-quantize) — this client never re-implements either.
+ * `lowDisk:true` means the sidecar's own 7%-floor disk guard refused BEFORE writing
+ * anything; `installable:true` means llama.cpp's converter/quantizer isn't present yet
+ * (offer installConverter). Both are actionable, not a generic failure.
+ */
+export interface ConvertResult {
+  ok: boolean;
+  id?: string;
+  path?: string;
+  /** the canonical open_models path — a symlink to `path` when `--out` pointed elsewhere. */
+  canonicalPath?: string;
+  quant?: string;
+  sizeBytes?: number;
+  sizeGb?: number;
+  installable?: boolean;
+  lowDisk?: boolean;
+  hint?: string;
+  error?: string;
+  raw: SidecarEnvelope;
+}
+
+function toConvertResult(env: SidecarEnvelope): ConvertResult {
+  return {
+    ok: env.ok !== false,
+    id: typeof env.id === "string" ? env.id : undefined,
+    path: typeof env.path === "string" ? env.path : undefined,
+    canonicalPath: typeof env.canonical_path === "string" ? env.canonical_path : undefined,
+    quant: typeof env.quant === "string" ? env.quant : undefined,
+    sizeBytes: typeof env.size_bytes === "number" ? env.size_bytes : undefined,
+    sizeGb: typeof env.size_gb === "number" ? env.size_gb : undefined,
+    installable: env.installable === true ? true : undefined,
+    lowDisk: env.low_disk === true ? true : undefined,
+    hint: typeof env.hint === "string" ? env.hint : undefined,
+    error: typeof env.error === "string" ? env.error : undefined,
+    raw: env,
+  };
+}
+
+/** Fetch llama.cpp's OWN convert_hf_to_gguf.py (a shallow git clone), once. */
+export interface InstallConverterResult {
+  ok: boolean;
+  installed?: boolean;
+  path?: string;
+  manual?: boolean;
+  install?: string;
+  error?: string;
+  raw: SidecarEnvelope;
+}
+
+function toInstallConverterResult(env: SidecarEnvelope): InstallConverterResult {
+  return {
+    ok: env.ok !== false,
+    installed: env.installed === true,
+    path: typeof env.path === "string" ? env.path : undefined,
+    manual: env.manual === true ? true : undefined,
+    install: typeof env.install === "string" ? env.install : undefined,
+    error: typeof env.error === "string" ? env.error : undefined,
+    raw: env,
+  };
+}
+
+export interface InstallTargetOptions {
+  target: "ollama" | "llamacpp" | "vllm" | "lmstudio";
+  id: string;
+  /** required for llamacpp/lmstudio/ollama — an existing GGUF path. */
+  gguf?: string;
+  /** required for vllm — the HF-format directory (vLLM never needs the GGUF). */
+  src?: string;
+  quant?: string;
+}
+
+/**
+ * Wire an already-converted (or already-GGUF) model into ONE target runtime, never
+ * duplicating the payload: llama.cpp/vLLM read the file/directory directly; Ollama
+ * ingests it into its own store; LM Studio gets a SYMLINK (or an `lms import`).
+ */
+export interface InstallTargetResult {
+  ok: boolean;
+  target?: string;
+  id?: string;
+  path?: string;
+  endpoint?: string;
+  method?: string;
+  note?: string;
+  error?: string;
+  raw: SidecarEnvelope;
+}
+
+function toInstallTargetResult(env: SidecarEnvelope): InstallTargetResult {
+  return {
+    ok: env.ok !== false,
+    target: typeof env.target === "string" ? env.target : undefined,
+    id: typeof env.id === "string" ? env.id : undefined,
+    path: typeof env.path === "string" ? env.path : undefined,
+    endpoint: typeof env.endpoint === "string" ? env.endpoint : undefined,
+    method: typeof env.method === "string" ? env.method : undefined,
+    note: typeof env.note === "string" ? env.note : undefined,
+    error: typeof env.error === "string" ? env.error : undefined,
+    raw: env,
+  };
+}
+
 // ── catalog Model projection (model.search rows → typed Model) ────────────────
 
 /** Project the catalog snake_case `resource` block → the camelCase ModelResource. */
@@ -474,6 +660,16 @@ export class ModelHubClient {
     const argv = ["hw.scan"];
     if (opts.rescan) argv.push("--rescan");
     const env = await this.run(argv);
+    /**
+     * FAIL CLOSED. `HardwareProfileSchema` defaults every field it cannot find — missing `os`
+     * becomes "linux", missing cpu becomes 0 cores, missing `ram_gb` becomes 0 — so a FAILURE
+     * envelope (`{ok:false, error:"sidecar not found"}`, a python traceback, an empty object)
+     * parsed cleanly into a plausible-looking machine and was returned as a successful scan.
+     * On this real macOS/arm64 host it reported linux / "" / 0 cores / 0 GB / cpu, and model-fit
+     * scoring then answered from those numbers. A readout that says nothing is safe; a readout
+     * that confidently says the wrong thing is not.
+     */
+    assertScanSucceeded(env, "hw.scan");
     return HardwareProfileSchema.parse(env);
   }
 
@@ -722,6 +918,42 @@ export class ModelHubClient {
       raw: env,
     };
   }
+
+  /** The ACTUAL raw-weights fetch for an HF repo — via HF's own `hf` downloader. */
+  async fetchHf(opts: FetchHfOptions): Promise<FetchHfResult> {
+    const argv = ["fetch-hf", "--repo", opts.repo];
+    if (opts.out) argv.push("--out", opts.out);
+    if (opts.revision) argv.push("--revision", opts.revision);
+    return toFetchHfResult(await this.run(argv));
+  }
+
+  /** `pip install huggingface_hub[cli]` on the user's behalf, once. */
+  async installHfCli(): Promise<InstallHfCliResult> {
+    return toInstallHfCliResult(await this.run(["install-hf-cli"]));
+  }
+
+  /** HF dir → GGUF (+ quantize), always via llama.cpp's own convert/quantize tools. */
+  async convert(opts: ConvertOptions): Promise<ConvertResult> {
+    const argv = ["convert", "--src", opts.src];
+    if (opts.quant) argv.push("--quant", opts.quant);
+    if (opts.id) argv.push("--id", opts.id);
+    if (opts.out) argv.push("--out", opts.out);
+    return toConvertResult(await this.run(argv));
+  }
+
+  /** Fetch llama.cpp's OWN convert_hf_to_gguf.py (a shallow git clone), once. */
+  async installConverter(): Promise<InstallConverterResult> {
+    return toInstallConverterResult(await this.run(["install-converter"]));
+  }
+
+  /** Wire a converted/GGUF model into ONE target runtime, never duplicating bytes. */
+  async installTarget(opts: InstallTargetOptions): Promise<InstallTargetResult> {
+    const argv = ["install-target", "--target", opts.target, "--id", opts.id];
+    if (opts.gguf) argv.push("--gguf", opts.gguf);
+    if (opts.src) argv.push("--src", opts.src);
+    if (opts.quant) argv.push("--quant", opts.quant);
+    return toInstallTargetResult(await this.run(argv));
+  }
 }
 
 // ── ServeProfile projection (serve `profile` envelope → typed ServeProfile) ────
@@ -800,3 +1032,12 @@ export const unserve = (profileId: string): Promise<MutationResult> =>
 export const endpoints = (): Promise<EndpointsResult> => defaultClient.endpoints();
 export const repoint = (opts: RepointOptions): Promise<RepointResult> =>
   defaultClient.repoint(opts);
+export const fetchHf = (opts: FetchHfOptions): Promise<FetchHfResult> =>
+  defaultClient.fetchHf(opts);
+export const installHfCli = (): Promise<InstallHfCliResult> => defaultClient.installHfCli();
+export const convert = (opts: ConvertOptions): Promise<ConvertResult> =>
+  defaultClient.convert(opts);
+export const installConverter = (): Promise<InstallConverterResult> =>
+  defaultClient.installConverter();
+export const installTarget = (opts: InstallTargetOptions): Promise<InstallTargetResult> =>
+  defaultClient.installTarget(opts);

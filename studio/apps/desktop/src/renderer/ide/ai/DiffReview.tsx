@@ -15,6 +15,13 @@
 
 import { Button, Panel, PermissionCard } from "@prometheus/ui";
 import { type ReactElement, useMemo, useState } from "react";
+import {
+  type PermissionQueues,
+  answerHeadFor,
+  clearFor,
+  headFor,
+  raiseFor,
+} from "./permission-queue.js";
 
 import { authLevelVar, useAuthorisationStore } from "../../stores/authorisation.js";
 import { useTabsStore } from "../state/stores.js";
@@ -259,10 +266,18 @@ export function DiffReview(): ReactElement | null {
   // so a flat boolean would let tab A's in-flight apply disable tab B's controls and
   // paint A's error under B's changeset.
   const [applyingBy, setApplyingBy] = useState<Record<string, boolean>>({});
-  // §3: the permission QUEUE — the writes still awaiting a human. Apply does not touch
-  // disk while this is non-empty; the card at the head of the queue is what the user
-  // answers, one exact path at a time.
-  const [pending, setPending] = useState<PendingWrite[]>([]);
+  /**
+   * §3: the permission QUEUE — the writes still awaiting a human, KEYED BY SESSION.
+   *
+   * This was flat component state while `applyingBy`/`errorBy` above were already per-session,
+   * with a comment explaining exactly why. A card raised for tab A therefore stayed on screen
+   * after switching to tab B, and approving it ran the apply against B's ChangeSet: B's files
+   * written on a permission granted for a path in tab A, with B's own paths never shown, while
+   * A's approved apply silently never happened. Per-session, switching tabs shows that tab's own
+   * queue — so there is no card to mis-answer.
+   */
+  const [pendingBy, setPendingBy] = useState<PermissionQueues<PendingWrite>>({});
+  const pending = pendingBy[activeId] ?? [];
   const authLevel = useAuthorisationStore((st) => st.level);
   const workspaceRoot = useTabsStore((st) => st.workspaceRoot);
   const roots = useMemo(() => (workspaceRoot ? [workspaceRoot] : []), [workspaceRoot]);
@@ -327,9 +342,10 @@ export function DiffReview(): ReactElement | null {
    */
   const onApply = (): void => {
     if (!cs) return;
+    const sid = activeId; // the session this card belongs to, captured now
     const asks = pendingWrites(cs, selection, roots).filter(needsPermission);
     if (asks.length > 0) {
-      setPending(asks);
+      setPendingBy((m) => raiseFor(m, sid, asks));
       return;
     }
     runApply();
@@ -337,17 +353,22 @@ export function DiffReview(): ReactElement | null {
 
   /** Answer the card at the head of the queue. Deny cancels the WHOLE apply. */
   const answer = (decision: "once" | "session" | "deny"): void => {
-    const head = pending[0];
+    // The card on screen is the ACTIVE session's own head — that is what per-session keying
+    // buys — so the sid captured here is the one the permission was granted for.
+    const sid = activeId;
+    const head = headFor(pendingBy, sid);
     if (!head) return;
     if (decision === "deny") {
-      setPending([]);
-      setErrorBy((m) => ({ ...m, [activeId]: `denied: ${head.path} was not written` }));
+      setPendingBy((m) => clearFor(m, sid));
+      setErrorBy((m) => ({ ...m, [sid]: `denied: ${head.path} was not written` }));
       return;
     }
     void grant(head, decision).then(() => {
-      const rest = pending.slice(1);
-      setPending(rest);
-      if (rest.length === 0) runApply();
+      // Computed from the queue we READ, not captured inside the updater — a state updater may
+      // be invoked more than once, so a variable assigned inside it is not a reliable signal.
+      const { drained } = answerHeadFor(pendingBy, sid);
+      setPendingBy((m) => answerHeadFor(m, sid).queues);
+      if (drained) runApply();
     });
   };
 

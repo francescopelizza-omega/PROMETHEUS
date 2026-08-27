@@ -90,3 +90,24 @@ test("path-bound grant applies only when the call touches that path", () => {
   assert.equal(store.merge([], "/w", ["/w/src/a.ts"]).length, 1);
   assert.equal(store.merge([], "/w", ["/w/src/b.ts"]).length, 0);
 });
+
+test("a shell GLOB is never remembered as a permission wildcard", () => {
+  /**
+   * `permission-engine.ts` matches a `bash:` pattern positionally and documents it plainly:
+   * "a trailing `*` matches any remaining args". A `*` the USER typed is a shell glob meaning
+   * "these files, here, now"; the same character in a stored subject means "any arguments,
+   * forever". Answering "always allow" once to `rm *` stored `bash:rm *`, which from then on
+   * matched `rm -rf /` with no further prompt. `isTooBroad` missed it — it only refuses a body
+   * that is EXACTLY `*`.
+   */
+  assert.equal(deriveSubject("run_command", ["rm", "*"]), null);
+  assert.equal(deriveSubject("run_command", ["rm", "-rf", "*"]), null);
+  assert.equal(deriveSubject("run_command", ["chmod", "777", "*"]), null);
+  assert.equal(deriveSubject("run_command", ["git", "add", "src/*.ts"]), null);
+  // a concrete command is still remembered — the fix must not disarm the feature
+  assert.equal(deriveSubject("run_command", ["git", "status"]), "bash:git status");
+  assert.equal(
+    deriveSubject("run_command", ["git", "push", "origin", "main"]),
+    "bash:git push origin main",
+  );
+});

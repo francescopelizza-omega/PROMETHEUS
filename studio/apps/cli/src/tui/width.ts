@@ -161,13 +161,29 @@ export function wrapLine(line: string, width: number): string[] {
 /** Truncate a string to at most `width` display columns, adding "…" when it cuts. */
 export function clipToWidth(s: string, width: number): string {
   if (stringWidth(s) <= width) return s;
+  /**
+   * ANSI-aware, exactly like `stringWidth` and `wrapLine` already are.
+   *
+   * Iterating raw code points counted the bytes of an SGR run as visible columns: `\x1b[31m`
+   * spends four of them (`[`, `3`, `1`, `m` — ESC itself is zero), so a styled string was
+   * over-truncated by four columns per colour change, and every caller that had already
+   * measured with `stringWidth` disagreed with the result. Worse, a cut landing INSIDE the
+   * sequence emitted a bare `\x1b[` — a half escape the terminal then eats the next character
+   * to complete, so clipping a colored line could corrupt the line after it.
+   *
+   * `toCells` splits the string into whole SGR runs (width 0) and single code points, so a
+   * sequence is either copied entire or not at all.
+   */
   let out = "";
   let w = 0;
-  for (const ch of s) {
-    const cw = charWidth(ch.codePointAt(0) ?? 0);
-    if (w + cw > width - 1) break;
-    out += ch;
-    w += cw;
+  for (const cell of toCells(s)) {
+    if (cell.w === 0) {
+      out += cell.s; // an SGR run: keep it whole, it costs no columns
+      continue;
+    }
+    if (w + cell.w > width - 1) break;
+    out += cell.s;
+    w += cell.w;
   }
   return `${out}…`;
 }

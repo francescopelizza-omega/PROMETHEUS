@@ -19,6 +19,7 @@ import { existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { findRootFrom } from "./config.js";
 import { safeChildEnv } from "./safe-env.js";
 
 /** A sidecar envelope: ok + command + per-verb fields (mirror C7). */
@@ -68,27 +69,43 @@ const DEFAULT_TIMEOUT_MS = 120_000;
 const MAX_SIDECAR_STDOUT_BYTES = 64 * 1024 * 1024;
 
 /**
- * Locate studio/python/sidecar. Honors PROMETHEUS_SIDECAR_DIR, else walks up from
- * this module (packages/engine-bridge/{src,dist}) to the studio root, else the
- * known absolute path.
+ * Locate `studio/python/sidecar`. Honors PROMETHEUS_SIDECAR_DIR, else finds the PROMETHEUS root
+ * by looking for it, else a relative last-resort guess.
+ *
+ * The walk used to be a FIXED three levels up — correct only for
+ * `…/studio/packages/engine-bridge/{src,dist}`. This module is bundled, and a bundle lives
+ * somewhere else: in the Electron build it is inlined into `studio/apps/desktop/out/main`, where
+ * three up is `studio/apps` and the guess became `studio/apps/python/sidecar`, which does not
+ * exist. Every sidecar-backed surface in the desktop app — test discovery, the @codebase repo
+ * map, the linter fan-in, structural search, coverage, the profiler, modelhub and metadata —
+ * therefore failed with "sidecar not found". Verified by running the shipped bundle's own walk
+ * from `apps/desktop/out/main`.
+ *
+ * `findRootFrom` searches for the directory that actually holds the engine, so every layout
+ * (source, dist, CLI bundle, Electron asar) lands on the same real path.
  */
 export function resolveSidecarDir(override?: string): string {
   if (override) return override;
   const env = process.env.PROMETHEUS_SIDECAR_DIR;
   if (env) return env;
+  let here: string | undefined;
   try {
-    const here = dirname(fileURLToPath(import.meta.url));
-    // …/studio/packages/engine-bridge/(src|dist) -> up 3 = …/studio
-    const studio = join(here, "..", "..", "..");
-    const guess = join(studio, "python", "sidecar");
-    if (existsSync(guess)) return guess;
-    return guess;
+    here = dirname(fileURLToPath(import.meta.url));
   } catch {
-    /* fall through */
+    /* import.meta.url unavailable in some test harnesses — fall through */
+  }
+  for (const start of [here, process.cwd()]) {
+    if (!start) continue;
+    const root = findRootFrom(start);
+    if (root) {
+      const guess = join(root, "studio", "python", "sidecar");
+      if (existsSync(guess)) return guess;
+    }
   }
   // RELATIVE to the caller, never an absolute developer path: this string is compiled
   // into the published CLI bundle and the Electron asar, so a hard-coded home directory
   // here is shipped to every user (and resolves on exactly one machine anyway).
+  if (here) return join(here, "..", "..", "..", "python", "sidecar");
   return join(process.cwd(), "studio", "python", "sidecar");
 }
 

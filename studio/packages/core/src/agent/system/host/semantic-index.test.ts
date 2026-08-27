@@ -17,6 +17,7 @@ import {
   type EmbedFn,
   bm25Search,
   cosineSimilarity,
+  embedAllWithBudget,
   semanticSearchTool,
 } from "./semantic-index.js";
 
@@ -225,4 +226,28 @@ test("semanticSearchTool reports no matches (not an error) over a tree with no i
   });
   assert.equal(out.ok, true);
   assert.match(out.summary, /no indexable source files/);
+});
+
+test("one failed embedding does not discard the whole index", async () => {
+  /**
+   * A single rejected `embed()` threw out of `Promise.all`, so the entire build was discarded,
+   * nothing was cached, and the caller fell back to lexical search — then paid for every chunk
+   * again on the next query, with the same odds of losing everything to one more bad call.
+   * Exceeding the wall-clock budget did the same, which is worse: the budget exists to BOUND
+   * the work, not to destroy the work that already succeeded.
+   */
+  const texts = Array.from({ length: 20 }, (_, i) => `chunk ${i}`);
+  let calls = 0;
+  const flaky = async (t: string): Promise<number[]> => {
+    calls += 1;
+    if (t === "chunk 7" || t === "chunk 13") throw new Error("embedding endpoint hiccup");
+    return [t.length, 1, 0];
+  };
+  const vectors = await embedAllWithBudget(flaky, texts);
+  assert.equal(vectors.length, 20);
+  assert.equal(calls, 20, "every chunk is still attempted");
+  const ok = vectors.filter((v) => Array.isArray(v) && v.length > 0);
+  assert.equal(ok.length, 18, "the 18 that worked are kept");
+  assert.equal(vectors[7], undefined, "the failed chunk is simply absent");
+  assert.equal(vectors[13], undefined);
 });

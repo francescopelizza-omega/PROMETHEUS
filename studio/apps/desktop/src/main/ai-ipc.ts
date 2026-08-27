@@ -28,16 +28,29 @@
 import type { IpcMain, WebContents } from "electron";
 
 import {
+  PROBE_CACHE_TTL_MS,
   ai,
   settings as coreSettings,
   orchestration,
+  probeContextWindow,
   secrets as secretsNs,
 } from "@prometheus/core";
 import { estimateTextTokens } from "@prometheus/core/agent-compact";
+import {
+  IdleWatchdog,
+  WATCHDOG_FIRST_TICK_MS,
+  WATCHDOG_STREAM_TICK_MS,
+  clearPossibleOrphan,
+  markPossibleOrphan,
+  orphanGraceRemainingMs,
+  raceTicks,
+} from "@prometheus/core/agent-idle-watchdog";
+import { looksLikeToolsRejection } from "@prometheus/core/agent-protocol";
 import { createCliSecretsStore } from "@prometheus/core/agent-system-host";
 import { applyEffort, applyEffortToMessages } from "@prometheus/core/ai-effort";
 import type { EffortResolution } from "@prometheus/core/ai-effort";
 import {
+  AiHttpError,
   describeAiFailure,
   endpointBreaker,
   fetchModelWithRetry,
@@ -46,7 +59,74 @@ import {
 
 import { getBudgetGate, isLocalModelId } from "./budget-gate.js";
 
+/**
+ * Native tool calls as they accumulate, keyed by the wire's GROUPING key rather than by
+ * `tc.index` alone.
+ *
+ * `index` groups the fragments of one streamed call — what OpenAI and Anthropic need. A provider
+ * that hands a call over WHOLE (Gemini) numbers it by its position inside the chunk it arrived
+ * in, so one call per chunk means `index: 0` for every call. Keyed on that alone, two different
+ * calls shared a slot: the later name won, the two argument objects were concatenated into
+ * something that does not parse, and BOTH calls were destroyed. `WireToolCallFragment.complete`
+ * is the flag that says "never merge this one". Identical fix in the CLI's `agent-runtime.ts`.
+ */
+interface ToolCallAccumulator {
+  map: Map<string, AiToolCall>;
+  /** first-seen sequence per key, so calls emit in arrival order. */
+  order: Map<string, number>;
+  seen: number;
+  wholeSeq: number;
+}
+
+function newToolCallAccumulator(): ToolCallAccumulator {
+  return { map: new Map(), order: new Map(), seen: 0, wholeSeq: 0 };
+}
+
+/** Merge one wire fragment into the accumulator, honouring `complete`. */
+function accumulateCall(
+  acc: ToolCallAccumulator,
+  tc: { index: number; id?: string; name?: string; argsFragment?: string; complete?: boolean },
+): void {
+  const key = tc.complete === true ? `whole:${acc.wholeSeq++}` : `idx:${tc.index}`;
+  const cur = acc.map.get(key) ?? { id: "", name: "", arguments: "" };
+  if (tc.id) cur.id = tc.id;
+  if (tc.name) cur.name = tc.name;
+  if (tc.argsFragment) cur.arguments += tc.argsFragment;
+  if (!acc.order.has(key)) acc.order.set(key, acc.seen++);
+  acc.map.set(key, cur);
+}
+
+/**
+ * The accumulated tool-call map, in wire order, as the result's `toolCalls`.
+ *
+ * `completeOnly` drops any call whose arguments are not parseable JSON — for a stream that
+ * ended EARLY (an idle pause), where a call can be cut mid-`arguments`. A truncated argument
+ * string parses to `{}` downstream, and running `write_file` with no arguments is a worse
+ * outcome than not running it.
+ */
+function harvestCalls(
+  calls: ToolCallAccumulator,
+  opts: { completeOnly?: boolean } = {},
+): AiToolCall[] {
+  const out = [...calls.map.entries()]
+    .sort((a, b) => (calls.order.get(a[0]) ?? 0) - (calls.order.get(b[0]) ?? 0))
+    .map(([key, v]) => ({ ...v, id: v.id || `call_${key}` }))
+    .filter((t) => t.name.length > 0);
+  if (!opts.completeOnly) return out;
+  return out.filter((t) => {
+    const raw = t.arguments.trim();
+    if (raw === "") return true; // a genuinely argument-less tool
+    try {
+      JSON.parse(raw);
+      return true;
+    } catch {
+      return false;
+    }
+  });
+}
+
 import {
+  type AiProbeEndpointResult,
   type AiProbeModelsResult,
   type AiProgressEvent,
   type AiStreamRequest,
@@ -57,15 +137,10 @@ import {
 } from "../shared/ipc-contract.js";
 
 /**
- * Progress watchdog windows, byte-identical to the CLI (`agent-runtime.ts:787-789`).
- *
- * A large local model can take 30–90s to produce its FIRST byte (cold prefill, weights
- * reload). Without a heartbeat the user cannot tell a slow MODEL from a hung WRAPPER, and
- * without a hard ceiling a wedged runner hangs the pane forever.
+ * Progress watchdog + inactivity-pause windows — SHARED with the CLI via
+ * `@prometheus/core/agent-idle-watchdog` (was three independent copies of a flat 180s hard
+ * timeout; see that module's header).
  */
-const FIRST_TOKEN_TICK_MS = 8_000;
-const STREAM_IDLE_TICK_MS = 15_000;
-const HARD_TIMEOUT_MS = 180_000;
 
 /** In-flight turns, so `ai:cancel` can abort one by runId. */
 const inFlight = new Map<string, AbortController>();
@@ -268,9 +343,12 @@ export async function adoptSecurityPosture(globalPath: string): Promise<void> {
   try {
     const { readFile } = await import("node:fs/promises");
     const raw = JSON.parse(await readFile(globalPath, "utf8")) as Record<string, unknown>;
-    const profileId =
-      typeof raw.profileId === "string" ? raw.profileId : coreSettings.DEFAULT_PROFILE_ID;
-    const profile = coreSettings.getProfile(profileId)?.settings;
+    // Same rule as loadEffective: an implicit profile may tighten, never widen.
+    const { profile } = coreSettings.resolveProfileLayer(raw, {
+      defaults: coreSettings.DEFAULT_SETTINGS,
+      layer: coreSettings.layerSettings,
+      sanitize: coreSettings.sanitizeWorkspaceLayer,
+    });
     setSecurityPosture(
       coreSettings.layerSettings(
         coreSettings.DEFAULT_SETTINGS,
@@ -341,8 +419,19 @@ export async function runAiStream(
    *
    * A test that exercises a 503 would otherwise wait out two real backoff delays, so the
    * suite pays a second per retry test — and a slow suite is a suite people stop running.
+   *
+   * `idleWatchdogNow`/`idleWatchdogSetTimeout`/`idleWatchdogClearTimeout` are the SAME
+   * test-only clock-injection seam `toolTurn` (CLI) and `stream()` (`ai/client.ts`) already
+   * expose — this file had none, so its idle-timeout/pause path had zero test coverage: a real
+   * `MIN_IDLE_TIMEOUT_MS` floor (30s) made it too slow to exercise honestly.
    */
-  retryOpts: { sleep?: (ms: number) => Promise<void>; retries?: number } = {},
+  retryOpts: {
+    sleep?: (ms: number) => Promise<void>;
+    retries?: number;
+    idleWatchdogNow?: () => number;
+    idleWatchdogSetTimeout?: (cb: () => void, ms: number) => ReturnType<typeof setTimeout>;
+    idleWatchdogClearTimeout?: (handle: ReturnType<typeof setTimeout>) => void;
+  } = {},
 ): Promise<AiStreamResult> {
   // §7.5 ENFORCEMENT: refuse a cloud endpoint before anything leaves the machine.
   //
@@ -419,6 +508,10 @@ export async function runAiStream(
    * model being broken. `ai/wire.ts` owns those differences, including tool calling.
    */
   const wire = ai.selectWire(ai.runtimeFromBaseUrl(req.endpoint.baseUrl, locality));
+  // Whether this request actually CARRIES tools. A tools-shaped rejection can only be read as
+  // one if we sent tools in the first place — otherwise a provider that happens to say the word
+  // for an unrelated reason would demote a perfectly capable endpoint.
+  const sentTools = toWireTools(req.tools).length > 0;
   let body: Record<string, unknown> = {
     ...wire.body(
       applyEffortToMessages(
@@ -439,7 +532,7 @@ export async function runAiStream(
         // mislabelled endpoint lost its usage counters and sent Ollama's `keep_alive` to a
         // cloud provider that answers a non-standard field with a 400. Same fact, one source.
         includeUsage: locality === "cloud",
-        ...(toWireTools(req.tools).length > 0 ? { tools: toWireTools(req.tools) } : {}),
+        ...(sentTools ? { tools: toWireTools(req.tools) } : {}),
       },
     ),
     // Ollama extension, ignored elsewhere: keep the model resident so a multi-round agent
@@ -459,13 +552,22 @@ export async function runAiStream(
   // last, so an effort constraint is not undone by a field written above it.
   body = applyEffort(body, effort);
 
+  // (D) advisory only — see idle-watchdog.ts's header on why this doesn't block the request.
+  const orphanRemainingMs = orphanGraceRemainingMs(req.endpoint.id);
+  if (orphanRemainingMs > 0) {
+    emit(sender, {
+      runId: req.runId,
+      kind: "status",
+      text: `⚠ ${req.endpoint.id} may still be finishing a generation from an earlier paused turn — this request can queue behind it for up to ${Math.ceil(orphanRemainingMs / 1000)}s.`,
+    });
+  }
+
   /**
-   * The abort controller and the hard deadline, RE-ARMED per attempt.
+   * The abort controller and the idle watchdog, RE-ARMED per attempt.
    *
    * A controller is single-use and this one is also the cancel handle registered in
-   * `inFlight`, so a retry has to replace both — otherwise attempt 2 aborts before it starts,
-   * three attempts share one 180-second budget, and `ai:cancel` stops aborting the request
-   * that is actually running.
+   * `inFlight`, so a retry has to replace it — otherwise attempt 2 aborts before it starts and
+   * `ai:cancel` stops aborting the request that is actually running.
    */
   /**
    * Refuse an impossible request here, with a sentence, rather than paying for a 400.
@@ -477,26 +579,84 @@ export async function runAiStream(
     estimatedPromptTokens: estimateTextTokens(req.messages.map((m) => m.content)),
     contextWindow: req.endpoint.contextWindow ?? 0,
   });
+  // Hoisted to the TOP of every return path (not just the eventual success one): the renderer's
+  // Model Health page can only ever learn about a breaker trip if a snapshot rides back on the
+  // SAME turn that tripped it — a turn that fails never reaching this point left the page
+  // permanently showing "closed" for an endpoint that was failing every single call.
+  const breaker = endpointBreaker(req.endpoint.id);
   if (!pre.ok) {
-    return { ok: false, error: pre.reason ?? "the request does not fit", text: "", toolCalls: [] };
+    return {
+      ok: false,
+      error: pre.reason ?? "the request does not fit",
+      text: "",
+      toolCalls: [],
+      breaker: breaker.snapshot(),
+    };
   }
 
   let ac = new AbortController();
-  inFlight.set(req.runId, ac);
-  let hardTimer: ReturnType<typeof setTimeout> = setTimeout(() => ac.abort(), HARD_TIMEOUT_MS);
+  /**
+   * STABLE across every retry attempt (never reassigned) — this is what `ai:cancel` and the
+   * idle watchdog actually act on, and what's threaded into `fetchModelWithRetry` below as
+   * `userSignal` so `retry()`'s own abort checks (before each attempt, and right after a
+   * failed one, `resilience/retry.ts:80,86`) see it regardless of whether a fetch is live or
+   * the loop is in its backoff SLEEP between attempts. Before this, `inFlight` held whichever
+   * per-attempt `ac` `armAttempt()` had most recently minted — during a sleep that was the
+   * ALREADY-DEAD controller from the attempt that just failed, so a cancel or idle-fire
+   * landing in that window aborted a controller nothing was listening to any more, and the
+   * next attempt fired anyway, unaware.
+   */
+  const outerAc = new AbortController();
+  inFlight.set(req.runId, outerAc);
+  // propagate immediately to whichever per-attempt controller is CURRENTLY live, so an active
+  // fetch is torn down right away rather than only ever stopping the NEXT attempt.
+  outerAc.signal.addEventListener("abort", () => ac.abort(), { once: true });
+  // set when THIS watchdog (not `ai:cancel`) ends the turn — a PAUSE, never a discard.
+  const watchdog = new IdleWatchdog({
+    idleTimeoutMs: req.idleTimeoutMs,
+    onIdle: () => outerAc.abort(),
+    ...(retryOpts.idleWatchdogNow ? { now: retryOpts.idleWatchdogNow } : {}),
+    ...(retryOpts.idleWatchdogSetTimeout ? { setTimeoutFn: retryOpts.idleWatchdogSetTimeout } : {}),
+    ...(retryOpts.idleWatchdogClearTimeout
+      ? { clearTimeoutFn: retryOpts.idleWatchdogClearTimeout }
+      : {}),
+  });
+  watchdog.arm();
   const armAttempt = (): AbortSignal => {
-    clearTimeout(hardTimer);
     ac = new AbortController();
-    inFlight.set(req.runId, ac); // the cancel handle must point at the LIVE attempt
-    hardTimer = setTimeout(() => ac.abort(), HARD_TIMEOUT_MS);
+    // a cancel/idle-fire that landed during the backoff sleep (before this attempt even
+    // started) must still stop it from firing its own fetch.
+    if (outerAc.signal.aborted) ac.abort();
     return ac.signal;
   };
 
   const requestAt = Date.now();
+  // hoisted (not `const` at its point of assignment below) so a `paused` return from the
+  // `catch` block — which can fire either before or after it's set — can always report it.
+  let firstByteAt: number | undefined;
   let firstTokenAt: number | undefined;
   let text = "";
   let usage: AiStreamResult["usage"];
-  const calls = new Map<number, AiToolCall>();
+  const calls = newToolCallAccumulator();
+  /**
+   * Splits inline `<think>…</think>` out of the content stream.
+   *
+   * R1-style models put their thinking in ordinary content rather than in a `reasoning` field,
+   * and a server that does not split it hands it straight through — so on those models the
+   * deliberation arrived in the pane as the answer. The tag comes from the capability table
+   * (`ai/effort/rules.ts`), resolved from the endpoint NAME here: `AiStreamRequest.endpoint`
+   * carries no probe data, and every rule that names a `reasoningTag` matches on the model id
+   * anyway (deepseek-r1, qwq, phi-4-reasoning, exaone-deep, qwen3).
+   *
+   * Independent of `req.effort`: these models leak the tag whether or not a tier was set.
+   */
+  const reasoningSplitter = ai.createReasoningTagSplitter(
+    ai.resolveCapability({
+      modelId: req.endpoint.model ?? req.endpoint.id,
+      runtime: ai.runtimeFromBaseUrl(req.endpoint.baseUrl, localityOfUrl(req.endpoint.baseUrl)),
+      locality: localityOfUrl(req.endpoint.baseUrl),
+    }).cap.reasoningTag,
+  );
   /** a provider failure reported mid-stream, after the 200 — see the wire's `error` event. */
   let streamError: string | undefined;
 
@@ -524,7 +684,13 @@ export async function runAiStream(
     if (locality === "cloud") {
       const auth = await resolveCloudAuth(req.endpoint.baseUrl);
       if (!auth.ok) {
-        return { ok: false, error: auth.reason, text: "", toolCalls: [] };
+        return {
+          ok: false,
+          error: auth.reason,
+          text: "",
+          toolCalls: [],
+          breaker: breaker.snapshot(),
+        };
       }
       // The FORMAT decides the credential's shape: a bearer for OpenAI, `x-api-key` plus the
       // mandatory `anthropic-version` for Anthropic, `x-goog-api-key` for Gemini. A bearer
@@ -532,9 +698,17 @@ export async function runAiStream(
       if (auth.key) authHeader = wire.headers(auth.key);
     }
 
+    // `breaker` (hoisted above, before `pre.ok`) rides back on the response — main is the only
+    // process that actually holds this breaker instance, and the renderer folds its snapshot
+    // into this endpoint's model-health record.
     let res: Awaited<ReturnType<typeof doFetch>>;
     try {
-      res = await fetchModelWithRetry({
+      // Explicit type argument: `doFetch as never` below (an existing cast, needed because the
+      // injected fetch-like seam isn't exactly `typeof fetch`) means `R` can no longer be
+      // inferred from `opts.doFetch` — it used to be inferred instead from the CONTEXTUAL type
+      // of `res = await fetchModelWithRetry(...)`, which this `pending`-then-`raceTicks`
+      // refactor no longer assigns directly.
+      const pending = fetchModelWithRetry<Awaited<ReturnType<typeof doFetch>>>({
         endpointId: req.endpoint.id,
         url: wire.url(req.endpoint.baseUrl, model),
         init: {
@@ -548,33 +722,111 @@ export async function runAiStream(
         },
         doFetch: doFetch as never,
         signalFor: armAttempt,
+        // The STABLE controller — checked by `retry()` before each attempt AND right after a
+        // failed one, which is what actually closes the backoff-sleep gap (see `outerAc`'s doc
+        // comment above).
+        userSignal: outerAc.signal,
         // Fail fast on a dead endpoint instead of paying the full retry schedule on every
         // subsequent round — see `endpointBreaker`.
-        breaker: endpointBreaker(req.endpoint.id),
+        breaker,
         ...(retryOpts.sleep ? { sleep: retryOpts.sleep } : {}),
         ...(retryOpts.retries !== undefined ? { retries: retryOpts.retries } : {}),
-        onRetry: (info) =>
+        onRetry: (info) => {
+          watchdog.touch();
           emit(sender, {
             runId: req.runId,
             kind: "status",
             text: `${info.reason} — retrying in ${Math.round(info.delayMs / 1000)}s`,
-          }),
+          });
+        },
       });
+      const ticker = raceTicks(pending, WATCHDOG_FIRST_TICK_MS, () => {
+        const s = Math.round((Date.now() - requestAt) / 1000);
+        return `⏳ still waiting for ${model} to start responding… (${s}s — a large local model can take 30–90s to start)`;
+      });
+      let step = await ticker.next();
+      while (!step.done) {
+        emit(sender, { runId: req.runId, kind: "status", text: step.value });
+        step = await ticker.next();
+      }
+      res = step.value;
     } catch (err) {
+      // An abort here (the idle watchdog firing before the first byte ever arrived — the
+      // reported "~22-minute silent stall on a cold load" scenario, or a plain `ai:cancel`)
+      // must reach the OUTER catch's `ac.signal.aborted && watchdog.didFire()` handling below,
+      // not be swallowed here as a hard failure — this `return` used to do exactly that,
+      // reporting a graceful pause/cancel as `{ok:false, error:"...cancelled"}` and defeating
+      // the whole point of the idle-watchdog for precisely its most likely firing phase.
+      if (ac.signal.aborted) throw err;
+      /**
+       * Was it refused BECAUSE it carried tools? Only this side can answer — the status and
+       * the body both live here and neither survives the trip to the renderer as a string.
+       * Reported, never acted on here: main does not choose transports. The renderer folds it
+       * into its capability state and retries the SAME turn in the text protocol, exactly as
+       * the agentic CLI has done since that protocol existed.
+       */
+      const toolsRejected =
+        sentTools && err instanceof AiHttpError && looksLikeToolsRejection(err.status, err.detail);
       return {
         ok: false,
         error: `AI endpoint ${req.endpoint.id}: ${describeAiFailure(err)}`,
         text,
         toolCalls: [],
+        ...(toolsRejected ? { toolsRejected: true } : {}),
+        breaker: breaker.snapshot(),
       };
     }
-    const firstByteAt = Date.now();
+    firstByteAt = Date.now();
     if (!res.body) {
       return {
         ok: false,
         error: `AI endpoint ${req.endpoint.id}: empty body`,
         text,
         toolCalls: [],
+        breaker: breaker.snapshot(),
+      };
+    }
+
+    /**
+     * A 200 that is NOT an SSE stream is still an answer.
+     *
+     * Plenty of OpenAI-compatible servers, proxies and gateways ignore `stream: true` and reply
+     * with an ordinary JSON completion. The reader below looks only for `data:` lines, finds
+     * none, and the turn ends with no text, no usage and no error — a completely silent reply,
+     * indistinguishable to the user from the model declining. Core's shared client was fixed the
+     * same way; this transport is the desktop's own copy and had the identical hole.
+     */
+    const contentType = res.headers?.get?.("content-type") ?? "";
+    if (contentType && !/text\/event-stream/i.test(contentType)) {
+      const whole = await res.text();
+      const ev = wire.parseWhole(whole);
+      if (ev.error !== undefined) {
+        return {
+          ok: false,
+          error: `AI endpoint ${req.endpoint.id}: ${ev.error}`,
+          text,
+          toolCalls: [],
+          breaker: breaker.snapshot(),
+        };
+      }
+      if (ev.usage) usage = ai.mergeWireUsage(usage, ev.usage);
+      if (ev.delta) {
+        text += ev.delta;
+        emit(sender, { runId: req.runId, kind: "text", text: ev.delta });
+        return {
+          ok: true,
+          text,
+          toolCalls: [],
+          ...(usage ? { usage } : {}),
+          breaker: breaker.snapshot(),
+        };
+      }
+      return {
+        ok: false,
+        error: `AI endpoint ${req.endpoint.id} answered 200 with ${contentType || "an unknown content type"} and no readable content`,
+        text,
+        toolCalls: [],
+        breaker: breaker.snapshot(),
       };
     }
 
@@ -588,29 +840,26 @@ export async function runAiStream(
     let pendingRead = reader.read();
     try {
       while (!done && !ac.signal.aborted) {
-        let timer: ReturnType<typeof setTimeout> | undefined;
-        const tick = new Promise<"TICK">((r) => {
-          timer = setTimeout(
-            () => r("TICK"),
-            firstByte ? STREAM_IDLE_TICK_MS : FIRST_TOKEN_TICK_MS,
-          );
-        });
-        const raced = await Promise.race([pendingRead, tick]);
-        if (timer) clearTimeout(timer);
-        if (raced === "TICK") {
-          const s = Math.round((Date.now() - requestAt) / 1000);
-          emit(sender, {
-            runId: req.runId,
-            kind: "status",
-            text: firstByte
+        const ticker = raceTicks(
+          pendingRead,
+          firstByte ? WATCHDOG_STREAM_TICK_MS : WATCHDOG_FIRST_TICK_MS,
+          () => {
+            const s = Math.round((Date.now() - requestAt) / 1000);
+            return firstByte
               ? `▼ ${model} still generating… (${s}s)`
-              : `⏳ waiting for ${model} — no output yet (${s}s). A large local model can take 30–90s to start.`,
-          });
-          continue; // pendingRead is STILL pending — re-race it
+              : `⏳ waiting for ${model} — no output yet (${s}s). A large local model can take 30–90s to start.`;
+          },
+        );
+        let tickStep = await ticker.next();
+        while (!tickStep.done) {
+          emit(sender, { runId: req.runId, kind: "status", text: tickStep.value });
+          tickStep = await ticker.next();
         }
-        const { value, done: streamDone } = raced;
+        const { value, done: streamDone } = tickStep.value;
         if (streamDone) break;
+        watchdog.touch();
         firstByte = true;
+        clearPossibleOrphan(req.endpoint.id);
         buf += decoder.decode(value, { stream: true });
         const { payloads, rest } = parseSseChunk(buf);
         buf = rest;
@@ -630,33 +879,47 @@ export async function runAiStream(
             done = true;
             break;
           }
-          if (ev.usage) usage = ev.usage;
+          if (ev.usage) usage = ai.mergeWireUsage(usage, ev.usage);
           const thinking = reasoningFrom(payload);
           if (thinking) emit(sender, { runId: req.runId, kind: "reasoning", text: thinking });
           if (ev.delta) {
             // the FIRST content delta is where generation actually starts; everything
             // before it is load, however the runner spent it.
             firstTokenAt ??= Date.now();
-            text += ev.delta;
-            emit(sender, { runId: req.runId, kind: "text", text: ev.delta });
+            const split = reasoningSplitter.push(ev.delta);
+            if (split.reasoning) {
+              emit(sender, { runId: req.runId, kind: "reasoning", text: split.reasoning });
+            }
+            if (split.text) {
+              // `text` is the AUTHORITATIVE answer the invoke returns, so the thinking has to
+              // be kept out of it here and not merely hidden in the presentational feed.
+              text += split.text;
+              emit(sender, { runId: req.runId, kind: "text", text: split.text });
+            }
           }
-          if (ev.toolCall) {
-            const idx = ev.toolCall.index;
-            const acc = calls.get(idx) ?? { id: "", name: "", arguments: "" };
-            if (ev.toolCall.id) acc.id = ev.toolCall.id;
-            if (ev.toolCall.name) acc.name = ev.toolCall.name;
-            if (ev.toolCall.argsFragment) acc.arguments += ev.toolCall.argsFragment;
-            calls.set(idx, acc);
+          // EVERY call in the frame — a provider may batch a turn's parallel calls into one,
+          // and reading only `ev.toolCall` executed the first and silently dropped the rest.
+          for (const tc of ev.toolCalls ?? (ev.toolCall ? [ev.toolCall] : [])) {
+            accumulateCall(calls, tc);
           }
         }
         if (!done) pendingRead = reader.read();
+      }
+      // An unterminated `<think>` flushes as REASONING, never into `text`: a model cut off
+      // mid-thought was still thinking.
+      const tail = reasoningSplitter.end();
+      if (tail.reasoning)
+        emit(sender, { runId: req.runId, kind: "reasoning", text: tail.reasoning });
+      if (tail.text) {
+        text += tail.text;
+        emit(sender, { runId: req.runId, kind: "text", text: tail.text });
       }
     } finally {
       await reader.cancel().catch(() => {});
     }
 
     if (streamError) {
-      return { ok: false, error: streamError, text, toolCalls: [] };
+      return { ok: false, error: streamError, text, toolCalls: [], breaker: breaker.snapshot() };
     }
     /**
      * Persist what this call cost, so the NEXT one can be gated on it.
@@ -677,10 +940,7 @@ export async function runAiStream(
     return {
       ok: true,
       text,
-      toolCalls: [...calls.entries()]
-        .sort((a, b) => a[0] - b[0])
-        .map(([idx, v]) => ({ ...v, id: v.id || `call_${idx}` }))
-        .filter((t) => t.name.length > 0),
+      toolCalls: harvestCalls(calls),
       ...(usage ? { usage } : {}),
       timing: {
         requestAt,
@@ -688,14 +948,51 @@ export async function runAiStream(
         ...(firstTokenAt !== undefined ? { firstTokenAt } : {}),
         lastByteAt: Date.now(),
       },
+      breaker: breaker.snapshot(),
     };
   } catch (e) {
-    // An abort is a USER action (stop / re-prompt) or the hard timeout, not a failure to
+    // An abort is a USER action (stop / re-prompt) or our own idle watchdog, not a failure to
     // report as an error string the pane would paint red.
-    if (ac.signal.aborted) return { ok: true, text, toolCalls: [] };
-    return { ok: false, error: e instanceof Error ? e.message : String(e), text, toolCalls: [] };
+    if (ac.signal.aborted) {
+      // Was it OUR idle watchdog, or `ai:cancel`/a superseded run? Only the FORMER is `paused`
+      // — the latter stays the existing "quiet, ok:true" shape.
+      if (watchdog.didFire()) {
+        markPossibleOrphan(req.endpoint.id); // (D)
+        return {
+          ok: true,
+          paused: true,
+          text,
+          /**
+           * NOT `[]`.
+           *
+           * `text` was preserved here from the start and `toolCalls` was hardcoded empty beside
+           * it, so a turn that had already streamed a COMPLETE native tool call reported the
+           * prose and silently dropped the call — while the pause line told the user no work
+           * was lost. `completeOnly` is the safety half: a stream cut mid-arguments leaves
+           * unparseable JSON, and handing that on would parse to `{}` and run the tool with no
+           * arguments at all, which is worse than dropping it.
+           */
+          toolCalls: harvestCalls(calls, { completeOnly: true }),
+          timing: {
+            requestAt,
+            ...(firstByteAt !== undefined ? { firstByteAt } : {}),
+            ...(firstTokenAt !== undefined ? { firstTokenAt } : {}),
+            lastByteAt: Date.now(),
+          },
+          breaker: breaker.snapshot(),
+        };
+      }
+      return { ok: true, text, toolCalls: [], breaker: breaker.snapshot() };
+    }
+    return {
+      ok: false,
+      error: e instanceof Error ? e.message : String(e),
+      text,
+      toolCalls: [],
+      breaker: breaker.snapshot(),
+    };
   } finally {
-    clearTimeout(hardTimer);
+    watchdog.dispose();
     inFlight.delete(req.runId);
   }
 }
@@ -738,7 +1035,95 @@ export async function probeServedModels(
   }
 }
 
-/** Register `ai:stream` / `ai:cancel` / `ai:probeModels` on the caller's `ipcMain`. */
+/**
+ * Measure ONE local model — its real context window AND the runner's capability array.
+ *
+ * Thin wrapper over core's `probeContextWindow`, which the CLI hosts have used since it
+ * existed; Studio had no path to it at all, so every desktop endpoint ran on the 8192 floor and
+ * the effort chip had no capability data to resolve against. See `AiProbeEndpointResult`.
+ *
+ * `doFetch` is injectable for the same reason `probeServedModels`'s is: the parse/fail-soft
+ * logic must be testable without Electron.
+ */
+/**
+ * Successful probes, keyed `baseUrl\u0000model`.
+ *
+ * FOUR components call `useActiveEndpoint` (AgentPane, two EditorPane surfaces, DatabasePanel)
+ * and each keeps its own hook state, so every model switch fired four identical `/api/show`
+ * POSTs at the runner. The CLI never had this problem because its probe owns a cache
+ * (`ai/endpoint-probe.ts`); main had none, so the cache belongs here — at the one place all
+ * four requests funnel through.
+ *
+ * FAILURES ARE NOT CACHED, deliberately and for the same reason core does not cache them: a
+ * runner that was still starting up when the window opened has to be re-askable.
+ */
+const probeCache = new Map<string, { result: AiProbeEndpointResult; atMs: number }>();
+
+/**
+ * Probes currently in flight, same key.
+ *
+ * The cache alone is not enough, and the case it misses is the ONLY one that actually happens:
+ * the four panes mount together, so all four calls arrive before any of them has resolved, all
+ * four miss, and all four go to the runner. De-duplicating in flight is what turns four
+ * requests into one — the cache handles the later switches back.
+ */
+const probeInFlight = new Map<string, Promise<AiProbeEndpointResult>>();
+
+/** Test seam: how many live probes have actually gone out. */
+export function probeRequestCount(): number {
+  return probeCalls;
+}
+let probeCalls = 0;
+
+/** Drop the cache — for tests, and for a future "the user re-pulled a model" signal. */
+export function resetProbeCache(): void {
+  probeCache.clear();
+  probeInFlight.clear();
+  probeCalls = 0;
+}
+
+export async function probeEndpointCapabilities(
+  baseUrl: string,
+  model: string,
+  doFetch: typeof fetch = fetch,
+): Promise<AiProbeEndpointResult> {
+  const key = `${baseUrl.replace(/\/+$/, "")}\u0000${model}`;
+  const hit = probeCache.get(key);
+  if (hit && Date.now() - hit.atMs < PROBE_CACHE_TTL_MS) return hit.result;
+  const pending = probeInFlight.get(key);
+  if (pending) return pending;
+  const run = probeOnce(key, baseUrl, model, doFetch).finally(() => probeInFlight.delete(key));
+  probeInFlight.set(key, run);
+  return run;
+}
+
+async function probeOnce(
+  key: string,
+  baseUrl: string,
+  model: string,
+  doFetch: typeof fetch,
+): Promise<AiProbeEndpointResult> {
+  probeCalls += 1;
+  try {
+    const r = await probeContextWindow(baseUrl, model, doFetch as never);
+    const result: AiProbeEndpointResult = {
+      ok: true,
+      contextWindow: r.contextWindow,
+      source: r.source,
+      ...(r.capabilities ? { capabilities: [...r.capabilities] } : {}),
+      ...(r.revision ? { revision: r.revision } : {}),
+    };
+    if (r.source !== "default") probeCache.set(key, { result, atMs: Date.now() });
+    return result;
+  } catch {
+    // `probeContextWindow` swallows its own errors and returns `source:"default"`; this is the
+    // belt-and-braces path for a `fetch` that rejects before it ever gets there.
+    return { ok: true, contextWindow: 0, source: "default" };
+  }
+}
+
+/** Register `ai:stream` / `ai:cancel` / `ai:probeModels` / `ai:probeEndpoint` on the caller's
+ *  `ipcMain`. */
 export function registerAiIpc(ipc: IpcMain): void {
   ipc.handle(IPC.aiStream, async (evt: unknown, arg: unknown): Promise<AiStreamResult> => {
     const req = arg as AiStreamRequest;
@@ -765,6 +1150,44 @@ export function registerAiIpc(ipc: IpcMain): void {
         return { ok: false, models: [], error: "ai:probeModels: malformed request" };
       }
       return probeServedModels(baseUrl);
+    },
+  );
+
+  ipc.handle(
+    IPC.aiProbeEndpoint,
+    async (_evt: unknown, arg: unknown): Promise<AiProbeEndpointResult> => {
+      const req = arg as { baseUrl?: unknown; model?: unknown } | null;
+      const baseUrl = req?.baseUrl;
+      const model = req?.model;
+      if (typeof baseUrl !== "string" || baseUrl.length === 0) {
+        return {
+          ok: false,
+          contextWindow: 0,
+          source: "default",
+          error: "ai:probeEndpoint: malformed request",
+        };
+      }
+      if (typeof model !== "string" || model.length === 0) {
+        return {
+          ok: false,
+          contextWindow: 0,
+          source: "default",
+          error: "ai:probeEndpoint: malformed request",
+        };
+      }
+      // LOCAL ONLY, enforced HERE and not merely in the renderer that asked: `/api/show` is an
+      // Ollama endpoint, and firing an unknown POST at a cloud provider to satisfy curiosity is
+      // not something a privacy-first client does. Same rule core's `probeContextWindow`
+      // documents; this is the process that can actually hold the line on it (§7.5).
+      if (localityOfUrl(baseUrl) !== "local") {
+        return {
+          ok: false,
+          contextWindow: 0,
+          source: "default",
+          error: "ai:probeEndpoint: refused — probing is local-only",
+        };
+      }
+      return probeEndpointCapabilities(baseUrl, model);
     },
   );
 }

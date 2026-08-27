@@ -17,7 +17,7 @@
  */
 
 import { type ChildProcess, spawn as nodeSpawn } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, statSync } from "node:fs";
 import { connect as netConnect } from "node:net";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -33,7 +33,7 @@ import {
   utilityProcess,
 } from "electron";
 
-import { ServerSupervisor, ai } from "@prometheus/core";
+import { ServerSupervisor, ai, type settings as coreSettings } from "@prometheus/core";
 import {
   createEngineClient,
   gateFull as engineGateFull,
@@ -50,6 +50,27 @@ import {
 } from "../shared/ipc-contract.js";
 import { runTask } from "../worker/tasks.js";
 import { setHookSettings } from "./agent-hooks.js";
+
+/**
+ * A native Yes/No dialog for one-time-per-workspace hook trust (`setHookSettings`'s `confirm`).
+ * Attached to whichever window currently has focus — falls back to a parentless dialog if none
+ * does (e.g. the confirm fires from a background settings republish), mirroring `folderOpen`'s
+ * own `win ? dialog.showMessageBox(win, opts) : dialog.showMessageBox(opts)` pattern.
+ */
+async function confirmHookTrust(prompt: string): Promise<boolean> {
+  const win = BrowserWindow.getFocusedWindow() ?? undefined;
+  const opts = {
+    type: "question" as const,
+    title: "New project hooks",
+    message: "This project wants to run new lifecycle hooks",
+    detail: prompt,
+    buttons: ["Trust and run", "Don't run"],
+    defaultId: 1,
+    cancelId: 1,
+  };
+  const res = await (win ? dialog.showMessageBox(win, opts) : dialog.showMessageBox(opts));
+  return res.response === 0;
+}
 import {
   adoptSecurityPosture,
   freeLocalModels,
@@ -58,7 +79,9 @@ import {
 } from "./ai-ipc.js";
 import { destroyAgentBrowser } from "./browser-tool-host.js";
 import { initBudgetGate, setBudgetSettings } from "./budget-gate.js";
+import { registerBudgetIpcHandlers } from "./budget-ipc.js";
 import { registerCatalogIpcHandlers } from "./catalog-ipc.js";
+import { registerCodebaseOverviewIpcHandlers } from "./codebase-overview-ipc.js";
 import { registerEnvIpcHandlers } from "./env-ipc.js";
 import { registerExtIpcHandlers } from "./ext-ipc.js";
 import { type RunWorkerTask, registerIdeIpcHandlers } from "./ide-ipc.js";
@@ -70,11 +93,19 @@ import {
   realProbe,
 } from "./ide/dap-adapter-install.js";
 import { type DapChild, DapHost, type DapSocket } from "./ide/dap-host.js";
+import { classifyNavigation, isOwnRendererUrl } from "./ide/drop-target.js";
 import { FsWatchHost } from "./ide/fs-watch.js";
 import { GitHost } from "./ide/git-host.js";
 import { LocalHistoryManager } from "./ide/history-store.js";
 import { type LspChild, LspHost } from "./ide/lsp-host.js";
-import { initGrantedRoots } from "./ide/path-guard.js";
+import {
+  approveOutsideWorkingSet,
+  assertNotSensitivePath,
+  getDeclaredRoots,
+  getWorkingSetRoots,
+  grantWorkingSetRoot,
+  initGrantedRoots,
+} from "./ide/path-guard.js";
 import { type PtyBackend, PtyHost, nodePtyBackend } from "./ide/pty-host.js";
 import { RunHost } from "./ide/run-host.js";
 import type { TestRunSpawn } from "./ide/test-run-host.js";
@@ -82,10 +113,15 @@ import { registerIpcHandlers } from "./ipc.js";
 import { registerMcpIpcHandlers } from "./mcp-ipc.js";
 import { migrateMcpStore, sharedMcpStorePath } from "./mcp-store-path.js";
 import { registerMetadataIpcHandlers } from "./metadata-ipc.js";
+import { registerModelHealthIpcHandlers } from "./model-health-ipc.js";
+import { migrateModelHealthStore, sharedModelHealthStorePath } from "./model-health-store-path.js";
 import { registerModelIpcHandlers } from "./model-ipc.js";
 import { registerPathCompletionIpcHandlers } from "./path-completion-ipc.js";
+import { registerPersonaIpcHandlers } from "./persona-ipc.js";
 import { registerRepoIpcHandlers } from "./repo-ipc.js";
 import { repairPath } from "./resolve-path.js";
+import { registerScheduleIpcHandlers } from "./schedule-ipc.js";
+import { migrateScheduleStore, sharedScheduleStorePath } from "./schedule-store-path.js";
 import { registerSecurityIpcHandlers } from "./security-ipc.js";
 import { ServeSupervisor } from "./serve-supervisor.js";
 import { registerSettingsIpcHandlers } from "./settings-ipc.js";
@@ -311,6 +347,16 @@ let disposeSettingsSyncIpc: (() => void) | null = null;
 let disposeSettingsIpc: (() => void) | null = null;
 /** Removes the registered `pathCompletion:*` ipcMain handlers (the "@"-path feature). */
 let disposePathCompletionIpc: (() => void) | null = null;
+/** Removes the registered `modelHealth:*` ipcMain handlers. */
+let disposeModelHealthIpc: (() => void) | null = null;
+/** Removes the registered `schedule:*` ipcMain handlers. */
+let disposeScheduleIpc: (() => void) | null = null;
+/** Removes the registered `persona:*` ipcMain handlers. */
+let disposePersonaIpc: (() => void) | null = null;
+/** Removes the registered `budget:status` ipcMain handler. */
+let disposeBudgetIpc: (() => void) | null = null;
+/** Removes the registered `codebase:overview` ipcMain handler. */
+let disposeCodebaseOverviewIpc: (() => void) | null = null;
 let disposeExtIpc: (() => void) | null = null;
 /** Removes the registered `system:telemetry` ipcMain handler (resource telemetry + guard). */
 let disposeTelemetryIpc: (() => void) | null = null;
@@ -483,6 +529,11 @@ const DEV_CSP =
  * CSP, the deny-all `setWindowOpenHandler` (external links go to the OS browser, scheme-gated),
  * and the will-navigate lock (no drive-by navigation off our own renderer).
  */
+/** Where the packaged renderer's own page lives — the one `file://` that is NOT a drop. */
+function rendererEntryPath(): string {
+  return join(__dirname, "../renderer/index.html");
+}
+
 function applyWindowHardening(win: BrowserWindow): void {
   const csp = RENDERER_DEV_URL ? DEV_CSP : PROD_CSP;
   win.webContents.session.webRequest.onHeadersReceived((details, callback) => {
@@ -496,8 +547,38 @@ function applyWindowHardening(win: BrowserWindow): void {
   });
   win.webContents.on("will-navigate", (event, url) => {
     const isDev = !!RENDERER_DEV_URL && url.startsWith(RENDERER_DEV_URL);
-    const isLocalFile = url.startsWith("file://");
-    if (!isDev && !isLocalFile) event.preventDefault();
+    if (isDev || isOwnRendererUrl(url, rendererEntryPath())) return;
+    /**
+     * ANY other `file://` navigation is a DROP (or a drive-by), never in-app routing.
+     *
+     * The old test was `url.startsWith("file://")`, which allowed every local file — and in a
+     * packaged build the renderer itself is a `file://` URL, so the check could not tell the app's
+     * own page from a file the user had just dragged onto the window. Dropping anything therefore
+     * NAVIGATED THE APP AWAY to that file: the whole UI, and the session with it, replaced by the
+     * dropped document.
+     *
+     * Preventing it is the fix for that. Treating it as a drop is the feature: this event is
+     * Chromium's own report of an OS-level drag-and-drop, so the path is one MAIN observed rather
+     * than one the renderer asked for — the only kind that can honestly earn a grant.
+     */
+    event.preventDefault();
+    const decision = classifyNavigation(url, rendererEntryPath(), statSync);
+    if (decision.kind === "folder") {
+      // The drag-and-drop equivalent of File ▸ Open Folder — same gesture, same grant.
+      grantWorkingSetRoot(decision.path);
+      broadcastIde({ channel: "shell.dropped", path: decision.path, kind: "folder" });
+      return;
+    }
+    if (decision.kind === "file") {
+      // A dropped credential is still a credential: the guard decides, not the gesture.
+      try {
+        assertNotSensitivePath(decision.path);
+      } catch {
+        return;
+      }
+      approveOutsideWorkingSet(decision.path);
+      broadcastIde({ channel: "shell.dropped", path: decision.path, kind: "file" });
+    }
   });
 }
 
@@ -650,6 +731,23 @@ const floatingTerminalController = {
  * scan envelope, log SMOKE_OK, and quit(0). Lets CI boot-test the whole 4-process
  * wiring (engine-bridge + core + sidecar/worker hosts) without a display.
  */
+/**
+ * The workspace folder that is OPEN, for read-only features.
+ *
+ * "Which folder is open" and "which roots may be written to" are different questions.
+ * `getWorkingSetRoots()` answers the second: it is the approved WRITE scope, and it is empty
+ * whenever the open folder was never granted (opened from recents, drag-drop, a worktree
+ * switch). Keying read-only features to it made "Meet your codebase" answer
+ * "no workspace folder is open" with a folder plainly open on screen, and made persona discovery
+ * silently find nothing. Reproduced through the real `codebase:overview` handler.
+ *
+ * Prefers the granted root when there is one (identical behaviour to before in the ordinary
+ * picker case), and falls back to what the renderer declared. No write guard consults this.
+ */
+function openFolderRoot(): string | undefined {
+  return getWorkingSetRoots()[0] ?? getDeclaredRoots()[0];
+}
+
 async function runHeadlessSmoke(): Promise<void> {
   disposeIpc = registerIpcHandlers({
     supervisor,
@@ -723,6 +821,41 @@ async function runHeadlessSmoke(): Promise<void> {
   // "@"-path fuzzy completion (shared logic with the CLI) — list one directory + rank it,
   // and the opt-in per-workspace frecency memory ("Tools ▸ Path Completion" setting).
   disposePathCompletionIpc = registerPathCompletionIpcHandlers();
+  // Model health (per-endpoint transport/breaker/context-window state) — one global file,
+  // never workspace-scoped, SHARED with the CLI's own store (model-health-store-path.ts's
+  // header: these used to be two different, never-synced files).
+  const adoptedModelHealth = migrateModelHealthStore(app.getPath("userData"));
+  if (adoptedModelHealth > 0) {
+    console.info(
+      `[model-health] adopted ${adoptedModelHealth} endpoint record(s) from the old app-private store into ${sharedModelHealthStorePath()}`,
+    );
+  }
+  disposeModelHealthIpc = registerModelHealthIpcHandlers(sharedModelHealthStorePath());
+  // Scheduled/autonomous runs (cron-triggered agent turns) — one global file, never
+  // workspace-scoped, SHARED with the CLI's own store: schedule-runner.ts (the only code that
+  // ever executes a due task, via `prometheus tasks run-due`) reads this exact path, so a task
+  // created here is now something the CLI's installed cron entry can actually run
+  // (schedule-store-path.ts's header: a GUI-only task used to persist to a file nothing ever
+  // read for execution, and could never run at all).
+  const adoptedSchedules = migrateScheduleStore(app.getPath("userData"));
+  if (adoptedSchedules > 0) {
+    console.info(
+      `[schedule] adopted ${adoptedSchedules} task(s) from the old app-private store into ${sharedScheduleStorePath()}`,
+    );
+  }
+  disposeScheduleIpc = registerScheduleIpcHandlers(sharedScheduleStorePath());
+  // Persona sharing (export/import of sub-agent persona files) — the SHARED ~/.prometheus/agents
+  // catalog the CLI also reads (never an Electron userData-private file, unlike the two stores
+  // above): project-scope discovery needs to know the CURRENTLY OPEN workspace root, which can
+  // change across the app's lifetime, so this is a getter re-read fresh on every request.
+  // The OPEN folder, not the write-grant list — see `getDeclaredRoots`. Persona discovery is
+  // read-only, and keying it to the grants made it silently empty in any project opened by a
+  // route that records no grant.
+  disposePersonaIpc = registerPersonaIpcHandlers(() => openFolderRoot());
+  // Budget & spend visibility (roadmap point 4) — read-only; setting a cap reuses settings:set.
+  disposeBudgetIpc = registerBudgetIpcHandlers();
+  // "Meet your codebase" (roadmap point 6) — on-demand only, never runs until the renderer asks.
+  disposeCodebaseOverviewIpc = registerCodebaseOverviewIpcHandlers(() => openFolderRoot());
   /**
    * MCP connectors (file 09 §2), in the file the CLI also reads.
    *
@@ -750,13 +883,21 @@ async function runHeadlessSmoke(): Promise<void> {
     // The four security settings become ENFORCED here. Without this the profile a user picks
     // ("Local-only", "Security-strict") is a label: `cloudModelsEnabled` and `defaultNetwork`
     // had no consumer anywhere, so selecting a locked-down profile changed nothing at all.
-    onEffective: (effective) => {
+    onEffective: (effective, raw) => {
       setSecurityPosture(effective);
       // The budget windows ride the SAME publish as the posture, so editing a cap in settings
       // takes effect on the next turn rather than on the next app launch.
       setBudgetSettings(effective);
-      // …and the user's lifecycle hooks, so editing one takes effect on the next turn.
-      setHookSettings(effective);
+      // …and the user's lifecycle hooks, so editing one takes effect on the next turn. The RAW
+      // layers go in (never `effective`, which has already been through the array-replace
+      // merge) so a workspace-supplied hook is narrowed/scanned/confirmed exactly like the CLI.
+      void setHookSettings(raw.global as coreSettings.Settings, raw.workspace, {
+        ...(raw.workspaceRoot ? { cwd: raw.workspaceRoot } : {}),
+        confirm: confirmHookTrust,
+        onRefusal: (r) => {
+          console.warn(`[hooks] refused (${r.event}): ${r.command} — ${r.reason}`);
+        },
+      });
     },
   });
 
@@ -803,6 +944,16 @@ async function runHeadlessSmoke(): Promise<void> {
     disposeSettingsIpc = null;
     disposePathCompletionIpc?.();
     disposePathCompletionIpc = null;
+    disposeModelHealthIpc?.();
+    disposeModelHealthIpc = null;
+    disposeScheduleIpc?.();
+    disposeScheduleIpc = null;
+    disposePersonaIpc?.();
+    disposePersonaIpc = null;
+    disposeBudgetIpc?.();
+    disposeBudgetIpc = null;
+    disposeCodebaseOverviewIpc?.();
+    disposeCodebaseOverviewIpc = null;
     disposeExtIpc?.();
     disposeExtIpc = null;
     disposeTelemetryIpc?.();
@@ -965,6 +1116,39 @@ async function bootstrap(): Promise<void> {
   // "@"-path fuzzy completion (shared logic with the CLI) — list one directory + rank it,
   // and the opt-in per-workspace frecency memory ("Tools ▸ Path Completion" setting).
   disposePathCompletionIpc = registerPathCompletionIpcHandlers();
+  // Model health (per-endpoint transport/breaker/context-window state) — one global file,
+  // never workspace-scoped, SHARED with the CLI's own store (model-health-store-path.ts's
+  // header: these used to be two different, never-synced files).
+  const adoptedModelHealth = migrateModelHealthStore(app.getPath("userData"));
+  if (adoptedModelHealth > 0) {
+    console.info(
+      `[model-health] adopted ${adoptedModelHealth} endpoint record(s) from the old app-private store into ${sharedModelHealthStorePath()}`,
+    );
+  }
+  disposeModelHealthIpc = registerModelHealthIpcHandlers(sharedModelHealthStorePath());
+  // Scheduled/autonomous runs (cron-triggered agent turns) — one global file, never
+  // workspace-scoped, SHARED with the CLI's own store: schedule-runner.ts (the only code that
+  // ever executes a due task, via `prometheus tasks run-due`) reads this exact path, so a task
+  // created here is now something the CLI's installed cron entry can actually run
+  // (schedule-store-path.ts's header: a GUI-only task used to persist to a file nothing ever
+  // read for execution, and could never run at all).
+  const adoptedSchedules = migrateScheduleStore(app.getPath("userData"));
+  if (adoptedSchedules > 0) {
+    console.info(
+      `[schedule] adopted ${adoptedSchedules} task(s) from the old app-private store into ${sharedScheduleStorePath()}`,
+    );
+  }
+  disposeScheduleIpc = registerScheduleIpcHandlers(sharedScheduleStorePath());
+  // Persona sharing (export/import of sub-agent persona files) — the SHARED ~/.prometheus/agents
+  // catalog the CLI also reads (never an Electron userData-private file, unlike the two stores
+  // above): project-scope discovery needs to know the CURRENTLY OPEN workspace root, which can
+  // change across the app's lifetime, so this is a getter re-read fresh on every request.
+  // The OPEN folder, not the write-grant list — see `openFolderRoot`.
+  disposePersonaIpc = registerPersonaIpcHandlers(() => openFolderRoot());
+  // Budget & spend visibility (roadmap point 4) — read-only; setting a cap reuses settings:set.
+  disposeBudgetIpc = registerBudgetIpcHandlers();
+  // "Meet your codebase" (roadmap point 6) — on-demand only, never runs until the renderer asks.
+  disposeCodebaseOverviewIpc = registerCodebaseOverviewIpcHandlers(() => openFolderRoot());
   /**
    * MCP connectors (file 09 §2), in the file the CLI also reads.
    *
@@ -992,13 +1176,21 @@ async function bootstrap(): Promise<void> {
     // The four security settings become ENFORCED here. Without this the profile a user picks
     // ("Local-only", "Security-strict") is a label: `cloudModelsEnabled` and `defaultNetwork`
     // had no consumer anywhere, so selecting a locked-down profile changed nothing at all.
-    onEffective: (effective) => {
+    onEffective: (effective, raw) => {
       setSecurityPosture(effective);
       // The budget windows ride the SAME publish as the posture, so editing a cap in settings
       // takes effect on the next turn rather than on the next app launch.
       setBudgetSettings(effective);
-      // …and the user's lifecycle hooks, so editing one takes effect on the next turn.
-      setHookSettings(effective);
+      // …and the user's lifecycle hooks, so editing one takes effect on the next turn. The RAW
+      // layers go in (never `effective`, which has already been through the array-replace
+      // merge) so a workspace-supplied hook is narrowed/scanned/confirmed exactly like the CLI.
+      void setHookSettings(raw.global as coreSettings.Settings, raw.workspace, {
+        ...(raw.workspaceRoot ? { cwd: raw.workspaceRoot } : {}),
+        confirm: confirmHookTrust,
+        onRefusal: (r) => {
+          console.warn(`[hooks] refused (${r.event}): ${r.command} — ${r.reason}`);
+        },
+      });
     },
   });
   // Extension host (file 09 §5, APP-059): the .promext pipeline + the utility-process runner.
@@ -1134,6 +1326,16 @@ app.on("before-quit", (event) => {
       disposeSettingsIpc = null;
       disposePathCompletionIpc?.();
       disposePathCompletionIpc = null;
+      disposeModelHealthIpc?.();
+      disposeModelHealthIpc = null;
+      disposeScheduleIpc?.();
+      disposeScheduleIpc = null;
+      disposePersonaIpc?.();
+      disposePersonaIpc = null;
+      disposeBudgetIpc?.();
+      disposeBudgetIpc = null;
+      disposeCodebaseOverviewIpc?.();
+      disposeCodebaseOverviewIpc = null;
       disposeExtIpc?.();
       disposeExtIpc = null;
       disposeTelemetryIpc?.();
@@ -1167,6 +1369,16 @@ app.on("before-quit", (event) => {
     disposeSettingsIpc = null;
     disposePathCompletionIpc?.();
     disposePathCompletionIpc = null;
+    disposeModelHealthIpc?.();
+    disposeModelHealthIpc = null;
+    disposeScheduleIpc?.();
+    disposeScheduleIpc = null;
+    disposePersonaIpc?.();
+    disposePersonaIpc = null;
+    disposeBudgetIpc?.();
+    disposeBudgetIpc = null;
+    disposeCodebaseOverviewIpc?.();
+    disposeCodebaseOverviewIpc = null;
     disposeExtIpc?.();
     disposeExtIpc = null;
     disposeTelemetryIpc?.();

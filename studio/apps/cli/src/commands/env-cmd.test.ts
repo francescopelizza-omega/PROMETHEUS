@@ -25,6 +25,22 @@ function fake(reply: Record<string, unknown> = { ok: true, command: "x" }): {
 
 const ctxFor = (argv: string[]) => makeContext(parseArgs(argv));
 
+test("prometheus env <typo>: reports unknown env verb, never silently defaults to list", async () => {
+  // regression: command[1] is undefined for a TWO_WORD mismatch (parse.ts sets `unmatchedSub`
+  // instead), so a typo used to silently fall through to the "list" branch.
+  const { deps } = fake();
+  const out = await runEnvCommand(ctxFor(["env", "xyz", "myenv", "--json"]), deps);
+  assert.equal(out.exitCode, 1);
+  assert.equal((out.json as { error: string }).error, "unknown-verb");
+});
+
+test("prometheus env init: not a real verb (only `create` makes a new env) — unknown-verb, not silently accepted", async () => {
+  const { deps } = fake();
+  const out = await runEnvCommand(ctxFor(["env", "init", "myenv", "--json"]), deps);
+  assert.equal(out.exitCode, 1);
+  assert.equal((out.json as { error: string }).error, "unknown-verb");
+});
+
 test("env templates: READ runs template.list + renders the recipes", async () => {
   const { deps, calls } = fake({
     ok: true,
@@ -137,16 +153,57 @@ test("never-force: --force under the ci profile is HARD-blocked (exit 2, no spaw
   }
 });
 
-test("env create with NO name → usage error (exit 2), never a silent 0", async () => {
+test("env create with NO name → usage error (exit 1), never a silent 0", async () => {
   const { deps, calls } = fake();
   const out = await runEnvCommand(ctxFor(["env", "create"]), deps);
-  assert.equal(out.exitCode, 2);
+  assert.equal(out.exitCode, 1);
   assert.equal((out.json as { error: string }).error, "missing-argument");
   assert.deepEqual(calls, []);
 });
 
-test("env init (recognized but unhandled) → exit 2 with a verb hint", async () => {
+test("env init (recognized but unhandled) → exit 1 with a verb hint", async () => {
   const { deps } = fake();
   const out = await runEnvCommand(ctxFor(["env", "init"]), deps);
-  assert.equal(out.exitCode, 2);
+  assert.equal(out.exitCode, 1);
+});
+
+test("--dry-run outranks --yes: a preview NEVER spawns the sidecar with --confirm", async () => {
+  // regression: `--dry-run` is a declared global boolean, documented in --help and forwarded
+  // to the engine for registry-routed verbs, but `wantsExecute()` only looked at --yes/--force.
+  // `prometheus --dry-run --yes env delete <name>` really removed the environment on disk and
+  // reported `executed: true` — measured against the built binary, the venv was gone.
+  for (const verb of ["delete", "create"]) {
+    const { deps, calls } = fake();
+    const out = await runEnvCommand(
+      ctxFor(["env", verb, "probe", "--dry-run", "--yes", "--json"]),
+      deps,
+    );
+    assert.equal(
+      calls.length,
+      0,
+      `env ${verb} --dry-run spawned the sidecar: ${JSON.stringify(calls)}`,
+    );
+    assert.equal((out.json as { status?: string }).status, "preview");
+    assert.equal(out.exitCode, 0);
+  }
+});
+
+test("--dry-run outranks --force too (force must not smuggle the mutation past the preview)", async () => {
+  const { deps, calls } = fake();
+  const out = await runEnvCommand(
+    ctxFor(["env", "delete", "probe", "--dry-run", "--force", "--json"]),
+    deps,
+  );
+  assert.equal(calls.length, 0);
+  assert.equal((out.json as { status?: string }).status, "preview");
+});
+
+test("without --dry-run, --yes still executes: the preview fix does not disarm the real verb", async () => {
+  const { deps, calls } = fake();
+  await runEnvCommand(ctxFor(["env", "delete", "probe", "--yes", "--json"]), deps);
+  assert.equal(calls.length, 1);
+  assert.ok(
+    calls[0]!.argv.includes("--confirm"),
+    `expected --confirm, got ${calls[0]!.argv.join(" ")}`,
+  );
 });

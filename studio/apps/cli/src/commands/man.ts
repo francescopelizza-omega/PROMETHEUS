@@ -8,6 +8,8 @@
  */
 import { COMMAND_SPECS } from "@prometheus/core";
 
+import { completionCommands } from "./completion.js";
+
 import type { CliContext, CommandOutcome } from "../context.js";
 import { PROM_VERSION } from "./help.js";
 
@@ -40,7 +42,11 @@ const GLOBAL_OPTIONS: ReadonlyArray<[string, string]> = [
 export function manPage(opts: { version?: string; date?: string } = {}): string {
   const version = opts.version ?? PROM_VERSION;
   const date = opts.date ?? "";
-  const cmds = [...new Set(COMMAND_SPECS.map((c) => c.id))].sort();
+  // The verbs a user can TYPE, not the internal spec ids. `env-list` is the spec behind
+  // `prometheus env list`, so a man page built from spec ids documented four commands that do
+  // not exist and omitted 32 that do — the same defect the shell completion had, from the same
+  // source. `completionCommands()` is the router's own list.
+  const cmds = completionCommands();
   const lines: string[] = [
     `.TH PROMETHEUS 1 "${date}" "prometheus ${roff(version)}" "Prometheus Studio"`,
     ".SH NAME",

@@ -17,6 +17,10 @@ export {
   runSystemTool,
   isSecretPath,
   execVarsFromEnv,
+  // Shared with the other agent hosts so the untrusted-file-data frame is ONE implementation:
+  // the VS Code extension had none at all, which is exactly how a protection drifts.
+  frameFileContent,
+  FILE_CONTENT_TOOLS,
   type SystemToolDeps,
 } from "./system-tools.js";
 export {
@@ -46,6 +50,8 @@ export {
   type ExecAuditEntry,
   type ExecDecision,
 } from "./exec-gate.js";
+// The canary tripwire's audit trail (point 6b) — see `agent/canary.ts` for the mechanism itself.
+export { appendCanaryAudit, canaryAuditPath } from "./canary-audit.js";
 export { makeStreamSink, type StreamSink } from "./exec-stream.js";
 // The OS-level confinement applied to an already-approved `run_command` — macOS Seatbelt and
 // Linux bubblewrap. Read exec-sandbox.ts's header for the precise list of what each does and
@@ -74,14 +80,28 @@ export {
   type HookSpawnLike,
 } from "./hook-runner.js";
 export {
+  resolveEffectiveHooks,
+  type HookRefusal,
+  type ResolvedHooks,
+} from "./hooks-trust.js";
+export {
   createWorkingSet,
   expandHome,
+  scopedAbsolute,
   isPathAllowed,
   pathArgsOf,
   resolveDir,
   type ResolveResult,
   type WorkingSet,
 } from "./working-set.js";
+export {
+  OWN_WORKSPACE_NAME,
+  findOwnWorkspaceRoot,
+  guardCwd,
+  isInsideRepo,
+  type CwdGuardResult,
+  type PackageJsonFs,
+} from "./own-repo-guard.js";
 
 /* ── the reaper: nothing this process started outlives it ────────────────────*/
 export {
@@ -111,7 +131,13 @@ export type { Chunk, EmbedFn, ScoredChunk, SemanticSearchDeps } from "./semantic
 
 // Tier W: the file mutators, shared by both hosts (they were CLI-local, so the desktop had none).
 export type { FsMutateDeps, FsPreImage } from "./fs-mutate-host.js";
-export { deleteFileTool, mkdirTool, moveFileTool, runFsMutateTool } from "./fs-mutate-host.js";
+export {
+  deleteFileTool,
+  mkdirTool,
+  moveFileTool,
+  readTextExact,
+  runFsMutateTool,
+} from "./fs-mutate-host.js";
 
 // web_fetch / web_search through the L6 proxy — were CLI-local, so the GUI had no network.
 export type { SafeFetchLike, WebToolOptions } from "./web-tools.js";

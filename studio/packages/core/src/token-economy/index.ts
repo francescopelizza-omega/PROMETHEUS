@@ -39,3 +39,9 @@ export {
   type RepoMap,
   type WalkOptions,
 } from "./repo-map.js";
+export {
+  summarizeCodebase,
+  renderCodebaseOverview,
+  type CodebaseOverview,
+  type OverviewCount,
+} from "./codebase-overview.js";

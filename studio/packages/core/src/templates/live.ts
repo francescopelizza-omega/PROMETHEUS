@@ -95,12 +95,30 @@ export interface MacroContext {
  * A macro whose value isn't supplied is left intact (so `$DATE$` without a clock stays a
  * literal rather than becoming an empty string mid-template).
  */
+/**
+ * Escape a LITERAL value being substituted into a Monaco snippet.
+ *
+ * `$` and `\` are snippet syntax. The values below are not template authoring — they are the
+ * user's buffer text, their clipboard and a filename — so a `$` in them must stay a dollar sign.
+ * Unescaped, `$EXPR$` on a receiver like `cost$1` produced a snippet containing a real TABSTOP:
+ * the text vanished and the caret jumped there instead. `$name` (PHP), `$1` (a regex
+ * replacement), `$0` (awk) and `${arr}` are all ordinary code that a postfix expansion or a
+ * `$CLIPBOARD$` paste silently mangles.
+ *
+ * The template's OWN `$1` / `${2:default}` / `$0` are untouched — only the injected values are
+ * escaped, which is exactly the distinction that was missing.
+ */
+function escapeSnippetLiteral(value: string): string {
+  return value.replace(/\\/g, "\\\\").replace(/\$/g, "\\$");
+}
+
 export function toMonacoSnippet(body: string, ctx: MacroContext = {}): string {
+  // `$0` and `${TM_SELECTED_TEXT}` are deliberate snippet syntax — never escaped.
   const macros: Record<string, string> = { END: "$0", SELECTION: "${TM_SELECTED_TEXT}" };
-  if (ctx.receiver !== undefined) macros.EXPR = ctx.receiver;
-  if (ctx.fileName !== undefined) macros.FILE_NAME = ctx.fileName;
-  if (ctx.clipboard !== undefined) macros.CLIPBOARD = ctx.clipboard;
-  if (ctx.now !== undefined) macros.DATE = isoDate(ctx.now);
+  if (ctx.receiver !== undefined) macros.EXPR = escapeSnippetLiteral(ctx.receiver);
+  if (ctx.fileName !== undefined) macros.FILE_NAME = escapeSnippetLiteral(ctx.fileName);
+  if (ctx.clipboard !== undefined) macros.CLIPBOARD = escapeSnippetLiteral(ctx.clipboard);
+  if (ctx.now !== undefined) macros.DATE = escapeSnippetLiteral(isoDate(ctx.now));
   return expandMacros(body, macros);
 }
 

@@ -1,4 +1,5 @@
 import type { ToolOutcome } from "../../loop.js";
+import { defangFrameMarkers } from "../../protocol/frame-body.js";
 /**
  * agent/system/host/web-tools.ts — `web_fetch` and `web_search`, in ONE place.
  *
@@ -97,7 +98,7 @@ export async function webFetchTool(
   const src = (res.final_url || url).replace(/[<>"\r\n]/g, "");
   return {
     ok: true,
-    summary: `<<untrusted-web-data source="${src}">>\n${text}${note}\n<<end untrusted-web-data>>${warn}`,
+    summary: `<<untrusted-web-data source="${src}">>\n${defangFrameMarkers(`${text}${note}`)}\n<<end untrusted-web-data>>${warn}`,
     data: {
       url,
       final_url: res.final_url,

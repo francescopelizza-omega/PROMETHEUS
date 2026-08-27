@@ -32,6 +32,17 @@ import type { ToolDef } from "./tools.js";
 export interface PatchFile {
   path: string;
   hunks: EditHunk[];
+  /**
+   * How many hunks for this file were MALFORMED and thrown away by the parser.
+   *
+   * A dropped hunk applies fewer edits than the model intended while the tool still reports
+   * `ok` — and `describePatch` then reports the reduced count as though it were the whole patch.
+   * That is bad for any edit tool and worse for this one, whose entire promise is that the
+   * change is atomic: a half-applied refactor is exactly the state apply_patch exists to avoid.
+   * The single-file sibling already surfaces this (`parseHunksResult.dropped`, which the CLI
+   * runtime treats as a hard failure); this parser dropped silently, so the caller could not.
+   */
+  dropped: number;
 }
 
 /** What a resolved file will become — held until every file has resolved. */
@@ -83,7 +94,19 @@ export function resolvePatch(files: readonly PatchFile[], read: ReadFile): Patch
         message: `no such file: ${file.path} (apply_patch edits EXISTING files; use write_file to create one)`,
       };
     }
-    const r = applyProposedEdit(current, file.hunks);
+    /**
+     * `{ fallback: true }` — the ladder, not just the exact rung.
+     *
+     * This called `applyProposedEdit` with no options, so `opts.fallback` was falsy and
+     * `resolveHunk` returned after the EXACT match: the trailing-whitespace, indent, blank-skip
+     * and anchor rungs never ran. The module header two dozen lines up says every hunk is matched
+     * "via the same `applyProposedEdit` + `RUNGS` ladder `propose_edit` uses", and adds that
+     * reusing it "is not a convenience — a second matching implementation would drift from the
+     * ladder". It drifted anyway, through a default: `propose_edit`'s real call site passes the
+     * flag and this one did not, so the ATOMIC multi-file tool failed on exactly the whitespace
+     * drift its single-file sibling recovers from.
+     */
+    const r = applyProposedEdit(current, file.hunks, { fallback: true });
     if (!r.ok) {
       return { ok: false, path: file.path, hunk: r.hunk, code: r.code, message: r.message };
     }
@@ -139,15 +162,18 @@ export function parsePatchFiles(raw: unknown): PatchFile[] {
           })()
         : [];
     const hunks: EditHunk[] = [];
+    let dropped = 0;
     for (const h of rawHunks) {
       if (h && typeof h === "object") {
         const hr = h as Record<string, unknown>;
         if (typeof hr.old === "string" && typeof hr.new === "string") {
           hunks.push({ old: hr.old, new: hr.new });
+          continue;
         }
       }
+      dropped += 1;
     }
-    out.push({ path, hunks });
+    out.push({ path, hunks, dropped });
   }
   return out;
 }

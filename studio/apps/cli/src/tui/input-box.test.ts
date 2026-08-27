@@ -162,3 +162,62 @@ test("the badge is painted independently of the border", () => {
   assert.match(bottom, /<E> effort: high <\/E>/);
   assert.match(bottom, /^<b>╰<\/b>/);
 });
+
+/* ── the two-row trait panel ────────────────────────────────────────────────*/
+
+test("panel: a `├──┤` rule, the two rows, then a PLAIN bottom border", () => {
+  // The bottom border carries no inlaid badge when a panel is present: they are two
+  // renderings of the same facts, and showing both would say everything twice.
+  const l = layoutComposer("hi", 2, 50, {
+    panel: ["completion   vision", "tools        effort: high"],
+    badge: "effort: high",
+  });
+  const [, , rule, r1, r2, bottom] = l.lines;
+  assert.ok(rule?.startsWith("\u251c"), "the panel opens with a tee-joined rule");
+  assert.ok(rule?.endsWith("\u2524"));
+  assert.match(r1 ?? "", /completion/);
+  assert.match(r2 ?? "", /effort: high/);
+  assert.ok(bottom?.startsWith("\u2570"));
+  assert.doesNotMatch(bottom ?? "", /effort/, "the badge must not also be inlaid");
+});
+
+test("panel: every rendered line is exactly the box width", () => {
+  // The redraw math assumes lines.length === physical rows, which only holds if no line
+  // wraps. A panel row one column too wide would silently double the box's height.
+  for (const width of [30, 50, 80, 120]) {
+    const l = layoutComposer("hi", 2, width, {
+      panel: ["completion   vision   audio", "tools   thinking   effort: max"],
+    });
+    for (const line of l.lines) {
+      assert.equal(stringWidth(line), width, `width ${width}: a line was not ${width} columns`);
+    }
+  }
+});
+
+test("panel: adds exactly 3 lines and does NOT move the caret", () => {
+  const plain = layoutComposer("hello", 5, 50, {});
+  const panelled = layoutComposer("hello", 5, 50, {
+    panel: ["completion   vision", "tools        effort: high"],
+  });
+  assert.equal(panelled.height, plain.height + 3);
+  // the panel lives BELOW the text area, so the caret is unaffected — the click-to-position
+  // geometry in frame.ts depends on this.
+  assert.equal(panelled.cursorRow, plain.cursorRow);
+  assert.equal(panelled.cursorCol, plain.cursorCol);
+});
+
+test("panel: rows are painted with the badge painter, not the border one", () => {
+  const l = layoutComposer("hi", 2, 50, {
+    panel: ["tools   thinking", "vision  effort: high"],
+    paint: { badge: (s) => `<E>${s}</E>`, border: (s) => `<B>${s}</B>` },
+  });
+  assert.match(l.lines[3] ?? "", /<E>tools/);
+  assert.match(l.lines[4] ?? "", /effort: high\s*<\/E>/);
+});
+
+test("panel: an over-wide row is clipped rather than allowed to wrap the box", () => {
+  // `status.ts` returns null instead of a clipped grid, so this should be unreachable in
+  // practice — but a row that DID arrive too wide must break the strip, never the redraw.
+  const l = layoutComposer("hi", 2, 30, { panel: ["x".repeat(200), "y".repeat(200)] });
+  for (const line of l.lines) assert.equal(stringWidth(line), 30);
+});

@@ -568,3 +568,33 @@ test("a large call body streamed in small chunks parses correctly and fast (no O
     `streaming a 300KB call body in 64-byte chunks took ${elapsedMs}ms — the scanner is rescanning from scratch again`,
   );
 });
+
+test("a 4-backtick fence does not swallow the tool call that follows it", () => {
+  /**
+   * The fence branch consumed exactly 3 bytes of a run that may be longer and always set the
+   * closer to "```". For a ````-fenced block — what a model writes whenever the content itself
+   * contains a ```-fence, i.e. every time it shows you markdown — the leftover backtick became a
+   * 1-char inline span, and at the CLOSING run 3 bytes closed the fence while the 4th OPENED a
+   * span nothing ever closed. Everything after it was literal text: zero call events AND zero
+   * malformed events, so the agent silently did nothing and nothing was reported.
+   */
+  const body = (ticks: string) =>
+    `Here is the README:\n${ticks}markdown\n\`\`\`js\nconsole.log(1)\n\`\`\`\n${ticks}\n` +
+    `Now reading it.\n<tool_call>{"name":"read_file","arguments":{"path":"a.ts"}}</tool_call>`;
+  for (const ticks of ["```", "````", "`````"]) {
+    const calls = scanToolCalls(body(ticks)).filter((e) => e.kind === "call");
+    assert.equal(calls.length, 1, `a ${ticks.length}-backtick fence lost the tool call`);
+  }
+  // an UNCLOSED fence must still swallow — the fix must not create false positives
+  assert.equal(
+    scanToolCalls('````\n<tool_call>{"name":"x","arguments":{}}</tool_call>').filter(
+      (e) => e.kind === "call",
+    ).length,
+    0,
+  );
+  // an inline code span is still literal
+  assert.equal(
+    scanToolCalls("say `<tool_call>` literally").filter((e) => e.kind === "call").length,
+    0,
+  );
+});

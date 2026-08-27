@@ -13,6 +13,7 @@ import { test } from "node:test";
 import {
   CloudPolicyError,
   type RendererEndpoint,
+  StreamPausedError,
   type ToolCallAccumulator,
   accumulateToolCalls,
   buildInlineEditMessages,
@@ -20,6 +21,7 @@ import {
   finalizeToolCalls,
   joinUrl,
   parseSseChunk,
+  runChatTurn,
   streamChat,
   usageFromPayload,
 } from "./ai-client.js";
@@ -219,6 +221,98 @@ test("streamChat throws on a non-ok HTTP status", async () => {
       /* drain */
     }
   });
+});
+
+/* --- inactivity pause -------------------------------------------------------
+ *
+ * Regression: `streamChat()`'s direct-fetch path used to end silently on an idle pause — the
+ * SAME class of bug root cause #1 fixed for the CLI, just unfixed here. A `ReadableStream`
+ * whose `pull()` never enqueues/closes leaves the reader's `read()` pending forever, exactly
+ * like a wedged/cold-loading local model; a real-elapsed-time × 1000 compressed clock lets the
+ * test use a fully realistic, floor-respecting `idleTimeoutMs` (30s) while actually firing in
+ * milliseconds of test time (see `packages/core/src/agent/idle-watchdog.test.ts`'s identical
+ * technique).
+ */
+/**
+ * A stream that never produces a chunk — UNLESS aborted, mirroring how a real `fetch()`
+ * rejects a pending `reader.read()` the instant its request signal aborts (`armRun`'s watchdog
+ * aborts `init.signal` on idle; without wiring that through, this stub would hang truly forever
+ * regardless of the watchdog, which is a bug in the TEST, not in `streamChat`/`runChatTurn`).
+ */
+function hangingSseStub(): typeof fetch {
+  return (async (_url: unknown, init?: { signal?: AbortSignal }) => {
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        init?.signal?.addEventListener("abort", () => {
+          controller.error(new DOMException("aborted", "AbortError"));
+        });
+      },
+      pull() {
+        return new Promise<void>(() => {
+          /* never enqueue, never close on its own — only the abort listener above settles it */
+        });
+      },
+    });
+    return new Response(body, { status: 200, headers: { "content-type": "text/event-stream" } });
+  }) as unknown as typeof fetch;
+}
+
+function compressedClock(speedup: number) {
+  const start = Date.now();
+  return {
+    now: () => start + (Date.now() - start) * speedup,
+    setTimeoutFn: (cb: () => void, ms: number) => setTimeout(cb, ms / speedup),
+    clearTimeoutFn: (h: ReturnType<typeof setTimeout>) => clearTimeout(h),
+  };
+}
+
+test("streamChat: a stream that goes silent forever throws StreamPausedError, not an indefinite hang", async () => {
+  const doFetch = hangingSseStub();
+  const clock = compressedClock(1000); // a real "30s" idle window fires in ~30ms of test time
+  const started = Date.now();
+  await assert.rejects(
+    async () => {
+      for await (const _d of streamChat(LOCAL, [{ role: "user", content: "hi" }], {
+        doFetch,
+        idleTimeoutMs: 30_000,
+        idleWatchdogNow: clock.now,
+        idleWatchdogSetTimeout: clock.setTimeoutFn,
+        idleWatchdogClearTimeout: clock.clearTimeoutFn,
+      })) {
+        /* never yields */
+      }
+    },
+    (e: unknown) => e instanceof StreamPausedError,
+  );
+  const elapsed = Date.now() - started;
+  assert.ok(
+    elapsed < 2000,
+    `expected a bounded pause well under 2s of real time, took ${elapsed}ms`,
+  );
+});
+
+test("runChatTurn: a stream that goes silent forever resolves with paused:true, not an indefinite hang", async () => {
+  const doFetch = hangingSseStub();
+  const clock = compressedClock(1000);
+  const started = Date.now();
+  const result = await runChatTurn(LOCAL, [{ role: "user", content: "hi" }], {
+    doFetch,
+    idleTimeoutMs: 30_000,
+    idleWatchdogNow: clock.now,
+    idleWatchdogSetTimeout: clock.setTimeoutFn,
+    idleWatchdogClearTimeout: clock.clearTimeoutFn,
+  });
+  const elapsed = Date.now() - started;
+  assert.ok(
+    elapsed < 2000,
+    `expected a bounded pause well under 2s of real time, took ${elapsed}ms`,
+  );
+  assert.equal(
+    result.paused,
+    true,
+    "expected the result to report paused:true, not just an empty text",
+  );
+  assert.equal(result.text, "");
 });
 
 test("buildInlineEditMessages includes instruction, selection, language, context", () => {

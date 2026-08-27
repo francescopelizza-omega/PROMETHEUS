@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { existsSync } from "node:fs";
+import { join } from "node:path";
 /**
  * policy.test.ts — C11 provider promotion policy.
  *
@@ -169,4 +170,23 @@ test("CONTRACT: real providers.config.json parses; local is Tier-A escape hatch"
     const cap = c.subscriptionCoversIf;
     if (cap) assert.equal(classifyTier(c, { coveredCapabilities: [cap] }), "B");
   }
+});
+
+test("DEFAULT_PROVIDERS_CONFIG finds the real config, not a fixed number of `..` hops", async (t) => {
+  /**
+   * The path is INLINED INTO THE PUBLISHED BUNDLE, and esbuild rewrites `import.meta.url` to the
+   * output file — so a fixed hop count that lands on `studio/` from `packages/core/src/providers`
+   * lands one level ABOVE studio from `apps/cli/dist`. `prometheus provider list` reported
+   * "provider config unavailable: ENOENT" with the file present in `studio/config/`.
+   */
+  if (!existsSync(DEFAULT_PROVIDERS_CONFIG)) {
+    t.skip("config/providers.config.json is not present in this checkout");
+    return;
+  }
+  assert.ok(
+    DEFAULT_PROVIDERS_CONFIG.endsWith(join("config", "providers.config.json")),
+    `resolved to an unexpected file: ${DEFAULT_PROVIDERS_CONFIG}`,
+  );
+  const providers = await loadProviders();
+  assert.ok(providers.length > 0, "the resolved config must actually parse into providers");
 });

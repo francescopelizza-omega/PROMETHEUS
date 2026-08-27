@@ -53,7 +53,7 @@ function fakeDeps(
         ...(opts.failConnect ? { failConnect: true } : {}),
       }),
   });
-  return { manager, confirm: async () => false };
+  return { manager, gate: opts.gate ?? allowGate, confirm: async () => false };
 }
 
 /** A deps whose manager uses the REAL stdio transport (for the fixture-server tests). */
@@ -137,6 +137,15 @@ test("mcp remove: unknown → exit 2; --yes deletes; list no longer shows it", a
   const yes = await runMcpCommand(ctxFor(["mcp", "remove", "fs", "--yes"]), deps);
   assert.equal(yes.exitCode, 0);
   assert.equal(deps.manager.list().length, 0);
+});
+
+test("prometheus mcp <typo>: reports unknown-verb, never silently defaults to list", async () => {
+  // regression: command[1] is undefined for a TWO_WORD mismatch (parse.ts sets `unmatchedSub`
+  // instead), so a typo used to silently fall through to the "list" branch.
+  const deps = fakeDeps();
+  const res = await runMcpCommand(ctxFor(["mcp", "ad", "fs", "--cmd", "node", "--json"]), deps);
+  assert.equal(res.exitCode, 1);
+  assert.equal((res.json as { error: string }).error, "unknown-verb");
 });
 
 test("mcp test: fake transport reports the tool count + names", async () => {
@@ -254,3 +263,70 @@ test(
     }
   },
 );
+
+test("--dry-run PREVIEWS an mcp add/remove — it used to do the real thing", async () => {
+  /**
+   * `dry-run` is a declared global boolean (`parse.ts`), forwarded to the engine for every
+   * registry-routed verb and listed in `--help`, so a user who types it on a prom-native verb
+   * reasonably expects a preview. `mcp add --dry-run` instead ran the full add: gated the
+   * command, wrote `mcp-servers.json`, and the server showed up in `mcp list`.
+   * `mcp remove --dry-run` likewise removed it. Both measured end to end through the built
+   * binary, against a temp PROMETHEUS_HOME.
+   */
+  const deps = fakeDeps();
+
+  const preview = await runMcpCommand(
+    ctxFor(["mcp", "add", "probe", "--cmd", "echo", "--dry-run"]),
+    deps,
+  );
+  assert.equal(preview.exitCode, 0);
+  assert.equal((preview.json as { preview?: boolean }).preview, true);
+  assert.match(preview.text ?? "", /preview/i);
+  assert.equal(deps.manager.list().length, 0, "the preview PERSISTED the server");
+
+  // the gate still runs in a preview — "would nemesis allow it" is the useful half
+  assert.ok((preview.json as { gate?: unknown }).gate, "a preview must still report the verdict");
+
+  // …and a preview of something nemesis BLOCKS says so, still without persisting
+  const blocked = await runMcpCommand(
+    ctxFor(["mcp", "add", "bad", "--cmd", "echo", "--dry-run"]),
+    fakeDeps({ gate: blockGate }),
+  );
+  assert.equal(blocked.exitCode, 2);
+  assert.match(blocked.text ?? "", /WOULD BE BLOCKED/);
+
+  /* self-validating: a REAL add still adds, and a real remove still removes. */
+  const added = await runMcpCommand(ctxFor(["mcp", "add", "probe", "--cmd", "echo"]), deps);
+  assert.equal(added.exitCode, 0, added.text);
+  assert.equal(deps.manager.list().length, 1);
+
+  const rmPreview = await runMcpCommand(
+    ctxFor(["mcp", "remove", "probe", "--dry-run", "--yes"]),
+    deps,
+  );
+  assert.equal((rmPreview.json as { preview?: boolean }).preview, true);
+  assert.equal(deps.manager.list().length, 1, "the preview REMOVED the server");
+
+  const removed = await runMcpCommand(ctxFor(["mcp", "remove", "probe", "--yes"]), deps);
+  assert.equal(removed.exitCode, 0);
+  assert.equal(deps.manager.list().length, 0);
+});
+
+test("mcp add: a nemesis BLOCK reports what actually happened — the row IS persisted", async () => {
+  // regression: the message said "not added" while `addServer` had deliberately persisted the
+  // server as `enabled:false, health:"blocked"` — a record that is load-bearing (connect()
+  // refuses on it). The control held; the REPORT was false, in the direction that matters:
+  // `mcp list` showed the server and mcp-servers.json contained it.
+  const { deps } = fakeDeps({ gate: blockGate });
+  const out = await runMcpCommand(
+    ctxFor(["mcp", "add", "evil", "--cmd", "sh", "--args", "-c rm -rf /", "--json"]),
+    deps,
+  );
+  assert.equal(out.exitCode, 2);
+  const json = out.json as { ok: boolean; error: string; stored?: boolean; enabled?: boolean };
+  assert.equal(json.ok, false);
+  assert.equal(json.error, "gate-blocked");
+  assert.equal(json.stored, true, "the envelope must admit the row was written");
+  assert.equal(json.enabled, false, "and that it is disabled");
+  assert.ok(!/not added/.test(out.text ?? ""), "the text must not claim nothing was written");
+});

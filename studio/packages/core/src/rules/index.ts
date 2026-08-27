@@ -8,11 +8,16 @@ export type {
   RuleKind,
   RuleScope,
   RuleSource,
+  SteeringCandidate,
 } from "./loader.js";
 export {
   DEFAULT_PRECEDENCE,
+  STEERING_GLOBAL_NAMES,
+  STEERING_PROJECT_NAMES,
   assembleRules,
   initRulesScaffold,
   isRemoteInstruction,
   orderRuleSources,
+  steeringCandidates,
+  steeringKindOf,
 } from "./loader.js";

@@ -27,6 +27,7 @@ import {
   useRef,
   useState,
 } from "react";
+import type { IdeEvent } from "../shared/ipc-contract.js";
 
 import { Z, resolveActivity } from "@prometheus/ui";
 import { CatalogRoute } from "../routes/catalog.js";
@@ -396,6 +397,17 @@ function App(): ReactElement {
   // the defaults for any missing/invalid field.
   const saved = useState(loadLayout)[0];
   const [activity, setActivity] = useState<ActivityId>(saved.activity ?? "home");
+  /**
+   * Has the editor been opened at least once this run?
+   *
+   * Once true it never goes back: the editor subtree stays mounted (hidden when another activity
+   * is showing) so navigating away cannot unmount TerminalPanel and kill its ptys. Deferring the
+   * first mount keeps the cost off sessions that never open the editor.
+   */
+  const [editorEverVisited, setEditorEverVisited] = useState(activity === "editor");
+  useEffect(() => {
+    if (activity === "editor") setEditorEverVisited(true);
+  }, [activity]);
   // per-route overrides only — a route absent here uses its default (open where a
   // body exists, editor collapsed; see shell/sidebar-view.ts).
   const [sidebarCollapsedMap, setSidebarCollapsedMap] = useState<SidebarCollapsedMap>(
@@ -710,9 +722,28 @@ function App(): ReactElement {
     };
     window.addEventListener(OPEN_FILE_EVENT, onFile);
     window.addEventListener(OPEN_FOLDER_EVENT, onFolder);
+    /**
+     * OS drag-and-drop arrives from MAIN, not from a DOM drop handler.
+     *
+     * A dropped path read out of renderer JavaScript could never earn a working-set grant — the
+     * renderer granting itself a root is exactly what that guard exists to prevent. Main sees the
+     * drop through Chromium's own `will-navigate`, records the grant (folder) or the single-path
+     * approval (file), and only then sends `shell.dropped`. By the time this runs the scope
+     * decision has already been made by the side that is allowed to make it, so this is pure
+     * routing onto the SAME open-resource bus as every other opener.
+     */
+    const ide = window.prometheus?.ide;
+    const offDropped = ide?.onEvent?.((ev: IdeEvent) => {
+      if (ev.channel !== "shell.dropped") return;
+      const detail = { detail: { path: ev.path } };
+      window.dispatchEvent(
+        new CustomEvent(ev.kind === "folder" ? OPEN_FOLDER_EVENT : OPEN_FILE_EVENT, detail),
+      );
+    });
     return () => {
       window.removeEventListener(OPEN_FILE_EVENT, onFile);
       window.removeEventListener(OPEN_FOLDER_EVENT, onFolder);
+      offDropped?.();
     };
   }, []);
 
@@ -826,11 +857,47 @@ function App(): ReactElement {
             {/* per-route boundary: a crash in one route shows a fallback there and
                 keeps the rail / palette / status bar alive (resets on navigation). */}
             <ErrorBoundary label={activity} resetKey={activity}>
+              {/**
+               * The EDITOR route stays MOUNTED once it has been visited; every other route is
+               * swapped normally.
+               *
+               * `renderActivity` returned `<EditorRoute>` from a bare switch, so navigating to
+               * any other activity unmounted the whole editor subtree — including TerminalPanel.
+               * Every `<Terminal>` cleanup then ran `ptyKill`, and the host killed the shell
+               * along with its children: clicking "Models" while `npm run dev` was running in the
+               * integrated terminal killed the dev server, and coming back gave a fresh empty
+               * shell with no scrollback. This is the same defect as the bottom panel's collapse
+               * control, one level up, and the wider of the two.
+               *
+               * It is not mounted until first visited, so an app that never opens the editor pays
+               * nothing; after that it is hidden rather than destroyed. Editor is not in
+               * ENGINE_BACKED (it reads no engine), so it never needed the EngineGate wrapper.
+               */}
+              {editorEverVisited && (
+                <div
+                  style={{
+                    minWidth: 0,
+                    minHeight: 0,
+                    flex: 1,
+                    display: activity === "editor" ? "flex" : "none",
+                    flexDirection: "column",
+                  }}
+                  {...(activity === "editor" ? {} : { "aria-hidden": true, inert: true })}
+                >
+                  <EditorRoute
+                    onNavigate={setActivity}
+                    onOpenShellPanel={(tab) => {
+                      setBottomTab(tab);
+                      setBottomCollapsed(false);
+                    }}
+                  />
+                </div>
+              )}
               {/* §6: DEGRADED wraps every ENGINE-BACKED route — the engine being down is a
                   fact about the whole route, not about one panel inside it. Home has its
                   own per-island degraded states (its islands degrade independently), and
                   Editor/Docs/Chat do not read the engine at all. */}
-              {ENGINE_BACKED.has(activity) ? (
+              {activity === "editor" ? null : ENGINE_BACKED.has(activity) ? (
                 <EngineGate>
                   {renderActivity(activity, setActivity, (tab) => {
                     setBottomTab(tab);

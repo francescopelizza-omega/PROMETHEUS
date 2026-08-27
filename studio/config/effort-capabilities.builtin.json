@@ -1,0 +1,666 @@
+{
+  "$comment": [
+    "GENERATED — do not edit. Source: studio/packages/core/src/ai/effort/rules.ts",
+    "Regenerate with: node studio/scripts/emit-effort-rules.mjs",
+    "",
+    "This is the BUILTIN table, published so prometheus.py can resolve the same /think tier",
+    "as the TypeScript hosts. User and workspace overrides are a different file —",
+    "effort-capabilities.json — and are layered AFTER these (later wins a specificity tie).",
+    "",
+    "Each rule carries a `provenance`: measured (sent at a live server and the accepted set",
+    "read back out of its error), published (the provider's current documented contract), or",
+    "inferred (release notes / model cards / prior knowledge, NOT verified end to end)."
+  ],
+  "version": 1,
+  "rules": [
+    {
+      "id": "ollama-openai-shim-thinking",
+      "provenance": "measured",
+      "match": {
+        "runtime": "ollama",
+        "capability": "thinking"
+      },
+      "cap": {
+        "mechanism": "effort-enum",
+        "field": "reasoning_effort",
+        "supported": [
+          "off",
+          "low",
+          "medium",
+          "high",
+          "max"
+        ],
+        "enumMap": {
+          "off": "none",
+          "low": "low",
+          "medium": "medium",
+          "high": "high",
+          "max": "max"
+        }
+      }
+    },
+    {
+      "id": "ollama-native-thinking",
+      "provenance": "measured",
+      "match": {
+        "runtime": "ollama-native",
+        "capability": "thinking"
+      },
+      "cap": {
+        "mechanism": "native-graded",
+        "field": "think",
+        "supported": [
+          "off",
+          "low",
+          "medium",
+          "high",
+          "max"
+        ],
+        "enumMap": {
+          "low": "low",
+          "medium": "medium",
+          "high": "high",
+          "max": "max"
+        },
+        "offValue": false
+      }
+    },
+    {
+      "id": "ollama-no-thinking",
+      "provenance": "measured",
+      "match": {
+        "runtime": "ollama",
+        "capabilityAbsent": "thinking"
+      },
+      "cap": {
+        "mechanism": "none",
+        "supported": [],
+        "note": "this model has no reasoning mode (the runtime reports no `thinking` capability)"
+      }
+    },
+    {
+      "id": "ollama-native-no-thinking",
+      "provenance": "measured",
+      "match": {
+        "runtime": "ollama-native",
+        "capabilityAbsent": "thinking"
+      },
+      "cap": {
+        "mechanism": "none",
+        "supported": [],
+        "note": "this model has no reasoning mode (the runtime reports no `thinking` capability)"
+      }
+    },
+    {
+      "id": "deepseek-r1",
+      "provenance": "inferred",
+      "match": {
+        "modelIdRegex": "(^|[/:_-])(deepseek-?r1|deepseek-reasoner)"
+      },
+      "cap": {
+        "mechanism": "always-on",
+        "supported": [],
+        "reasoningTag": "think",
+        "constraints": {
+          "noTemperature": true
+        },
+        "note": "DeepSeek R1 always reasons; depth is not adjustable"
+      }
+    },
+    {
+      "id": "qwq",
+      "provenance": "inferred",
+      "match": {
+        "modelIdRegex": "(^|[/:_-])qwq"
+      },
+      "cap": {
+        "mechanism": "always-on",
+        "supported": [],
+        "reasoningTag": "think",
+        "note": "QwQ always reasons; depth is not adjustable"
+      }
+    },
+    {
+      "id": "kimi-k2-thinking",
+      "provenance": "inferred",
+      "match": {
+        "modelIdRegex": "(^|[/:_-])kimi-?k2.*think"
+      },
+      "cap": {
+        "mechanism": "always-on",
+        "supported": [],
+        "constraints": {
+          "minMaxTokens": 16000
+        },
+        "note": "Kimi K2-Thinking always reasons; depth is not adjustable"
+      }
+    },
+    {
+      "id": "phi-reasoning",
+      "provenance": "inferred",
+      "match": {
+        "modelIdRegex": "(^|[/:_-])phi-?4.*reasoning"
+      },
+      "cap": {
+        "mechanism": "always-on",
+        "supported": [],
+        "reasoningTag": "think",
+        "note": "Phi-4-reasoning always reasons; depth is not adjustable"
+      }
+    },
+    {
+      "id": "exaone-deep",
+      "provenance": "inferred",
+      "match": {
+        "modelIdRegex": "(^|[/:_-])exaone.*deep"
+      },
+      "cap": {
+        "mechanism": "always-on",
+        "supported": [],
+        "reasoningTag": "thought",
+        "note": "EXAONE Deep always reasons; depth is not adjustable"
+      }
+    },
+    {
+      "id": "gemma-2-3",
+      "provenance": "inferred",
+      "match": {
+        "modelIdRegex": "(^|[/:_-])gemma-?(2|3)([^0-9]|$)"
+      },
+      "cap": {
+        "mechanism": "none",
+        "supported": [],
+        "note": "Gemma 2/3 have no reasoning mode (Gemma 4 does)"
+      }
+    },
+    {
+      "id": "llama-instruct",
+      "provenance": "inferred",
+      "match": {
+        "modelIdRegex": "(^|[/:_-])llama-?[34]"
+      },
+      "cap": {
+        "mechanism": "none",
+        "supported": [],
+        "note": "Llama 3/4 have no reasoning mode"
+      }
+    },
+    {
+      "id": "qwen2.5",
+      "provenance": "inferred",
+      "match": {
+        "modelIdRegex": "(^|[/:_-])qwen-?2"
+      },
+      "cap": {
+        "mechanism": "none",
+        "supported": [],
+        "note": "Qwen2.x has no reasoning mode"
+      }
+    },
+    {
+      "id": "openai-non-reasoning",
+      "provenance": "published",
+      "match": {
+        "modelIdRegex": "^(gpt-4o|gpt-4\\.1|gpt-4-turbo|gpt-3)"
+      },
+      "cap": {
+        "mechanism": "none",
+        "supported": [],
+        "note": "this GPT-4-class model has no reasoning mode"
+      }
+    },
+    {
+      "id": "anthropic-effort-current",
+      "provenance": "published",
+      "match": {
+        "runtime": "anthropic",
+        "modelIdRegex": "^claude-(fable-5|mythos-5|opus-5|opus-4-[78]|sonnet-5)"
+      },
+      "cap": {
+        "mechanism": "effort-enum",
+        "field": "output_config.effort",
+        "supported": [
+          "low",
+          "medium",
+          "high",
+          "max"
+        ],
+        "enumMap": {
+          "low": "low",
+          "medium": "medium",
+          "high": "high",
+          "max": "max"
+        },
+        "constraints": {
+          "noTemperature": true
+        },
+        "note": "Claude 4.7+ reasoning cannot be disabled (and rejects temperature)"
+      }
+    },
+    {
+      "id": "anthropic-effort-4-6",
+      "provenance": "published",
+      "match": {
+        "runtime": "anthropic",
+        "modelIdRegex": "^claude-(opus|sonnet)-4-6"
+      },
+      "cap": {
+        "mechanism": "effort-enum",
+        "field": "output_config.effort",
+        "supported": [
+          "low",
+          "medium",
+          "high",
+          "max"
+        ],
+        "enumMap": {
+          "low": "low",
+          "medium": "medium",
+          "high": "high",
+          "max": "max"
+        },
+        "note": "Claude 4.6 reasoning cannot be disabled"
+      }
+    },
+    {
+      "id": "anthropic-effort-opus-4-5",
+      "provenance": "published",
+      "match": {
+        "runtime": "anthropic",
+        "modelIdRegex": "^claude-opus-4-5"
+      },
+      "cap": {
+        "mechanism": "effort-enum",
+        "field": "output_config.effort",
+        "supported": [
+          "low",
+          "medium",
+          "high"
+        ],
+        "enumMap": {
+          "low": "low",
+          "medium": "medium",
+          "high": "high"
+        },
+        "note": "Opus 4.5 exposes low/medium/high only"
+      }
+    },
+    {
+      "id": "anthropic-budget-4-5",
+      "provenance": "published",
+      "match": {
+        "runtime": "anthropic",
+        "modelIdRegex": "^claude-(sonnet|haiku)-4-5"
+      },
+      "cap": {
+        "mechanism": "token-budget",
+        "field": "thinking.budget_tokens",
+        "supported": [
+          "low",
+          "medium",
+          "high",
+          "max"
+        ],
+        "budgetMap": {
+          "low": 1024,
+          "medium": 4096,
+          "high": 16384,
+          "max": 32000
+        },
+        "budgetBounds": {
+          "min": 1024,
+          "max": 32000
+        },
+        "constraints": {
+          "budgetUnderMaxTokens": true,
+          "budgetAnswerHeadroom": 4096
+        },
+        "note": "Claude 4.5 takes a thinking token budget, not an effort level"
+      }
+    },
+    {
+      "id": "anthropic-claude-3",
+      "provenance": "published",
+      "match": {
+        "runtime": "anthropic",
+        "modelIdRegex": "^claude-3"
+      },
+      "cap": {
+        "mechanism": "none",
+        "supported": [],
+        "note": "Claude 3.x has no reasoning mode"
+      }
+    },
+    {
+      "id": "gemini-3-thinking-level",
+      "provenance": "inferred",
+      "match": {
+        "runtime": "gemini",
+        "modelIdRegex": "^gemini-3"
+      },
+      "cap": {
+        "mechanism": "effort-enum",
+        "field": "generationConfig.thinkingConfig.thinkingLevel",
+        "supported": [
+          "low",
+          "medium",
+          "high"
+        ],
+        "enumMap": {
+          "low": "low",
+          "medium": "medium",
+          "high": "high"
+        },
+        "note": "Gemini 3 exposes low/medium/high thinking levels"
+      }
+    },
+    {
+      "id": "gemini-2-5-budget",
+      "provenance": "inferred",
+      "match": {
+        "runtime": "gemini",
+        "modelIdRegex": "^gemini-2\\.5"
+      },
+      "cap": {
+        "mechanism": "token-budget",
+        "field": "generationConfig.thinkingConfig.thinkingBudget",
+        "supported": [
+          "off",
+          "low",
+          "medium",
+          "high",
+          "max"
+        ],
+        "budgetMap": {
+          "low": 1024,
+          "medium": 4096,
+          "high": 16384,
+          "max": 24576
+        },
+        "budgetBounds": {
+          "min": 0,
+          "max": 24576,
+          "disableWith": 0
+        },
+        "note": "Gemini 2.5 Flash takes a thinking token budget"
+      }
+    },
+    {
+      "id": "gemini-2-5-pro-budget",
+      "provenance": "inferred",
+      "match": {
+        "runtime": "gemini",
+        "modelIdRegex": "^gemini-2\\.5-pro"
+      },
+      "cap": {
+        "mechanism": "token-budget",
+        "field": "generationConfig.thinkingConfig.thinkingBudget",
+        "supported": [
+          "low",
+          "medium",
+          "high",
+          "max"
+        ],
+        "budgetMap": {
+          "low": 1024,
+          "medium": 4096,
+          "high": 16384,
+          "max": 32768
+        },
+        "budgetBounds": {
+          "min": 128,
+          "max": 32768
+        },
+        "note": "Gemini 2.5 Pro always reasons; only the budget is adjustable"
+      }
+    },
+    {
+      "id": "qwen3-soft-switch",
+      "provenance": "inferred",
+      "match": {
+        "modelIdRegex": "(^|[/:_-])qwen-?3(?![.0-9])(?!.*(instruct|coder))"
+      },
+      "cap": {
+        "mechanism": "prompt-soft-switch",
+        "promptSlot": "user-append",
+        "supported": [
+          "off",
+          "medium"
+        ],
+        "promptMap": {
+          "off": "/no_think",
+          "medium": "/think"
+        },
+        "reasoningTag": "think",
+        "note": "Qwen3 takes a /think or /no_think switch, not a graded level"
+      }
+    },
+    {
+      "id": "nemotron",
+      "provenance": "inferred",
+      "match": {
+        "modelIdRegex": "(^|[/:_-])nemotron"
+      },
+      "cap": {
+        "mechanism": "system-prompt-line",
+        "promptSlot": "system-append",
+        "supported": [
+          "off",
+          "medium"
+        ],
+        "promptMap": {
+          "off": "detailed thinking off",
+          "medium": "detailed thinking on"
+        },
+        "note": "Nemotron takes a literal `detailed thinking on|off` system line"
+      }
+    },
+    {
+      "id": "glm-thinking-toggle",
+      "provenance": "inferred",
+      "match": {
+        "modelIdRegex": "(^|[/:_-])glm-?[45]"
+      },
+      "cap": {
+        "mechanism": "binary-toggle",
+        "field": "thinking.type",
+        "supported": [
+          "off",
+          "medium"
+        ],
+        "onValue": "enabled",
+        "offValue": "disabled",
+        "note": "GLM thinking is on/off only, with no depth control"
+      }
+    },
+    {
+      "id": "deepseek-v3-2-toggle",
+      "provenance": "inferred",
+      "match": {
+        "modelIdRegex": "(^|[/:_-])deepseek-?v3\\.?2"
+      },
+      "cap": {
+        "mechanism": "binary-toggle",
+        "field": "thinking.type",
+        "supported": [
+          "off",
+          "medium"
+        ],
+        "onValue": "enabled",
+        "offValue": "disabled",
+        "constraints": {
+          "noTemperature": true
+        },
+        "note": "DeepSeek V3.2 thinking is on/off only"
+      }
+    },
+    {
+      "id": "granite-thinking-toggle",
+      "provenance": "inferred",
+      "match": {
+        "modelIdRegex": "(^|[/:_-])granite-?[34]"
+      },
+      "cap": {
+        "mechanism": "binary-toggle",
+        "field": "thinking",
+        "supported": [
+          "off",
+          "medium"
+        ],
+        "note": "Granite thinking is on/off only"
+      }
+    },
+    {
+      "id": "openai-reasoning",
+      "provenance": "published",
+      "match": {
+        "modelIdRegex": "^(o[1-9]|gpt-5|codex)"
+      },
+      "cap": {
+        "mechanism": "effort-enum",
+        "field": "reasoning_effort",
+        "supported": [
+          "off",
+          "low",
+          "medium",
+          "high"
+        ],
+        "enumMap": {
+          "off": "none",
+          "low": "low",
+          "medium": "medium",
+          "high": "high"
+        },
+        "note": "OpenAI exposes none/low/medium/high on this model"
+      }
+    },
+    {
+      "id": "xai-grok-reasoning",
+      "provenance": "inferred",
+      "match": {
+        "modelIdRegex": "^grok-[4-9]"
+      },
+      "cap": {
+        "mechanism": "effort-enum",
+        "field": "reasoning_effort",
+        "supported": [
+          "low",
+          "medium",
+          "high"
+        ],
+        "enumMap": {
+          "low": "low",
+          "medium": "medium",
+          "high": "high"
+        },
+        "note": "Grok reasoning cannot be disabled"
+      }
+    },
+    {
+      "id": "gpt-oss",
+      "provenance": "inferred",
+      "match": {
+        "modelIdRegex": "(^|[/:_-])gpt-oss"
+      },
+      "cap": {
+        "mechanism": "system-prompt-line",
+        "promptSlot": "system-append",
+        "supported": [
+          "low",
+          "medium",
+          "high"
+        ],
+        "promptMap": {
+          "low": "Reasoning: low",
+          "medium": "Reasoning: medium",
+          "high": "Reasoning: high"
+        },
+        "note": "gpt-oss has three levels (low/medium/high)"
+      }
+    },
+    {
+      "id": "llamacpp-template-kwarg",
+      "provenance": "inferred",
+      "match": {
+        "runtime": "llamacpp"
+      },
+      "cap": {
+        "mechanism": "template-kwarg",
+        "kwarg": "enable_thinking",
+        "supported": [
+          "off",
+          "medium"
+        ],
+        "optimistic": true,
+        "note": "llama.cpp only toggles thinking for templates that branch on enable_thinking"
+      }
+    },
+    {
+      "id": "vllm-template-kwarg",
+      "provenance": "inferred",
+      "match": {
+        "runtime": "vllm"
+      },
+      "cap": {
+        "mechanism": "template-kwarg",
+        "kwarg": "enable_thinking",
+        "supported": [
+          "off",
+          "medium"
+        ],
+        "optimistic": true,
+        "note": "vLLM only toggles thinking for templates that branch on enable_thinking"
+      }
+    },
+    {
+      "id": "llamacpp-qwen3-template",
+      "provenance": "inferred",
+      "match": {
+        "runtime": "llamacpp",
+        "modelIdRegex": "(^|[/:_-])qwen-?3([^.0-9]|$)"
+      },
+      "cap": {
+        "mechanism": "template-kwarg",
+        "kwarg": "enable_thinking",
+        "supported": [
+          "off",
+          "medium"
+        ],
+        "optimistic": true,
+        "reasoningTag": "think",
+        "note": "llama.cpp only toggles thinking for templates that branch on enable_thinking"
+      }
+    },
+    {
+      "id": "vllm-qwen3-template",
+      "provenance": "inferred",
+      "match": {
+        "runtime": "vllm",
+        "modelIdRegex": "(^|[/:_-])qwen-?3([^.0-9]|$)"
+      },
+      "cap": {
+        "mechanism": "template-kwarg",
+        "kwarg": "enable_thinking",
+        "supported": [
+          "off",
+          "medium"
+        ],
+        "optimistic": true,
+        "reasoningTag": "think",
+        "note": "vLLM only toggles thinking for templates that branch on enable_thinking"
+      }
+    },
+    {
+      "id": "lmstudio-ignores",
+      "provenance": "inferred",
+      "match": {
+        "runtime": "lmstudio"
+      },
+      "cap": {
+        "mechanism": "none",
+        "supported": [],
+        "note": "LM Studio ignores per-request reasoning settings; set it in the app instead"
+      }
+    }
+  ]
+}

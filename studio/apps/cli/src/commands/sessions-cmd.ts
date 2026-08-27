@@ -17,12 +17,26 @@ import {
   resolveSessionId,
   searchSessions,
 } from "../session/history-store.js";
-import { flagStr } from "./sidecar-cmd.js";
+import { flagStr, isPreviewRun } from "./sidecar-cmd.js";
 
 const VERBS = ["list", "search", "fork", "delete"] as const;
 
 export interface SessionsDeps {
   home: string;
+}
+
+/**
+ * The short form of a session id — the part that actually DISTINGUISHES it.
+ *
+ * Every call site used `id.slice(0, 8)`, which for a headless id (`headless-<stamp>-<rand>`) is
+ * the constant string "headless": the list showed the same token on every row, and — worse — the
+ * delete gate asked the user to type that token back as their confirmation, so the confirm
+ * carried no information about WHICH session was about to go. Taking the last dash-separated
+ * segment keeps a prefixed id distinguishable and leaves an unprefixed one behaving as before.
+ */
+export function shortSessionId(id: string): string {
+  const tail = id.slice(id.lastIndexOf("-") + 1);
+  return (tail.length >= 4 ? tail : id).slice(0, 8);
 }
 
 function renderTable(records: readonly SessionRecord[]): string {
@@ -31,7 +45,7 @@ function renderTable(records: readonly SessionRecord[]): string {
   for (const r of records) {
     const when = r.ts.replace("T", " ").slice(0, 16);
     lines.push(
-      `  ${c.cyan(r.id.slice(0, 8))}  ${c.dim(when)}  ${c.dim(r.cwd)}\n      ${r.descriptor}`,
+      `  ${c.cyan(shortSessionId(r.id))}  ${c.dim(when)}  ${c.dim(r.cwd)}\n      ${r.descriptor}`,
     );
   }
   return lines.join("\n");
@@ -43,7 +57,10 @@ export function runSessions(
   deps: SessionsDeps = { home: prometheusHome() },
 ): CommandOutcome {
   const { home } = deps;
-  const verb = ctx.args.command[1] ?? "list";
+  // `unmatchedSub` (parse.ts) distinguishes "a second word WAS typed but didn't match
+  // list/search/fork/delete" from "nothing was typed" — without it a typo silently defaulted
+  // to `list` instead of reaching the "unknown verb" fallback below.
+  const verb = ctx.args.unmatchedSub ?? ctx.args.command[1] ?? "list";
   const pos = ctx.args.positionals;
 
   if (verb === "list") {
@@ -85,7 +102,7 @@ export function runSessions(
       return { text: c.red(`fork: ${r.error}`), json: { ok: false, error: r.error }, exitCode: 2 };
     }
     return {
-      text: `${c.green("✓")} forked → ${c.cyan(r.newId.slice(0, 8))} (independent copy)`,
+      text: `${c.green("✓")} forked → ${c.cyan(shortSessionId(r.newId))} (independent copy)`,
       json: { ok: true, newId: r.newId },
       exitCode: 0,
     };
@@ -108,7 +125,17 @@ export function runSessions(
         exitCode: 2,
       };
     }
-    const shortId = resolved.id.slice(0, 8);
+    const shortId = shortSessionId(resolved.id);
+    // `--dry-run` outranks the typed confirm. This gate consults ONLY `--confirm`, so the
+    // preview guard in `wantsExecute` never applied here: `sessions delete <id> --confirm <id>
+    // --dry-run` really deleted the session (measured — the list went from 1 to 0).
+    if (isPreviewRun(ctx)) {
+      return {
+        text: `${c.dim("preview:")} would delete session ${c.bold(shortId)} — nothing removed`,
+        json: { ok: true, status: "preview", command: "sessions delete", id: resolved.id },
+        exitCode: 0,
+      };
+    }
     // typed confirm: the short id must be echoed back via --confirm (scriptable + explicit).
     if (flagStr(ctx, "confirm") !== shortId) {
       return {
@@ -128,6 +155,6 @@ export function runSessions(
   return {
     text: `prometheus sessions: unknown verb "${verb}" — valid: ${VERBS.join(", ")}`,
     json: { ok: false, error: "unknown-verb", valid: VERBS },
-    exitCode: 2,
+    exitCode: 1,
   };
 }

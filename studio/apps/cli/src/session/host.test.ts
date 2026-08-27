@@ -12,9 +12,9 @@
  */
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import { mkdtempSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
+import { join, relative } from "node:path";
 import test from "node:test";
 
 /** A throwaway ~/.prometheus home per test run — never touches the real $HOME. */
@@ -129,6 +129,7 @@ function runSession(
     // skip the startup network/engine probe — deterministic "no backend" for tests.
     backends: { liveRunners: [], paidClis: [] },
     home: TMP_HOME,
+    configHome: TMP_HOME,
   });
   return p.then((code) => ({ code, out: out.join(""), rl }));
 }
@@ -170,6 +171,37 @@ test("banner + footer render; a message routes to runMessageTurn (which streams 
   // the host must not DOUBLE-print the reply (runtime already streamed it).
   assert.equal(out.match(/hi back/g)?.length, 1);
   assert.match(out, /session ended/); // clean close note
+});
+
+test("banner shows the REAL, full home path — never a bare '~' — when cwd IS the home directory", async () => {
+  // A lone `~` reads clearly to an expert and is nearly invisible to everyone else — the one
+  // line in the whole banner that answers "where am I", reduced to a single low-contrast
+  // glyph. The banner (shown once, at startup) spells it out in full; the persistent per-turn
+  // status lines (tested below) intentionally keep the traditional `~` — that's a DIFFERENT,
+  // deliberate choice, not an oversight.
+  const { out } = await runSession([], {}, { argsOver: { cwd: homedir() } });
+  // The banner box right-pads the value with spaces before the closing "│" — so this checks
+  // for a WHITESPACE boundary right after the path, not a literal end-of-line.
+  assert.match(out, new RegExp(`cwd {5}${homedir().replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s`));
+  assert.doesNotMatch(out, /cwd {5}~\s/);
+});
+
+test("banner still collapses a NESTED path under home to '~/sub' — only the bare home case expands", async () => {
+  const nested = join(homedir(), "projects", "demo");
+  const { out } = await runSession([], {}, { argsOver: { cwd: nested } });
+  assert.match(out, /cwd {5}~\/projects\/demo\s/);
+});
+
+test("the TUI-analogous persistent status line keeps the plain '~' for home (unchanged, on purpose)", async () => {
+  // footer() (the readline host's own persistent per-turn status line, and the same shortCwd
+  // the TUI's own right-hand status chip uses) is a SEPARATE code path from the banner and
+  // must NOT pick up the banner's full-path expansion.
+  const { out } = await runSession(
+    ["hi"],
+    { runMessageTurn: async () => turnResult("ok") },
+    { argsOver: { cwd: homedir() } },
+  );
+  assert.match(out, /~ {2}│ {2}model/); // footer's "~  │  model ..." line, unexpanded
 });
 
 test("registry handles /quit (exits, code 0); an UNKNOWN /slash falls back to execSlash", async () => {
@@ -251,6 +283,7 @@ test("Ctrl-C during a turn cancels the in-flight turn; the session stays alive",
     write: (s) => out.push(s),
     backends: { liveRunners: [], paidClis: [] },
     home: TMP_HOME,
+    configHome: TMP_HOME,
     handlers: {
       runMessageTurn: async (_session, message) => {
         if (message === "long task") {
@@ -282,6 +315,7 @@ test("the confirm seam asks via readline.question and honors a typed no", async 
     write: (s) => out.push(s),
     backends: { liveRunners: [], paidClis: [] },
     home: TMP_HOME,
+    configHome: TMP_HOME,
     handlers: {
       runMessageTurn: async (_session, _message, deps) => {
         // agent-runtime's confirm takes a ToolCall; the host adapts it to a readline y/N.
@@ -319,6 +353,7 @@ async function captureCtx(
     write: () => {},
     backends: { liveRunners: [], paidClis: [] },
     home: TMP_HOME,
+    configHome: TMP_HOME,
     ...over,
     handlers: {
       runMessageTurn: async (_s, _m, deps) => {
@@ -466,6 +501,47 @@ test("/continue is interruptible too — a continuation is a full turn", async (
 
 /* ── the autonomy ladder actually decides something ────────────────────────── */
 
+test("/authorisation persists under `configHome` (os.homedir()-rooted), NEVER under `home` (prometheusHome()'s accounting tree)", async () => {
+  // A real, shipped bug (found via a stray `~/.prometheus/.config/prometheus-studio/...`
+  // artifact on an actual dev machine): `saveAuthLevel`/`readSavedAuthLevel` used to be called
+  // with `home` (prometheusHome()) instead of `deps.configHome` — silently writing the saved
+  // level to the WRONG tree. Two DELIBERATELY DIFFERENT temp dirs here (unlike every other test
+  // in this file, which reuses the same TMP_HOME for both) is what actually distinguishes them.
+  const wrongHome = mkdtempSync(join(tmpdir(), "prom-wrong-home-"));
+  const rightConfigHome = mkdtempSync(join(tmpdir(), "prom-right-confighome-"));
+  try {
+    const rl = new FakeReadline(["/authorisation 6", "go"]);
+    await launchSession(args(), {
+      isTty: true,
+      makeReadline: () => {
+        setImmediate(() => rl.drive());
+        return rl as unknown as never;
+      },
+      write: () => {},
+      backends: { liveRunners: [], paidClis: [] },
+      home: wrongHome,
+      configHome: rightConfigHome,
+      handlers: { runMessageTurn: async () => turnResult("done") },
+    });
+
+    const savedAtRightPath = JSON.parse(
+      readFileSync(
+        join(rightConfigHome, ".config", "prometheus-studio", "authorisation.json"),
+        "utf8",
+      ),
+    );
+    assert.equal(savedAtRightPath.level, 6);
+    assert.equal(
+      existsSync(join(wrongHome, ".config", "prometheus-studio", "authorisation.json")),
+      false,
+      "must NEVER be written under `home` (prometheusHome()'s accounting/state tree)",
+    );
+  } finally {
+    rmSync(wrongHome, { recursive: true, force: true });
+    rmSync(rightConfigHome, { recursive: true, force: true });
+  }
+});
+
 test("/authorisation raises the ladder and the readline host HONOURS it", async () => {
   // `hostAuthLevel` was read from disk, exposed via getAuthLevel, written by /authorisation
   // and persisted as the next session's default — and consulted by nothing. So the command
@@ -612,5 +688,175 @@ test("learned tool capability SURVIVES the next message", async () => {
     seen[1]?.textCallsWhileNative,
     1,
     "the observation was thrown away — the endpoint is re-probed natively forever",
+  );
+});
+
+/* ── /cd (project switch) — the readline host's own changeProjectDirectory, end-to-end ────────
+ * Previously covered only via slash-registry.test.ts's FAKE SlashCtx (never runs this host's real
+ * code) and tui/session-bridge.test.ts's structurally separate implementation — a regression here
+ * would have shipped undetected. These drive the REAL launchSession, no fakes on the /cd path. */
+
+test("/cd: a valid target rotates the session (fresh id echoed, tuning untouched)", async () => {
+  const base = mkdtempSync(join(tmpdir(), "prom-cd-"));
+  const target = join(base, "other-project");
+  mkdirSync(target, { recursive: true });
+  const { out } = await runSession([`/cd ${target}`, "/quit"], {}, { argsOver: { cwd: base } });
+  assert.match(out, /moved to/);
+  assert.match(out, new RegExp(target.replace(/[/\\]/g, "\\$&")));
+  assert.match(out, /model\/tuning kept/);
+});
+
+test("/cd: a nonexistent target reports the error and does not disturb the session", async () => {
+  const base = mkdtempSync(join(tmpdir(), "prom-cd-bad-"));
+  const { out } = await runSession(
+    [`/cd ${join(base, "does-not-exist")}`, "/status", "/quit"],
+    {},
+    { argsOver: { cwd: base } },
+  );
+  assert.match(out, /\/cd: no such directory/);
+  assert.match(out, new RegExp(`cwd\\s+${base.replace(/[/\\]/g, "\\$&")}`)); // cwd is unchanged
+});
+
+test("/cd: accepting the pre-filled default (blank Enter) is a genuine no-op, not a rotation", async () => {
+  const base = mkdtempSync(join(tmpdir(), "prom-cd-noop-"));
+  // a bare "/cd" with no path asks via askPath, which returns the pre-filled default (the
+  // current cwd) verbatim on a blank answer — exactly what a plain Enter keystroke produces.
+  const { out, rl } = await runSession(
+    ["/cd", "/quit"],
+    {},
+    { argsOver: { cwd: base }, answer: "" },
+  );
+  assert.match(out, /already in/);
+  assert.doesNotMatch(out, /fresh session/);
+  assert.ok(rl.questions.some((q) => /Move to project/.test(q)));
+});
+
+test("/cd: expands a leading ~ the same way /add-dir does", async () => {
+  const marker = mkdtempSync(join(homedir(), "prom-cd-tilde-"));
+  try {
+    const base = mkdtempSync(join(tmpdir(), "prom-cd-from-"));
+    const rel = `~/${relative(homedir(), marker)}`;
+    const { out } = await runSession([`/cd ${rel}`, "/quit"], {}, { argsOver: { cwd: base } });
+    assert.match(out, /moved to/);
+    assert.match(out, new RegExp(marker.replace(/[/\\]/g, "\\$&")));
+    assert.doesNotMatch(out, /no such directory/);
+  } finally {
+    const { rmSync } = await import("node:fs");
+    rmSync(marker, { recursive: true, force: true });
+  }
+});
+
+test("/cd: re-discovers steering (AGENTS.md) from the NEW directory, not the old one", async () => {
+  // Regression test for the ordering bug where steering.reload() ran before state.cwd was
+  // updated, so it silently re-read the OLD project's AGENTS.md forever.
+  const projectA = mkdtempSync(join(tmpdir(), "prom-cd-steerA-"));
+  const projectB = mkdtempSync(join(tmpdir(), "prom-cd-steerB-"));
+  writeFileSync(join(projectA, "AGENTS.md"), "Project A steering rules.");
+  writeFileSync(join(projectB, "AGENTS.md"), "Project B steering rules — totally different.");
+  const { out } = await runSession(
+    [`/cd ${projectB}`, "/memory", "/quit"],
+    {},
+    { argsOver: { cwd: projectA } },
+  );
+  assert.ok(out.includes(join(projectB, "AGENTS.md")), "project B's AGENTS.md was not loaded");
+  assert.ok(
+    !out.includes(join(projectA, "AGENTS.md")),
+    "project A's AGENTS.md is still being read after /cd",
+  );
+});
+
+test("/context window: set directly, then bare /context shows the new ceiling", async () => {
+  const { out } = await runSession(["/context window 500000", "/context", "/quit"]);
+  assert.match(out, /500,000/);
+  assert.match(out, /auto-compact ceiling: 500,000 tokens/);
+});
+
+test("/context window: the no-arg menu states a custom current value even off-preset", async () => {
+  const { out } = await runSession(
+    ["/context window 325000", "/context window", "/quit"],
+    {},
+    { answer: "" },
+  );
+  assert.match(out, /current: 325,000 tokens \(custom\)/);
+});
+
+test("yolo RUNS TO DONE on this host too — it used to stop at the cap and ask", async () => {
+  /**
+   * `yolo` is "bypass + run to done (auto-/continue, no pauses)", and `/permission-mode` prints
+   * that description verbatim — "no prompts, no pauses". This host implemented only the
+   * confirm-skip half: `runAgentMessage` ended at `settleCap` and `isRunToDoneMode` appeared
+   * nowhere in the file, so a yolo turn hit the step cap and printed "paused at the step cap —
+   * /continue to resume", waiting for exactly the human the mode had promised it would not need.
+   * The TUI had done this since CLI-072, so the same words meant two different things depending
+   * on which binary you launched.
+   */
+  let turns = 0;
+  const { out } = await runSession(["/permission-mode yolo", "do the whole thing"], {
+    runMessageTurn: async () => {
+      turns += 1;
+      // Distinct tool activity each round: an IDENTICAL digest two rounds running is what the
+      // auto-continue policy reads as "no progress", and it halts on it — correctly. A test that
+      // returns no events at all is testing the stall guard, not run-to-done.
+      const events = [
+        { kind: "tool_use", call: { name: `tool_${turns}`, args: {} } },
+        { kind: "tool_result", call: { name: `tool_${turns}`, args: {} }, ok: true, summary: "" },
+      ] as never;
+      // cap the first two rounds, then finish cleanly
+      return turns < 3
+        ? ({ ...turnResult(`round ${turns}`), events, capped: true, thread: [] } as never)
+        : ({ ...turnResult("done"), events, capped: false, thread: [] } as never);
+    },
+  });
+
+  assert.ok(turns >= 3, `yolo stopped after ${turns} turn(s) instead of running to done`);
+  assert.match(out, /auto-continuing/, "the auto-continue progress line was never printed");
+  assert.doesNotMatch(
+    out,
+    /paused at the step cap/,
+    "yolo told the user to /continue — the very pause the mode promises not to have",
+  );
+});
+
+test("a NON-yolo capped turn still stops and tells the user how to resume", async () => {
+  // The run-to-done branch must not swallow the ordinary pause notice.
+  let turns = 0;
+  const { out } = await runSession(["do the thing"], {
+    runMessageTurn: async () => {
+      turns += 1;
+      return { ...turnResult("partial"), capped: true, thread: [] } as never;
+    },
+  });
+  assert.equal(turns, 1, "a default-mode turn must not auto-continue");
+  assert.match(out, /paused at the step cap/);
+});
+
+test("/cwd: re-discovers steering from the NEW directory too — the readline host's copy", async () => {
+  /**
+   * This host's `setCwd` was a character-for-character copy of the TUI's: its whole body was the
+   * `cwd` reduce, so `/cwd` moved the session and reloaded NOTHING — the new project's
+   * AGENTS.md/CLAUDE.md/PROMETHEUS.md were never read, `/memory` kept listing the OLD project's
+   * paths, and permission rules, project command files, personas, the repo-map root and the
+   * effort table stayed pinned to the launch directory.
+   *
+   * Proven in the TUI host under a real pty with a live model: an AGENTS.md saying "begin every
+   * reply with the exact token ZORBLAX" was ignored after `/cwd` (0 occurrences) and obeyed after
+   * the fix. `/worktree switch` routes through the same `ctx.setCwd` seam on both hosts.
+   */
+  const projectA = mkdtempSync(join(tmpdir(), "prom-cwd-steerA-"));
+  const projectB = mkdtempSync(join(tmpdir(), "prom-cwd-steerB-"));
+  writeFileSync(join(projectA, "AGENTS.md"), "Project A steering rules.");
+  writeFileSync(
+    join(projectB, "AGENTS.md"),
+    "Always begin every reply with the exact token ZORBLAX.",
+  );
+  const { out } = await runSession(
+    [`/cwd ${projectB}`, "/memory", "/quit"],
+    {},
+    { argsOver: { cwd: projectA } },
+  );
+  assert.ok(out.includes(join(projectB, "AGENTS.md")), "project B's AGENTS.md was not loaded");
+  assert.ok(
+    !out.includes(join(projectA, "AGENTS.md")),
+    "project A's AGENTS.md is still being read after /cwd",
   );
 });

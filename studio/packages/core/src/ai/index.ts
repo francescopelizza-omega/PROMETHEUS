@@ -20,6 +20,7 @@ export * from "./connectors/index.js";
 export * from "./guardrails/index.js";
 export * from "./repoint/index.js";
 export * from "./effort/index.js";
+export { mergeWireUsage, type WireUsage } from "./usage.js";
 
 // Resilience for a model request: what a failure MEANS, and one retrying POST for all four
 // transports. `resilience/retry.ts` had backoff, jitter and abort support with zero callers.
@@ -50,6 +51,25 @@ export {
   promptCachingSupported,
   shouldRequestPromptCache,
 } from "./prompt-cache.js";
+
+// Model health: the capability/breaker/context-window state this repo already measures,
+// merged into one displayable, storable record. See that module's own header for why.
+export type {
+  ContextWindowOrigin,
+  EndpointHealthRecord,
+  ModelHealthStore,
+  TransportMode,
+} from "./model-health.js";
+export {
+  NO_BREAKER_SNAPSHOT,
+  buildHealthRecord,
+  describeBreaker,
+  describeContextWindow,
+  describeTransport,
+  formatHealthTable,
+  mergeHealthRecord,
+  parseEndpointHealthRecord,
+} from "./model-health.js";
 
 // Turning a configured cloud provider into an endpoint an interactive session can select.
 // The CLI's endpoint universe was two hardcoded LOCAL runners; the swarm lane knew all this

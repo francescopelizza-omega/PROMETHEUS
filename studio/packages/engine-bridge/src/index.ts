@@ -116,7 +116,12 @@ export type {
   PrOpResult,
   SafeFetchFn,
 } from "./pr/provider.js";
-export { listPullRequests, getPullRequest, postComment } from "./pr/provider.js";
+export {
+  listPullRequests,
+  getPullRequest,
+  postComment,
+  pullRequestAsUntrustedContext,
+} from "./pr/provider.js";
 
 // --- URL-injection L4 classifier + §4 verdict fusion ------------------------
 export type {
@@ -624,3 +629,6 @@ export {
   type ServeStartResult,
   type ServeStopResult,
 } from "./serve-host.js";
+
+export type { McpGateTargetKind, McpGateVerdict } from "./security/mcp-gate.js";
+export { createMcpGateRunner } from "./security/mcp-gate.js";

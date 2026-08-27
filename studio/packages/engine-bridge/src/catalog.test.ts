@@ -119,11 +119,19 @@ test("skillsList()/vaultStatus() LIVE return JSON envelopes", async (t) => {
   assert.ok("repos" in vault, "vault status carries repos[]");
 });
 
-test("appsList()/worldsimList()/modelsList()/inventory() LIVE return human-table lines", async (t) => {
+test("appsList()/worldsimList()/modelsList()/inventory() LIVE return DISPLAY lines, never a JSON blob", async (t) => {
   if (!engineExists()) {
     t.skip("prometheus.py not present");
     return;
   }
+  /**
+   * `Array.isArray(res.lines)` — all this used to assert — is satisfied by the single-element
+   * array holding an entire serialized JSON envelope, which is precisely what these reads
+   * started returning once the engine grew `{command, action, lines:[…]}` envelopes for
+   * `models list` / `apps list` / `inventory`. Studio rendered that blob verbatim in its
+   * catalog panes and the suite stayed green. The assertions below are the ones that would
+   * have caught it: real row COUNT, and no row that is itself an envelope.
+   */
   const client = liveClient();
   for (const res of [
     await client.appsList(),
@@ -132,8 +140,18 @@ test("appsList()/worldsimList()/modelsList()/inventory() LIVE return human-table
     await client.inventory(),
   ]) {
     assert.equal(res.ok, true, `the engine ran (${res.command}): ${res.error ?? ""}`);
-    assert.ok(Array.isArray(res.lines), "stdout lines array");
     assert.ok(res.engine, "the engine path that ran is reported");
+    assert.ok(
+      res.lines.length > 1,
+      `${res.command}: a catalog read must produce many display rows, got ${res.lines.length} ` +
+        "— one row means the JSON envelope was rendered as a single line",
+    );
+    for (const line of res.lines) {
+      assert.ok(
+        !line.trimStart().startsWith('{"'),
+        `${res.command}: a display row must not be a JSON envelope — got ${line.slice(0, 80)}`,
+      );
+    }
   }
 });
 

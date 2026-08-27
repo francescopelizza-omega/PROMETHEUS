@@ -33,10 +33,20 @@ import { createVsCodeWorkspaceIo } from "./workspace-io.js";
  */
 export interface PrometheusApi {
   readonly view: ChatViewProvider;
-  /** Replace the model client. Pass undefined to restore the configured endpoint. */
-  setLlmClient(llm: LLMClient | undefined): void;
-  /** Replace the human confirm surface (the tests auto-answer; a modal would hang them). */
-  setConfirm(fn: ((call: ToolCall) => Promise<ConfirmResult>) | undefined): void;
+  /**
+   * Replace the model client. Pass undefined to restore the configured endpoint.
+   *
+   * AWAIT IT. Swapping the client rebuilds the session, and the rebuild is asynchronous because
+   * it stops and waits out any in-flight turn first. These setters used to return `void` while
+   * firing `void rebuild()`, so a caller that set a client and immediately submitted raced the
+   * rebuild and drove the OLD session — the one still wired to the configured endpoint. In the
+   * integration suite that is every test after the activation ones: they injected a scripted
+   * model, submitted, and got nothing back, because the turn went to an endpoint that is not
+   * there. The whole point of this API is injection, so the injection has to be awaitable.
+   */
+  setLlmClient(llm: LLMClient | undefined): Promise<void>;
+  /** Replace the human confirm surface (the tests auto-answer; a modal would hang them). AWAIT IT — see `setLlmClient`. */
+  setConfirm(fn: ((call: ToolCall) => Promise<ConfirmResult>) | undefined): Promise<void>;
   /** Send a user turn and resolve when it completes. */
   submit(text: string): Promise<void>;
   /** The live session, or undefined when no workspace folder is open. */
@@ -63,8 +73,47 @@ export function activate(context: vscode.ExtensionContext): PrometheusApi {
    * Called on activation and whenever the workspace folders or the relevant settings change.
    * The session holds the thread, so rebuilding deliberately starts a fresh conversation — the
    * old one was about a different workspace or a different model.
+   *
+   * The OUTGOING session is stopped and AWAITED before being discarded: an ordinary action
+   * (the user changing a `prometheus.*` setting, or a workspace-folder change) firing mid-turn
+   * used to swap `session` out from under a still-running turn. The old ChatSession kept
+   * streaming into the webview via sinks that route through `ChatViewProvider.post` (unaffected
+   * by the swap), while `cancel()`/`submit()` — which always re-resolve `session()` fresh —
+   * started acting on the brand-new, idle instance instead: Cancel silently stopped working
+   * ("no turn is currently running"), and sending a new message started a SECOND, fully
+   * independent turn concurrently with the still-running orphaned one.
    */
-  const rebuild = (): void => {
+  /**
+   * What the LAST rebuild was keyed to, so the next one can tell a cosmetic settings change from
+   * a real change of model or workspace. `undefined` before the first build.
+   */
+  let sessionKey: string | undefined;
+  /**
+   * Bumped every time an LLM client is injected. Swapping the client IS a change of model, so it
+   * belongs in the session key — otherwise a fresh client inherits the previous conversation,
+   * which is both wrong in principle and what made two integration tests see an earlier test's
+   * tool result in their thread.
+   */
+  let llmEpoch = 0;
+
+  const rebuild = async (): Promise<void> => {
+    const outgoing = session;
+    if (outgoing) await outgoing.stopAndWaitIdle();
+    /**
+     * The conversation so far, MINUS the system prompt (the new session writes its own).
+     *
+     * Any `prometheus.*` setting change calls `rebuild()`, which constructs a fresh `ChatSession`
+     * with an empty thread — while the webview transcript is left on screen untouched. So
+     * nudging `authLevel` or `contextWindow` silently erased the model's whole memory of the
+     * conversation, and the user's next message landed on a model that had never seen any of it.
+     * Reproduced: 5 messages before, 1 (the system prompt) after.
+     *
+     * A rebuild that genuinely changes the MODEL or the WORKSPACE is a different conversation and
+     * should start clean — that is what `rebuild`'s own docstring intends. This only preserves
+     * the thread when neither changed, and says so out loud when it does reset.
+     */
+    const carried = outgoing ? outgoing.thread.messages.slice(1) : [];
+
     const folder = vscode.workspace.workspaceFolders?.[0];
     if (!folder) {
       session = undefined;
@@ -74,21 +123,59 @@ export function activate(context: vscode.ExtensionContext): PrometheusApi {
     const cfg = vscode.workspace.getConfiguration("prometheus");
     const io = createVsCodeWorkspaceIo(folder);
 
+    /**
+     * The model id may be EMPTY, and that is fine: `createEndpointLlmClient` discovers one from
+     * the endpoint at first use.
+     *
+     * The shipped default used to be the literal `prometheus-local`, which no Modelfile, install
+     * step or any other artifact in this repo ever creates — so a user who installed the .vsix
+     * and typed one word got `HTTP 404 … model 'prometheus-local' not found` on their very first
+     * message. Verified against a real Ollama. Substituting a different hardcoded tag would fail
+     * the same way on a machine that does not happen to have it, so the id is DISCOVERED.
+     *
+     * The discovery is deliberately NOT done here. `rebuild()` is fired as `void rebuild()` on
+     * activation, so an `await` on this path means `api.session()` is still undefined when
+     * `activate()` returns — which broke the integration suite's very first API assertion. Doing
+     * it lazily also means a probe only happens when a turn actually needs one.
+     */
+    const model = (cfg.get<string>("model") ?? "").trim();
+
     session = new ChatSession({
-      llm: llmOverride ?? createEndpointLlmClient({ endpoint: endpointFromConfig(cfg) }),
+      llm:
+        llmOverride ??
+        createEndpointLlmClient({
+          endpoint: endpointFromConfig(cfg, model),
+          // read lazily: `session` is assigned just below, and this is only ever called
+          // mid-turn, long after that.
+          getSignal: () => session?.currentSignal,
+        }),
       runTool: createVsCodeToolRunner({
         io,
         onToolNote: (note) => provider.post({ type: "tool", note }),
       }),
       confirm: (call) => (confirmOverride ?? confirmToolCall)(call),
-      tuning: vscodeTuning(
-        cfg.get<string>("model") ?? "prometheus-local",
-        cfg.get<number>("authLevel") ?? 1,
-      ),
+      // the SAME resolved id the endpoint got — keying the tuning to a different (phantom)
+      // model was half of what made the old default so confusing to diagnose.
+      tuning: vscodeTuning(model, cfg.get<number>("authLevel") ?? 1),
+      // so the session can warn before the window it will be rejected at — see `SessionDeps`.
+      contextWindow: cfg.get<number>("contextWindow") ?? 8192,
     });
+
+    const key = `${folder.uri.fsPath}|${cfg.get<string>("baseUrl") ?? ""}|${model}|${llmEpoch}`;
+    if (carried.length > 0) {
+      if (sessionKey === undefined || sessionKey === key) {
+        session.thread.messages.push(...carried); // same model, same folder — keep the thread
+      } else {
+        provider.post({
+          type: "status",
+          text: "⟳ model or workspace changed — starting a fresh conversation.",
+        });
+      }
+    }
+    sessionKey = key;
   };
 
-  rebuild();
+  void rebuild();
 
   context.subscriptions.push(
     vscode.window.registerWebviewViewProvider(CHAT_VIEW_ID, provider, {
@@ -100,20 +187,17 @@ export function activate(context: vscode.ExtensionContext): PrometheusApi {
     vscode.commands.registerCommand("prometheus.focusChat", async () => {
       await vscode.commands.executeCommand(`${CHAT_VIEW_ID}.focus`);
     }),
-    vscode.commands.registerCommand("prometheus.newSession", () => {
-      provider.reset();
+    vscode.commands.registerCommand("prometheus.newSession", async () => {
+      await provider.reset();
     }),
     vscode.commands.registerCommand("prometheus.cancel", () => {
-      // Honest about its limits: the turn's abort plumbing is not wired in this MVP (see
-      // README.md "Scoped out"), and a command that silently did nothing would be worse than
-      // one that says so.
-      void vscode.window.showInformationMessage(
-        "Prometheus: cancelling a turn mid-flight is not supported yet.",
-      );
+      if (!provider.cancel()) {
+        void vscode.window.showInformationMessage("Prometheus: no turn is currently running.");
+      }
     }),
-    vscode.workspace.onDidChangeWorkspaceFolders(() => rebuild()),
+    vscode.workspace.onDidChangeWorkspaceFolders(() => void rebuild()),
     vscode.workspace.onDidChangeConfiguration((e) => {
-      if (e.affectsConfiguration("prometheus")) rebuild();
+      if (e.affectsConfiguration("prometheus")) void rebuild();
     }),
   );
 
@@ -121,11 +205,12 @@ export function activate(context: vscode.ExtensionContext): PrometheusApi {
     view: provider,
     setLlmClient(llm) {
       llmOverride = llm;
-      rebuild();
+      llmEpoch += 1; // a different client is a different model — start a fresh conversation
+      return rebuild();
     },
     setConfirm(fn) {
       confirmOverride = fn;
-      rebuild();
+      return rebuild();
     },
     submit: (text) => provider.submit(text),
     session: () => session,
@@ -138,9 +223,8 @@ export function deactivate(): void {
 }
 
 /** Build the endpoint from settings. Defaults to a local Ollama, the common local-first case. */
-function endpointFromConfig(cfg: vscode.WorkspaceConfiguration): AiEndpoint {
+function endpointFromConfig(cfg: vscode.WorkspaceConfiguration, model: string): AiEndpoint {
   const baseUrl = cfg.get<string>("baseUrl") ?? "http://localhost:11434/v1";
-  const model = cfg.get<string>("model") ?? "prometheus-local";
   // `locality` gates core's cloud policy, so it is derived from the URL rather than trusted
   // from a setting: a loopback address is local, anything else may leave the machine.
   const local = /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(:|\/|$)/.test(baseUrl);

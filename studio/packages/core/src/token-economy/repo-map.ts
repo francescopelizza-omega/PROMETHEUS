@@ -25,6 +25,15 @@ export interface RepoFs {
 export interface RepoDirent {
   name: string;
   isDirectory: boolean;
+  /**
+   * Whether this dirent is itself a symlink (regardless of what it points to). A walk that
+   * dereferences a symlink can hang forever reading a special file (a FIFO, `/dev/zero`) or
+   * disclose content from outside the walk root — so the walker never follows one; adapters
+   * MUST report this from the dirent's own type (e.g. `Dirent.isSymbolicLink()`), never from a
+   * `stat` of the target. Defaults to `false` for adapters that predate this field (accepted only
+   * from fakes/tests — every real binding must set it).
+   */
+  isSymlink?: boolean;
 }
 
 export interface WalkOptions {
@@ -34,6 +43,13 @@ export interface WalkOptions {
   maxReadBytes?: number;
   /** extra ignore dir names layered on the built-in defaults. */
   ignoreDirs?: readonly string[];
+  /**
+   * Max directories DESCENDED INTO before the walk stops early (`truncated=true`), regardless of
+   * how many files have been recorded (default 20000). `fileCap` alone never bounds a file-sparse,
+   * directory-heavy tree (e.g. tens of thousands of empty subfolders) — this is the same early
+   * exit, keyed on directories visited instead of files recorded.
+   */
+  dirCap?: number;
 }
 
 export interface RepoEntry {
@@ -115,6 +131,7 @@ const BINARY_EXT = new Set([
 ]);
 
 const DEFAULT_FILE_CAP = 2000;
+const DEFAULT_DIR_CAP = 20_000;
 const DEFAULT_MAX_READ = 256 * 1024;
 /** per-file symbol cap so one generated barrel can't flood the map. */
 const MAX_SYMBOLS_PER_FILE = 48;
@@ -128,15 +145,24 @@ interface GitignoreRule {
   negate: boolean;
   /** trailing `/` — matches directories only. */
   dirOnly: boolean;
-  /** leading `/` — anchored to the repo root (match the full rel path, not a basename). */
+  /** a `/` anywhere but a single trailing one — anchored to the repo root (match the full rel
+   *  path, not a basename). */
   anchored: boolean;
 }
 
 /**
  * Parse the ROOT `.gitignore` — TOP-LEVEL patterns only (deterministic). Honors `#` comments,
- * blank lines, leading `!` negation, trailing-slash dir-only, leading-slash anchoring, and a
- * simple `*.ext` suffix glob. A full gitignore matcher is out of scope; NESTED `.gitignore`
- * files are deliberately NOT honored so the map is byte-stable across machines.
+ * blank lines, leading `!` negation, trailing-slash dir-only, anchoring, and a simple `*.ext`
+ * suffix glob. A full gitignore matcher is out of scope; NESTED `.gitignore` files are
+ * deliberately NOT honored so the map is byte-stable across machines.
+ *
+ * ANCHORING follows git's own rule, not just "has a leading slash": a pattern anchors to the
+ * .gitignore's own directory when it contains a `/` ANYWHERE but a single trailing one — a
+ * pattern with a slash only in the MIDDLE, like `apps/vscode-extension/.vscode-test/`, is just
+ * as anchored as `/apps/vscode-extension/.vscode-test/`. Treating "anchored" as "has a leading
+ * slash" specifically was the bug: that pattern would fall through to basename-only matching
+ * against a bare `.vscode-test`, which can never match a multi-segment relative path — so an
+ * ignored, potentially huge (VS Code test binaries) directory would be walked anyway.
  */
 export function parseGitignore(text: string): GitignoreRule[] {
   const rules: GitignoreRule[] = [];
@@ -148,8 +174,8 @@ export function parseGitignore(text: string): GitignoreRule[] {
     if (negate) pat = pat.slice(1);
     const dirOnly = pat.endsWith("/");
     if (dirOnly) pat = pat.slice(0, -1);
-    const anchored = pat.startsWith("/");
-    if (anchored) pat = pat.slice(1);
+    const anchored = pat.includes("/");
+    if (anchored && pat.startsWith("/")) pat = pat.slice(1);
     if (!pat) continue;
     rules.push({ pattern: pat, negate, dirOnly, anchored });
   }
@@ -195,6 +221,7 @@ const extOf = (name: string): string => {
  */
 export function walkRepo(fs: RepoFs, root: string, opts: WalkOptions = {}): RepoMap {
   const fileCap = opts.fileCap ?? DEFAULT_FILE_CAP;
+  const dirCap = opts.dirCap ?? DEFAULT_DIR_CAP;
   const maxRead = opts.maxReadBytes ?? DEFAULT_MAX_READ;
   const ignoreDirs = new Set([...DEFAULT_IGNORE_DIRS, ...(opts.ignoreDirs ?? [])]);
 
@@ -207,9 +234,18 @@ export function walkRepo(fs: RepoFs, root: string, opts: WalkOptions = {}): Repo
 
   const entries: RepoEntry[] = [];
   let truncated = false;
+  let dirsVisited = 0;
 
   const descend = (absDir: string, relDir: string): void => {
     if (truncated) return;
+    dirsVisited++;
+    if (dirsVisited > dirCap) {
+      // A file-sparse, directory-heavy tree (many empty subfolders) never trips `fileCap` — this
+      // is the same early exit, keyed on directories visited instead of files recorded, so the
+      // walk can't run unbounded on a repo shaped to have few files and many directories.
+      truncated = true;
+      return;
+    }
     let dirents: RepoDirent[];
     try {
       dirents = [...fs.readdir(absDir)];
@@ -223,6 +259,10 @@ export function walkRepo(fs: RepoFs, root: string, opts: WalkOptions = {}): Repo
       if (d.isDirectory) {
         if (ignoreDirs.has(d.name)) continue;
         if (isGitIgnored(gitignore, rel, d.name, true)) continue;
+        // Never follow a symlinked directory: it can point outside `root` (disclosing an
+        // unrelated tree) or cycle back into an ancestor (infinite recursion) — neither of
+        // which `ignoreDirs`/`.gitignore` guards against.
+        if (d.isSymlink) continue;
         descend(joinPosix(absDir, d.name), rel);
         continue;
       }
@@ -233,7 +273,13 @@ export function walkRepo(fs: RepoFs, root: string, opts: WalkOptions = {}): Repo
       }
       entries.push({
         path: rel,
-        symbols: extractFileSymbols(fs, joinPosix(absDir, d.name), d.name, maxRead),
+        // Never dereference a symlinked FILE's target: it may point at a special file (a FIFO,
+        // `/dev/zero`) whose read never returns — the exact DoS this guard exists to prevent —
+        // or at a real file outside `root`, disclosing content that isn't part of this repo.
+        // List it by name only, exactly like an oversized file already is.
+        symbols: d.isSymlink
+          ? []
+          : extractFileSymbols(fs, joinPosix(absDir, d.name), d.name, maxRead),
       });
     }
   };

@@ -61,6 +61,7 @@ import { dirname, isAbsolute, join, resolve } from "node:path";
 // agent` / `export * as mcpServer`). The provider-agnostic AI client stays FLAT at
 // top-level (`createAiClient` + its types). We alias the namespace types we touch.
 import {
+  ModelIdlePausedError,
   agent,
   ai,
   costOf,
@@ -71,6 +72,7 @@ import {
 // The shared model-request path: one retrying POST, one failure classification. Every
 // transport in this repo made a single attempt before this.
 const { AiHttpError, describeAiFailure, endpointBreaker, fetchModelWithRetry } = ai;
+import { DEFAULT_CONTEXT_WINDOW } from "@prometheus/core";
 import type {
   AiClient,
   AiClientDeps,
@@ -81,6 +83,7 @@ import type {
   SseTokenUsage,
   WorkspacePolicy,
 } from "@prometheus/core";
+import { readTextExact } from "@prometheus/core/agent-system-host";
 
 import {
   type EngineClient,
@@ -102,14 +105,16 @@ import {
   readAccounting,
   readAccountingSince,
 } from "./history-store.js";
+import { recordEndpointHealth } from "./model-health-store.js";
 import {
   type SystemToolDeps,
+  appendCanaryAudit,
   execVarsFromEnv,
   runEngineVerb,
   runSystemTool,
   runWebTool,
 } from "./system-tools.js";
-import { isPathAllowed, pathArgsOf } from "./working-set.js";
+import { isPathAllowed, pathArgsOf, scopedAbsolute } from "./working-set.js";
 
 const {
   applyProposedEdit,
@@ -226,6 +231,42 @@ export function shouldEnablePromptCaching(
  *  when `terse-output` is enabled). Read once at session start; PURE + injected into runMessageTurn. */
 export function tokenSystemBlocks(toggles: Record<string, boolean> | undefined): string[] {
   return toggles?.["terse-output"] === true ? [terseDirective()] : [];
+}
+
+/**
+ * Host-specific TURN contributors for the preamble dispatch pipeline — thin adapters over
+ * `SessionCtx` getters that already do their OWN vetting upstream (steering's remote-instruction
+ * filter + `rules/loader.ts`'s `PROJECT_PROVENANCE` framing for project-scope sources; the repo
+ * map's own size cap). Each is a `block`-target contributor: its own trailing system message,
+ * exactly as these blocks have always been pushed — just now priority-ordered and budgeted
+ * alongside every other contributor instead of appended unconditionally with no ceiling at all.
+ */
+function hostTurnContributors(ctx: SessionCtx): agent.protocol.PreambleContributor[] {
+  const block = (
+    id: string,
+    priority: number,
+    get: () => string | null | undefined,
+  ): agent.protocol.PreambleContributor => ({
+    id,
+    priority,
+    applies: (): boolean => Boolean(get()?.trim()),
+    render: (): agent.protocol.PreambleUnit => ({ text: get() ?? "", mergeTarget: "block" }),
+  });
+  return [
+    block("steering", 30, () => ctx.steering?.() ?? null),
+    block("memory", 40, () => ctx.memory?.() ?? null),
+    block("session-start-hooks", 50, () => ctx.sessionStartHooks?.() ?? null),
+    block("repo-map", 80, () => ctx.repoMap?.() ?? null),
+    {
+      id: "token-economy",
+      priority: 90,
+      applies: (): boolean => tokenSystemBlocks(ctx.tokenToggles).length > 0,
+      render: (): agent.protocol.PreambleUnit => ({
+        text: tokenSystemBlocks(ctx.tokenToggles).join("\n\n"),
+        mergeTarget: "block",
+      }),
+    },
+  ];
 }
 
 /** One measured context component (a label + its raw char count). */
@@ -426,6 +467,16 @@ export interface SessionCtx {
   /** the selected AI endpoint (from the Model Hub), or undefined when offline. */
   endpoint?: AiEndpoint;
   /**
+   * The session's EFFECTIVE effort capability table — builtins plus any user/workspace
+   * override file (`session/effort-rules.ts`).
+   *
+   * Loaded once per session by the host, not per turn: it is disk-backed, and re-reading it on
+   * every message would put two file stats on the request path for a table that changes when a
+   * human edits it. Omitted ⇒ the builtins alone, which is exactly the behaviour before the
+   * override files existed.
+   */
+  effortRules?: readonly ai.EffortRule[];
+  /**
    * Resolve `endpoint.apiKeyRef` → the raw key, LAZILY (the secret is read per request and
    * never stored in JS state).
    *
@@ -437,6 +488,13 @@ export interface SessionCtx {
   resolveKey?: (apiKeyRef: string) => Promise<string>;
   /** the per-workspace privacy policy (cloud refusal). Defaults to permissive. */
   policy?: WorkspacePolicy;
+  /** `/timeout` — the user's inactivity-pause threshold in ms (default 10 min, see
+   *  `agent.idleWatchdog.DEFAULT_IDLE_TIMEOUT_MS`). Undefined ⇒ the default applies. */
+  idleTimeoutMs?: number;
+  /** override for the auto-compaction summarizer's OWN (shorter) idle window — see
+   *  `makeSummarizer`. Undefined ⇒ `agent.idleWatchdog.DEFAULT_COMPACT_IDLE_TIMEOUT_MS`. Not
+   *  currently exposed via a slash command; present for testability/future tuning. */
+  compactIdleTimeoutMs?: number;
   /** --json mode: machine envelope to stdout, human text to stderr (host-owned). */
   json?: boolean;
   /** asked before a non-auto-approvable tool runs; DEFAULT = deny (never-force). A
@@ -865,7 +923,7 @@ export function turnsToHistory(turns: readonly SessionTurn[]): ThreadMessage[] {
  */
 export function makeSummarizer(
   ctx: SessionCtx,
-  deps: { llm?: LLMClient } = {},
+  deps: { llm?: LLMClient; signal?: AbortSignal; onStatus?: (text: string) => void } = {},
 ): { summarize: Summarizer; offline: boolean } {
   const llm =
     deps.llm ??
@@ -873,6 +931,14 @@ export function makeSummarizer(
       ? makeLlmClient(ctx.endpoint, {
           ...(ctx.policy ? { policy: ctx.policy } : {}),
           ...(ctx.resolveKey ? { resolveKey: ctx.resolveKey } : {}),
+          // (B) root cause 3's fix: this inner call used to get NO signal at all, so Esc/
+          // Ctrl-C could never reach it, and it died on its own undifferentiated 180s timer
+          // with its status silently discarded (see the for-await loop below).
+          ...(deps.signal ? { signal: deps.signal } : {}),
+          // A background helper the user's real turn is waiting behind — bounded to a SHORTER
+          // idle window than the main turn's (10 min default) for exactly that reason.
+          idleTimeoutMs:
+            ctx.compactIdleTimeoutMs ?? agent.idleWatchdog.DEFAULT_COMPACT_IDLE_TIMEOUT_MS,
         })
       : undefined);
   if (!llm) {
@@ -884,6 +950,7 @@ export function makeSummarizer(
   return {
     offline: false,
     summarize: async (older) => {
+      deps.onStatus?.("⎿ compacting session (summarizing older turns)…");
       const thread: Thread = {
         messages: [
           {
@@ -901,6 +968,17 @@ export function makeSummarizer(
       try {
         for await (const turn of llm.turn(thread, ctx.tuning, [])) {
           if (turn.kind === "text") text += turn.text;
+          else if (turn.kind === "status") deps.onStatus?.(`⎿ compacting: ${turn.text}`);
+          else if (turn.kind === "paused") {
+            // (B): fail-soft rather than making the user's real turn wait out the full
+            // compact-idle window a SECOND time — the caller's extractive fallback below is
+            // always safe (compact.ts is fail-soft by contract), and this is now VISIBLE
+            // instead of a silent 180s death.
+            deps.onStatus?.(
+              `⎿ compacting: the summarizer model went idle for ${Math.round(turn.idleMs / 1000)}s — using an offline summary for this pass`,
+            );
+            break;
+          }
         }
       } catch {
         /* model error → deterministic fallback below */
@@ -995,6 +1073,13 @@ export interface LlmClientDeps extends AiClientDeps {
   policy?: WorkspacePolicy;
   /** abort the in-flight SSE request + stop yielding deltas (Ctrl-C, CLI-002). */
   signal?: AbortSignal;
+  /** the inactivity-pause threshold for THIS client's requests (root cause 1's fix) — see
+   *  `agent.idleWatchdog`. Undefined ⇒ `DEFAULT_IDLE_TIMEOUT_MS` (10 min). */
+  idleTimeoutMs?: number;
+  /** test-only clock injection for the idle watchdog — see `toolTurn`'s identical fields. */
+  idleWatchdogNow?: () => number;
+  idleWatchdogSetTimeout?: (cb: () => void, ms: number) => ReturnType<typeof setTimeout>;
+  idleWatchdogClearTimeout?: (handle: ReturnType<typeof setTimeout>) => void;
   /**
    * The session's `prompt-caching` token toggle. Undefined ⇒ on (the previous behaviour).
    *
@@ -1008,6 +1093,8 @@ export interface LlmClientDeps extends AiClientDeps {
    *  omitted the client falls back to matching the model NAME, which is strictly worse —
    *  Gemma 3 and Gemma 4 differ on this within one family. */
   effortCapability?: EffortCapability;
+  /** the session's effective capability table (builtins ⊕ user ⊕ workspace) — see SessionCtx. */
+  effortRules?: readonly ai.EffortRule[];
   /** clock for the accounting timestamp (injected in tests). */
   now?: () => string;
   /**
@@ -1020,6 +1107,26 @@ export interface LlmClientDeps extends AiClientDeps {
   capability?: ToolCapabilityState;
   /** fired whenever the observation changes, so the host can persist it. */
   onCapability?: (state: ToolCapabilityState) => void;
+  /**
+   * Fired after every turn with this endpoint's fresh health record (Model Health: transport,
+   * breaker, context window). Omitted (every existing test) ⇒ no persistence at all — a host
+   * that wants it on disk wires it to `recordEndpointHealth` itself; this client never writes
+   * anything on its own.
+   */
+  onModelHealth?: (record: ai.EndpointHealthRecord) => void;
+  /**
+   * The TURN-SCOPE preamble assembly's own spend (`PreambleAssembly.totalApproxTokens` from
+   * `runMessageTurn`'s `CORE_TURN_CONTRIBUTORS` pass — tool-discipline, pre-write-recheck,
+   * effort-text), so the ROUND-SCOPE assembly (`withPreamble`, below — tool-catalog, called once
+   * per round rather than once per turn) draws against what is genuinely LEFT of one combined
+   * pool instead of its own separate full `instructionBudget(contextWindow)`. Before this, a
+   * model whose turn-scope contributors spent nearly the whole budget still got tool-catalog's
+   * own FULL budget on top — two independent ceilings, not the one the design intends. Mutated
+   * on the SAME `LlmClientDeps` object after `makeLlmClient` is constructed but before any round
+   * runs (see `runMessageTurn`) — `turn()`'s closures read it fresh from `deps` each round, so
+   * the mutation is visible without needing to reorder the two assemblies relative to each other.
+   */
+  turnScopeSpentTokens?: number;
 }
 
 /** An aborted `fetch` rejects with a DOMException `name === "AbortError"` (code 20). */
@@ -1254,10 +1361,27 @@ async function* toolTurn(
   // the one nearly every agentic turn takes — could not be intercepted by a test at all.
   doFetch: FetchLike = fetch,
   // Written in place so the caller can fold this turn into the endpoint's capability state.
-  observed: { nativeCalls: number; textCalls: number; rejectedForTools: boolean } = {
+  observed: {
+    nativeCalls: number;
+    textCalls: number;
+    rejectedForTools: boolean;
+    /**
+     * Every content byte this turn produced, for the accounting FLOOR when the provider sends
+     * no usage frame.
+     *
+     * The caller used to pass a literal `""` as the received text, so on a native turn without
+     * an SSE `usage` frame — every local runner that omits `stream_options.include_usage`, and
+     * that is the default — the record read `completionTokens: 0`. The same bytes on the
+     * tool-less path were estimated and counted. So the expensive turns, the agentic ones,
+     * were exactly the ones that cost nothing on the budget report, which is the failure mode
+     * a cap exists to prevent.
+     */
+    receivedText: string;
+  } = {
     nativeCalls: 0,
     textCalls: 0,
     rejectedForTools: false,
+    receivedText: "",
   },
   /**
    * Resolve `endpoint.apiKeyRef` → the raw key, and receive the turn's token usage.
@@ -1280,6 +1404,28 @@ async function* toolTurn(
      * every agentic turn takes. Undefined ⇒ on, which is the previous behaviour.
      */
     promptCache?: boolean;
+    /** this transport's inactivity-pause threshold — see `agent.idleWatchdog`. */
+    idleTimeoutMs?: number;
+    /**
+     * `EffortCapability.reasoningTag` for this endpoint — the tag an R1-style model wraps its
+     * inline thinking in (`"think"`, `"thought"`).
+     *
+     * Passed IN rather than resolved here because the capability is an endpoint fact the
+     * caller already computed once, and because it must apply whether or not a `/think` tier
+     * was ever set: these models leak `<think>` regardless of what effort is requested.
+     */
+    reasoningTag?: string;
+    /**
+     * Test-only clock injection for the idle watchdog, mirroring this file's existing `now?:
+     * () => string` / `RetryOptions.sleep` pattern for timing-sensitive code. Production never
+     * sets these (the watchdog uses the real `Date.now`/`setTimeout`); a test can inject a
+     * TIME-COMPRESSED clock (e.g. 1 real ms = 1000 fake ms) to verify a real 30-second-minimum
+     * idle threshold fires in milliseconds of actual test time, without weakening
+     * `MIN_IDLE_TIMEOUT_MS` itself or waiting out real minutes in the suite.
+     */
+    idleWatchdogNow?: () => number;
+    idleWatchdogSetTimeout?: (cb: () => void, ms: number) => ReturnType<typeof setTimeout>;
+    idleWatchdogClearTimeout?: (handle: ReturnType<typeof setTimeout>) => void;
   } = {},
 ): AsyncIterable<LlmTurn> {
   if (policy.neverSendToCloud && endpoint.locality === "cloud") {
@@ -1300,47 +1446,182 @@ async function* toolTurn(
   const wire = ai.selectWire(runtime);
   const url = wire.url(endpoint.baseUrl, model);
   // accumulate tool-call fragments by their stream index (args arrive in pieces).
-  const calls = new Map<number, ToolCallAccum>();
+  /**
+   * Accumulated native tool calls, keyed by the wire's grouping key — NOT bare `tc.index`.
+   *
+   * `index` groups the fragments of ONE streamed call, which is what OpenAI and Anthropic need.
+   * But a provider that hands over a call whole (Gemini) numbers it by its position within the
+   * chunk it arrived in, so one call per chunk means `index: 0` for every call. Keyed on that
+   * alone, two different calls shared a slot: the later name won and the argument objects were
+   * concatenated into `{"path":"a.txt"}{"path":"."}`, which does not parse — so BOTH calls were
+   * destroyed and the model was handed a `malformed_tool_call` blaming its own output.
+   */
+  const calls = new Map<string, ToolCallAccum>();
+  /** Monotonic key for calls that arrive COMPLETE — never merged, never colliding. */
+  let completeCallSeq = 0;
+  /** Preserves emit order: the sequence in which each key was first seen. */
+  const callOrder = new Map<string, number>();
+  let callSeen = 0;
+  function callKey(tc: { index: number; complete?: boolean }): string {
+    return tc.complete === true ? `whole:${completeCallSeq++}` : `idx:${tc.index}`;
+  }
   // …and a text scanner for the same turn, because a model with a native channel may still
   // answer in prose (see where `delta.content` is consumed).
   const textScanner = new agent.protocol.ToolCallScanner();
   const textCalls: agent.protocol.TextToolCall[] = [];
-  // progress watchdog: a large local model can take 30–90s to START (cold prefill/reload).
-  // Without a heartbeat the user can't tell a slow MODEL from a hung WRAPPER — so we emit a
-  // status every FIRST_TOKEN_TICK until the first byte, and hard-abort after HARD_TIMEOUT.
-  const FIRST_TOKEN_TICK_MS = 8_000;
-  const STREAM_IDLE_TICK_MS = 15_000;
-  const HARD_TIMEOUT_MS = 180_000;
   /**
-   * Our own controller so a HARD TIMEOUT (or the user's Ctrl-C) cancels the fetch + reader —
-   * RE-ARMED per attempt, which is the part a retry loop makes load-bearing.
-   *
-   * An `AbortController` is single-use: once aborted it stays aborted. A retry that reused one
-   * would have its second attempt abort before it began, and a retry that reused the timer
-   * would let three attempts share one 180-second budget and then blame the model. So each
-   * attempt gets a fresh controller and a fresh deadline; `ac` is a `let` and the user's abort
-   * handler is registered ONCE, closing over whichever controller is current.
+   * Splits inline `<think>…</think>` out of the content stream — a no-op pass-through when this
+   * endpoint's capability names no tag. See `ai/effort/reasoning-tag.ts`; it must run BEFORE
+   * `textScanner`, so a model's private deliberation never reaches the tool-call parser.
+   */
+  const reasoningSplitter = ai.createReasoningTagSplitter(aux.reasoningTag);
+  /**
+   * Our own controller so an IDLE PAUSE (or the user's Ctrl-C) cancels the fetch + reader —
+   * RE-ARMED per attempt, which is the part a retry loop makes load-bearing. `ac` is a `let`
+   * and the watchdog's `onIdle` closes over it, so it always aborts whichever attempt is
+   * CURRENT, without needing its own per-attempt timer any more (see below).
    */
   let ac = new AbortController();
-  const onUserAbort = (): void => ac.abort();
+  /**
+   * STABLE across every retry attempt (never reassigned) — this is what the idle watchdog
+   * actually aborts, and what is threaded into `fetchModelWithRetry` below as `userSignal` so
+   * `retry()`'s own abort checks (before each attempt, and right after a failed one,
+   * `resilience/retry.ts:80,86`) see it regardless of whether a fetch is live or the loop is in
+   * its backoff SLEEP between attempts.
+   *
+   * Without this (verification pass #2's CRITICAL finding, `ai/client.ts`'s twin of this exact
+   * pattern): `onIdle` aborting the per-attempt `ac` directly means an idle-fire landing during
+   * the backoff sleep (nothing pending on `ac` at that instant — the previous attempt already
+   * settled, the next hasn't started) aborts a controller nothing is listening to, is silently
+   * lost, and — because `IdleWatchdog` is a documented ONE-SHOT — can never fire again for the
+   * rest of this call, so a genuine LATER stall in the same request hangs forever instead of
+   * pausing.
+   */
+  const outerAc = new AbortController();
+  const onUserAbort = (): void => outerAc.abort();
   if (signal) {
-    if (signal.aborted) ac.abort();
+    if (signal.aborted) outerAc.abort();
     else signal.addEventListener("abort", onUserAbort, { once: true });
   }
+  // propagate immediately to whichever per-attempt controller is CURRENTLY live, so an active
+  // fetch/read is torn down right away rather than only on the NEXT attempt noticing.
+  outerAc.signal.addEventListener("abort", () => ac.abort(), { once: true });
   const startMs = Date.now();
-  let hardTimer: ReturnType<typeof setTimeout> = setTimeout(() => ac.abort(), HARD_TIMEOUT_MS);
+  // set when THIS watchdog (not the user) ends the turn — a PAUSE, never a discard (root
+  // cause 1's fix: was a flat, hardcoded 180s "abort and lose the turn").
+  let pausedByIdle = false;
+  const watchdog = new agent.idleWatchdog.IdleWatchdog({
+    idleTimeoutMs: aux.idleTimeoutMs,
+    onIdle: () => outerAc.abort(),
+    ...(aux.idleWatchdogNow ? { now: aux.idleWatchdogNow } : {}),
+    ...(aux.idleWatchdogSetTimeout ? { setTimeoutFn: aux.idleWatchdogSetTimeout } : {}),
+    ...(aux.idleWatchdogClearTimeout ? { clearTimeoutFn: aux.idleWatchdogClearTimeout } : {}),
+  });
+  watchdog.arm();
   const armAttempt = (): AbortSignal => {
-    clearTimeout(hardTimer);
     ac = new AbortController();
-    if (signal?.aborted) ac.abort();
-    hardTimer = setTimeout(() => ac.abort(), HARD_TIMEOUT_MS);
+    // an idle-fire/cancel that landed during the backoff sleep (before this attempt even
+    // started) must still stop it from firing its own fetch.
+    if (outerAc.signal.aborted) ac.abort();
     return ac.signal;
   };
+  /**
+   * Interrupt the backoff sleep itself the INSTANT `outerAc` aborts, rather than letting the
+   * full delay elapse before `retry()`'s next top-of-loop check ever notices — see `ai/client.ts`'s
+   * identical helper for the full rationale. This transport has no existing injectable sleep for
+   * tests, so there is nothing to defer to; production always uses the real timer below.
+   */
+  const abortableSleep = (ms: number): Promise<void> =>
+    new Promise((resolve) => {
+      if (outerAc.signal.aborted) {
+        resolve();
+        return;
+      }
+      const t = setTimeout(resolve, ms);
+      outerAc.signal.addEventListener(
+        "abort",
+        () => {
+          clearTimeout(t);
+          resolve();
+        },
+        { once: true },
+      );
+    });
   // Hoisted so the `finally` below can always release it — declared once per call (unlike
   // `ac`), which is fine: the body is only ever read once per turn, retries happen inside
   // `fetchModelWithRetry` before this reader is ever created.
   let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+  /**
+   * Emit whatever tool calls/prose have FULLY reassembled so far — shared between the normal
+   * completion path (below) and the idle-pause catch branch, so a pause never discards a call
+   * the model already finished deciding on (verification pass #2's CRITICAL finding: the catch
+   * block used to set `pausedByIdle` and return without ever draining `calls`/`textScanner`,
+   * silently losing a fully-formed tool call and contradicting the turn's own "no work lost"
+   * status line).
+   */
+  function* flushAccumulated(): Generator<LlmTurn> {
+    /**
+     * Drain the reasoning splitter FIRST, so its tail reaches the text scanner before that is
+     * itself flushed. An unterminated `<think>` comes back as reasoning rather than text — a
+     * model cut off mid-thought was still thinking, and promoting a truncated deliberation to
+     * "the answer" is the failure the splitter exists to prevent.
+     */
+    const tail = reasoningSplitter.end();
+    if (tail.reasoning) yield { kind: "reasoning", text: tail.reasoning };
+    if (tail.text) yield* pumpText(textScanner.push(tail.text), textCalls);
+    yield* pumpText(textScanner.end(), textCalls);
+    // emit each fully-reassembled tool call (ordered by stream index).
+    for (const [, acc] of [...calls.entries()].sort(
+      (a, b) => (callOrder.get(a[0]) ?? 0) - (callOrder.get(b[0]) ?? 0),
+    )) {
+      if (!acc.name) continue;
+      let args: Record<string, unknown> = {};
+      let broken: string | undefined;
+      try {
+        args = JSON.parse(acc.args || "{}") as Record<string, unknown>;
+      } catch {
+        // Substituting `{}` here ran the tool with no arguments and told the model nothing,
+        // so it had no way to know its own output was unparseable — and repeated it.
+        broken = "the streamed arguments were not valid JSON";
+      }
+      if (broken) {
+        yield {
+          kind: "tool_call",
+          call: { name: MALFORMED_CALL_TOOL, args: { reason: broken, wrote: acc.args } },
+        };
+        continue;
+      }
+      observed.nativeCalls += 1;
+      yield {
+        kind: "tool_call",
+        call: {
+          name: acc.name as agent.ToolCall["name"],
+          args,
+          ...(acc.id ? { id: acc.id } : {}),
+        },
+      };
+    }
+    // Native calls win: when both arrived, the prose was almost certainly the model narrating
+    // the call it also made properly, and running it twice would double every side effect.
+    if (observed.nativeCalls === 0) {
+      observed.textCalls = textCalls.length;
+      for (const call of textCalls) {
+        yield { kind: "tool_call", call: { name: call.name, args: call.args } };
+      }
+    }
+  }
   try {
+    // (D) defensive guard: this endpoint may still have a generation from an EARLIER paused
+    // turn running/queued server-side (Ollama's own queue, not Prometheus's) — see
+    // `agent.idleWatchdog`'s header for why we can't verify or force real cancellation. Purely
+    // informative: we still send the request, we just say why it might queue.
+    const orphanRemainingMs = agent.idleWatchdog.orphanGraceRemainingMs(endpoint.id);
+    if (orphanRemainingMs > 0) {
+      yield {
+        kind: "status",
+        text: `⚠ ${endpoint.id} may still be finishing a generation from an earlier paused turn — this request can queue behind it for up to ${Math.ceil(orphanRemainingMs / 1000)}s.`,
+      };
+    }
     yield { kind: "status", text: `→ ${model}: sending request…` };
     const headers: Record<string, string> = {
       "Content-Type": "application/json",
@@ -1460,10 +1741,10 @@ async function* toolTurn(
       return;
     }
 
-    const retryNotes: string[] = [];
+    const progressNotes: string[] = [];
     let res: Awaited<ReturnType<typeof doFetch>>;
     try {
-      res = await fetchModelWithRetry({
+      const pending = fetchModelWithRetry({
         endpointId: endpoint.id,
         url,
         init: { method: "POST", headers, body: requestBody },
@@ -1472,14 +1753,39 @@ async function* toolTurn(
         // A dead local server (down, still loading, wrong port) fails FAST after a run of
         // exhausted turns instead of paying the full retry schedule on every subsequent round.
         breaker: endpointBreaker(endpoint.id),
-        ...(signal ? { userSignal: signal } : {}),
-        onRetry: (info: { attempt: number; delayMs: number; reason: string }) =>
-          retryNotes.push(
+        // ALWAYS `outerAc.signal`, not just when the caller passed one: this is what makes an
+        // idle-fire landing during the backoff sleep observable to `retry()`'s own checks —
+        // `signal`'s abort already propagates into it via the listener above.
+        userSignal: outerAc.signal,
+        sleep: abortableSleep,
+        onRetry: (info: { attempt: number; delayMs: number; reason: string }) => {
+          // a response — even a failing one — is evidence the endpoint is alive.
+          watchdog.touch();
+          progressNotes.push(
             `${model}: ${info.reason} — retrying in ${Math.round(info.delayMs / 1000)}s`,
-          ),
+          );
+        },
       });
+      // (C) pre-first-byte watchdog: from the moment the request is SENT, not from the first
+      // response byte — a cold model load or a queue wait behind something else is never
+      // silent for the whole `idleTimeoutMs` window any more.
+      const ticker = agent.idleWatchdog.raceTicks(
+        pending,
+        agent.idleWatchdog.WATCHDOG_FIRST_TICK_MS,
+        () => {
+          const s = Math.round((Date.now() - startMs) / 1000);
+          return `⏳ still waiting for ${model} to start responding… (${s}s — a large local model can take 30–90s to start; esc to cancel)`;
+        },
+      );
+      let step = await ticker.next();
+      while (!step.done) {
+        for (const n of progressNotes.splice(0)) yield { kind: "status", text: n };
+        yield { kind: "status", text: step.value };
+        step = await ticker.next();
+      }
+      res = step.value;
     } catch (err) {
-      for (const n of retryNotes) yield { kind: "status", text: n };
+      for (const n of progressNotes.splice(0)) yield { kind: "status", text: n };
       if (err instanceof AiHttpError) {
         // Was the request refused BECAUSE it carried tools? If so the caller retries THIS turn
         // in the text protocol (see the comment on the `!wire.supportsTools` branch above for
@@ -1502,7 +1808,7 @@ async function* toolTurn(
       }
       throw err;
     }
-    for (const n of retryNotes) yield { kind: "status", text: n };
+    for (const n of progressNotes.splice(0)) yield { kind: "status", text: n };
     if (!res.body) {
       yield { kind: "text", text: `model error: ${endpoint.id} returned an empty response body` };
       yield { kind: "final" };
@@ -1512,35 +1818,67 @@ async function* toolTurn(
     const decoder = new TextDecoder();
     let buf = "";
     let done = false;
+    /** The reader is exhausted; drain the last unterminated frame, then stop. */
+    let streamEnded = false;
     let firstByte = false;
-    // hold ONE in-flight read across watchdog ticks (calling read() twice concurrently throws).
+    // hold ONE in-flight read across watchdog ticks (calling read() twice concurrently throws)
+    // — `raceTicks` never re-issues `pendingRead`, only re-races it.
     let pendingRead = reader.read();
     while (!done) {
-      if (signal?.aborted || ac.signal.aborted) break;
-      let timer: ReturnType<typeof setTimeout> | undefined;
-      const tick = new Promise<"TICK">((r) => {
-        timer = setTimeout(() => r("TICK"), firstByte ? STREAM_IDLE_TICK_MS : FIRST_TOKEN_TICK_MS);
-      });
-      const raced = await Promise.race([pendingRead, tick]);
-      if (timer) clearTimeout(timer);
-      if (raced === "TICK") {
-        // no byte within the tick window — tell the user it's the MODEL we're waiting on.
-        const s = Math.round((Date.now() - startMs) / 1000);
-        yield {
-          kind: "status",
-          text: firstByte
+      if (signal?.aborted || outerAc.signal.aborted) {
+        // Do NOT silently fall through to "the model finished" here: a plain `break` used to
+        // exit the loop and flow straight into `pumpText`/the tool-call flush below, treating
+        // whatever had accumulated so far as a COMPLETE answer — including a tool call's
+        // arguments truncated mid-stream, which then failed to parse and was reported as
+        // malformed rather than genuinely paused. `raceTicks` has no pending operation to
+        // naturally reject in this exact gap (an abort landing BETWEEN reads, before the next
+        // one is even issued) — the narrow race root cause #6's verification pass found — so
+        // this throws instead, letting the SAME catch block below make the idle-vs-user
+        // distinction uniformly for both exit paths, and skip the flush a real completion
+        // still needs.
+        throw new DOMException("idle watchdog (or user) aborted mid-turn", "AbortError");
+      }
+      const ticker = agent.idleWatchdog.raceTicks(
+        pendingRead,
+        firstByte
+          ? agent.idleWatchdog.WATCHDOG_STREAM_TICK_MS
+          : agent.idleWatchdog.WATCHDOG_FIRST_TICK_MS,
+        () => {
+          const s = Math.round((Date.now() - startMs) / 1000);
+          return firstByte
             ? `▼ ${model} still generating… (${s}s)`
-            : `⏳ waiting for ${model} — no output yet (${s}s). A large local model can take 30–90s to start.`,
-        };
-        continue; // pendingRead is still pending — re-race it next iteration
+            : `⏳ waiting for ${model} — no output yet (${s}s). A large local model can take 30–90s to start.`;
+        },
+      );
+      let tickStep = await ticker.next();
+      while (!tickStep.done) {
+        yield { kind: "status", text: tickStep.value };
+        tickStep = await ticker.next();
       }
-      const { value, done: streamDone } = raced;
-      if (streamDone) break;
-      if (!firstByte) {
-        firstByte = true;
-        yield { kind: "status", text: `▼ ${model}: responding…` };
+      const { value, done: streamDone } = tickStep.value;
+      if (streamDone) {
+        /**
+         * The stream ended. Anything still in `buf` is a frame the server sent WITHOUT a
+         * terminating newline — and that last frame can carry the closing sentence of the
+         * answer or the tail of a tool call's arguments. Breaking here dropped it: the reply
+         * was truncated with nothing to say so. Reproduced against a real HTTP server that
+         * `res.end()`s mid-frame — the text arrived as `"first "` and the final frame was gone.
+         *
+         * Terminate the frame and let the SAME parsing loop below drain it, then leave — this
+         * is exactly what core's own `client.ts` does with `parseSseChunk(`${buf}\n`)`.
+         */
+        if (buf.trim() === "") break;
+        buf += "\n";
+        streamEnded = true;
+      } else {
+        watchdog.touch(); // REAL evidence of life — reset the idle countdown (root cause 1's fix)
+        if (!firstByte) {
+          firstByte = true;
+          agent.idleWatchdog.clearPossibleOrphan(endpoint.id); // (D) confirmed alive again
+          yield { kind: "status", text: `▼ ${model}: responding…` };
+        }
+        buf += decoder.decode(value, { stream: true });
       }
-      buf += decoder.decode(value, { stream: true });
       // SSE frames are newline-delimited `data: <json>` lines; process whole lines only.
       let nl = buf.indexOf("\n");
       while (nl !== -1) {
@@ -1581,71 +1919,69 @@ async function* toolTurn(
         const reasoning = reasoningFromPayload(payload);
         if (reasoning) yield { kind: "reasoning", text: reasoning };
         if (ev.delta) {
-          // Scanned even here. A small model handed a working native channel very often
-          // answers with `<tool_call>` prose anyway; dropping those reads to the user as the
-          // model refusing to act, and the scanner also keeps the markup out of the transcript.
-          yield* pumpText(textScanner.push(ev.delta), textCalls);
+          /**
+           * Split inline `<think>…</think>` OUT of the content first.
+           *
+           * R1-style models put their thinking in the ordinary content stream rather than in a
+           * `reasoning` field, and a server that does not split it for us hands it straight
+           * through. `capability.reasoningTag` has named those models since the type existed
+           * and nothing read it, so the deliberation arrived as the answer — and, worse, was
+           * fed to the tool scanner below, where a model musing about calling `write_file`
+           * could trip the text protocol into really calling it.
+           *
+           * A no-op splitter when the capability names no tag, so the ordinary path is
+           * byte-identical.
+           */
+          // Counted RAW, before the thinking is split out and before the scanner reclassifies
+          // any of it: the provider billed every one of these bytes, whatever we do with them.
+          observed.receivedText += ev.delta;
+          const split = reasoningSplitter.push(ev.delta);
+          if (split.reasoning) yield { kind: "reasoning", text: split.reasoning };
+          if (split.text) {
+            // Scanned even here. A small model handed a working native channel very often
+            // answers with `<tool_call>` prose anyway; dropping those reads to the user as the
+            // model refusing to act, and the scanner also keeps the markup out of the transcript.
+            yield* pumpText(textScanner.push(split.text), textCalls);
+          }
         }
-        if (ev.toolCall) {
-          const idx = ev.toolCall.index;
-          const acc = calls.get(idx) ?? { name: "", args: "" };
-          if (ev.toolCall.id) acc.id = ev.toolCall.id;
-          if (ev.toolCall.name) acc.name = ev.toolCall.name;
-          if (ev.toolCall.argsFragment) acc.args += ev.toolCall.argsFragment;
-          calls.set(idx, acc);
+        // EVERY call in the frame — a provider may batch a turn's parallel calls into one,
+        // and reading only `ev.toolCall` executed the first and silently dropped the rest.
+        for (const tc of ev.toolCalls ?? (ev.toolCall ? [ev.toolCall] : [])) {
+          const key = callKey(tc);
+          const acc = calls.get(key) ?? { name: "", args: "" };
+          if (tc.id) acc.id = tc.id;
+          if (tc.name) acc.name = tc.name;
+          if (tc.argsFragment) acc.args += tc.argsFragment;
+          if (!callOrder.has(key)) callOrder.set(key, callSeen++);
+          calls.set(key, acc);
         }
       }
+      if (streamEnded) break;
       // Only queue the next read if we're still going — `done` may have just been set by an
       // `ev.done`/`ev.error` frame above, and queuing a read here left it dangling: the outer
       // `while (!done)` exits before anyone awaits it, and the reader's lock never gets
       // released either (nothing downstream ever cancels it).
       if (!done) pendingRead = reader.read();
     }
-    yield* pumpText(textScanner.end(), textCalls);
-    // emit each fully-reassembled tool call (ordered by stream index).
-    for (const [, acc] of [...calls.entries()].sort((a, b) => a[0] - b[0])) {
-      if (!acc.name) continue;
-      let args: Record<string, unknown> = {};
-      let broken: string | undefined;
-      try {
-        args = JSON.parse(acc.args || "{}") as Record<string, unknown>;
-      } catch {
-        // Substituting `{}` here ran the tool with no arguments and told the model nothing,
-        // so it had no way to know its own output was unparseable — and repeated it.
-        broken = "the streamed arguments were not valid JSON";
-      }
-      if (broken) {
-        yield {
-          kind: "tool_call",
-          call: { name: MALFORMED_CALL_TOOL, args: { reason: broken, wrote: acc.args } },
-        };
-        continue;
-      }
-      observed.nativeCalls += 1;
-      yield {
-        kind: "tool_call",
-        call: {
-          name: acc.name as agent.ToolCall["name"],
-          args,
-          ...(acc.id ? { id: acc.id } : {}),
-        },
-      };
-    }
-    // Native calls win: when both arrived, the prose was almost certainly the model narrating
-    // the call it also made properly, and running it twice would double every side effect.
-    if (observed.nativeCalls === 0) {
-      observed.textCalls = textCalls.length;
-      for (const call of textCalls) {
-        yield { kind: "tool_call", call: { name: call.name, args: call.args } };
-      }
-    }
+    yield* flushAccumulated();
   } catch (err) {
-    // our HARD TIMEOUT aborted the fetch (ac aborted but NOT via the user's Ctrl-C).
-    if (ac.signal.aborted && !signal?.aborted) {
-      const s = Math.round((Date.now() - startMs) / 1000);
+    // OUR idle watchdog aborted the fetch (ac aborted but NOT via the user's Ctrl-C) — a
+    // PAUSE, not a failure. Nothing is discarded: the `text` deltas already yielded above are
+    // already in the caller's (`runAgentTurn`'s) `assistantText`, which the loop folds into
+    // the thread the moment it sees the `paused` LlmTurn below — /continue (or the user's very
+    // next message) resumes from exactly here. A tool call the model had ALREADY fully decided
+    // on before going silent is flushed too (`flushAccumulated`, below) — a pause never gets to
+    // discard real, completed work, matching the status line's own promise.
+    if (outerAc.signal.aborted && !signal?.aborted) {
+      pausedByIdle = true;
+      agent.idleWatchdog.markPossibleOrphan(endpoint.id); // (D)
+      // Flush BEFORE the status note: a tool call the model already fully decided on is real
+      // work, not a symptom of the pause, and the loop needs it in order to actually run it.
+      yield* flushAccumulated();
+      const idleS = Math.round(watchdog.idleForMs() / 1000);
       yield {
         kind: "status",
-        text: `✗ ${model} timed out after ${s}s with no complete response — aborting this turn. Try a smaller model via /setup, or check the local runner.`,
+        text: `⏸ ${model} has been silent for ${idleS}s — pausing this turn (no work lost). Send any message, or /continue, to resume.`,
       };
     } else if (!(isAbortError(err) || signal?.aborted)) {
       yield {
@@ -1654,12 +1990,16 @@ async function* toolTurn(
       };
     }
   } finally {
-    clearTimeout(hardTimer);
+    watchdog.dispose();
     if (signal) signal.removeEventListener("abort", onUserAbort);
     // Runs on EVERY exit — normal completion, the abort break, or an error thrown above —
     // so the reader's lock and the underlying connection are never left dangling. `cancel()`
     // on an already-closed/errored reader is a documented no-op, not a throw.
     await reader?.cancel().catch(() => {});
+  }
+  if (pausedByIdle) {
+    yield { kind: "paused", idleMs: watchdog.idleForMs() };
+    return;
   }
   // `final` ONLY when nothing was called. This yielded unconditionally, which — combined with
   // the loop's old `if (sawFinal || …) break` — meant every native tool turn was single-round:
@@ -1709,6 +2049,48 @@ function* pumpText(
  * good native channel very often answers with `<tool_call>` prose anyway, and
  * dropping those is indistinguishable, to the user, from the model refusing to act.
  */
+
+/**
+ * Build this endpoint's health record (transport, breaker, context window) after a turn — the
+ * Model Health feature (`/model-health`, and the desktop's Settings ▸ Model Health page).
+ *
+ * Deliberately does NOT write anything itself: every other per-turn side effect on this
+ * client (`onUsage`, `onCapability`) is an OPTIONAL INJECTED CALLBACK that the host wires to
+ * a real implementation and a test simply omits — a client built with no `onModelHealth`
+ * (every existing test) must be a complete no-op, not a write to the real
+ * `~/.prometheus/state/model-health.json` on whatever machine happens to run the suite.
+ *
+ * `contextWindowSource` is approximated rather than threaded through as its own dep: a host
+ * that successfully probed the real window already folds the measured number into
+ * `endpoint.contextWindow` before this client is (re)built for the next message (see
+ * session-bridge.ts's/host.ts's `probeContextWindow` wiring), so a LOCAL endpoint whose
+ * current number is still the bare default is treated as unmeasured, and any other number as
+ * measured. The only case this mislabels is a local model whose real window happens to BE
+ * exactly the default (8192) — an honest, harmless edge case, not a wrong warning.
+ */
+function buildModelHealthRecord(
+  endpoint: AiEndpoint,
+  capability: ToolCapabilityState,
+  transport: agent.protocol.ToolTransport,
+): ai.EndpointHealthRecord | undefined {
+  if (transport === "none") return undefined; // nothing was offered — nothing learned.
+  return ai.buildHealthRecord({
+    endpointId: endpoint.id,
+    model: endpoint.model ?? endpoint.id,
+    locality: endpoint.locality,
+    transport,
+    capability,
+    breaker: endpointBreaker(endpoint.id).snapshot(),
+    contextWindow: endpoint.contextWindow,
+    contextWindowSource:
+      endpoint.locality === "cloud"
+        ? "declared"
+        : endpoint.contextWindow === DEFAULT_CONTEXT_WINDOW
+          ? "default"
+          : "ollama",
+    nowIso: new Date().toISOString(),
+  });
+}
 export function makeLlmClient(endpoint: AiEndpoint, deps: LlmClientDeps = {}): LLMClient {
   const policy: WorkspacePolicy = deps.policy ?? { neverSendToCloud: false };
   const { policy: _omit, signal, ...aiDeps } = deps;
@@ -1757,18 +2139,29 @@ export function makeLlmClient(endpoint: AiEndpoint, deps: LlmClientDeps = {}): L
   // capability (Ollama /api/show) instead of the name-matched guess.
   const capability: EffortCapability =
     deps.effortCapability ??
-    resolveCapability({
-      modelId: endpoint.model ?? endpoint.id,
-      runtime: runtimeFromBaseUrl(endpoint.baseUrl, endpoint.locality),
-      locality: endpoint.locality,
-    }).cap;
+    resolveCapability(
+      {
+        modelId: endpoint.model ?? endpoint.id,
+        runtime: runtimeFromBaseUrl(endpoint.baseUrl, endpoint.locality),
+        locality: endpoint.locality,
+        probedCapabilities: endpoint.probedCapabilities,
+      },
+      deps.effortRules,
+    ).cap;
 
   return {
     async *turn(thread: Thread, tuning: AgentTuning, tools: ToolDef[]): AsyncIterable<LlmTurn> {
       // The `/think` tier finally reaches the wire (it was stored and discarded here before).
       // `resolveEffort` returns null-applied for a model with no knob, and `applyEffort`
       // then adds nothing — so an unsupported model is a no-op, never a 400.
-      const effort = tuning.effort ? resolveEffort(tuning.effort, capability) : undefined;
+      const effort = tuning.effort
+        ? resolveEffort(tuning.effort, capability, {
+            // `--force-effort` / `[agent] effortForce`. Off by default; when on, the resolution
+            // comes back `degraded.reason:"forced"` so the override is never mistaken for
+            // support this table vouched for.
+            ...(tuning.effortForce ? { force: true } : {}),
+          })
+        : undefined;
       /**
        * The WIRE's tool capability is part of the opening guess, not a discovery.
        *
@@ -1817,10 +2210,24 @@ export function makeLlmClient(endpoint: AiEndpoint, deps: LlmClientDeps = {}): L
       const budget = agent.carryBudgetFor(endpoint.contextWindow);
       const body = threadToMessages(thread);
       const trimmed = agent.carryForward(body, { budgetTokens: budget }) as ThreadMsg[];
-      if (trimmed.length < body.length) {
+      /**
+       * Count what `carryForward` actually governs.
+       *
+       * It returns the CONVERSATION only — the system messages are stripped and re-added below
+       * by `withPreamble`, which is why the line under this one filters them back out of `body`.
+       * Comparing raw lengths therefore counted every system message as "dropped": on the very
+       * first turn of a session, with a 100k budget and nothing trimmed at all, `body` is
+       * [system, steering, repo map, user] and `trimmed` is [user] — so every single round
+       * printed "3 older message(s) dropped from this turn". A warning that fires when nothing
+       * happened trains the user to ignore it, which is worse than not having it: the turn where
+       * context really IS being lost looks identical to all the others.
+       */
+      const carried = body.filter((m) => m.role !== "system");
+      const dropped = carried.length - trimmed.length;
+      if (dropped > 0) {
         yield {
           kind: "status",
-          text: `⎿ context trimmed to fit ${endpoint.model ?? endpoint.id}: ${body.length - trimmed.length} older message(s) dropped from this turn`,
+          text: `⎿ context trimmed to fit ${endpoint.model ?? endpoint.id}: ${dropped} older message(s) dropped from this turn`,
         };
       }
       // The preamble is merged into the OUTGOING system message only — never into the
@@ -1832,10 +2239,17 @@ export function makeLlmClient(endpoint: AiEndpoint, deps: LlmClientDeps = {}): L
         transport,
         endpoint.contextWindow,
         capabilityState.textSyntaxCalls > 0,
+        deps.turnScopeSpentTokens,
+        endpoint.locality,
       );
 
       if (transport === "native") {
-        const observed = { nativeCalls: 0, textCalls: 0, rejectedForTools: false };
+        const observed = {
+          nativeCalls: 0,
+          textCalls: 0,
+          rejectedForTools: false,
+          receivedText: "",
+        };
         let toolUsage: SseTokenUsage | undefined;
         // `finally`, NOT straight-line code after the `yield*`.
         //
@@ -1849,13 +2263,40 @@ export function makeLlmClient(endpoint: AiEndpoint, deps: LlmClientDeps = {}): L
         try {
           yield* toolTurn(endpoint, messages, tools, policy, signal, effort, deps.fetch, observed, {
             ...(deps.resolveKey ? { resolveKey: deps.resolveKey } : {}),
+            // Applies whether or not a `/think` tier was ever set: an R1-style model leaks its
+            // inline `<think>` regardless of what effort was requested.
+            ...(capability.reasoningTag ? { reasoningTag: capability.reasoningTag } : {}),
+            ...(deps.idleTimeoutMs !== undefined ? { idleTimeoutMs: deps.idleTimeoutMs } : {}),
+            ...(deps.idleWatchdogNow ? { idleWatchdogNow: deps.idleWatchdogNow } : {}),
+            ...(deps.idleWatchdogSetTimeout
+              ? { idleWatchdogSetTimeout: deps.idleWatchdogSetTimeout }
+              : {}),
+            ...(deps.idleWatchdogClearTimeout
+              ? { idleWatchdogClearTimeout: deps.idleWatchdogClearTimeout }
+              : {}),
             // The user's `prompt-caching` switch, honoured on the path that actually sends
             // `cache_control`. `shouldRequestPromptCache` also answers "does this provider
             // support it", which `applyPromptCache` already handles per dialect — so what
             // travels here is only the half that was missing: the human's decision.
             ...(deps.promptCache === false ? { promptCache: false } : {}),
+            /**
+             * MERGED, not overwritten.
+             *
+             * Anthropic reports a turn's usage across TWO frames: `message_start` carries
+             * `input_tokens` plus the prompt-cache counters, and `message_delta` later carries
+             * `output_tokens` with `input_tokens: 0`. Assigning each frame in turn meant the
+             * last one won, so every agentic Anthropic turn was recorded as
+             * `promptTokens: 0` — /cost, the session usage report, the budget gate and the USD
+             * cap all under-counted by the entire input side, usually the larger half of the
+             * bill, and both cache counters vanished. Reproduced against a live HTTP server:
+             * a stream carrying input_tokens 12345 / cache_read 9000 / cache_create 500
+             * recorded `{promptTokens: 0, completionTokens: 77}`.
+             *
+             * `mergeWireUsage` is the same recombiner core's own `chat()` and the desktop
+             * transport already use — this was the one transport of three that did not.
+             */
             onUsage: (u) => {
-              toolUsage = u;
+              toolUsage = ai.mergeWireUsage(toolUsage, u);
             },
           });
         } finally {
@@ -1866,7 +2307,9 @@ export function makeLlmClient(endpoint: AiEndpoint, deps: LlmClientDeps = {}): L
             rejectedForTools: observed.rejectedForTools,
           });
           deps.onCapability?.(capabilityState);
-          recordUsage(toolUsage, messages, "");
+          recordUsage(toolUsage, messages, observed.receivedText);
+          const health = buildModelHealthRecord(endpoint, capabilityState, transport);
+          if (health) deps.onModelHealth?.(health);
         }
         if (!observed.rejectedForTools) return;
         /**
@@ -1886,6 +2329,8 @@ export function makeLlmClient(endpoint: AiEndpoint, deps: LlmClientDeps = {}): L
           transport,
           endpoint.contextWindow,
           capabilityState.textSyntaxCalls > 0,
+          deps.turnScopeSpentTokens,
+          endpoint.locality,
         );
       }
 
@@ -1893,6 +2338,21 @@ export function makeLlmClient(endpoint: AiEndpoint, deps: LlmClientDeps = {}): L
       // One scanner for the whole turn: a call routinely spans several SSE deltas, so the
       // hold-back has to live across them.
       const scanner = transport === "text" ? new agent.protocol.ToolCallScanner() : undefined;
+      /**
+       * The SAME inline-`<think>` splitter the native path uses, on the path that actually
+       * needs it more.
+       *
+       * P4 wired `toolTurn` and the desktop's main-process stream and called that "both
+       * transports". It is not: THIS path serves every no-tools chat AND every model demoted
+       * from native — and a demoted small local model is precisely the population that emits
+       * R1-style inline thinking. Without this, `<think>…</think>` reached the transcript as
+       * the answer and was fed to `scanner` below, where a model reasoning aloud about a tool
+       * call could trip the text protocol into making one.
+       *
+       * A no-op pass-through when the capability names no tag, so the ordinary path stays
+       * byte-identical.
+       */
+      const reasoningSplit = ai.createReasoningTagSplitter(capability.reasoningTag);
       const calls: agent.protocol.TextToolCall[] = [];
       const malformed: agent.protocol.MalformedToolCall[] = [];
       /** Route one scanned event: prose streams live, calls are held until the turn ends. */
@@ -1900,6 +2360,9 @@ export function makeLlmClient(endpoint: AiEndpoint, deps: LlmClientDeps = {}): L
       // protocol. A turn whose ENTIRE output was a stray `</tool_call>` has a non-empty
       // `received` and nothing to show the user — see the empty-turn handling below.
       let shownText = "";
+      /** The REQUEST failed (refused, unreachable, unauthorised) — distinct from a turn that
+       *  ran and produced nothing, which is what the synthetic correction below is for. */
+      let requestFailed = false;
       const pump = function* (events: agent.protocol.ScanEvent[]): Generator<LlmTurn> {
         for (const ev of events) {
           if (ev.kind === "text") {
@@ -1915,38 +2378,101 @@ export function makeLlmClient(endpoint: AiEndpoint, deps: LlmClientDeps = {}): L
       let any = false;
       let usage: SseTokenUsage | undefined;
       let received = "";
+      let pausedIdleMs: number | undefined;
       try {
         // thread the signal so fetch() aborts AND the SSE reader is cancelled — a bare
         // fetch abort still lets the parser drain buffered bytes (post-abort deltas).
+        //
+        // idleTimeoutMs/idleWatchdog* thread through to `stream()`'s own `IdleWatchdog` (see
+        // `ai/client.ts`) — this transport used to have ZERO inactivity protection, the ONLY
+        // one of the four the repo runs (native tool-calling, text-fallback, VS Code, the
+        // background summarizer) with that gap, so a cold-loading or wedged model on THIS path
+        // hung forever instead of pausing like `toolTurn` already did.
         for await (const chunk of client.chat(flattenToolRoles(messages), {
           ...(signal ? { signal } : {}),
           ...(effort ? { effort } : {}),
+          ...(deps.idleTimeoutMs !== undefined ? { idleTimeoutMs: deps.idleTimeoutMs } : {}),
+          ...(deps.idleWatchdogNow ? { idleWatchdogNow: deps.idleWatchdogNow } : {}),
+          ...(deps.idleWatchdogSetTimeout
+            ? { idleWatchdogSetTimeout: deps.idleWatchdogSetTimeout }
+            : {}),
+          ...(deps.idleWatchdogClearTimeout
+            ? { idleWatchdogClearTimeout: deps.idleWatchdogClearTimeout }
+            : {}),
         })) {
           if (signal?.aborted) break; // stop yielding the instant Ctrl-C fires
           if (chunk.delta) {
             any = true;
             received += chunk.delta;
-            // With no tools exposed there is nothing to scan for, so the delta streams
-            // straight through and the transcript is byte-identical to before.
-            if (scanner) yield* pump(scanner.push(chunk.delta));
-            else yield { kind: "text", text: chunk.delta };
+            // Thinking comes out FIRST, and never reaches `scanner`.
+            const split = reasoningSplit.push(chunk.delta);
+            if (split.reasoning) yield { kind: "reasoning", text: split.reasoning };
+            if (split.text) {
+              // With no tools exposed there is nothing to scan for, so the delta streams
+              // straight through and the transcript is byte-identical to before.
+              if (scanner) yield* pump(scanner.push(split.text));
+              else yield { kind: "text", text: split.text };
+            }
           }
           if (chunk.usage) usage = chunk.usage;
           if (chunk.done) break;
         }
+        // Drain the splitter BEFORE the scanner, so its tail still reaches the scanner. An
+        // unterminated `<think>` flushes as reasoning — a model cut off mid-thought was still
+        // thinking, and promoting a truncated deliberation to "the answer" is the failure this
+        // exists to prevent.
+        const reasoningTail = reasoningSplit.end();
+        if (reasoningTail.reasoning) {
+          yield { kind: "reasoning", text: reasoningTail.reasoning };
+        }
+        if (reasoningTail.text) {
+          if (scanner) yield* pump(scanner.push(reasoningTail.text));
+          else yield { kind: "text", text: reasoningTail.text };
+        }
         if (scanner) yield* pump(scanner.end());
       } catch (err) {
-        // abort is NOT an error: swallow it into the interrupted path (never retry —
-        // an AbortError counting toward resilience would silently re-request).
-        if (isAbortError(err) || signal?.aborted) {
+        if (err instanceof ModelIdlePausedError) {
+          // A PAUSE, not a failure — nothing discarded: the `text`/tool-call events already
+          // yielded above are already folded into the caller's thread by the time it sees the
+          // `paused` LlmTurn below, exactly like the native `toolTurn`'s own idle pause.
+          agent.idleWatchdog.markPossibleOrphan(endpoint.id);
+          pausedIdleMs = err.idleMs;
+          yield {
+            kind: "status",
+            text: `⏸ ${endpoint.model ?? endpoint.id} has been silent for ${Math.round(err.idleMs / 1000)}s — pausing this turn (no work lost). Send any message, or /continue, to resume.`,
+          };
+        } else if (isAbortError(err) || signal?.aborted) {
+          // abort is NOT an error: swallow it into the interrupted path (never retry —
+          // an AbortError counting toward resilience would silently re-request).
           // intentionally silent
         } else {
           // a refused/unreachable endpoint becomes an honest text turn, not a crash.
+          requestFailed = true;
           const message = err instanceof Error ? err.message : String(err);
           if (!any) yield { kind: "text", text: `model error: ${message}` };
         }
       }
       recordUsage(usage, messages, received);
+      if (pausedIdleMs !== undefined) {
+        // A call (or a malformed one) the model already fully produced before going silent is
+        // real work, not a symptom of the pause — flush it before reporting `paused` (verification
+        // pass #2's CRITICAL finding: this used to `return` here unconditionally, silently
+        // discarding an already-complete `<tool_call>` the scanner had fully parsed, contradicting
+        // the status line's own "no work lost" promise). Deliberately NOT the empty-turn synthetic
+        // correction below (that's for a turn that genuinely finished saying nothing) and NOT the
+        // capability/model-health bookkeeping after it (a paused turn is not a completed one).
+        for (const bad of malformed) {
+          yield {
+            kind: "tool_call",
+            call: { name: MALFORMED_CALL_TOOL, args: { reason: bad.reason, wrote: bad.raw } },
+          };
+        }
+        for (const call of calls) {
+          yield { kind: "tool_call", call: { name: call.name, args: call.args } };
+        }
+        yield { kind: "paused", idleMs: pausedIdleMs };
+        return;
+      }
 
       // An EMPTY turn: no prose, no call, nothing malformed. A real gemma4:12b does this by
       // opening a turn with a stray `</tool_call>` and stopping — the scanner correctly
@@ -1959,6 +2485,14 @@ export function makeLlmClient(endpoint: AiEndpoint, deps: LlmClientDeps = {}): L
         calls.length === 0 &&
         malformed.length === 0 &&
         shownText.trim() === "" &&
+        // NOT an empty turn — a turn that never happened.
+        //
+        // `shownText` grows only through `pump`, and the `model error: …` line above is yielded
+        // straight to the consumer, so a 401 or a dead endpoint left every one of these four
+        // conditions true. The model was then told "you replied with nothing usable" — about a
+        // reply it was never asked for — and the loop re-requested the same dead endpoint every
+        // round to the cap, printing the same error each time. A failure must END the turn.
+        !requestFailed &&
         !signal?.aborted
       ) {
         malformed.push({
@@ -1987,6 +2521,10 @@ export function makeLlmClient(endpoint: AiEndpoint, deps: LlmClientDeps = {}): L
         textCalls: calls.length,
       });
       deps.onCapability?.(capabilityState);
+      {
+        const health = buildModelHealthRecord(endpoint, capabilityState, transport);
+        if (health) deps.onModelHealth?.(health);
+      }
       // `final` ONLY when nothing was called. Emitting it alongside calls is what made the
       // native path single-round — the loop now folds results regardless, but a transport
       // that says "I am done" while asking for a tool is lying about its own state.
@@ -2035,25 +2573,49 @@ function withPreamble(
   transport: agent.protocol.ToolTransport,
   contextWindow?: number,
   demonstrated?: boolean,
+  turnScopeSpentTokens?: number,
+  locality: "local" | "cloud" | "unknown" = "unknown",
 ): ThreadMsg[] {
   if (transport === "none" || tools.length === 0) return messages;
-  const mode = agent.protocol.preambleModeFor(transport);
-  // The MEASURED window sizes the budget. Without it every model got the budget sized for an
-  // 8192 window, and with 45 tools that forces the degrade ladder down to bare signatures — so
-  // the model never sees a single tool DESCRIPTION, which is the part that says which tool to
-  // reach for. `probeContextWindow` measures the real number; this is what spends it.
-  const opts = {
-    mode,
+  // ROUND-SCOPE dispatch: the tool catalog is the only built-in contributor whose content
+  // depends on the transport negotiated for THIS round, so it is assembled here — once per
+  // round, exactly where it was assembled before — rather than at thread-build time with
+  // everything else. See `agent/protocol/contributors/tool-catalog.ts`.
+  //
+  // `locality` is threaded from the real endpoint (rather than left "unknown") for consistency
+  // with Desktop's/VS Code's round-scope ctx, even though `CORE_ROUND_CONTRIBUTORS` (today, just
+  // tool-catalog) does not itself read it — a latent-drift guard for the next contributor
+  // registered here, not a live behavior change (verification pass #2's LOW finding).
+  const preambleCtx: agent.protocol.PreambleCtx = {
+    surface: "cli",
+    isSubAgent: false,
+    readOnly: false,
+    locality,
     ...(contextWindow ? { contextWindow } : {}),
-    ...(demonstrated ? { demonstrated } : {}),
+    transport,
+    ...(demonstrated ? { demonstratedToolSyntax: demonstrated } : {}),
+    tools,
   };
+  // ONE combined pool across BOTH assemblies, not two independent ones: `runMessageTurn`'s
+  // turn-scope pass (tool-discipline/pre-write-recheck/effort-text) already spent
+  // `turnScopeSpentTokens` of this SAME ceiling before this round-scope pass (tool-catalog) ever
+  // runs — without subtracting it, a model whose turn-scope contributors used nearly the whole
+  // budget still got tool-catalog's own FULL budget on top, on every single round.
+  const roundBudget = Math.max(
+    0,
+    agent.protocol.instructionBudget(contextWindow) - (turnScopeSpentTokens ?? 0),
+  );
+  const assembled = agent.protocol.assemblePreamble(
+    agent.protocol.CORE_ROUND_CONTRIBUTORS,
+    preambleCtx,
+    roundBudget,
+  );
+  if (!assembled.personaAppend) return messages;
   const at = messages.findIndex((m) => m.role === "system");
-  if (at === -1) {
-    const { text } = agent.protocol.renderToolPreamble(tools, opts);
-    return [{ role: "system", content: text }, ...messages];
-  }
-  const { prompt } = agent.protocol.withToolPreamble(messages[at]?.content ?? "", tools, opts);
-  return messages.map((m, i) => (i === at ? { ...m, content: prompt } : m));
+  if (at === -1) return [{ role: "system", content: assembled.personaAppend }, ...messages];
+  const base = (messages[at]?.content ?? "").trim();
+  const merged = base ? `${base}\n\n${assembled.personaAppend}` : assembled.personaAppend;
+  return messages.map((m, i) => (i === at ? { ...m, content: merged } : m));
 }
 
 /* ------------------------------------------------------------------------- *
@@ -2174,9 +2736,29 @@ function applyLocalEdit(
       },
     };
   }
+  /**
+   * REFUSE a file whose bytes do not round-trip through UTF-8.
+   *
+   * `readFileSync(abs, "utf8")` does not throw on binary — it substitutes U+FFFD for every
+   * invalid sequence — so this read "succeeded", the splice ran against the lossy string, and
+   * `atomicWrite` put that back on disk as the file. Measured: a 1032-byte PNG became 2058 bytes
+   * of replacement characters, reported as `ok: true, "edited logo.png (1 hunk(s))"`. Worse, the
+   * pre-image recorded for `/revert` was the same lossy text, so the corruption could not be
+   * undone. The identical mistake was already fixed once in `delete_file`; `readTextExact` is
+   * that fix, shared, so the two cannot drift apart again.
+   */
   let content: string;
   try {
-    content = readFileSync(abs, "utf8");
+    const text = readTextExact(abs);
+    if (text === null) {
+      return {
+        outcome: {
+          ok: false,
+          summary: `propose_edit: ${rawPath} is not a UTF-8 text file — refusing to edit it. Editing it as text would rewrite every byte that is not valid UTF-8 and destroy the file.`,
+        },
+      };
+    }
+    content = text;
   } catch {
     return { outcome: { ok: false, summary: `propose_edit: cannot read ${rawPath}` } };
   }
@@ -2309,6 +2891,29 @@ function applyMultiFilePatch(
       records: [],
     };
   }
+  /**
+   * A malformed hunk fails the WHOLE patch, exactly as it does for propose_edit above.
+   *
+   * The parser used to discard hunks that were not `{old:string, new:string}` and say nothing,
+   * so a patch with one bad hunk among good ones applied the survivors and reported ok — and
+   * `describePatch` printed the reduced count as though it were the whole change. For the
+   * atomic multi-file tool that is the precise failure it exists to prevent: a partially
+   * applied refactor, reported as success, with no signal that anything was missing.
+   */
+  const droppedHunks = files.reduce((n, f) => n + f.dropped, 0);
+  if (droppedHunks > 0) {
+    const where = files
+      .filter((f) => f.dropped > 0)
+      .map((f) => `${f.path} (${f.dropped})`)
+      .join(", ");
+    return {
+      outcome: {
+        ok: false,
+        summary: `apply_patch: ${droppedHunks} hunk(s) malformed (each needs string old+new) in ${where} — nothing applied`,
+      },
+      records: [],
+    };
+  }
   // Resolve every path FIRST — a refusal must not leave earlier files already written.
   const abs = new Map<string, string>();
   for (const f of files) {
@@ -2428,11 +3033,17 @@ export interface ApplyIntentOutcome {
  * Apply edit intents parsed out of raw model text (extractEditIntents) to disk, reusing the SAME
  * path-guarded, fallback-laddered, verify-gated, atomic applier as `propose_edit` (applyLocalEdit).
  * Powers `/apply` — the "the model wrote the edits as prose, put them on disk" path. Never throws.
+ *
+ * `checkpoint`, when given, folds each successfully-applied intent's pre-image into it — without
+ * this, /apply wrote real files but NEVER recorded a checkpoint (the pre-image `record` was
+ * silently discarded), so `/checkpoints` never listed an /apply-made change and `/revert` either
+ * said "nothing to revert" or, worse, silently restored an unrelated earlier checkpoint instead.
  */
 export function applyEditIntentsLocal(
   intents: readonly agent.EditIntent[],
   roots: string[] | undefined,
   cwd: string,
+  checkpoint?: CheckpointHook,
 ): ApplyIntentOutcome[] {
   const out: ApplyIntentOutcome[] = [];
   for (const intent of intents) {
@@ -2440,7 +3051,12 @@ export function applyEditIntentsLocal(
       out.push({ path: "(no path)", ok: false, summary: "edit block had no target file path" });
       continue;
     }
-    const { outcome } = applyLocalEdit({ path: intent.path, hunks: intent.hunks }, roots, cwd);
+    const { outcome, record } = applyLocalEdit(
+      { path: intent.path, hunks: intent.hunks },
+      roots,
+      cwd,
+    );
+    if (outcome.ok && record && checkpoint) captureIntoCheckpoint(checkpoint, record);
     out.push({ path: intent.path, ok: outcome.ok, summary: outcome.summary });
   }
   return out;
@@ -2490,31 +3106,52 @@ function captureIntoCheckpoint(hook: CheckpointHook, rec: EditRecord): void {
 export function restoreCheckpoint(
   cp: Checkpoint,
   opts: { roots?: string[]; currentPaths?: string[] } = {},
-): { restored: string[]; deleted: string[] } {
+): { restored: string[]; deleted: string[]; skipped: string[] } {
   const plan = restorePlan(cp, opts.currentPaths ?? Object.keys(cp.files));
   const allowed = (p: string): boolean =>
     !opts.roots || opts.roots.length === 0 || isPathAllowed(p, opts.roots);
   const restored: string[] = [];
   const deleted: string[] = [];
+  /**
+   * Paths the scope guard refused — REPORTED, not swallowed.
+   *
+   * A `write_file` outside the working set is reachable: the confirm seam asks, and the human
+   * can approve it. Its pre-image is captured like any other. But `/revert` then skipped it here
+   * (correctly — a checkpoint must not become an arbitrary-write primitive) and said nothing,
+   * while the caller deleted the checkpoint on the strength of a successful-looking return. The
+   * original bytes of a file the user explicitly approved a write to were destroyed by the
+   * command whose entire purpose is to bring them back.
+   */
+  const skipped: string[] = [];
   for (const [path, content] of Object.entries(plan.write)) {
-    if (!allowed(path)) continue;
+    if (!allowed(path)) {
+      skipped.push(path);
+      continue;
+    }
     try {
       atomicWrite(path, content);
       restored.push(path);
     } catch {
-      /* skip an un-writable path, restore the rest */
+      // An un-writable path is REPORTED, not swallowed: `/revert` counted it as neither
+      // restored nor skipped, so the caller saw a clean return, dropped the checkpoint, and the
+      // pre-image of a file that was never actually rewritten went with it.
+      skipped.push(path);
     }
   }
   for (const path of plan.delete) {
-    if (!allowed(path)) continue;
+    if (!allowed(path)) {
+      skipped.push(path);
+      continue;
+    }
     try {
       rmSync(path);
       deleted.push(path);
-    } catch {
-      /* already gone / un-removable */
+    } catch (e) {
+      // "already gone" IS success for a delete; anything else failed and must be reported.
+      if ((e as NodeJS.ErrnoException)?.code !== "ENOENT") skipped.push(path);
     }
   }
-  return { restored, deleted };
+  return { restored, deleted, skipped };
 }
 
 /** The URL-fetch seam (default = engine-bridge safeFetch); injected in tests. CLI-011. */
@@ -2673,6 +3310,45 @@ export function makeToolRunner(
     // `readOnlyHint`, so `classifyAuth` puts them in the `read` category and A1 auto-approves
     // them: reading `git diff` is not a riskier act than reading a file, which A1 already
     // allows. Returns null for anything that is not a system tool, so the chain falls through.
+    /**
+     * Fail-closed path scope (CLI-004) — FIRST, so it covers every tool.
+     *
+     * This check used to sit ~120 lines below, immediately above `runEngineVerb`. But the
+     * system-tool arm right underneath this comment returns for every tool core recognises —
+     * read_file, list_dir, grep, glob, git_status/diff/log/show, run_command — so the guard was
+     * only ever reached by `prometheus_*` engine verbs. With a session scoped to one repo, the
+     * model could still `read_file {path:"/etc/hosts"}`, `list_dir` any directory on the
+     * machine, `git_status {cwd:"/some/other/repo"}`, and hand `run_command` a cwd outside the
+     * working set — none of which the working set was ever consulted about.
+     *
+     * Three comments in the two modules asserted the opposite and were simply wrong about the
+     * code as written (system-tools.ts's header, its `cwd` note, and working-set.ts's reason
+     * for putting `cwd` in PATH_KEYS — "without `cwd` in this set the fail-closed scope check
+     * simply would not see the argument it needs to check", describing a check that never saw
+     * these tools at all). Those comments describe the intent; this placement implements it.
+     *
+     * A path the human APPROVED through the confirm seam this turn is exempt — that is the
+     * whole point of `approvedWrites`, and re-denying it here would break out-of-scope writes
+     * the user explicitly said yes to.
+     */
+    if (roots && roots.length > 0) {
+      const cwdForScope = opts.cwd ?? process.cwd?.() ?? ".";
+      for (const p of pathArgsOf(args)) {
+        // Resolve against the SESSION cwd, not `process.cwd()`. `isPathAllowed` resolves a
+        // relative path against the process directory, which is the repo the CLI was launched
+        // from — not necessarily the session's. A relative `note.txt` would then be tested
+        // against the wrong directory and denied inside its own working set.
+        // `scopedAbsolute` expands `~` BEFORE resolving. Without that, `~/.ssh/id_rsa` tested as
+        // `<cwd>/~/.ssh/id_rsa` — nonexistent, so the check walked up to `<cwd>`, which is a
+        // root, and ALLOWED it — while `read_file` expanded the same `~` for real and opened the
+        // home file. Guard and tool must judge the same string.
+        const abs = scopedAbsolute(p, cwdForScope);
+        if (opts.approvedWrites?.has(abs)) continue;
+        if (!isPathAllowed(abs, roots)) {
+          return { ok: false, summary: `path outside the working set (denied): ${p}` };
+        }
+      }
+    }
     {
       const sys = await runSystemTool(tool.name, args, {
         cwd: opts.cwd ?? process.cwd?.() ?? ".",
@@ -2822,17 +3498,6 @@ export function makeToolRunner(
     // NOTE: delete_file / move_file / mkdir are dispatched ABOVE, by core's `runSystemTool`.
     // They used to have host-local arms here; once the implementation moved into core those
     // arms became unreachable, and the pre-image capture moved up with the dispatch.
-    // fail-closed read scope (CLI-004): when a working set is configured, any path
-    // argument outside [cwd, ...added dirs] is denied BEFORE it reaches the engine.
-    // (Only PATH SCOPE widens — nemesis gating for exec-flavored tools is untouched;
-    // this is a pure additional restriction on already-broker-approved calls.)
-    if (roots && roots.length > 0) {
-      for (const p of pathArgsOf(args)) {
-        if (!isPathAllowed(p, roots)) {
-          return { ok: false, summary: `path outside the working set (denied): ${p}` };
-        }
-      }
-    }
     // The engine verbs, through core's shared runner — the same one the desktop pane reaches
     // over IPC, so the envelope's nemesis verdict is lifted in exactly one place. It also
     // VALIDATES the args first, which this call site did not: `toArgv(args)` skipped the
@@ -2888,6 +3553,12 @@ export interface MessageTurnResult {
   /** CLI-072: the loop hit its iteration cap with more tool work pending — the host offers
    *  `/continue`. False for every turn that finishes under the cap (no cap notice then). */
   capped: boolean;
+  /** the turn PAUSED on inactivity (idle-watchdog.ts) rather than finishing or hitting the
+   *  round cap. The SAME `/continue` + `thread` resume this exact same turn — see `capped`'s
+   *  own doc comment; the two are resumed identically, only the reported REASON differs. */
+  paused: boolean;
+  /** how long the turn had been silent when it paused — undefined when `paused` is false. */
+  pausedIdleMs?: number;
   /** CLI-072: the full non-system conversation thread AFTER this turn (incl. `{role:"tool"}`
    *  results). The host stashes it on a capped turn so `/continue` resumes with intact tool
    *  state. Empty for the non-agent-loop paths (offline / gate-blocked). */
@@ -2925,6 +3596,8 @@ function eventLine(ev: AgentEvent): string | null {
     // (the host augments this with the consecutive-continue counter).
     case "capped":
       return `● hit the ${ev.rounds}-step cap${ev.canContinue ? " — /continue to resume" : ""}`;
+    case "paused":
+      return `⏸ paused after ${Math.round(ev.idleMs / 1000)}s of inactivity${ev.canContinue ? " — /continue to resume, or just keep typing" : ""}`;
     case "done":
       return null;
   }
@@ -3150,7 +3823,7 @@ export async function runMessageTurn(
                 : "stWait"
               : ev.kind === "blocked"
                 ? "stErr"
-                : ev.kind === "capped"
+                : ev.kind === "capped" || ev.kind === "paused"
                   ? "stWait"
                   : null;
       if (role) paintWrapped(line, role);
@@ -3190,51 +3863,65 @@ export async function runMessageTurn(
   if (gate.message) emit({ kind: "text", text: gate.message }); // a warn / force-proceed note
 
   // --- agent loop path: stream model ⇄ tool ⇄ gate ⇄ result ------------------ //
-  const llm =
-    deps.llm ??
-    // ctx.endpoint is defined here (the offline branch above returned otherwise).
-    makeLlmClient(ctx.endpoint as AiEndpoint, {
-      ...(ctx.policy ? { policy: ctx.policy } : {}),
-      // The loaded personas travel to the client because that is where the tool list is
-      // rendered — `spawn_agent`'s description has to name them before it is serialized.
-      ...(ctx.agentFiles && ctx.agentFiles.length > 0 ? { personas: ctx.agentFiles } : {}),
-      // Without this a CLOUD endpoint's key never reaches the request — the transport
-      // resolves the ref, but nothing ever handed it a resolver.
-      ...(ctx.resolveKey ? { resolveKey: ctx.resolveKey } : {}),
-      /**
-       * The user's `prompt-caching` switch, finally consulted.
-       *
-       * `tokenToggles` reached the SYSTEM BLOCKS (`tokenSystemBlocks`) and stopped there, while
-       * the transport applied `cache_control` unconditionally. So switching prompt caching off
-       * changed the prompt the model was told about and not the request that was sent, and
-       * `tokens report` kept crediting savings from a technique the user had turned off.
-       */
-      ...(ctx.tokenToggles?.["prompt-caching"] === false ? { promptCache: false } : {}),
-      /**
-       * Carry the endpoint's LEARNED tool capability across turns.
-       *
-       * A fresh `makeLlmClient` is built for every user message, and the capability state it
-       * accumulates — "this endpoint answered a tools request with prose twice, stop offering
-       * native tools" — lives inside that client. So it was discarded the moment the turn
-       * ended, and `negotiateTransport`'s two-observation threshold could never be reached:
-       * a model that cannot function-call was re-probed natively on every single message,
-       * wasting the first round of each one, forever. Both `capability` and `onCapability`
-       * are optional, which is why nothing ever noticed.
-       */
-      ...(ctx.capability ? { capability: ctx.capability() } : {}),
-      ...(ctx.onCapability ? { onCapability: ctx.onCapability } : {}),
-      ...(deps.signal ? { signal: deps.signal } : {}),
-      ...(ctx.accounting
-        ? {
-            onUsage: (rec) =>
-              appendAccounting(
-                (ctx.accounting as { home: string }).home,
-                (ctx.accounting as { sessionId: string }).sessionId,
-                rec,
-              ),
-          }
-        : {}),
-    });
+  // Built as a NAMED variable (not inline in the `??` below) so `turnScopeSpentTokens` can be
+  // set on it once the turn-scope preamble assembly further down computes its own spend — the
+  // SAME object `makeLlmClient`'s `turn()` closures read `deps.*` off of each round, so mutating
+  // it here (before any round actually runs) reaches them without reordering the two assemblies.
+  const llmDeps: LlmClientDeps = {
+    ...(ctx.policy ? { policy: ctx.policy } : {}),
+    // The loaded personas travel to the client because that is where the tool list is
+    // rendered — `spawn_agent`'s description has to name them before it is serialized.
+    ...(ctx.agentFiles && ctx.agentFiles.length > 0 ? { personas: ctx.agentFiles } : {}),
+    // Without this a CLOUD endpoint's key never reaches the request — the transport
+    // resolves the ref, but nothing ever handed it a resolver.
+    ...(ctx.resolveKey ? { resolveKey: ctx.resolveKey } : {}),
+    // `/timeout` — the session's inactivity-pause threshold (root cause 1's fix).
+    ...(ctx.idleTimeoutMs !== undefined ? { idleTimeoutMs: ctx.idleTimeoutMs } : {}),
+    /**
+     * The user's `prompt-caching` switch, finally consulted.
+     *
+     * `tokenToggles` reached the SYSTEM BLOCKS (`tokenSystemBlocks`) and stopped there, while
+     * the transport applied `cache_control` unconditionally. So switching prompt caching off
+     * changed the prompt the model was told about and not the request that was sent, and
+     * `tokens report` kept crediting savings from a technique the user had turned off.
+     */
+    ...(ctx.tokenToggles?.["prompt-caching"] === false ? { promptCache: false } : {}),
+    /**
+     * Carry the endpoint's LEARNED tool capability across turns.
+     *
+     * A fresh `makeLlmClient` is built for every user message, and the capability state it
+     * accumulates — "this endpoint answered a tools request with prose twice, stop offering
+     * native tools" — lives inside that client. So it was discarded the moment the turn
+     * ended, and `negotiateTransport`'s two-observation threshold could never be reached:
+     * a model that cannot function-call was re-probed natively on every single message,
+     * wasting the first round of each one, forever. Both `capability` and `onCapability`
+     * are optional, which is why nothing ever noticed.
+     */
+    ...(ctx.capability ? { capability: ctx.capability() } : {}),
+    ...(ctx.onCapability ? { onCapability: ctx.onCapability } : {}),
+    // Model Health (`/model-health`, the desktop's Settings ▸ Model Health page): persisted
+    // ONLY when a real host is running (it has a real `ctx.home`) — never inside a test,
+    // which builds this same client with no `ctx.home` at all and gets a pure no-op.
+    ...(ctx.home
+      ? {
+          onModelHealth: (record: ai.EndpointHealthRecord) =>
+            recordEndpointHealth(record, ctx.home as string),
+        }
+      : {}),
+    ...(deps.signal ? { signal: deps.signal } : {}),
+    ...(ctx.accounting
+      ? {
+          onUsage: (rec) =>
+            appendAccounting(
+              (ctx.accounting as { home: string }).home,
+              (ctx.accounting as { sessionId: string }).sessionId,
+              rec,
+            ),
+        }
+      : {}),
+  };
+  // ctx.endpoint is defined here (the offline branch above returned otherwise).
+  const llm = deps.llm ?? makeLlmClient(ctx.endpoint as AiEndpoint, llmDeps);
   // Absolute paths an OUT-OF-working-set `write_file` was approved for through the confirm seam
   // this turn. The loop always routes write_file through confirm (destructiveHint is never
   // auto-approvable in the broker), so recording on approval is complete; applyWriteFile refuses
@@ -3303,6 +3990,26 @@ export async function runMessageTurn(
       task,
       exposed,
       typeof args.maxRounds === "number" ? args.maxRounds : undefined,
+      // The child's preamble is assembled against the SAME endpoint facts the parent's own
+      // turn already resolved — not the permanent "unknown"/no-window placeholder `childTuning`
+      // falls back to when this is omitted. Without `effortMechanism` specifically, a child on
+      // a model with a WORKING native mechanism got the textual effort nudge on top of it —
+      // double-injecting the tier in two registers at once.
+      ctx.endpoint
+        ? {
+            locality: ctx.endpoint.locality,
+            contextWindow: ctx.endpoint.contextWindow,
+            effortMechanism: resolveCapability(
+              {
+                modelId: ctx.endpoint.model ?? ctx.endpoint.id,
+                runtime: runtimeFromBaseUrl(ctx.endpoint.baseUrl, ctx.endpoint.locality),
+                locality: ctx.endpoint.locality,
+                probedCapabilities: ctx.endpoint.probedCapabilities,
+              },
+              ctx.effortRules,
+            ).cap.mechanism,
+          }
+        : undefined,
     );
     // A persona layers on top of the child tuning the ROLE already produced — it can add denies
     // and add prompt text, and it cannot undo either. `childTuning` has already applied the
@@ -3327,12 +4034,42 @@ export async function runMessageTurn(
     // so if that deny-list line were ever bypassed, `canSpawn` reading a real depth here is the
     // backstop the budget's own field name has always promised.
     spawnBudget.depth += 1;
+    // The child re-enters `runAgentTurn` with the SAME `llm` client (so capability observation
+    // stays shared across parent and child) — but that means it also shares `llmDeps`, the ONE
+    // object the round-scope `withPreamble` reads `turnScopeSpentTokens` off of. Left alone, the
+    // PARENT's own turn-scope spend (tool-discipline/pre-write-recheck/effort-text tokens that
+    // exist in the PARENT's prompt, not the child's) would reduce the CHILD's round-scope
+    // tool-catalog budget for reasons entirely unrelated to what the child's own prompt holds —
+    // in the worst case clamping it to 0 and truncating the tools the child is told about
+    // (verification pass #2's MAJOR finding). Suspend it for the child's turn, restore the
+    // parent's own value once the child returns — `childTune`'s own turn-scope spend was already
+    // baked into `childTune.systemPrompt` by `childTuning` itself, so the child's round-scope
+    // pass correctly falls back to the full, un-reduced budget rather than a wrong one.
+    const parentTurnScopeSpentTokens = llmDeps.turnScopeSpentTokens;
+    llmDeps.turnScopeSpentTokens = undefined;
     try {
       const out = await agent.runSubagent(
         (thread, tuning, d) => runAgentTurn(thread, tuning, d),
         childTune,
         task,
-        { llm, runTool, confirm },
+        {
+          llm,
+          runTool,
+          confirm,
+          // Point 6b: a sub-agent is exactly the surface most likely to touch untrusted content
+          // (that's what `touchedUntrustedSurface` above is for) — it must not run with the
+          // canary tripwire silently disabled just because it's a delegated turn.
+          ...(ctx.home
+            ? {
+                onCanaryTripped: (info: { textSnippet: string }) =>
+                  appendCanaryAudit(ctx.home as string, {
+                    event: "canary-tripped",
+                    subagent: true,
+                    ...info,
+                  }),
+              }
+            : {}),
+        },
       );
       ctx.write(`  ⤶ sub-agent done (${out.toolCalls} tool call${out.toolCalls === 1 ? "" : "s"})`);
       // ONLY the final text crosses back. Forwarding the child's transcript would defeat the
@@ -3342,6 +4079,7 @@ export async function runMessageTurn(
       return { ok: false, summary: `sub-agent failed: ${errMsg(err)}` };
     } finally {
       spawnBudget.depth -= 1;
+      llmDeps.turnScopeSpentTokens = parentTurnScopeSpentTokens;
     }
   };
   const runTool: ToolRunner =
@@ -3433,33 +4171,65 @@ export async function runMessageTurn(
     return answer;
   };
 
-  // CLI-053: inject the budgeted repo map as a SECOND system block when the technique is enabled,
-  // so the agent grounds "where is X defined" from the map instead of a grep. Getter → toggles live.
-  const repoMapBlock = ctx.repoMap?.();
-  // CLI-061: inject assembled AGENTS.md/CLAUDE.md/PROMETHEUS.md steering as a system block; the
-  // getter re-reads after `/memory edit`→reload so edited steering affects the NEXT turn (no restart).
-  const steeringBlock = ctx.steering?.();
-  // Durable cross-session memory (`memory_write`): the index only, re-read every turn so a
-  // write earlier in this same session is visible on the next one without a restart.
-  const memoryBlock = ctx.memory?.();
-  // SessionStart hooks: whatever the user's session-open scripts printed, folded in as a system
-  // block on the SAME channel as steering/memory (captured once at session start; replayed here).
-  const sessionStartBlock = ctx.sessionStartHooks?.();
   // CLI-072 resume: continue the SAME non-system thread (its tail already ends on the last
   // round's tool results — a valid user-terminal state) with NO new user message. Otherwise the
   // normal path: prior history + this user message. System context is (re)assembled fresh either way.
   const conversation: ThreadMessage[] = deps.resumeThread
     ? [...deps.resumeThread]
     : [...(deps.history ?? []), { role: "user", content: message }];
+
+  /**
+   * The PREAMBLE DISPATCH PIPELINE — the single assembly point for every piece of instructional
+   * text that is not the user's own conversation. Replaces six independently wired blocks
+   * (tool-discipline was never wired for this host at all; pre-write-recheck and effort-as-text
+   * did not exist; steering/memory/session-start/repo-map/token-economy were each pushed
+   * unconditionally, with no shared budget accounting) with ONE call, in ONE declared priority
+   * order, against ONE shared token budget. See
+   * `packages/core/src/agent/protocol/preamble-dispatch.ts`.
+   */
+  const preambleCtx: agent.protocol.PreambleCtx = {
+    surface: "cli",
+    isSubAgent: false,
+    readOnly: ctx.tuning.permissionMode === "plan",
+    modelId: ctx.tuning.model.modelId,
+    locality: ctx.endpoint?.locality ?? "unknown",
+    contextWindow: ctx.endpoint?.contextWindow,
+    effortTier: ctx.tuning.effort,
+    effortMechanism: ctx.endpoint
+      ? resolveCapability(
+          {
+            modelId: ctx.endpoint.model ?? ctx.endpoint.id,
+            runtime: runtimeFromBaseUrl(ctx.endpoint.baseUrl, ctx.endpoint.locality),
+            locality: ctx.endpoint.locality,
+            probedCapabilities: ctx.endpoint.probedCapabilities,
+          },
+          ctx.effortRules,
+        ).cap.mechanism
+      : undefined,
+    tools: agent.exposedTools(ctx.tuning.tools),
+    authLevel: ctx.authLevel,
+    permissionMode: ctx.tuning.permissionMode,
+    gateMode: ctx.tuning.gateMode,
+  };
+  const assembled = agent.protocol.assemblePreamble(
+    [...agent.protocol.CORE_TURN_CONTRIBUTORS, ...hostTurnContributors(ctx)],
+    preambleCtx,
+    agent.protocol.instructionBudget(preambleCtx.contextWindow),
+  );
+  // ONE combined budget across this turn-scope pass and the ROUND-scope one (`withPreamble`,
+  // tool-catalog) — mutating the SAME `llmDeps` object `makeLlmClient` was already constructed
+  // with, read fresh by its `turn()` closures on every round from here on. No round has run yet
+  // (the agent loop below hasn't started), so this always reaches them in time regardless of
+  // `deps.llm` having been used instead (in which case this is an inert, unread field).
+  llmDeps.turnScopeSpentTokens = assembled.totalApproxTokens;
+  const systemPrompt = assembled.personaAppend
+    ? `${ctx.tuning.systemPrompt}\n\n${assembled.personaAppend}`
+    : ctx.tuning.systemPrompt;
+
   const thread: Thread = {
     messages: [
-      { role: "system", content: ctx.tuning.systemPrompt },
-      ...(steeringBlock ? [{ role: "system" as const, content: steeringBlock }] : []),
-      ...(memoryBlock ? [{ role: "system" as const, content: memoryBlock }] : []),
-      ...(sessionStartBlock ? [{ role: "system" as const, content: sessionStartBlock }] : []),
-      ...(repoMapBlock ? [{ role: "system" as const, content: repoMapBlock }] : []),
-      // CLI-088: token-economy system blocks (terse-output → the terse directive), when enabled.
-      ...tokenSystemBlocks(ctx.tokenToggles).map((b) => ({ role: "system" as const, content: b })),
+      { role: "system", content: systemPrompt },
+      ...assembled.blocks.map((content) => ({ role: "system" as const, content })),
       ...conversation,
     ],
   };
@@ -3473,6 +4243,14 @@ export async function runMessageTurn(
       // The loop's own cancel check. Without it the abort stopped the SSE stream and the loop
       // simply started another round.
       ...(deps.signal ? { signal: deps.signal } : {}),
+      // Point 6b: a tripped canary means something got the model to act against an explicit
+      // instruction — recorded to its own audit stream so a security review can find it.
+      ...(ctx.home
+        ? {
+            onCanaryTripped: (info: { textSnippet: string }) =>
+              appendCanaryAudit(ctx.home as string, { event: "canary-tripped", ...info }),
+          }
+        : {}),
     })) {
       // check BEFORE emit: a delta/tool_use produced after Ctrl-C is dropped, and the
       // lazy generator suspends here so the NEXT tool never dispatches (no post-abort work).
@@ -3523,12 +4301,17 @@ function persist(
     events,
     createdAt: now(),
   });
+  const pausedEvent = events.find(
+    (e): e is Extract<AgentEvent, { kind: "paused" }> => e.kind === "paused",
+  );
   return {
     session: updated,
     events,
     reply,
     jsonl: serializeSession(updated),
     capped: events.some((e) => e.kind === "capped"),
+    paused: pausedEvent !== undefined,
+    ...(pausedEvent ? { pausedIdleMs: pausedEvent.idleMs } : {}),
     thread,
   };
 }

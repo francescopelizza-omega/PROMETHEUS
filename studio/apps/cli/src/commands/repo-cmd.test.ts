@@ -8,7 +8,7 @@ import test from "node:test";
 
 import { makeContext } from "../context.js";
 import { parseArgs } from "../parse.js";
-import { runRepoCommand } from "./repo-cmd.js";
+import { renderRescan, runRepoCommand } from "./repo-cmd.js";
 import type { SidecarDeps } from "./sidecar-cmd.js";
 
 function fake(reply: Record<string, unknown> = { ok: true, command: "x" }): {
@@ -61,9 +61,57 @@ test("repo list: READ renders the index (exit 0)", async () => {
   assert.match(out.text ?? "", /r1/);
 });
 
-test("repo pin with a missing sha → usage error (exit 2)", async () => {
+test("repo pin with a missing sha → usage error (exit 1)", async () => {
   const { deps, calls } = fake();
   const out = await runRepoCommand(ctxFor(["repo", "pin", "myrepo"]), deps);
-  assert.equal(out.exitCode, 2);
+  assert.equal(out.exitCode, 1);
   assert.deepEqual(calls, []);
+});
+
+/**
+ * Regression: a mistyped repo sub-verb used to be silently swallowed and fall through to "list",
+ * discarding the user's real action + arguments with exit 0 and no error — the switch's own
+ * "unknown repo verb" branch was unreachable dead code. Fixed via parse.ts's `unmatchedSub`.
+ */
+test("a mistyped repo sub-verb reports 'unknown repo verb' instead of silently listing", async () => {
+  const { deps, calls } = fake();
+  const out = await runRepoCommand(ctxFor(["repo", "removee", "myid"]), deps);
+  assert.equal(out.exitCode, 1);
+  assert.match(out.text ?? "", /unknown repo verb/);
+  assert.match(out.text ?? "", /removee/);
+  assert.deepEqual(calls, []); // never silently ran `list` (or anything else) against the sidecar
+});
+
+test("a genuinely bare /repo (no sub-verb at all) still defaults to list, unaffected", async () => {
+  const { deps, calls } = fake({ ok: true, repos: [] });
+  const out = await runRepoCommand(ctxFor(["repo"]), deps);
+  assert.equal(out.exitCode, 0);
+  assert.deepEqual(calls[0]?.argv, ["list"]);
+});
+
+test("rescan's --json envelope mirrors the verdict tier, not just the exit code", () => {
+  /**
+   * `renderRescan` mapped the nemesis tier to an exit code but returned no `json`, so the caller
+   * fell back to the engine's raw envelope — which `_envelope.emit()` stamps `"ok": true` for any
+   * scan that COMPLETED. A repo whose live tree now scans BLOCK therefore came back as
+   * `{"ok": true}` while the process exited 20, and a CI script branching on `.ok` — the
+   * documented envelope contract — treated it as clean. Only a script that happened to read `$?`
+   * or `.verdict` caught it.
+   *
+   * `ok = allow` is the rule `prometheus gate` already uses: `ok` answers "is this safe to use",
+   * not "did the scan run".
+   */
+  for (const [verdict, expectOk, expectExit] of [
+    ["allow", true, 0],
+    ["warn", false, 10],
+    ["block", false, 20],
+    ["deny", false, 20],
+    ["error", false, 2],
+  ] as const) {
+    const out = renderRescan("acme/repo", { verdict, risk_score: 1, findings: [] });
+    const json = out.json as { ok?: boolean; verdict?: string } | undefined;
+    assert.equal(json?.ok, expectOk, `${verdict}: ok should be ${expectOk}`);
+    assert.equal(json?.verdict, verdict, `${verdict}: the tier must survive into the envelope`);
+    assert.equal(out.exitCode, expectExit, `${verdict}: exit code`);
+  }
 });

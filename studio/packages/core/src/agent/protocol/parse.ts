@@ -458,7 +458,7 @@ function nextMarker(
   from: number,
 ):
   | { at: number; marker: Marker }
-  | { at: number; fence: true; boundedByEnd: boolean }
+  | { at: number; fence: number; boundedByEnd: boolean }
   | { at: number; codeSpan: number; boundedByEnd: boolean }
   | null {
   let bestMarker: { at: number; marker: Marker } | null = null;
@@ -468,13 +468,15 @@ function nextMarker(
   }
   const tick = nextBacktickRun(s, from);
   const backtickFound:
-    | { at: number; fence: true; boundedByEnd: boolean }
+    | { at: number; fence: number; boundedByEnd: boolean }
     | { at: number; codeSpan: number; boundedByEnd: boolean }
     | null =
     tick === null
       ? null
       : tick.len >= FENCE.length
-        ? { at: tick.at, fence: true, boundedByEnd: tick.boundedByEnd }
+        ? // carry the RUN LENGTH, not just "this is a fence": a 4-backtick fence is closed by a
+          // run of 4, and consuming only 3 of it leaves a stray backtick behind (see `drain`).
+          { at: tick.at, fence: tick.len, boundedByEnd: tick.boundedByEnd }
         : { at: tick.at, codeSpan: tick.len, boundedByEnd: tick.boundedByEnd };
   // A tie means the fence/span IS the head of a marker (e.g. ```tool_call) — the marker wins.
   if (bestMarker && (!backtickFound || bestMarker.at <= backtickFound.at)) return bestMarker;
@@ -582,14 +584,35 @@ export class ToolCallScanner {
       }
 
       if ("fence" in found) {
-        const upto = found.at + FENCE.length;
+        /**
+         * Consume the WHOLE backtick run, and remember its length.
+         *
+         * This used to consume exactly `FENCE.length` (3) bytes of a run that may be longer, and
+         * always set the closer to "```". For a ````-fenced block — which is what a model writes
+         * whenever the content itself contains a ```-fence, i.e. every time it shows you
+         * markdown — the leftover backtick was re-scanned as a 1-char inline span, and at the
+         * CLOSING run the same thing happened again: 3 bytes closed the fence and the 4th
+         * OPENED an inline code span that nothing ever closed. Everything after it, including a
+         * perfectly well-formed `<tool_call>`, was then literal text: `scanToolCalls` returned
+         * zero call events AND zero malformed events, so the agent silently did nothing and no
+         * error was reported anywhere.
+         *
+         * CommonMark: a closing fence must be at least as long as the opening one.
+         */
+        const runLen = found.fence;
+        const upto = found.at + runLen;
         out.push({ kind: "text", text: this.buf.slice(0, upto) });
         this.buf = this.buf.slice(upto);
-        if (this.codeSpanCloser === null || this.codeSpanCloser === FENCE) {
-          this.codeSpanCloser = this.codeSpanCloser === FENCE ? null : FENCE;
+        if (this.codeSpanCloser === null) {
+          this.codeSpanCloser = "`".repeat(runLen);
+        } else if (
+          this.codeSpanCloser.length >= FENCE.length &&
+          runLen >= this.codeSpanCloser.length
+        ) {
+          this.codeSpanCloser = null;
         }
-        // else: 3+ backticks while inside an inline span of a different length are just that
-        // span's literal content — its own (shorter) closer hasn't arrived yet.
+        // else: a fence-length run while inside a SHORTER inline span is that span's literal
+        // content — its own closer hasn't arrived yet.
         continue;
       }
 

@@ -93,3 +93,28 @@ test("a name derived from a filename is sanitised", () => {
   assert.equal(isUsableCommandName("", none), false);
   assert.equal(isUsableCommandName("review-pr_2", none), true);
 });
+
+test("a `~` ref is refused — it is an absolute path in disguise", () => {
+  /**
+   * The rejection list covered `/abs`, `C:\abs` and any `..` segment, but not a leading `~/` —
+   * and `read_file` expands `~` for real. A cloned repo shipping
+   * `.prometheus/command/summarize.md` whose body reads `Summarize @~/Documents/notes.md`
+   * therefore read a file from the user's HOME and spliced it into the prompt, on `/summarize`.
+   *
+   * This gate is the only bound on that path: `expandCommand` calls `runSystemTool("read_file")`
+   * directly, and the read tool does not consult the working-set roots. The docstring justified
+   * project-scope refs by saying a read "is bounded by the working set the caller already
+   * enforces"; no caller enforced it.
+   */
+  for (const ref of ["~", "~/Documents/notes.md", "~/.ssh/id_rsa", "~\\Documents\\notes.md"]) {
+    const plan = gateCommandFile(f({ fileRefs: [ref] }), "project");
+    assert.deepEqual(plan.reads, [], `${ref} was accepted as a readable ref`);
+    assert.equal(plan.rejected.length, 1, `${ref} was not reported as rejected`);
+    assert.match(plan.rejected[0]?.reason ?? "", /home path/);
+  }
+
+  // A legitimate in-workspace ref must still be allowed, or the gate has broken the feature.
+  const ok = gateCommandFile(f({ fileRefs: ["src/notes.md"] }), "project");
+  assert.deepEqual(ok.reads, ["src/notes.md"]);
+  assert.deepEqual(ok.rejected, []);
+});

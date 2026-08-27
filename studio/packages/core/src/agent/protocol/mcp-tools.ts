@@ -12,8 +12,9 @@
  * published back into a `FieldSpec` map so the tool can live in the same catalog, be rendered
  * into the same preamble, and pass the same broker.
  *
- * TWO RULES CARRY THE SAFETY HERE, and both are about the fact that a discovered tool list is
- * UNTRUSTED INPUT — it is a description written by whoever wrote the server:
+ * THREE RULES CARRY THE SAFETY HERE, and all three are about the fact that a discovered tool
+ * list, and everything a connected server returns afterward, is UNTRUSTED INPUT — written and
+ * served by whoever wrote and runs the server:
  *
  *  1. **Namespacing is not cosmetic.** Every name becomes `mcp__<server>__<tool>`. A server
  *     that publishes a tool called `write_file` or `run_command` must not be able to shadow
@@ -22,12 +23,22 @@
  *  2. **Absent annotations mean CONFIRM, never auto.** `autoApprovable` already fails safe on
  *     unknown annotations; this must not undo that by inventing a `readOnlyHint` for a server
  *     that declared none.
+ *  3. **A CALL RESULT is untrusted content, not a trusted tool's output.** Rules 1–2 protect the
+ *     tool-selection decision; they say nothing about the TEXT a server returns once called,
+ *     which — unlike its description (rule 1) — is not size-capped-and-attributed here, it is
+ *     the model's entire view of what the tool "said." `mcpOutcome` wraps it the same way
+ *     `web_fetch` already wraps a fetched page (an explicit `<<untrusted-mcp-data...>>` frame)
+ *     and runs the same lightweight pattern scan `web_fetch` runs — a connected server that
+ *     passed an add-time gate is not thereby trusted to say anything it likes on every call
+ *     forever after.
  *
  * PURE: no node, no IO, no transport.
  */
 
 import type { McpServerConfig, McpToolDescriptor } from "../../mcp/host/types.js";
 import type { FieldSpec, ToolDef, ToolSchema } from "../tools.js";
+import { defangFrameMarkers } from "./frame-body.js";
+import { scanForInjectionSignals } from "./injection-scan.js";
 
 /** The separator that makes a discovered name unmistakable and un-shadowable. */
 export const MCP_TOOL_PREFIX = "mcp__";
@@ -217,11 +228,13 @@ export function renderMcpContent(content: unknown): string {
 /**
  * Turn an MCP call result into the shape a tool runner returns.
  *
- * Shared by the CLI session and the desktop's main process, because the three judgements here
- * are the ones a second copy would get subtly different: an `isError` result is a FAILURE (not
- * text that happens to describe one), an EMPTY success is reported as an empty success (the
- * tool ran and returned nothing — which must not read the same as "the tool did not run"), and
- * over-long output is truncated with a marker rather than silently.
+ * Shared by the CLI session and the desktop's main process, because the judgements here are the
+ * ones a second copy would get subtly different: an `isError` result is a FAILURE (not text that
+ * happens to describe one), an EMPTY success is reported as an empty success (the tool ran and
+ * returned nothing — which must not read the same as "the tool did not run"), over-long output
+ * is truncated with a marker rather than silently, and any non-empty body — success or error
+ * alike, an attacker's payload does not care which — is wrapped in an explicit untrusted-data
+ * frame and pattern-scanned before it ever becomes a tool result, exactly like `web_fetch`.
  */
 export function mcpOutcome(
   serverId: string,
@@ -233,8 +246,23 @@ export function mcpOutcome(
     text.length > MAX_MCP_RESULT_CHARS
       ? `${text.slice(0, MAX_MCP_RESULT_CHARS)}\n… [truncated at ${MAX_MCP_RESULT_CHARS} chars]`
       : text;
-  if (res.isError === true) {
-    return { ok: false, summary: body || `${tool} on ${serverId} reported an error` };
+  if (!body) {
+    return res.isError === true
+      ? { ok: false, summary: `${tool} on ${serverId} reported an error` }
+      : { ok: true, summary: `${tool} returned no content`, data: res.content };
   }
-  return { ok: true, summary: body || `${tool} returned no content`, data: res.content };
+  // The server id/tool name are untrusted too (a server author picks its own tool name) — scan
+  // them alongside the body so a hidden-character trick hiding in a NAME, not just the content,
+  // is not the one thing this scan misses, then strip whatever could break out of the frame's
+  // own attribute quoting.
+  const scan = scanForInjectionSignals(`${body}\n${serverId}\n${tool}`);
+  const warn = scan.flagged
+    ? `\n[warning: possible injected instructions detected — ${scan.signals.join(", ")}]`
+    : "";
+  const safeServer = serverId.replace(/[<>"\r\n]/g, "");
+  const safeTool = tool.replace(/[<>"\r\n]/g, "");
+  const wrapped = `<<untrusted-mcp-data server="${safeServer}" tool="${safeTool}">>\n${defangFrameMarkers(body)}\n<<end untrusted-mcp-data>>${warn}`;
+  return res.isError === true
+    ? { ok: false, summary: wrapped }
+    : { ok: true, summary: wrapped, data: res.content };
 }

@@ -60,8 +60,22 @@ function makeReply(): (res: Outbound) => void {
 
 /**
  * Handle one inbound message: validate → run → reply. Never throws to the loop.
- * A `{cancel:id}` control message flags that id in `cancelled` so an in-flight walk
- * that polls `shouldCancel` stops early (APP-066); progress ticks stream back live.
+ *
+ * CANCEL SEMANTICS — read this before relying on them.
+ *
+ * `runTask` below is SYNCHRONOUS and is not awaited, so it blocks this process's event loop for
+ * its whole duration. No `message` event can be delivered while it runs, which means a
+ * `{cancel:id}` sent by the host after the task started cannot reach `cancelled` until the task
+ * has already finished. The `shouldCancel` hook the walk polls therefore only ever observes a
+ * cancel that was queued BEFORE the task began.
+ *
+ * This header used to say the flag stops an in-flight walk early. It does not, and cannot, while
+ * the walk is synchronous: making cancellation preemptive means yielding to the event loop
+ * inside the walk (an async `runTask` all the way down through `searchFiles`) or having the host
+ * terminate this process outright. Both are real changes; neither is a comment.
+ *
+ * Progress ticks DO stream back live — `reply` posts them from inside the walk, and posting does
+ * not require the loop to turn.
  */
 function handle(raw: unknown, reply: (res: Outbound) => void, cancelled: Set<string>): void {
   if (isCancelMessage(raw)) {
@@ -73,6 +87,7 @@ function handle(raw: unknown, reply: (res: Outbound) => void, cancelled: Set<str
   try {
     res = runTask(raw, {
       onProgress: (scanned) => reply({ id: raw.id, kind: raw.kind, progress: { scanned } }),
+      // Only observes a cancel queued BEFORE this task started — see the header.
       shouldCancel: () => cancelled.has(raw.id),
     });
   } catch (e) {

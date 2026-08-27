@@ -28,8 +28,10 @@ export async function runInfo(ctx: CliContext): Promise<CommandOutcome> {
   if (!name) {
     return {
       text: c.red("usage: prometheus info <plugin-name>"),
-      json: { ok: false, error: "missing name" },
-      exitCode: 2,
+      // A missing positional is the BAD-ARGS class → 1 (CLI-084). It exited 2, which is the
+      // security-block signal `$? -eq 2` is meant to detect; see `usageError`.
+      json: { ok: false, error: "missing-argument", command: "info", usage: "<plugin-name>" },
+      exitCode: 1,
     };
   }
 

@@ -14,7 +14,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import type { AgentEvent } from "./events.js";
-import type { AgentTuning, LLMClient, ThreadMessage, ToolRunner } from "./loop.js";
+import type { AgentTuning, LLMClient, ThreadMessage, ToolCall, ToolRunner } from "./loop.js";
 import { runAgentTurn } from "./loop.js";
 import {
   DEFAULT_REPEAT_LIMIT,
@@ -175,4 +175,132 @@ test("a model doing real work is untouched by the guard", () => {
 
 test("the default limit is stated once and is what the loop uses", () => {
   assert.equal(DEFAULT_REPEAT_LIMIT, 3);
+});
+
+/** A model that asks forever for a tool that DOES NOT EXIST. */
+function hallucinatingModel(): LLMClient {
+  return {
+    async *turn() {
+      yield { kind: "tool_call" as const, call: { name: "not_a_real_tool", args: { q: "a" } } };
+    },
+  } as unknown as LLMClient;
+}
+
+test("a model stuck on a HALLUCINATED tool is stopped too — it used to run the full round cap", () => {
+  // regression: `repeats.observe()` sat BELOW the catalog lookup, and the "is not exposed"
+  // branch `continue`d before reaching it. So the single most repeatable thing a model does was
+  // the one thing the guard could not see. Measured on compiled core: a repeated EXPOSED tool
+  // stopped after 4 model rounds; a repeated non-existent name ran all 32 and ended `capped` —
+  // eight times the budget on a call that could never succeed.
+  let rounds = 0;
+  const llm = {
+    async *turn() {
+      rounds += 1;
+      yield { kind: "tool_call" as const, call: { name: "not_a_real_tool", args: { q: "a" } } };
+    },
+  } as unknown as LLMClient;
+  const runTool: ToolRunner = async () => ({ ok: true, summary: "never reached" });
+  const thread = { messages: [{ role: "user", content: "go" }] as ThreadMessage[] };
+
+  return (async () => {
+    const events: AgentEvent[] = [];
+    for await (const e of runAgentTurn(thread, tuning(), { llm, runTool })) events.push(e);
+    assert.ok(rounds < 8, `the hallucinated call ran ${rounds} model rounds — the guard is blind`);
+    // the FIRST occurrence must still say the tool does not exist, or the model cannot re-plan.
+    assert.ok(
+      events.some((e) => e.kind === "blocked" && /is not exposed/.test(e.reason)),
+      "the model was never told the tool does not exist",
+    );
+    assert.ok(
+      events.some((e) => e.kind === "blocked" && /repeated identically/.test(e.reason)),
+      "the turn did not end with an explanation of why",
+    );
+    assert.equal(
+      events.some((e) => e.kind === "capped"),
+      false,
+      "a doom loop must not be presented as a resumable pause",
+    );
+  })();
+});
+
+test("hallucinatingModel is only used through the loop (self-check on the helper)", () => {
+  assert.equal(typeof hallucinatingModel().turn, "function");
+});
+
+test("EVERY early-return branch is under the guard: --force and malformed_tool_call loops stop too", () => {
+  // regression: round 17 hoisted the guard above the CATALOG lookup, but two `continue` branches
+  // still sat above it — the `--force` refusal and the transport's malformed-call feedback. Each
+  // returns early, and an early return the guard never sees is a doom loop it cannot stop.
+  // Measured on compiled core: both ran the FULL 32 model rounds and ended `capped`, offering a
+  // `/continue` that would resume the same loop. An exposed tool stopped after 4.
+  const cases: Array<[string, ToolCall]> = [
+    ["--force", { name: "read_file", args: { path: "a.ts", force: true } } as ToolCall],
+    ["malformed", { name: "malformed_tool_call", args: { reason: "cannot parse" } } as ToolCall],
+  ];
+  return (async () => {
+    for (const [label, call] of cases) {
+      let rounds = 0;
+      const llm = {
+        async *turn() {
+          rounds += 1;
+          yield { kind: "tool_call" as const, call };
+        },
+      } as unknown as LLMClient;
+      const events: AgentEvent[] = [];
+      const thread = { messages: [{ role: "user", content: "go" }] as ThreadMessage[] };
+      for await (const e of runAgentTurn(thread, tuning(), {
+        llm,
+        runTool: (async () => ({ ok: true, summary: "x" })) as ToolRunner,
+      })) {
+        events.push(e);
+      }
+      assert.ok(rounds < 8, `${label} ran ${rounds} model rounds — the guard is blind to it`);
+      assert.equal(
+        events.some((e) => e.kind === "capped"),
+        false,
+        `${label} doom loop was presented as a resumable pause`,
+      );
+    }
+  })();
+});
+
+test("first occurrences keep their OWN message — the guard only changes REPEATS", () => {
+  const probes: Array<[string, ToolCall, RegExp]> = [
+    [
+      "force",
+      { name: "read_file", args: { path: "a.ts", force: true } } as ToolCall,
+      /forbidden from using --force/,
+    ],
+    [
+      "malformed",
+      { name: "malformed_tool_call", args: { reason: "could not parse your XML" } } as ToolCall,
+      /could not parse your XML/,
+    ],
+    ["unknown", { name: "not_a_tool", args: {} } as ToolCall, /is not exposed/],
+  ];
+  return (async () => {
+    for (const [label, call, want] of probes) {
+      let n = 0;
+      const llm = {
+        async *turn() {
+          n += 1;
+          if (n === 1) yield { kind: "tool_call" as const, call };
+          else yield { kind: "final" as const, text: "done" };
+        },
+      } as unknown as LLMClient;
+      const events: AgentEvent[] = [];
+      const thread = { messages: [{ role: "user", content: "go" }] as ThreadMessage[] };
+      for await (const e of runAgentTurn(thread, tuning(), {
+        llm,
+        runTool: (async () => ({ ok: true, summary: "x" })) as ToolRunner,
+      })) {
+        events.push(e);
+      }
+      const reasons = events.filter((e) => e.kind === "blocked").map((e) => e.reason);
+      assert.ok(
+        reasons.some((r) => want.test(r)),
+        `${label}: lost its own first-occurrence message, got ${JSON.stringify(reasons)}`,
+      );
+    }
+  })();
 });

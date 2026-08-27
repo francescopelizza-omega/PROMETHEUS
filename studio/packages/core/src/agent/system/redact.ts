@@ -206,19 +206,33 @@ export function redact(text: string): string {
  * slip past a `/`-anchored pattern. Patterns are deliberately broad — a false refusal costs
  * the agent one tool call and a clear message; a false accept costs the user a key.
  */
+/**
+ * Every dot-DIRECTORY pattern matches the directory ITSELF as well as its contents (`(?:$|/…)`).
+ *
+ * They used to require a trailing slash, so only paths INSIDE matched and the directory as an
+ * operand did not: `cp -r ~/.docker dk` was permitted, and `read_file dk/config.json` then
+ * returned the registry credential verbatim. Measured — both `cp -r ~/.docker dk` and
+ * `cp -r ~/.docker/ dk` were allowed, so the trailing slash was not the deciding factor; the
+ * directory simply never matched. The same escape existed for `.ssh`, `.aws` and `.gnupg`, and
+ * `.docker`/`.kube` matched only one specific file inside them.
+ *
+ * Broadened to the whole directory in keeping with this file's stated policy — "a false refusal
+ * costs the agent one tool call and a clear message; a false accept costs the user a key". The
+ * `.ssh` carve-out for `known_hosts`/`config` is preserved.
+ */
 const SECRET_PATHS: { re: RegExp; why: string }[] = [
-  { re: /(^|\/)\.ssh\/(?!known_hosts|config$)/i, why: "SSH private-key directory" },
+  { re: /(^|\/)\.ssh(?:$|\/(?!known_hosts|config$))/i, why: "SSH private-key directory" },
   { re: /(^|\/)id_(?:rsa|dsa|ecdsa|ed25519)(?!\.pub$)/i, why: "SSH private key" },
   { re: /\.(?:pem|key|p12|pfx|jks|keystore)$/i, why: "private key / keystore" },
-  { re: /(^|\/)\.aws\//i, why: "AWS credentials directory" },
+  { re: /(^|\/)\.aws(?:$|\/)/i, why: "AWS credentials directory" },
   { re: /(^|\/)\.(?:netrc|pgpass|my\.cnf)$/i, why: "credential file" },
   { re: /(^|\/)\.env(?:\.[A-Za-z0-9_-]+)?$/i, why: "environment file (.env)" },
   { re: /(^|\/)(?:credentials|secrets?)(?:\.(?:json|ya?ml|toml|ini))?$/i, why: "credential file" },
-  { re: /(^|\/)\.gnupg\//i, why: "GnuPG keyring" },
-  { re: /(^|\/)\.docker\/config\.json$/i, why: "Docker registry credentials" },
+  { re: /(^|\/)\.gnupg(?:$|\/)/i, why: "GnuPG keyring" },
+  { re: /(^|\/)\.docker(?:$|\/)/i, why: "Docker registry credentials" },
   { re: /(^|\/)\.npmrc$/i, why: "npm registry token" },
   { re: /(^|\/)\.git-credentials$/i, why: "stored git credentials" },
-  { re: /(^|\/)\.kube\/config$/i, why: "Kubernetes cluster credentials" },
+  { re: /(^|\/)\.kube(?:$|\/)/i, why: "Kubernetes cluster credentials" },
 ];
 
 /** Why this path is refused, or null when it is safe to read. */
@@ -237,10 +251,16 @@ export function isSecretPath(path: string): boolean {
 }
 
 /** The refusal message a tool returns instead of the content. */
-export function secretRefusal(path: string, why: string): string {
+export function secretRefusal(path: string, why: string, verb = "read"): string {
   return [
-    `refused to read ${path}: ${why}.`,
+    `refused to ${verb} ${path}: ${why}.`,
     "Tool output is folded into the model's context and may be sent to a cloud endpoint, so",
     "credential files are never read. Ask the human to paste only the specific value you need.",
-  ].join(" ");
+    // A MOVE is refused for the same reason a read is: renaming `.env` to `notes.txt` and
+    // reading that back was a complete bypass of this refusal, and the redactor behind it only
+    // masks values long enough to look like secrets.
+    verb === "read" ? "" : "Renaming it would defeat this refusal, so the move is refused too.",
+  ]
+    .filter(Boolean)
+    .join(" ");
 }

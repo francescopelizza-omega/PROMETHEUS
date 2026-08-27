@@ -76,6 +76,13 @@ const MAP = {
   "@prometheus/core/agent-tools": resolvePath(PKG_ROOT, "core", "src", "agent", "tools.ts"),
   "@prometheus/core/agent-patch": resolvePath(PKG_ROOT, "core", "src", "agent", "patch.ts"),
   "@prometheus/core/agent-compact": resolvePath(PKG_ROOT, "core", "src", "agent", "compact.ts"),
+  "@prometheus/core/agent-idle-watchdog": resolvePath(
+    PKG_ROOT,
+    "core",
+    "src",
+    "agent",
+    "idle-watchdog.ts",
+  ),
   "@prometheus/core/agent-todo": resolvePath(PKG_ROOT, "core", "src", "agent", "todo.ts"),
   "@prometheus/core/agent-subagent": resolvePath(PKG_ROOT, "core", "src", "agent", "subagent.ts"),
   "@prometheus/core/agent-question": resolvePath(PKG_ROOT, "core", "src", "agent", "question.ts"),
@@ -97,9 +104,23 @@ const MAP = {
     "authorization.ts",
   ),
   "@prometheus/core/ai-effort": resolvePath(PKG_ROOT, "core", "src", "ai", "effort", "index.ts"),
+  // pure context-window + schedule subpaths — the renderer needs these WITHOUT the node-heavy
+  // barrel (C5); see the desktop config's CORE_SUBPATHS for the matching build-side alias.
+  "@prometheus/core/ai-context-window": resolvePath(
+    PKG_ROOT,
+    "core",
+    "src",
+    "ai",
+    "context-window.ts",
+  ),
+  "@prometheus/core/agent-schedule": resolvePath(PKG_ROOT, "core", "src", "agent", "schedule.ts"),
   // Found by `dev-resolver.test.ts` the moment it was written — a second subpath the CLI
   // imports that was silently resolving to dist/.
   "@prometheus/core/mcp-node": resolvePath(PKG_ROOT, "core", "src", "mcp", "host", "node.ts"),
+  // pure metadata subpath — the privacy-sensitive-key rule the CLI's `metadata inspect` and
+  // the desktop metadata panel BOTH read, so the two surfaces cannot disagree about what is
+  // sensitive in a file the user is about to scrub.
+  "@prometheus/core/metadata": resolvePath(PKG_ROOT, "core", "src", "metadata", "index.ts"),
   // pure keymap subpath (APP-057) — presets + conflict detection + the user-override
   // layer; the sandboxed renderer container (SettingsPanel) reaches it WITHOUT the barrel.
   "@prometheus/core/keymap": resolvePath(PKG_ROOT, "core", "src", "settings", "keymap.ts"),
@@ -141,7 +162,29 @@ const tsResult = (absPath) => ({
   shortCircuit: true,
 });
 
+/**
+ * The VS Code extension host's own `vscode` module — the one bare specifier in this repo that
+ * can NEVER be npm-installed: the editor injects it at runtime.
+ *
+ * `apps/vscode-extension/src/workspace-io.ts` imports it at module scope, so any suite that
+ * transitively touches it (session.test.ts does, via tool-runner.ts) dies at resolution under
+ * the monorepo runner — which loads every suite in ONE process with ONE `--import`, so the
+ * extension's own `test/register.mjs` (which already maps this) never gets a chance to run.
+ * The result was a permanently red suite in `node scripts/run-tests.mjs` that was green when
+ * the package was tested on its own.
+ *
+ * Mapping it HERE, in the resolver that already exists to run this monorepo from source without
+ * installed dependencies, fixes it once for every entry point. Nothing is masked: the stub is a
+ * test artifact of the extension package itself, and if it is absent the specifier falls through
+ * to normal resolution and fails exactly as it did before.
+ */
+const VSCODE_STUB = resolvePath(HERE, "..", "vscode-extension", "src", "test", "vscode-stub.mjs");
+
 export async function resolve(specifier, context, nextResolve) {
+  // 0) the editor-injected "vscode" module → the extension package's own empty test stub.
+  if (specifier === "vscode" && existsSync(VSCODE_STUB)) {
+    return { url: pathToFileURL(VSCODE_STUB).href, shortCircuit: true };
+  }
   // 1) workspace bare specifiers -> package src/index.ts
   const mapped = MAP[specifier];
   if (mapped) return tsResult(mapped);

@@ -149,12 +149,33 @@ export interface AuthorisationStore {
   setPermissionMode(mode: PermissionModeId): void;
 }
 
+/** True only while `setPermissionMode` is driving the level — see its body. */
+let syncingFromMode = false;
+
 export const useAuthorisationStore = create<AuthorisationStore>((set, get) => ({
   level: load(),
   setLevel: (level: number): void => {
     const next = clampAuthLevel(level);
     set({ level: next });
     persist(next);
+    /**
+     * Choosing a LEVEL leaves plan mode, so the two dials cannot disagree.
+     *
+     * `setPermissionMode` already syncs the level (plan pins it to 0 so no ladder rung can
+     * auto-approve underneath a read-only posture) — but the reverse never happened. Picking a
+     * level while in plan mode left `permissionMode: "plan"` beside a level that auto-approves:
+     * the indicator said read-only while the behaviour was not. That is the exact failure this
+     * store's own docstring records for the TUI.
+     *
+     * Written directly rather than through `setPermissionMode` to avoid the mutual recursion
+     * (that setter calls `setLevel`), and unconditionally rather than only when the level rises:
+     * plan is a deliberate posture, so returning to level 0 must not silently re-enter it either.
+     */
+    if (!syncingFromMode && get().permissionMode === "plan") {
+      const mode = clampPermissionMode("default");
+      set({ permissionMode: mode });
+      persistMode(mode);
+    }
   },
   cycle: (): void => {
     get().setLevel((get().level + 1) % (MAX_AUTH_LEVEL + 1));
@@ -164,6 +185,16 @@ export const useAuthorisationStore = create<AuthorisationStore>((set, get) => ({
     const next = clampPermissionMode(mode);
     set({ permissionMode: next });
     persistMode(next);
-    get().setLevel(modeToAuthLevel(next));
+    /**
+     * Guarded, because `setLevel` now clears plan mode — without this, choosing `plan` would
+     * set the mode, drive the level to 0, and that level change would immediately clear the mode
+     * again. The flag marks "this level change IS the mode change", not a user picking a level.
+     */
+    syncingFromMode = true;
+    try {
+      get().setLevel(modeToAuthLevel(next));
+    } finally {
+      syncingFromMode = false;
+    }
   },
 }));

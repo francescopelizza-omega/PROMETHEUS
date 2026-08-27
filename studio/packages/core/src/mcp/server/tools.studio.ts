@@ -3,7 +3,8 @@
  *
  * Five new ToolDefs that map 1:1 to existing `cmd_*` functions in prometheus.py
  * (cmd_models ~9553, cmd_apps ~5582, cmd_worldsim ~5732, cmd_localai ~6001) plus
- * the read-only `prometheus_mcp_discover` (the §2.3 union of installed MCP servers).
+ * the studio-side tools. (`prometheus_mcp_discover` used to live here and was removed — see
+ * the note at the end of the list.)
  * Same dependency-free FieldSpec contract + `[...globalFlags, subcmd, ...]` toArgv
  * as the 14 ported tools (tools.ts).
  *
@@ -175,14 +176,18 @@ export const STUDIO_TOOLS: ToolDef[] = [
     annotations: { readOnlyHint: true },
     toArgv: (a) => ["localai", s(a.action ?? "audit"), ...(a.tool ? [s(a.tool)] : [])],
   },
-  {
-    name: "prometheus_mcp_discover",
-    title: "Discover installed MCP servers",
-    description:
-      "Read-only: the union of MCP servers already configured across detected agent CLIs " +
-      "(Claude/Cursor/Codex/Windsurf/Zed/Continue/Cline). Used to offer 'Import N servers'.",
-    schema: {},
-    annotations: { readOnlyHint: true, openWorldHint: true },
-    toArgv: () => ["mcp", "discover"],
-  },
+  /**
+   * `prometheus_mcp_discover` was REMOVED, deliberately.
+   *
+   * It mapped to `["mcp", "discover"]`, and prometheus.py has no `mcp` subcommand at all —
+   * `invalid choice: 'mcp'`. Since this catalog is what the standalone `prometheus-studio-mcp`
+   * binary registers in `tools/list`, an external MCP client (Claude Desktop, Cursor, …) saw a
+   * tool promising "the union of MCP servers already configured across detected agent CLIs" and
+   * got an argparse error 100% of the time.
+   *
+   * It was not repointed because no engine subcommand serves it: the discovery its description
+   * advertises is implemented in TypeScript (`mcpHost`'s importers), which the engine bridge
+   * cannot reach. Advertising a tool that can only fail is worse than not advertising it — the
+   * model spends a call finding out, every time.
+   */
 ];

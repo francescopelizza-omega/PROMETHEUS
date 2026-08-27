@@ -26,16 +26,26 @@
  */
 
 import type { AiEndpoint, WorkspacePolicy } from "@prometheus/core";
-import { createAiClient } from "@prometheus/core";
+import { ModelIdlePausedError, ai, createAiClient } from "@prometheus/core";
 import type { AgentTuning, LLMClient, LlmTurn, Thread } from "@prometheus/core/agent-loop";
-import type { ScanEvent, TextToolCall } from "@prometheus/core/agent-protocol";
+import type { PreambleCtx, ScanEvent, TextToolCall } from "@prometheus/core/agent-protocol";
 import {
+  CORE_ROUND_CONTRIBUTORS,
+  CORE_TURN_CONTRIBUTORS,
   ToolCallScanner,
-  preambleModeFor,
-  renderToolPreamble,
-  withToolPreamble,
+  assemblePreamble,
+  instructionBudget,
 } from "@prometheus/core/agent-protocol";
 import type { ToolDef } from "@prometheus/core/agent-tools";
+import type { EffortResolution } from "@prometheus/core/ai-effort";
+
+import {
+  createReasoningTagSplitter,
+  resolveCapability,
+  resolveEffort,
+  runtimeFromBaseUrl,
+} from "@prometheus/core/ai-effort";
+import { firstServedModel } from "./model-discovery.js";
 
 /** An OpenAI-shaped message, matching core's `Msg`. */
 interface WireMsg {
@@ -43,12 +53,57 @@ interface WireMsg {
   content: string;
 }
 
+/**
+ * Resolve an endpoint's `apiKeyRef` for this host.
+ *
+ * `env:NAME` is the form the setting's own description leads with and the only one a VS Code
+ * window can satisfy without a keychain prompt, so it is the form supported here; anything else
+ * fails with a message that NAMES what is supported instead of the opaque "no key resolver".
+ */
+async function resolveApiKeyRef(ref: string): Promise<string> {
+  const parsed = ai.parseKeyRef(ref);
+  if (!parsed) throw new Error(`unrecognised api key reference "${ref}"`);
+  if (parsed.kind !== "env") {
+    throw new Error(
+      `\`prometheus.apiKeyRef\` supports \`env:NAME\` in VS Code; got "${ref}". ` +
+        "Export the key as an environment variable and reference it as env:NAME.",
+    );
+  }
+  const val = process.env[parsed.envVar];
+  if (!val) {
+    throw new Error(
+      `\`prometheus.apiKeyRef\` is set to "${ref}" but the environment variable ` +
+        `${parsed.envVar} is empty in this VS Code process.`,
+    );
+  }
+  return val;
+}
+
 export interface EndpointLlmOptions {
   endpoint: AiEndpoint;
   policy?: WorkspacePolicy;
   signal?: AbortSignal;
+  /**
+   * The CURRENT turn's abort signal, read fresh on every turn.
+   *
+   * `signal` is fixed at construction, and this client is constructed once per session rebuild —
+   * so nothing could ever supply the per-turn signal that "Cancel Current Turn" trips. The
+   * result was a Cancel that did not stop generation: tokens kept arriving until the round
+   * finished on its own, and the fetch was never aborted.
+   */
+  getSignal?: () => AbortSignal | undefined;
   /** Injected for tests; defaults to the platform fetch. */
   fetch?: typeof globalThis.fetch;
+  /** this client's inactivity-pause threshold — see `@prometheus/core`'s `agent/idle-watchdog`.
+   *  Undefined ⇒ `DEFAULT_IDLE_TIMEOUT_MS` (10 min). No settings UI surfaces this yet (unlike
+   *  the CLI's `/timeout` and Desktop's settings field) — this host simply inherits the shared
+   *  client's default rather than going completely unprotected as it did before this option
+   *  existed. */
+  idleTimeoutMs?: number;
+  /** test-only clock injection for the idle watchdog, mirroring the CLI's identical fields. */
+  idleWatchdogNow?: () => number;
+  idleWatchdogSetTimeout?: (cb: () => void, ms: number) => ReturnType<typeof setTimeout>;
+  idleWatchdogClearTimeout?: (handle: ReturnType<typeof setTimeout>) => void;
 }
 
 /**
@@ -60,19 +115,76 @@ export interface EndpointLlmOptions {
  */
 export function createEndpointLlmClient(opts: EndpointLlmOptions): LLMClient {
   const policy: WorkspacePolicy = opts.policy ?? { neverSendToCloud: false };
-  const client = createAiClient(
-    opts.endpoint,
-    policy,
-    opts.fetch ? { fetch: opts.fetch as never } : {},
-  );
+  /**
+   * The endpoint's model id, resolved at FIRST USE.
+   *
+   * `prometheus.model` ships empty on purpose: the old default was the literal
+   * `prometheus-local`, a model nothing in this repo ever creates, so a user's first message
+   * came back `HTTP 404 … model 'prometheus-local' not found`. Any other hardcoded tag is just as
+   * absent on someone else's machine, so the id is DISCOVERED from the endpoint — and discovered
+   * HERE rather than during activation, because activation must not await a network probe.
+   *
+   * Memoised: one probe per client, and the client is rebuilt whenever the settings change.
+   */
+  let resolving:
+    | Promise<{ endpoint: AiEndpoint; client: ReturnType<typeof createAiClient> }>
+    | undefined;
+  const fetchImpl = (opts.fetch ?? globalThis.fetch) as typeof globalThis.fetch;
+  const resolveClient = (): Promise<{
+    endpoint: AiEndpoint;
+    client: ReturnType<typeof createAiClient>;
+  }> => {
+    resolving ??= (async () => {
+      let endpoint = opts.endpoint;
+      if (!endpoint.model?.trim()) {
+        const found = await firstServedModel(endpoint.baseUrl, fetchImpl);
+        if (!found) {
+          throw new Error(
+            `No model found at ${endpoint.baseUrl}. Start a local runner (e.g. \`ollama serve\` with a model pulled), or set \`prometheus.model\` and \`prometheus.baseUrl\` in Settings.`,
+          );
+        }
+        endpoint = { ...endpoint, id: `vscode:${found}`, model: found };
+      }
+      return {
+        endpoint,
+        client: createAiClient(endpoint, policy, {
+          ...(opts.fetch ? { fetch: opts.fetch as never } : {}),
+          // `prometheus.apiKeyRef` is a CONTRIBUTED setting (package.json) and `extension.ts`
+          // puts it on the endpoint — but no key resolver was ever passed here, so the moment a
+          // user filled it in, every turn threw "no key resolver; cannot resolve apiKeyRef"
+          // before a single request left the machine. Measured: with the setting empty a turn
+          // answers; with `env:MY_KEY` it throws even when MY_KEY is exported.
+          resolveKey: resolveApiKeyRef,
+        }),
+      };
+    })();
+    return resolving;
+  };
   // Set once this endpoint has produced at least one correctly-read `<tool_call>` — see
   // `withPreamble`'s `demonstrated` param. Monotonic across the whole client's lifetime (one
   // session), same as the CLI's and desktop pane's `ToolCapabilityState.textSyntaxCalls`; this
   // host has no native transport to negotiate, so a single flag is all the state it needs.
   let demonstrated = false;
+  // The endpoint's effort CAPABILITY is fixed for the client's lifetime (a property of the
+  // model+runtime, not of any one turn) — resolved once here, mirroring the CLI's
+  // `makeLlmClient`. Before this, `turn()`'s own `tuning` parameter was unused entirely: VS Code
+  // never sent an effort tier as a request parameter AND `effort-text` (the textual fallback)
+  // was permanently dead code, regardless of what tier the user asked for.
+  // Resolved from the endpoint the client ACTUALLY uses, so a discovered model id keys the
+  // effort rules rather than the empty string the settings held.
+  const capabilityFor = (endpoint: AiEndpoint) =>
+    resolveCapability({
+      modelId: endpoint.model ?? endpoint.id,
+      runtime: runtimeFromBaseUrl(endpoint.baseUrl, endpoint.locality),
+      locality: endpoint.locality,
+      probedCapabilities: endpoint.probedCapabilities,
+    }).cap;
 
   return {
-    async *turn(thread: Thread, _tuning: AgentTuning, tools: ToolDef[]): AsyncIterable<LlmTurn> {
+    async *turn(thread: Thread, tuning: AgentTuning, tools: ToolDef[]): AsyncIterable<LlmTurn> {
+      const { endpoint, client } = await resolveClient();
+      const capability = capabilityFor(endpoint);
+      const effort = tuning.effort ? resolveEffort(tuning.effort, capability) : undefined;
       const messages: WireMsg[] = thread.messages.map((m) => ({
         // An unpaired OpenAI `role:"tool"` message is rejected outright by strict endpoints,
         // and core's thread is full of them (that is how tool results re-enter). They carry
@@ -80,9 +192,33 @@ export function createEndpointLlmClient(opts: EndpointLlmOptions): LLMClient {
         role: m.role === "tool" ? "user" : m.role,
         content: m.content,
       }));
-      const outgoing = withPreamble(messages, tools, opts.endpoint.contextWindow, demonstrated);
+      const outgoing = withPreamble(
+        messages,
+        tools,
+        endpoint.locality,
+        endpoint.contextWindow,
+        demonstrated,
+        effort,
+      );
 
       const scanner = new ToolCallScanner();
+      /**
+       * Strip an R1-style model's inline `<think>…</think>` before the scanner sees it.
+       *
+       * This host has no separate thinking channel, so the deliberation is DROPPED rather than
+       * routed — the right trade here: a dropped thought costs the user nothing they had
+       * before, while leaking it prefixes every answer with paragraphs of deliberation AND
+       * feeds that deliberation to the tool-call scanner below, where a model reasoning aloud
+       * about a call could trip the text protocol into making one.
+       *
+       * A no-op pass-through when the capability names no tag.
+       */
+      const reasoningSplit = createReasoningTagSplitter(capability.reasoningTag);
+      /** Flush the splitter's tail into the scanner at end of stream. */
+      const drainReasoningTail = function* (): Generator<LlmTurn> {
+        const tail = reasoningSplit.end();
+        if (tail.text) yield* drain(scanner.push(tail.text));
+      };
       const calls: TextToolCall[] = [];
       const drain = function* (events: ScanEvent[]): Generator<LlmTurn> {
         for (const ev of events) {
@@ -94,14 +230,63 @@ export function createEndpointLlmClient(opts: EndpointLlmOptions): LLMClient {
         }
       };
 
-      for await (const chunk of client.chat(outgoing as never, {
-        ...(opts.signal ? { signal: opts.signal } : {}),
-      })) {
-        // Scanned rather than yielded raw: the scanner both extracts the calls AND keeps the
-        // `<tool_call>` markup out of the transcript, so the user reads prose instead of
-        // protocol.
-        if (chunk.delta) yield* drain(scanner.push(chunk.delta));
+      try {
+        // the LIVE turn's signal wins; `opts.signal` stays supported for a fixed-signal caller
+        const turnSignal = opts.getSignal?.() ?? opts.signal;
+        for await (const chunk of client.chat(outgoing as never, {
+          ...(turnSignal ? { signal: turnSignal } : {}),
+          ...(effort ? { effort } : {}),
+          ...(opts.idleTimeoutMs !== undefined ? { idleTimeoutMs: opts.idleTimeoutMs } : {}),
+          ...(opts.idleWatchdogNow ? { idleWatchdogNow: opts.idleWatchdogNow } : {}),
+          ...(opts.idleWatchdogSetTimeout
+            ? { idleWatchdogSetTimeout: opts.idleWatchdogSetTimeout }
+            : {}),
+          ...(opts.idleWatchdogClearTimeout
+            ? { idleWatchdogClearTimeout: opts.idleWatchdogClearTimeout }
+            : {}),
+        })) {
+          // Scanned rather than yielded raw: the scanner both extracts the calls AND keeps the
+          // `<tool_call>` markup out of the transcript, so the user reads prose instead of
+          // protocol.
+          if (chunk.delta) {
+            const split = reasoningSplit.push(chunk.delta);
+            if (split.text) yield* drain(scanner.push(split.text));
+          }
+        }
+      } catch (err) {
+        /**
+         * A transport failure must say WHERE it failed and what to do.
+         *
+         * Node's fetch rejects with the bare string "fetch failed" for every network-level
+         * problem — nothing running on the port, DNS, TLS, a refused connection. That is what
+         * the user saw in the chat panel: two words, no URL, no next step. It is also the
+         * commonest first-run failure, because the default endpoint is a local runner that may
+         * simply not be started.
+         */
+        if (
+          err instanceof Error &&
+          !(err instanceof ModelIdlePausedError) &&
+          /fetch failed|ECONNREFUSED|ENOTFOUND|EAI_AGAIN|network|socket hang up/i.test(err.message)
+        ) {
+          throw new Error(
+            `cannot reach the model endpoint at ${endpoint.baseUrl} (${err.message}). Start the local runner (e.g. \`ollama serve\`), or change \`prometheus.baseUrl\` in Settings.`,
+            { cause: err },
+          );
+        }
+        if (!(err instanceof ModelIdlePausedError)) throw err;
+        // The shared client's own idle watchdog (`ai/client.ts`) paused a silent request — this
+        // host had NO inactivity protection at all before that watchdog existed, so a cold-
+        // loading or wedged local model hung the extension forever. A pause, not a failure:
+        // whatever prose already streamed above is already in the caller's thread.
+        yield* drainReasoningTail();
+        yield* drain(scanner.end());
+        if (calls.length > 0) demonstrated = true;
+        for (const call of calls)
+          yield { kind: "tool_call", call: { name: call.name, args: call.args } };
+        yield { kind: "paused", idleMs: err.idleMs };
+        return;
       }
+      yield* drainReasoningTail();
       yield* drain(scanner.end());
 
       if (calls.length > 0) demonstrated = true;
@@ -115,30 +300,46 @@ export function createEndpointLlmClient(opts: EndpointLlmOptions): LLMClient {
 }
 
 /**
- * Merge the tool preamble into the OUTGOING system message only.
+ * Merge the preamble dispatch pipeline's output into the OUTGOING system message only.
  *
- * Outgoing-only because the preamble is derived from the exposed tool set — persisting it into
- * the thread would freeze one turn's tool list into the conversation forever. The measured
- * context window sizes the budget; without it the budget is the one sized for an 8192 window,
- * which drops every tool DESCRIPTION from the listing and leaves the model guessing at schemas.
+ * Outgoing-only because the assembled text is derived from the exposed tool set and the
+ * endpoint's own capability — persisting it into the thread would freeze one turn's tool list
+ * and effort tier into the conversation forever. This host has no separate turn-scope assembly
+ * point (there is no per-turn `runMessageTurn`-equivalent here, unlike the CLI) and always uses
+ * the TEXT transport (see this file's header) — so both the once-per-turn contributors
+ * (tool-discipline, pre-write-recheck, effort-text) and the round-scope one (tool-catalog) are
+ * assembled together here, every round, exactly as the desktop pane's own `withPreamble` does.
  */
 function withPreamble(
   messages: WireMsg[],
   tools: ToolDef[],
+  locality: "local" | "cloud",
   contextWindow?: number,
   demonstrated?: boolean,
+  effort?: EffortResolution,
 ): WireMsg[] {
   if (tools.length === 0) return messages;
-  const opts = {
-    mode: preambleModeFor("text"),
+  const ctx: PreambleCtx = {
+    surface: "vscode",
+    isSubAgent: false,
+    readOnly: false,
+    locality,
     ...(contextWindow ? { contextWindow } : {}),
-    ...(demonstrated ? { demonstrated } : {}),
+    transport: "text",
+    ...(demonstrated ? { demonstratedToolSyntax: demonstrated } : {}),
+    // Without these, `effort-text` was dead code here — see `turn()`'s own comment.
+    ...(effort ? { effortTier: effort.requested, effortMechanism: effort.mechanism } : {}),
+    tools,
   };
+  const assembled = assemblePreamble(
+    [...CORE_TURN_CONTRIBUTORS, ...CORE_ROUND_CONTRIBUTORS],
+    ctx,
+    instructionBudget(contextWindow),
+  );
+  if (!assembled.personaAppend) return messages;
   const at = messages.findIndex((m) => m.role === "system");
-  if (at === -1) {
-    const { text } = renderToolPreamble(tools, opts);
-    return [{ role: "system", content: text }, ...messages];
-  }
-  const { prompt } = withToolPreamble(messages[at]?.content ?? "", tools, opts);
-  return messages.map((m, i) => (i === at ? { ...m, content: prompt } : m));
+  if (at === -1) return [{ role: "system", content: assembled.personaAppend }, ...messages];
+  const base = (messages[at]?.content ?? "").trim();
+  const merged = base ? `${base}\n\n${assembled.personaAppend}` : assembled.personaAppend;
+  return messages.map((m, i) => (i === at ? { ...m, content: merged } : m));
 }

@@ -85,7 +85,11 @@ export const PROMETHEUS_TOOLS: ToolDef[] = [
       "Detect which AI agent CLIs (Claude Code, Codex, Cursor, Gemini, Windsurf, Zed, " +
       "Continue, Copilot, …) are installed on this machine.",
     schema: {},
-    annotations: { ...RO, openWorldHint: true },
+    // NOT openWorldHint: this inspects THIS machine and reaches no external entity. The hint is
+    // for tools that touch an open world (a web search); a local inventory is the closed-world
+    // case. It mattered once `openWorldHint` started outranking `readOnlyHint` in classifyAuth:
+    // the mislabel would have pushed a purely local read into the network tier.
+    annotations: { ...RO },
     toArgv: () => ["scan"],
   },
   {
@@ -95,7 +99,8 @@ export const PROMETHEUS_TOOLS: ToolDef[] = [
       "Deep inventory of every known agent: present/forgotten, binary + version, config " +
       "dir, staleness, and per-agent counts of plugins/skills/MCP/extensions/rules/commands.",
     schema: {},
-    annotations: { ...RO, openWorldHint: true },
+    // NOT openWorldHint — a deeper inventory of the SAME local machine. See prometheus_scan.
+    annotations: { ...RO },
     toArgv: () => ["superscan"],
   },
   {

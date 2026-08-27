@@ -165,3 +165,23 @@ test("formatAuditLine: fields present, ends in newline, truncates to < 512 bytes
   assert.match(huge, /…/, "the argv field is marked truncated");
   assert.ok(huge.endsWith("auto-approved\n"), "the outcome field survives truncation");
 });
+
+test("a tool that reaches the network is 'exec' even when it mutates nothing", () => {
+  /**
+   * `readOnlyHint` and `openWorldHint` are orthogonal, and a tool can honestly carry both:
+   * `web_search` changes nothing on the machine, yet it sends the query out to a provider.
+   * Classifying on readOnly first made it "read", and "read" is ALLOWED in plan mode — so the
+   * one mode whose entire contract is "look, decide, change nothing" performed network egress
+   * without a prompt. Egress is precisely what plan mode denies through the "exec" class.
+   */
+  const bothHints = { readOnlyHint: true, openWorldHint: true };
+  assert.equal(classifyTool(bothHints), "exec");
+  assert.equal(decideToolForMode("plan", bothHints), "deny");
+  assert.equal(decideToolForMode("default", bothHints), "ask");
+
+  // the ordinary cases are untouched
+  assert.equal(classifyTool({ readOnlyHint: true }), "read");
+  assert.equal(decideToolForMode("plan", { readOnlyHint: true }), "allow");
+  assert.equal(classifyTool({ openWorldHint: true }), "exec");
+  assert.equal(classifyTool(undefined), "edit");
+});

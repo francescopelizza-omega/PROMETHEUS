@@ -19,7 +19,7 @@ import { Button } from "@prometheus/ui";
 import { type ReactElement, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import type { RendererEndpoint } from "./ai-client.js";
-import { buildInlineEditMessages, streamChat } from "./ai-client.js";
+import { StreamPausedError, buildInlineEditMessages, streamChat } from "./ai-client.js";
 import { diffStats, lineDiff } from "./inline-diff.js";
 
 export interface InlineEditProps {
@@ -42,6 +42,9 @@ export function InlineEdit(props: InlineEditProps): ReactElement {
   const [streaming, setStreaming] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Distinct from `error`: the idle watchdog paused the turn, not a failure — whatever streamed
+  // above is real and still acceptable, so this renders as a notice, not a red failure banner.
+  const [paused, setPaused] = useState(false);
   const inputRef = useRef<HTMLInputElement | null>(null);
   // the in-flight stream's aborter — cancelled on unmount and before each new run so
   // a streaming request never outlives the overlay (no setState-after-unmount, no
@@ -65,6 +68,7 @@ export function InlineEdit(props: InlineEditProps): ReactElement {
     setBusy(true);
     setStreaming("");
     setError(null);
+    setPaused(false);
     try {
       const messages = buildInlineEditMessages({ instruction, selection, context, languageId });
       let acc = "";
@@ -77,7 +81,13 @@ export function InlineEdit(props: InlineEditProps): ReactElement {
         setStreaming(acc);
       }
     } catch (e) {
-      if (!ac.signal.aborted) setError(e instanceof Error ? e.message : String(e));
+      if (ac.signal.aborted) {
+        // user cancel — nothing to show.
+      } else if (e instanceof StreamPausedError) {
+        setPaused(true);
+      } else {
+        setError(e instanceof Error ? e.message : String(e));
+      }
     } finally {
       // clear busy UNLESS a newer run superseded this one (then it owns the flag).
       // Keying on abort left busy stuck "…" when the stream was aborted but the overlay
@@ -156,6 +166,12 @@ export function InlineEdit(props: InlineEditProps): ReactElement {
       </form>
 
       {error && <p style={{ color: "var(--danger)", margin: "6px 0 0" }}>{error}</p>}
+      {paused && (
+        <p style={{ color: "var(--warning)", margin: "6px 0 0" }}>
+          ⏸ the model went idle — paused, nothing lost.{" "}
+          {streaming ? "Accept below, or retry." : "Retry."}
+        </p>
+      )}
 
       {streaming && (
         <div style={{ marginTop: 6 }}>

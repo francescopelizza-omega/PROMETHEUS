@@ -47,13 +47,17 @@ export async function runRefactor(
   ctx: CliContext,
   deps: SidecarDeps = defaultSidecarDeps,
 ): Promise<CommandOutcome> {
-  const verb = ctx.args.command[1];
+  // `unmatchedSub` (parse.ts) distinguishes "a second word WAS typed but didn't match
+  // structure/imports/callgraph" from "nothing was typed" — without it, a typo (command[1] is
+  // undefined for a TWO_WORD mismatch) rendered as "unknown verb (none)" instead of naming
+  // the actual typo.
+  const verb = ctx.args.unmatchedSub ?? ctx.args.command[1];
   // validate the VERB before the path so a bad verb never spawns python.
   if (verb !== "structure" && verb !== "imports" && verb !== "callgraph") {
     return {
       text: `prometheus refactor: unknown verb ${verb ? `"${verb}"` : "(none)"} — valid: ${VERBS.join(", ")}`,
-      json: { ok: false, error: "unknown-verb", valid: VERBS },
-      exitCode: 2,
+      json: { ok: false, error: "unknown-verb", verb: verb ?? null, valid: VERBS },
+      exitCode: 1,
     };
   }
   const file = ctx.args.positionals[0] ?? ".";

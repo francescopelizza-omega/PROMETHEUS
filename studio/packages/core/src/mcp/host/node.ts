@@ -13,6 +13,7 @@ import {
   StreamableHttpTransport,
   createHttpTransportFactory,
 } from "./http-transport.js";
+import { appendMcpAudit, mcpAuditPath } from "./mcp-audit.js";
 import {
   StdioMcpTransport,
   type StdioSpawn,
@@ -27,6 +28,8 @@ export {
   createStdioTransportFactory,
   StreamableHttpTransport,
   createHttpTransportFactory,
+  appendMcpAudit,
+  mcpAuditPath,
 };
 export type { FetchLike, HttpTransportDeps, StdioSpawn, StdioTransportDeps };
 // Opt-in real-server e2e harness (CLI-038) — dev/test tooling, spawns a pinned reference server.

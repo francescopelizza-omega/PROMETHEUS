@@ -161,6 +161,38 @@ test("runSetup: an already-ready local model is adopted without prompting", asyn
   assert.equal(r.endpoint?.model, "llama3.1:8b");
 });
 
+test("runSetup: multiple already-downloaded local models → a real pick, not a silent models[0]", async () => {
+  const r = await runSetup({
+    client: fakeClient([]),
+    write: () => {},
+    fetchFn: fakeFetch({ "http://localhost:11434/v1": ["llama3.1:8b", "qwen2.5-coder:7b"] }),
+    ask: scriptedAsk(["2"]), // pick the SECOND already-downloaded model
+  });
+  assert.equal(r.endpoint?.model, "qwen2.5-coder:7b");
+});
+
+test("runSetup: multiple local models, a blank answer defaults to #1 (never throws)", async () => {
+  const r = await runSetup({
+    client: fakeClient([]),
+    write: () => {},
+    fetchFn: fakeFetch({ "http://localhost:11434/v1": ["llama3.1:8b", "qwen2.5-coder:7b"] }),
+    ask: scriptedAsk([""]),
+  });
+  assert.equal(r.endpoint?.model, "llama3.1:8b");
+});
+
+test("runSetup local: declining the Ollama-install prompt still writes visible feedback", async () => {
+  const out: string[] = [];
+  const r = await runSetup({
+    client: fakeClient([]),
+    write: (s) => out.push(s),
+    fetchFn: fakeFetch({}), // nothing serving → ollamaUp === false
+    ask: scriptedAsk(["1", "1", "n"]), // local → model #1 → decline the gated installer
+  });
+  assert.equal(r.endpoint, undefined);
+  assert.match(out.join("\n"), /skipped/i);
+});
+
 test("runSetup local: askPath repoints open_models, then pulls + adopts", async () => {
   const home = mkdtempSync(join(tmpdir(), "prom-setup-"));
   const pulls: Array<[string, string[]]> = [];

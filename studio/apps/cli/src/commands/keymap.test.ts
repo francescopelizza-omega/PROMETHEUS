@@ -31,3 +31,11 @@ test("keymap list --preset <unknown>: not found (exit 2)", () => {
   const out = runKeymap(ctxFor(["keymap", "list", "--preset", "no-such-map"]));
   assert.equal(out.exitCode, 2);
 });
+
+test("keymap <typo>: reports unknown verb, never silently defaults to list", () => {
+  // regression: command[1] is undefined for a TWO_WORD mismatch (parse.ts sets `unmatchedSub`
+  // instead), so a typo used to silently fall through to the "list" branch.
+  const out = runKeymap(ctxFor(["keymap", "lsit", "--json"]));
+  assert.equal(out.exitCode, 1);
+  assert.equal((out.json as { error: string }).error, "unknown-verb");
+});

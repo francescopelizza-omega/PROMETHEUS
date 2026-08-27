@@ -9,7 +9,7 @@
  * module still imports under tsc/node without a window.
  */
 
-import { type KeyboardEvent, type RefObject, useEffect } from "react";
+import { type KeyboardEvent, type RefObject, useEffect, useRef } from "react";
 
 /** The focusable selector used to find trap boundaries (Radix's set). */
 const FOCUSABLE =
@@ -52,6 +52,23 @@ export function useFocusTrap(
   options: FocusTrapOptions = {},
 ): void {
   const { deferTabToTextFields = false, skipInitialFocus = false } = options;
+  /**
+   * `onClose` is held in a REF, not listed as an effect dependency.
+   *
+   * Every caller in this file passes a freshly created `() => onOpenChange(false)`, so a
+   * dependency on its identity re-ran the whole effect on EVERY render of the surface. Teardown
+   * restores focus to `previouslyFocused` — the element behind the modal — and the re-run then
+   * focuses the panel's first focusable. So any state update in the dialog's owner, which means
+   * every keystroke in a controlled field inside it, yanked focus out of that field. The one
+   * shipped consumer, CostWarningModal, owns the "ENABLE METERED" text state itself: typing the
+   * first character moved the caret out of the input, so the typed-consent gate could not be
+   * completed by typing at all.
+   *
+   * A ref keeps the latest handler without making the trap's lifetime depend on it — the trap
+   * must live as long as the overlay is open, not as long as one render's closure.
+   */
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
   useEffect(() => {
     if (!active) return;
     const container = containerRef.current;
@@ -75,7 +92,7 @@ export function useFocusTrap(
     function onKeyDown(e: globalThis.KeyboardEvent): void {
       if (e.key === "Escape") {
         e.stopPropagation();
-        onClose();
+        onCloseRef.current();
         return;
       }
       if (e.key !== "Tab") return;
@@ -108,7 +125,8 @@ export function useFocusTrap(
       // while the overlay was open throws focus to <body> and loses the user's place.
       if (previouslyFocused && doc.contains(previouslyFocused)) previouslyFocused.focus?.();
     };
-  }, [active, containerRef, onClose, deferTabToTextFields, skipInitialFocus]);
+    // NOTE: `onClose` is deliberately absent — see `onCloseRef` above.
+  }, [active, containerRef, deferTabToTextFields, skipInitialFocus]);
 }
 
 /**

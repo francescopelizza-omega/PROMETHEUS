@@ -26,12 +26,15 @@ export async function runDiagram(
   ctx: CliContext,
   deps: SidecarDeps = defaultSidecarDeps,
 ): Promise<CommandOutcome> {
-  const verb = ctx.args.command[1];
+  // `unmatchedSub` (parse.ts) distinguishes "a second word WAS typed but didn't match
+  // uml/deps" from "nothing was typed" — without it, a typo (command[1] is undefined for a
+  // TWO_WORD mismatch) rendered as "unknown verb (none)" instead of naming the actual typo.
+  const verb = ctx.args.unmatchedSub ?? ctx.args.command[1];
   if (verb !== "uml" && verb !== "deps") {
     return {
       text: `prometheus diagram: unknown verb ${verb ? `"${verb}"` : "(none)"} — valid: ${VERBS.join(", ")}`,
-      json: { ok: false, error: "unknown-verb", valid: VERBS },
-      exitCode: 2,
+      json: { ok: false, error: "unknown-verb", verb: verb ?? null, valid: VERBS },
+      exitCode: 1,
     };
   }
   const path = ctx.args.positionals[0] ?? ".";
@@ -39,9 +42,10 @@ export async function runDiagram(
   if (path.startsWith("-")) return badPath(verb, path);
 
   const env = await deps.runSidecar("diagram.py", [verb, "--path", path]);
-  if (ctx.json) return { json: env, exitCode: env.ok === false ? 2 : 0 };
   if (env.ok === false) {
-    return { text: c.red(`diagram ${verb} failed: ${env.error ?? "unknown error"}`), exitCode: 2 };
+    return ctx.json
+      ? { json: env, exitCode: 2 }
+      : { text: c.red(`diagram ${verb} failed: ${env.error ?? "unknown error"}`), exitCode: 2 };
   }
 
   const mermaid = typeof env.mermaid === "string" ? env.mermaid : "";
@@ -54,7 +58,15 @@ export async function runDiagram(
             : ""
         }`;
 
-  // --out <file>: write the artifact (mermaid), fenced only for a .md target.
+  /**
+   * `--out <file>`: write the artifact (mermaid), fenced only for a .md target.
+   *
+   * Handled BEFORE the `--json` early return, not after it. `--json` used to return the
+   * envelope straight from the sidecar and never reach this block, so
+   * `--json diagram deps <path> --out f.md` wrote NO file and still reported `ok:true` —
+   * while the identical command without `--json` wrote it. `--out` is a side effect the caller
+   * asked for; the output format decides how to REPORT it, never whether it happens.
+   */
   const out = flagStr(ctx, "out");
   if (out !== undefined) {
     if (out.startsWith("-")) return badPath(verb, out);
@@ -70,10 +82,17 @@ export async function runDiagram(
       writeFileSync(out, body);
     } catch (err) {
       const detail = err instanceof Error ? err.message : String(err);
-      return { text: c.red(`diagram: write failed: ${detail}`), exitCode: 2 };
+      return ctx.json
+        ? { json: { ok: false, error: "write-failed", path: out, detail }, exitCode: 2 }
+        : { text: c.red(`diagram: write failed: ${detail}`), exitCode: 2 };
     }
-    return { text: `${c.green("✓")} wrote ${verb} diagram (${count}) → ${out}`, exitCode: 0 };
+    return {
+      text: `${c.green("✓")} wrote ${verb} diagram (${count}) → ${out}`,
+      json: { ...env, out, written: true },
+      exitCode: 0,
+    };
   }
+  if (ctx.json) return { json: env, exitCode: 0 };
 
   // --summary: terse pane view (counts + first lines) for the /diagram TUI slash.
   if (flagSet(ctx, "summary")) {

@@ -30,8 +30,11 @@ import { HOST_DISPATCH_TOOLS } from "@prometheus/core/agent-system";
 import { WEB_FETCH_TOOL, WEB_SEARCH_TOOL } from "@prometheus/core/agent-system";
 import { ENGINE_VERBS, exposedTools } from "@prometheus/core/agent-tools";
 import type { ToolDef } from "@prometheus/core/agent-tools";
+import type { EffortResolution } from "@prometheus/core/ai-effort";
 
 import type { LoadedAgent } from "@prometheus/core/agent-files";
+
+import { AiTurnError } from "./ai-client.js";
 
 import {
   AGENT_PANE_ALLOW,
@@ -298,9 +301,13 @@ test("the four engine MUTATORS can never auto-approve, at any authorization leve
   }
 });
 
-test("the system prompt composes core's tool discipline verbatim", () => {
-  assert.match(AGENT_PANE_SYSTEM, /printing does nothing on disk/);
-  assert.match(AGENT_PANE_SYSTEM, /SMALLEST exact hunks/);
+test("AGENT_PANE_SYSTEM is persona-only — tool discipline is added by the preamble pipeline, not baked in", () => {
+  // The preamble dispatch pipeline (`withPreamble`, exercised below via `createRendererLlmClient`)
+  // now appends tool-discipline/pre-write-recheck to the OUTGOING system message every round —
+  // baking the same text into this constant would duplicate it. See "the pane's system message
+  // carries the tool preamble, after its own prompt" for the real path.
+  assert.doesNotMatch(AGENT_PANE_SYSTEM, /printing does nothing on disk/);
+  assert.doesNotMatch(AGENT_PANE_SYSTEM, /SMALLEST exact hunks/);
 });
 
 test("toOpenAiTool emits a valid function schema with required fields", () => {
@@ -503,6 +510,88 @@ test("the pane's system message carries the tool preamble, after its own prompt"
   assert.ok(system);
   assert.ok(system.content.startsWith(AGENT_PANE_SYSTEM), "the pane's own prompt was displaced");
   assert.match(system.content, /read_file/, "the tools were never named for the model");
+  // The preamble dispatch pipeline's fix for the diagnosed gap: AGENT_TOOL_DISCIPLINE and the
+  // pre-write-recheck checklist now genuinely reach the pane's real outgoing message, appended
+  // after the persona string — not just present in a test fixture or a hand-paraphrased literal.
+  assert.match(system.content, /printing does nothing on disk/);
+  assert.match(system.content, /Before calling write_file or propose_edit/);
+});
+
+/**
+ * Regression: `withPreamble`'s `ctx` used to never set `effortTier`/`effortMechanism` at all
+ * (the `turn()` method's own `tuning` param is unused, and `opts.effort` — the resolved
+ * `EffortResolution` the caller already computes — never reached the preamble ctx), so the
+ * `effort-text` contributor (the textual nudge for a model with no working request-parameter
+ * effort mechanism) was permanently dead code on Desktop regardless of what tier was requested.
+ */
+test("the pane's system message carries the effort-as-text nudge when the mechanism can't express it", async () => {
+  const { run, seen } = fakeRunTurn(["done"]);
+  const effort: EffortResolution = {
+    requested: "high",
+    applied: null,
+    mechanism: "none",
+    patch: { kind: "none" },
+    degraded: { reason: "no-capability", message: "no known mechanism for this model" },
+  };
+  const llm = createRendererLlmClient({
+    endpoint: PANE_ENDPOINT,
+    neverSendToCloud: false,
+    signal: new AbortController().signal,
+    runTurn: run,
+    effort,
+  });
+  for await (const _t of llm.turn(
+    { messages: [{ role: "user", content: "hi" }] },
+    agentPaneTuning("local:qwen"),
+    [...EDITOR_TOOLS],
+  )) {
+    // drain
+  }
+  const system = seen[0]?.messages.find((m) => m.role === "system");
+  assert.ok(system);
+  assert.match(
+    system.content,
+    /Think carefully before you answer/,
+    "the high-effort nudge never reached the outgoing system message",
+  );
+});
+
+/**
+ * Regression: `turn()`'s `tuning` parameter used to be entirely unused (`_tuning`), so
+ * `withPreamble`'s `ctx.readOnly` was hardcoded `false` regardless of the pane's real
+ * permission mode. Plan mode denies a mutation at CONFIRM time (core's loop), not by removing
+ * write tools from the catalog — so a Plan-mode user still saw the FULL, write-oriented
+ * tool-discipline wording and the pre-write-recheck checklist for tools about to be denied
+ * anyway, a materially more confusing model experience than the CLI's correctly-scoped
+ * read-only wording for the identical mode.
+ */
+test("Plan mode gets the READ-ONLY tool-discipline wording, not the full write-oriented one", async () => {
+  const { run, seen } = fakeRunTurn(["done"]);
+  const llm = createRendererLlmClient({
+    endpoint: PANE_ENDPOINT,
+    neverSendToCloud: false,
+    signal: new AbortController().signal,
+    runTurn: run,
+  });
+  for await (const _t of llm.turn(
+    { messages: [{ role: "user", content: "hi" }] },
+    agentPaneTuning("local:qwen", 1, [], "plan"),
+    [...EDITOR_TOOLS],
+  )) {
+    // drain
+  }
+  const system = seen[0]?.messages.find((m) => m.role === "system");
+  assert.ok(system);
+  assert.doesNotMatch(
+    system.content,
+    /printing does nothing on disk/,
+    "Plan mode must get the read-only tool-discipline variant, not the write-oriented one",
+  );
+  assert.doesNotMatch(
+    system.content,
+    /Before calling write_file or propose_edit/,
+    "pre-write-recheck must not fire for a read-only (Plan-mode) turn",
+  );
 });
 
 test("a model proven unable to call natively stops being sent `tools`", async () => {
@@ -670,4 +759,57 @@ test("runCoreAgentTurn: the run's cancel reaches the LOOP, not only the model st
 
   assert.equal(modelCalls, 1, "the model was called again after the run was stopped");
   assert.equal(toolRuns, 1, "more tools ran after the run was stopped");
+});
+
+test("a tools-shaped refusal retries the SAME turn in the text protocol", async () => {
+  /**
+   * `looksLikeToolsRejection` has existed in `agent/protocol/negotiate.ts` since the text
+   * protocol did, `negotiateTransport` already reads `nativeRejected`, and the agentic CLI has
+   * wired the whole fallback end to end for as long — but nothing on this surface ever SET the
+   * flag. So a tool-incapable endpoint (an Ollama model whose template cannot render tools is
+   * the common case) failed every single turn, forever, with a working fallback one field away.
+   *
+   * The retry is what the test pins, not the flag: stopping at the failure is what ate the
+   * user's message.
+   */
+  const attempts: Array<{ tools: unknown[] | undefined }> = [];
+  const run = (async (
+    _ep: unknown,
+    _messages: unknown,
+    opts: { tools?: unknown[]; onText?: (d: string) => void },
+  ) => {
+    attempts.push({ tools: opts.tools });
+    if (attempts.length === 1) {
+      throw new AiTurnError(
+        "AI endpoint local:qwen HTTP 400: does not support tools",
+        undefined,
+        true,
+      );
+    }
+    opts.onText?.("done");
+    return { text: "done", toolCalls: [] };
+  }) as never;
+
+  const llm = createRendererLlmClient({
+    endpoint: PANE_ENDPOINT,
+    neverSendToCloud: false,
+    signal: new AbortController().signal,
+    runTurn: run,
+  });
+  const turns: Array<{ kind: string }> = [];
+  for await (const t of llm.turn(
+    { messages: [{ role: "user", content: "read it" }] },
+    agentPaneTuning("local:qwen"),
+    [...EDITOR_TOOLS],
+  )) {
+    turns.push(t as { kind: string });
+  }
+
+  assert.equal(attempts.length, 2, "the turn was not retried — the user's message was eaten");
+  assert.ok(attempts[0]?.tools, "the first attempt should have carried native tools");
+  assert.equal(attempts[1]?.tools, undefined, "the retry must NOT carry native tools again");
+  assert.ok(
+    turns.some((t) => t.kind === "final"),
+    "the retry must produce a real answer, not just a status line",
+  );
 });

@@ -112,3 +112,81 @@ test("commit-one-list with no OTHER staged files skips the restore stage", async
     ["commit", "x"],
   ]);
 });
+
+test("committing one list PRESERVES another file's partial staging, instead of flattening it", async () => {
+  /**
+   * The choreography cleared the whole index (`git restore --staged .`) and later re-staged the
+   * other lists' files with `git add -- <paths>`, which stages the CURRENT WORKTREE content —
+   * not the index content that was there before. So a file the user had partially staged with
+   * the panel's own per-hunk stager was silently promoted to fully staged, and the hunks they
+   * had deliberately left out went into the NEXT commit. Both the module header and the inline
+   * comment claimed the original staged set was restored "exactly"; only path membership was.
+   */
+  const calls: string[] = [];
+  const PATCH = "diff --git a/keep.ts b/keep.ts\n@@ -1 +1 @@\n-old\n+new\n";
+  const res = await commitChangelistFiles(
+    {
+      gitUnstage: async (_r, files) => {
+        calls.push(`unstage:${files.length === 0 ? "ALL" : files.join(",")}`);
+        return { ok: true };
+      },
+      gitStage: async (_r, files) => {
+        calls.push(`stage:${files.join(",")}`);
+        return { ok: true };
+      },
+      gitCommit: async () => {
+        calls.push("commit");
+        return { ok: true };
+      },
+      gitDiff: async (_r, file, staged) => {
+        calls.push(`diff:${file}:${staged ? "cached" : "worktree"}`);
+        return { ok: true, diff: PATCH };
+      },
+      gitApplyPatch: async (_r, patch) => {
+        calls.push(`apply:${patch === PATCH ? "exact" : "OTHER"}`);
+        return { ok: true };
+      },
+    },
+    { root: "/repo", message: "msg", targets: ["ship.ts"], originalStaged: ["ship.ts", "keep.ts"] },
+  );
+
+  assert.equal(res.ok, true, res.error);
+  assert.deepEqual(res.flattened, undefined, "nothing should have been flattened");
+  // the staged CONTENT of the untouched file is captured before the reset and replayed after
+  assert.ok(calls.includes("diff:keep.ts:cached"), `never captured the index content: ${calls}`);
+  assert.ok(calls.includes("apply:exact"), `never replayed the index content: ${calls}`);
+  assert.ok(
+    !calls.includes("stage:keep.ts"),
+    `keep.ts was re-staged by PATH, which flattens partial staging: ${calls}`,
+  );
+});
+
+test("a file whose staged content cannot be replayed is REPORTED, not silently flattened", async () => {
+  // Binary files have no textual patch to replay. Falling back to `git add` is the old behaviour
+  // and is acceptable — doing it without telling anyone is not.
+  const res = await commitChangelistFiles(
+    {
+      gitUnstage: async () => ({ ok: true }),
+      gitStage: async () => ({ ok: true }),
+      gitCommit: async () => ({ ok: true }),
+      gitDiff: async () => ({ ok: true, diff: "Binary files a/logo.png and b/logo.png differ\n" }),
+      gitApplyPatch: async () => ({ ok: true }),
+    },
+    { root: "/repo", message: "m", targets: ["a.ts"], originalStaged: ["a.ts", "logo.png"] },
+  );
+  assert.equal(res.ok, true);
+  assert.deepEqual(res.flattened, ["logo.png"]);
+});
+
+test("with no diff/apply seam the choreography still works, and says what it could not preserve", async () => {
+  const res = await commitChangelistFiles(
+    {
+      gitUnstage: async () => ({ ok: true }),
+      gitStage: async () => ({ ok: true }),
+      gitCommit: async () => ({ ok: true }),
+    },
+    { root: "/repo", message: "m", targets: ["a.ts"], originalStaged: ["a.ts", "b.ts"] },
+  );
+  assert.equal(res.ok, true);
+  assert.deepEqual(res.flattened, ["b.ts"]);
+});

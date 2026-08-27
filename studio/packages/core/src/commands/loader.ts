@@ -61,12 +61,28 @@ function parseFrontmatter(markdown: string): {
   return { meta, body: (fm[2] as string).trim() };
 }
 
+/**
+ * Blank out every ``!`cmd` `` span so the `@ref` scan cannot see inside one.
+ *
+ * An `@` inside a shell injection belongs to the COMMAND — `npm view react@latest`, `git diff
+ * @{u}`, `docker run img@sha256:…` — not to a file the caller should read. Reporting it as both
+ * was destructive rather than merely noisy: the expanders resolve reads FIRST and rewrite every
+ * occurrence of `@ref` in the template, which mutates the very ``!`cmd` `` token the runs loop
+ * then splits on. The split stops matching, so in user scope the command is confirmed by the
+ * human, executed through the gate, and its output silently dropped; in project scope the
+ * refusal marker lands nowhere, which is exactly the silent-gap failure `refusalMarker` exists
+ * to prevent. Spaces preserve the body's length so nothing else shifts.
+ */
+function maskShellInjections(body: string): string {
+  return body.replace(SHELL_INJ_RE, (m) => " ".repeat(m.length));
+}
+
 /** Parse a command file (fail-soft). `filename` provides the slash name. */
 export function parseCommandFile(filename: string, markdown: string): CommandParseOutcome {
   const name = commandNameFromFile(filename);
   if (!name) return { ok: false, reason: "empty command name" };
   const { meta, body } = parseFrontmatter(markdown);
-  const fileRefs = [...body.matchAll(FILE_REF_RE)].map((m) => m[1] as string);
+  const fileRefs = [...maskShellInjections(body).matchAll(FILE_REF_RE)].map((m) => m[1] as string);
   const shellInjections = [...body.matchAll(SHELL_INJ_RE)].map((m) => m[1] as string);
   return {
     ok: true,

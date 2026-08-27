@@ -68,6 +68,23 @@ export interface Settings {
    */
   "budget.unpricedPolicy"?: "block" | "warn";
   /**
+   * The reasoning-effort tier a session starts at — the `/think` ladder, shared with the CLI's
+   * `[agent] effort`.
+   *
+   * Absent ⇒ the session starts UNSET, which is not the same as `"off"`: unset means no tier
+   * was chosen, and the composer badge reads the model's own default rather than claiming one.
+   */
+  "ai.effort"?: "off" | "low" | "medium" | "high" | "max";
+  /**
+   * Send the effort knob even when `ai/effort/rules.ts` says this model has none.
+   *
+   * OFF by default. It re-opens exactly the failure that table exists to close — a forwarded
+   * `reasoning_effort` is a hard 400 on a GPT-4-class model, not a no-op — so it is an explicit
+   * choice for a model released after those rules were written, and every resolution it
+   * produces is marked `degraded.reason: "forced"`.
+   */
+  "ai.effortForce"?: boolean;
+  /**
    * LIFECYCLE HOOKS — user-authored shell commands bound to `PreToolUse` / `PostToolUse` /
    * `SessionStart` (see `agent/hooks.ts` for the semantics and the fail-soft contract).
    *
@@ -97,7 +114,18 @@ export const DEFAULT_SETTINGS: Settings = {
   defaultNetwork: "mcp-only",
   gateStrict: false,
   allowForce: true,
-  autoApprove: false,
+  /**
+   * TRUE by default, matching what the authorisation ladder actually does.
+   *
+   * The shipped default was `false` while the ladder's own default level (A1, "Auto-approve
+   * reads/scans; ask before every change — the safe default") auto-approves reads. The
+   * contradiction was invisible because NOTHING read this key: it was declared, defaulted,
+   * validated and set by the Security-strict profile, and never consulted. Translating it into
+   * the posture with the old default would have clamped every user to "ask before every action",
+   * which is not what any of them chose. `true` here means "the ladder decides", and an explicit
+   * `false` — which is what Security-strict sets — now genuinely means no auto-approval.
+   */
+  autoApprove: true,
   telemetryEnabled: false, // §8: OFF by default — explicit, never upgraded by the validator
   "completion.pathFrecency": false, // OFF by default — explicit, never upgraded by the validator
   updateChannel: "latest",
@@ -190,6 +218,16 @@ export function validateSettings(value: unknown): Settings {
         break;
       case "budget.unpricedPolicy":
         if (v === "block" || v === "warn") out["budget.unpricedPolicy"] = v;
+        break;
+      case "ai.effort":
+        // Validated against the ladder: a typo'd tier that survived as a bare string would
+        // fail every comparison downstream while the settings file still read as configured.
+        if (v === "off" || v === "low" || v === "medium" || v === "high" || v === "max") {
+          out["ai.effort"] = v;
+        }
+        break;
+      case "ai.effortForce":
+        if (typeof v === "boolean") out["ai.effortForce"] = v;
         break;
       case "todoPatterns":
         // APP-096 — drop-don't-throw ELEMENT-wise: a non-array drops the key; within an array

@@ -298,3 +298,122 @@ test("a JSON body carrying `method` is refused rather than read as an empty resu
   await assert.rejects(() => t.listTools(), /got a "ping" request/);
   await t.close();
 });
+
+test("the timeout covers READING an SSE body, not just receiving headers", async () => {
+  /**
+   * `post`'s AbortController is cleared the moment `fetch` resolves — which for
+   * `text/event-stream` is only the HEADERS. The body was then read under no deadline at all,
+   * so a server that answers with an SSE content-type, writes one `notifications/progress`
+   * event and holds the stream open left `listTools()` awaiting forever. `timeoutMs` was
+   * configured, obeyed for the handshake, and silently absent for the part that actually stalls.
+   */
+  const server = createServer((req, res) => {
+    let body = "";
+    req.on("data", (c) => {
+      body += c;
+    });
+    req.on("end", () => {
+      res.writeHead(200, { "content-type": "text/event-stream" });
+      // a well-formed SSE event that is NOT the reply, then silence — the stream stays open
+      res.write(
+        `data: ${JSON.stringify({ jsonrpc: "2.0", method: "notifications/progress" })}\n\n`,
+      );
+    });
+  });
+  await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => r()));
+  const addr = server.address();
+  const port = typeof addr === "object" && addr ? addr.port : 0;
+  try {
+    const t = new StreamableHttpTransport({
+      id: "sse-stall",
+      transport: { kind: "http", url: `http://127.0.0.1:${port}/mcp`, timeoutMs: 300 },
+    } as never);
+    const started = Date.now();
+    // Raced against our OWN bound on purpose: without the fix `listTools()` never settles, and a
+    // test that merely awaits it would HANG the suite instead of failing it. A regression has to
+    // read as a failure, not as a stuck run someone kills by hand.
+    const HANG_GUARD_MS = 5_000;
+    const outcome = await Promise.race([
+      t.listTools().then(
+        () => ({ kind: "resolved" as const }),
+        (err: unknown) => ({ kind: "rejected" as const, err }),
+      ),
+      new Promise<{ kind: "hung" }>((r) => {
+        const h = setTimeout(() => r({ kind: "hung" }), HANG_GUARD_MS);
+        if (typeof h.unref === "function") h.unref();
+      }),
+    ]);
+    assert.notEqual(
+      outcome.kind,
+      "hung",
+      `listTools() did not settle within ${HANG_GUARD_MS}ms — the SSE body is being read with no deadline`,
+    );
+    assert.equal(outcome.kind, "rejected", "a stalled SSE stream must not resolve");
+    const err = (outcome as { err: unknown }).err;
+    assert.ok(err instanceof McpTransportError, `expected McpTransportError, got ${err}`);
+    assert.equal(err.kind, "timeout");
+    assert.ok(Date.now() - started < HANG_GUARD_MS, "the read must be bounded by timeoutMs");
+  } finally {
+    // The stalled SSE response is still open on the server side; `close()` alone waits for it,
+    // which added minutes to the suite. Drop the sockets, then close.
+    server.closeAllConnections?.();
+    server.close();
+  }
+});
+
+test("a configured auth ref reaches the request as a Bearer header", async () => {
+  /**
+   * The header is attached only when BOTH the config's `authSecretRef` and an injected
+   * `resolveAuth` are present. The CLI passed a resolver; the DESKTOP passed none, so a
+   * connector added with `prometheus mcp add --auth-secret` — which stores the token in the OS
+   * keychain and writes only a ref into the config — sent no Authorization header at all from
+   * the app. The remote 401'd, health flipped to "error", no tools appeared, and the identical
+   * connector kept working from the terminal with nothing in the UI hinting that auth had been
+   * dropped.
+   *
+   * Both halves are asserted here, because either one missing produces the same silent 401.
+   */
+  const seen: (string | undefined)[] = [];
+  const fetchImpl = (async (_url: string, init?: { headers?: Record<string, string> }) => {
+    seen.push(init?.headers?.Authorization);
+    return {
+      ok: true,
+      status: 200,
+      headers: new Headers({ "content-type": "application/json" }),
+      async json() {
+        return {
+          jsonrpc: "2.0",
+          id: 1,
+          result: { protocolVersion: "2025-06-18", capabilities: {} },
+        };
+      },
+      async text() {
+        return "";
+      },
+    } as unknown as Response;
+  }) as typeof globalThis.fetch;
+
+  const cfg = {
+    id: "remote",
+    transport: {
+      kind: "http" as const,
+      url: "https://api.example.com/mcp",
+      authSecretRef: "my-token",
+    },
+  };
+
+  const withResolver = new StreamableHttpTransport(
+    cfg as never,
+    {
+      fetch: fetchImpl,
+      resolveAuth: async (ref: string) => (ref === "my-token" ? "s3cret" : undefined),
+    } as never,
+  );
+  await withResolver.connect().catch(() => {});
+  assert.equal(seen[0], "Bearer s3cret", "the keychain token never reached the request");
+
+  seen.length = 0;
+  const withoutResolver = new StreamableHttpTransport(cfg as never, { fetch: fetchImpl } as never);
+  await withoutResolver.connect().catch(() => {});
+  assert.equal(seen[0], undefined, "a host with no resolver sends no header — the bug's shape");
+});

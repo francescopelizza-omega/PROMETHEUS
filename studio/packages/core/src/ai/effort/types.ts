@@ -50,8 +50,13 @@ export type EffortMechanism =
   | "system-prompt-line"
   /** a trained-on token appended to a turn — Qwen3 `/think` `/no_think`, SmolLM3. */
   | "prompt-soft-switch"
-  /** thinking is permanently on and its depth is not adjustable — DeepSeek R1,
-   *  Kimi K2-Thinking, Phi-4-reasoning, EXAONE Deep, Gemini 2.5 Pro, Claude Fable 5. */
+  /** thinking is permanently on AND its depth is not adjustable — DeepSeek R1, QwQ,
+   *  Kimi K2-Thinking, Phi-4-reasoning, EXAONE Deep.
+   *
+   *  BOTH halves are required. A model that always reasons but exposes a depth control is NOT
+   *  this: Gemini 2.5 Pro takes a `thinkingBudget` and Claude Fable 5 takes
+   *  `output_config.effort`, so both are graded mechanisms whose `supported` set simply omits
+   *  `off`. Filing them here would report "not available" for a dial that works. */
   | "always-on"
   /** no reasoning capability at all — Gemma 2/3/3n, Llama 3.x/4, Phi-4, GPT-4o. */
   | "none";
@@ -64,8 +69,38 @@ export interface EffortConstraints {
   pinTemperature?: number;
   /** Anthropic: budget_tokens must be strictly < max_tokens, else HTTP 400. */
   budgetUnderMaxTokens?: boolean;
+  /**
+   * The provider's MINIMUM thinking budget, mirrored from `budgetBounds.min` when the
+   * resolution is built.
+   *
+   * `buildPatch` already clamps to `budgetBounds`, but `applyEffort` re-clamps against the
+   * `max_tokens` actually on the body — the only place that number is known — and it sees the
+   * resolution, not the capability. Without the floor here that second clamp could push the
+   * budget BELOW the provider minimum and produce the exact 400 it exists to prevent.
+   */
+  budgetMin?: number;
   /** Kimi K2-Thinking: reasoning + answer must fit, so max_tokens needs a floor. */
   minMaxTokens?: number;
+  /**
+   * Tokens that must remain for the ANSWER once the thinking budget is subtracted.
+   *
+   * `budgetUnderMaxTokens` alone only requires `budget < max_tokens`, and the clamp that
+   * enforced it used `max_tokens - 1`. On Claude 4.5 with the wire's default `max_tokens: 4096`
+   * that turned medium (4096), high (16384) and max (32000) into the SAME request —
+   * `budget_tokens: 4095` — leaving exactly one token for the reply. Declared per-rule, so a
+   * capability that has no such requirement is unaffected (the clamp stays `- 1`).
+   */
+  budgetAnswerHeadroom?: number;
+  /**
+   * Did the CALLER pin `max_tokens`, or is the number on the body a library default?
+   *
+   * Set by `resolveEffort` from `ctx.maxTokens`, because that is the only place that can tell
+   * the two apart — by the time `applyEffort` sees the body, `ai/wire.ts` has already
+   * substituted `ANTHROPIC_DEFAULT_MAX_TOKENS` for an omitted value and the two are
+   * indistinguishable. A caller's ceiling is a hard cost limit and the budget yields to it; OUR
+   * default is not, and must not silently cap the tier the user asked for.
+   */
+  ceilingFromCaller?: boolean;
 }
 
 /** How ONE model+runtime pair accepts — or refuses — an effort setting. */
@@ -101,13 +136,35 @@ export interface EffortCapability {
   note?: string;
 }
 
+/**
+ * How a tier is being honoured when no request parameter can carry it.
+ *
+ * Lives here rather than in `emulation.ts` (which owns the TABLE and the reasoning about which
+ * techniques are admissible) so `EffortResolution` below can reference it without the two
+ * modules importing each other.
+ */
+export interface EffortEmulation {
+  /** the only technique in scope today — see `ai/effort/emulation.ts` for what is excluded. */
+  via: "prompt-cot";
+  /** the literal instruction that will be put in front of the model. */
+  text: string;
+}
+
 /** Why an applied effort differs from the requested one. */
 export type EffortDegradeReason =
   | "no-capability"
   | "always-on"
   | "tier-clamped"
   | "runtime-ignores"
-  | "emulated";
+  | "emulated"
+  /**
+   * The user said "send it anyway" (`--force-effort`) and we did, over this table's objection.
+   *
+   * A distinct reason rather than a silent success because the request may now be REJECTED —
+   * `reasoning_effort` is a hard 400 on a GPT-4-class model, not a no-op — and the user needs
+   * to be able to tell a forced knob from one this table vouched for.
+   */
+  | "forced";
 
 /** What actually gets added to the outgoing request. */
 export type EffortPatch =
@@ -125,11 +182,40 @@ export type EffortPatch =
  */
 export interface EffortResolution {
   requested: EffortTier;
-  /** null ⇒ nothing was sent. */
+  /**
+   * The tier actually in force, by ANY route.
+   *
+   * null ⇒ genuinely nothing is happening: the model reasons at a fixed depth we cannot move
+   * (`always-on`), or the tier could not be expressed at all.
+   *
+   * Note what this deliberately does NOT mean: "no request parameter was sent". A tier carried
+   * by `emulation` below has `patch: {kind:"none"}` — nothing goes on the wire — and is still
+   * `applied`, because an instruction IS in front of the model and the answer WILL differ.
+   * Reporting that as null was the misreport this field's doc used to encode: `/think high` on
+   * a knobless model said "not available" while a graded instruction was being injected on
+   * every single turn.
+   */
   applied: EffortTier | null;
   mechanism: EffortMechanism;
   patch: EffortPatch;
   degraded: null | { reason: EffortDegradeReason; message: string };
+  /**
+   * Set when the tier is being honoured by INSTRUCTION rather than by a request parameter —
+   * see `ai/effort/emulation.ts` for the technique and, more importantly, for the list of
+   * things that are excluded from it on purpose.
+   *
+   * Two distinct cases carry this:
+   *   - `degraded.reason === "emulated"` — prose is the ONLY thing in force (`mechanism:"none"`);
+   *   - `degraded.reason === "runtime-ignores"` — a parameter WAS sent but the runtime may
+   *     silently drop it (llama.cpp/vLLM template kwargs), so prose rides along as a backup.
+   *
+   * The consumer that puts this text in front of the model is the preamble pipeline's
+   * `effort-text` contributor, NOT `applyEffortToMessages` — that one handles `patch.kind ===
+   * "prompt"`, which is a different thing (a literal the model was TRAINED on, like gpt-oss's
+   * `Reasoning: high`). Keeping them separate is what stops a model with its own prompt-shaped
+   * knob from being told the same thing twice in two registers.
+   */
+  emulation?: EffortEmulation;
   /** Side-constraints the transport must honor (suppress temperature, raise max_tokens…). */
   constraints?: EffortConstraints;
 }
@@ -147,10 +233,22 @@ export function tierIndex(t: EffortTier): number {
 export function nearestTier(want: EffortTier, supported: readonly EffortTier[]): EffortTier | null {
   if (supported.length === 0) return null;
   if (supported.includes(want)) return want;
+  /**
+   * `off` is a MODE, not the bottom of the ladder, and this is the one place that distinction
+   * has teeth. On a two-value switch (`supported: ["off", "medium"]` — Qwen3's `/think` vs
+   * `/no_think`, Nemotron's `detailed thinking on|off`) `low` is equidistant from both, and a
+   * plain downward tie-break resolved it to `off`: asking for a LITTLE thinking turned thinking
+   * OFF, and the rule's own comment claimed the opposite. Distance is the right metric among
+   * degrees of thinking; it is the wrong metric across the boundary between thinking and not.
+   */
+  const pool =
+    want === "off" || supported.every((t) => t === "off")
+      ? supported
+      : supported.filter((t) => t !== "off");
   const target = tierIndex(want);
   let best: EffortTier | null = null;
   let bestDist = Number.POSITIVE_INFINITY;
-  for (const t of supported) {
+  for (const t of pool) {
     const d = Math.abs(tierIndex(t) - target);
     // strict `<` keeps the FIRST of an equal pair; EFFORT_TIERS is ascending and `supported`
     // is normalised to that order by `rules.ts`, so the first equal hit is the lower tier.

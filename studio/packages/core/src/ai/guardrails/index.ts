@@ -21,7 +21,9 @@ export {
   type BudgetWindow,
   type PriceFor,
   type SpendRecord,
+  type SpendSummary,
   evaluateBudgets,
+  summarizeSpend,
 } from "./budgetWindows.js";
 /**
  * The shared pre-turn spend gate. Every host that can spend money calls THIS — see the

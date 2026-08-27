@@ -36,6 +36,8 @@
 
 import { ipcMain } from "electron";
 
+import { grantWorkingSetRoot } from "./ide/path-guard.js";
+
 import {
   type RepoRemoveResult as BridgeRemoveResult,
   type RepoResult as BridgeRepoResult,
@@ -205,7 +207,24 @@ export function registerRepoIpcHandlers(wiring: RepoIpcWiring = {}): () => void 
       if (a.pin !== undefined) opts.pin = a.pin;
       if (a.staged !== undefined) opts.staged = a.staged;
       if (a.linkedCatalogItemId !== undefined) opts.linkedCatalogItemId = a.linkedCatalogItemId;
-      return toClone(await client.repoClone(a.url, opts));
+      const cloned = toClone(await client.repoClone(a.url, opts));
+      /**
+       * A clone MAIN performed at the user's request earns a working-set grant.
+       *
+       * `grantWorkingSetRoot` had exactly one call site — the native Open-Folder dialog — so a
+       * repo cloned through the built-in Repo Manager appeared in Home ▸ recents with no grant
+       * behind it. Opening it then declared a root main refused, and every save in the project
+       * on screen was refused with "refusing to write outside the working set".
+       *
+       * The grant is safe to record HERE and nowhere else in this flow: the path is the one main
+       * itself just wrote, not a path the renderer supplied, so the renderer still cannot widen
+       * its own scope by asking. A blocked or quarantined clone is NOT granted — `ok` and a real
+       * `localPath` are both required.
+       */
+      if (cloned.ok && !cloned.blocked && cloned.localPath) {
+        grantWorkingSetRoot(cloned.localPath);
+      }
+      return cloned;
     } catch (e) {
       return { ok: false, error: errString(e) };
     }

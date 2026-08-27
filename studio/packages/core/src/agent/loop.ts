@@ -14,6 +14,8 @@ import type { ModelRef } from "../agents/types.js";
  *     (unless the human set gate:off) — there is no JS-side bypass.
  */
 import type { ToolDef } from "../mcp/server/index.js";
+import { canaryInstructionBlock, containsCanary, generateCanaryToken } from "./canary.js";
+import { CONTINUATION_NUDGE, DEFAULT_MAX_NUDGES, announcesUnfinishedWork } from "./continuation.js";
 import type { AgentEvent, GateVerdictTier } from "./events.js";
 import { PROTOCOL_FEEDBACK_TOOL, protocolFeedbackMessage } from "./protocol/feedback.js";
 import {
@@ -53,10 +55,27 @@ export interface AgentTuning {
    *  Translated per-backend by `ai/effort` — NOT forwarded raw, because the same intent is
    *  `reasoning_effort` on one endpoint, `think` on another, and unsendable on a third. */
   effort?: "off" | "low" | "medium" | "high" | "max";
+  /**
+   * Send the effort knob even when `ai/effort/rules.ts` says this model has none
+   * (`--force-effort`, `[agent] effortForce`).
+   *
+   * OFF by default. It re-opens exactly the failure `ai/effort` exists to close — a forwarded
+   * `reasoning_effort` is a hard 400 on a GPT-4-class model, not a no-op — so it is the user's
+   * explicit call, made once, for a model released after those rules were written. The
+   * resolution reports `degraded.reason: "forced"` whenever it fires, so a forced knob is never
+   * mistaken for one the table vouched for.
+   */
+  effortForce?: boolean;
   /** max model⇄tool rounds per turn (CLI-032); default 8. A hard runaway backstop — NOT a
    *  product limit: on reaching it the loop emits a `capped` event and the host offers
    *  `/continue` (CLI-072). Honored from config via `agent.maxIterations` (resolveTuning). */
   maxRounds?: number;
+  /**
+   * How many times one turn may be told "you described work but called no tool" before its
+   * silence is taken as an answer. Defaults to `DEFAULT_MAX_NUDGES`; 0 disables the behaviour
+   * entirely for a caller that wants the raw loop.
+   */
+  continuationNudges?: number;
   /**
    * Consecutive identical tool calls (name AND arguments) before the loop refuses one.
    * Default 3; `0` disables the guard.
@@ -116,6 +135,34 @@ export interface AgentTuning {
  */
 export const DEFAULT_MAX_ROUNDS = 32;
 
+/**
+ * The round ceiling at `effort: "max"`.
+ *
+ * The ONE resource-shaped thing an effort tier may legitimately move. A higher step budget
+ * wins only where the extra steps GATHER NEW INFORMATION — another file read, another grep,
+ * another test run — which is exactly what an agentic turn spends rounds on, and is why this is
+ * in scope while the other tempting knobs are not: temperature is not an effort control in
+ * either direction (low temperature is best for single-shot reasoning), and `max_tokens`
+ * headroom removes a failure mode without adding any effort at all.
+ *
+ * 50% headroom rather than a blank cheque, because rounds that do NOT gather new information
+ * are pure burn, and the cap is a runaway backstop before it is a product limit.
+ */
+export const MAX_EFFORT_MAX_ROUNDS = 48;
+
+/**
+ * The DEFAULT round ceiling for an effort tier. An explicit `tuning.maxRounds` (config
+ * `agent.maxIterations`) always wins over this — a user who pinned a ceiling asked for that
+ * ceiling, and `/think max` must not quietly raise it back up.
+ *
+ * Only `max` moves. Lowering the ceiling for `off`/`low` would be the wrong shape entirely:
+ * those tiers ask for less DELIBERATION, not for less work, and a turn that runs out of rounds
+ * fails to finish rather than answering more briefly.
+ */
+export function roundsForEffort(effort: AgentTuning["effort"]): number {
+  return effort === "max" ? MAX_EFFORT_MAX_ROUNDS : DEFAULT_MAX_ROUNDS;
+}
+
 /** Byte budget for a single tool output folded back into the thread (head+tail, CLI-032). */
 export const TOOL_OUTPUT_CAP_BYTES = 16 * 1024;
 
@@ -170,7 +217,10 @@ export type LlmTurn =
   | { kind: "reasoning"; text: string }
   | { kind: "text"; text: string }
   | { kind: "tool_call"; call: ToolCall }
-  | { kind: "final"; text?: string };
+  | { kind: "final"; text?: string }
+  /** the transport went idle (agent/idle-watchdog.ts) mid-turn — a PAUSE, not completion. See
+   *  `AgentEvent{kind:"paused"}`, which this becomes at the loop level. */
+  | { kind: "paused"; idleMs: number };
 
 /** The model client the loop drives (cloud OR local-served). Injected. */
 export interface LLMClient {
@@ -231,10 +281,49 @@ export interface AgentTurnDeps {
    *     rather than finishing its `npm install` after the turn is over.
    */
   signal?: AbortSignal;
+  /**
+   * Called if the model's own text output ever contains this turn's planted canary token — see
+   * `canary.ts`. A near-zero-false-positive signal that something (an injected instruction the
+   * earlier defense-in-depth layers missed) got the model to act against an explicit
+   * instruction. Optional: omitting it skips planting a canary entirely (no token generated, no
+   * extra system text), so tests and any host that hasn't wired an audit sink yet pay no cost.
+   */
+  onCanaryTripped?: (info: { textSnippet: string }) => void;
 }
 
 function withDryRun(args: Record<string, unknown>, dryRun: boolean): Record<string, unknown> {
   return dryRun ? { ...args, dryRun: true } : args;
+}
+
+/**
+ * Does the tool implement `dryRun` ITSELF, i.e. does its own schema declare the field?
+ *
+ * `withDryRun` above only INJECTS the flag into the args. A tool whose schema never declared it
+ * simply ignored the extra key: with `/dry-run on`, `delete_file` still deleted the file and
+ * `mkdir` still created the directory — measured against the compiled runner, not read. The
+ * engine verbs DO declare it (`prometheus_install`'s schema even defaults it to `true`) and
+ * forward `--dry-run` to produce a real gated preview, so those must still run.
+ *
+ * Schema membership is the test rather than a hand-written list of mutators, because a list
+ * beside the tools is exactly the shape that drifts when a tool is added — and it would have to
+ * be duplicated in each of the four hosts to boot.
+ */
+function honoursDryRun(tool: ToolDef): boolean {
+  return Object.hasOwn(tool.schema as Record<string, unknown>, "dryRun");
+}
+
+/**
+ * Enforce `/dry-run` for tools that cannot enforce it themselves.
+ *
+ * Reads still run — previewing a plan is useless if the agent cannot look at anything — so the
+ * short-circuit applies only to tools that are NOT `readOnlyHint`. Lives HERE, at the one place
+ * the loop dispatches a tool, so all four hosts (CLI readline, CLI TUI, desktop pane, VS Code)
+ * inherit it from one decision instead of four copies.
+ */
+export function dryRunSkipped(tool: ToolDef, dryRun: boolean): boolean {
+  if (!dryRun) return false;
+  if (tool.annotations?.readOnlyHint === true) return false;
+  return !honoursDryRun(tool);
 }
 
 interface ToolMsgFields {
@@ -300,7 +389,41 @@ export async function* runAgentTurn(
 ): AsyncIterable<AgentEvent> {
   const tools = exposedTools(tuning.tools);
   const byName = new Map(tools.map((t) => [t.name, t]));
-  const maxRounds = Math.max(1, tuning.maxRounds ?? DEFAULT_MAX_ROUNDS);
+  const maxRounds = Math.max(1, tuning.maxRounds ?? roundsForEffort(tuning.effort));
+  /** Continuation nudges spent this TURN (never per round) — see the `toolMessages` branch. */
+  let nudges = 0;
+  const maxNudges = tuning.continuationNudges ?? DEFAULT_MAX_NUDGES;
+  /**
+   * The canary tripwire (`canary.ts`) — a fresh token per turn, only generated when a caller has
+   * somewhere to send a trip (no cost otherwise). Planted on a COPY of the thread handed to the
+   * model, never on `thread` itself: `thread` is the caller's own persisted conversation
+   * (mutated in place elsewhere in this function, by design, so it survives a mid-round abort),
+   * and a security tripwire has no business surviving into a saved/exported transcript.
+   */
+  const canaryToken = deps.onCanaryTripped ? generateCanaryToken() : undefined;
+  /**
+   * Checked against a bounded TAIL of each stream — assistant text and reasoning tracked
+   * separately, via `channel` — rather than each raw chunk in isolation. A chunk boundary is an
+   * ordinary streaming/network artifact, not adversarial model behavior, and the token (32 hex
+   * chars) can legitimately land split across two chunks; checking only the current chunk missed
+   * exactly that case. The window only needs to be a little larger than the token so a split
+   * anywhere in it is still caught, without re-scanning the whole ever-growing turn on every
+   * chunk. Reasoning is checked too — a leak visible only in "thinking" output (several hosts
+   * stream it to the user) is still a leak. Fires at most once per turn: once tripped, the
+   * breach is already known and re-scanning would only spam the audit sink with the same finding.
+   */
+  const CANARY_TAIL = 256;
+  const canaryTails = { assistant: "", reasoning: "" };
+  let canaryTripped = false;
+  const checkCanary = (text: string, channel: "assistant" | "reasoning"): void => {
+    if (!canaryToken || canaryTripped) return;
+    const next = (canaryTails[channel] + text).slice(-CANARY_TAIL);
+    canaryTails[channel] = next;
+    if (containsCanary(next, canaryToken)) {
+      canaryTripped = true;
+      deps.onCanaryTripped?.({ textSnippet: next });
+    }
+  };
   /**
    * ONE guard for the whole turn, constructed OUTSIDE the round loop.
    *
@@ -359,6 +482,9 @@ export async function* runAgentTurn(
     }
     let assistantText = "";
     let sawFinal = false;
+    // set when THIS round's transport went idle rather than finishing — see `LlmTurn{kind:"paused"}`.
+    let pausedThisRound = false;
+    let pausedIdleMs = 0;
     /** This round's tool results, each tagged with the call it answers (when there was an id). */
     const toolMessages: { content: string; callId?: string }[] = [];
     /** Every call the model asked for this round, including ones that were refused. */
@@ -377,8 +503,17 @@ export async function* runAgentTurn(
     // first one already succeeded and was already shown to the user. Without a `finally` here,
     // that already-real result never reached `thread.messages` at all: the round vanished from
     // the model's memory even though its effect (e.g. a file write) had already happened.
+    const llmThread: Thread = canaryToken
+      ? {
+          ...thread,
+          messages: [
+            ...thread.messages,
+            { role: "system", content: canaryInstructionBlock(canaryToken) },
+          ],
+        }
+      : thread;
     try {
-      for await (const turn of deps.llm.turn(thread, tuning, tools)) {
+      for await (const turn of deps.llm.turn(llmThread, tuning, tools)) {
         if (turn.kind === "status") {
           // wrapper progress note (waiting/timeout/etc.): surface live, never persist.
           yield { kind: "status", text: turn.text };
@@ -386,21 +521,36 @@ export async function* runAgentTurn(
         }
         if (turn.kind === "reasoning") {
           // thinking tokens: surface as live feedback but NEVER fold into assistantText /
-          // the persisted thread (reasoning is ephemeral, not part of the answer).
+          // the persisted thread (reasoning is ephemeral, not part of the answer). Still
+          // canary-checked: several hosts stream this straight to the user, so a leak that
+          // surfaces only here is still a leak.
+          checkCanary(turn.text, "reasoning");
           yield { kind: "reasoning", text: turn.text };
           continue;
         }
         if (turn.kind === "text") {
           assistantText += turn.text;
+          checkCanary(turn.text, "assistant");
           yield { kind: "text", text: turn.text };
           continue;
         }
         if (turn.kind === "final") {
           if (turn.text) {
             assistantText += turn.text;
+            checkCanary(turn.text, "assistant");
             yield { kind: "text", text: turn.text };
           }
           sawFinal = true;
+          break;
+        }
+        if (turn.kind === "paused") {
+          // The already-streamed prose (yielded above, accumulated into `assistantText`) is
+          // everything worth keeping — a tool call still mid-argument-stream at pause time is
+          // NOT reconstructed: resuming re-asks the model, which regenerates it. `roundCalls`/
+          // `toolMessages` are correctly empty here because a transport only reaches this from
+          // mid-stream, before any of THIS round's tool calls have been fully parsed and executed.
+          pausedThisRound = true;
+          pausedIdleMs = turn.idleMs;
           break;
         }
 
@@ -419,6 +569,47 @@ export async function* runAgentTurn(
         // Recorded BEFORE any gate: a refused call is still something the model asked for, and
         // it must see that it asked, or it re-proposes the identical refused call next round.
         roundCalls.push(call);
+
+        /**
+         * The repeat guard runs ABOVE the broker, so it can see the calls the broker
+         * auto-approves — which is where the real loop lives. A model stuck on `read_file` never
+         * reaches a confirm at all, so a guard under the confirm path could never have seen it.
+         *
+         * It runs above EVERY `continue` in this block — the --force refusal, the transport's
+         * malformed-call feedback, and the catalog lookup — because each of those returns early,
+         * and an early return the guard never sees is a doom loop it cannot stop. Measured on
+         * compiled core: a repeated exposed tool stopped after 4 model rounds, while a repeated
+         * `--force` call and a repeated `malformed_tool_call` each ran the FULL 32 and ended
+         * `capped` — offering the human a `/continue` that would resume the same loop.
+         *
+         * A HALLUCINATED tool name is the single
+         * most repeatable thing a model does and it used to be invisible here: the "is not
+         * exposed" branch `continue`d before `observe` was ever reached. Measured on compiled
+         * core — a model repeating an exposed tool was stopped after 4 rounds, while one
+         * repeating a name that does not exist ran all 32 and then reported `capped`, burning
+         * eight times the budget on a call that could never succeed.
+         */
+        const verdict = repeats.observe(call);
+        if (verdict !== "ok") {
+          const reason = repeatRefusal(call, repeatLimit);
+          toolMessages.push({
+            content: toolResultMessage(call.name, { blocked: true, reason }),
+            ...(call.id ? { callId: call.id } : {}),
+          });
+          yield { kind: "tool_result", call, ok: false, summary: reason };
+          if (verdict === "abort") {
+            // It repeated after being told. Ending the turn is the only remaining move that
+            // does not burn the user's budget on a model that is not listening.
+            repeatAbort = true;
+            yield {
+              kind: "blocked",
+              tool: call.name,
+              reason: `${call.name} repeated identically after being refused — ending the turn`,
+            };
+            break;
+          }
+          continue;
+        }
         // INVARIANT (§4): the agent may NEVER use --force.
         if (isForceArg(call.args)) {
           const reason =
@@ -450,6 +641,13 @@ export async function* runAgentTurn(
           yield { kind: "blocked", tool: call.name, reason };
           continue;
         }
+
+        /**
+         * The catalog lookup, now BELOW the repeat guard (see above) so a hallucinated name is
+         * counted like any other repeat. The FIRST occurrence still lands here and still tells
+         * the model the tool does not exist — only a model that ignores that answer and asks
+         * again meets the guard.
+         */
         const tool = byName.get(call.name);
         if (!tool) {
           const reason = `tool "${call.name}" is not exposed`;
@@ -458,33 +656,6 @@ export async function* runAgentTurn(
             ...(call.id ? { callId: call.id } : {}),
           });
           yield { kind: "blocked", tool: call.name, reason };
-          continue;
-        }
-
-        /**
-         * The repeat guard runs ABOVE the broker, so it can see the calls the broker
-         * auto-approves — which is where the real loop lives. A model stuck on `read_file` never
-         * reaches a confirm at all, so a guard under the confirm path could never have seen it.
-         */
-        const verdict = repeats.observe(call);
-        if (verdict !== "ok") {
-          const reason = repeatRefusal(call, repeatLimit);
-          toolMessages.push({
-            content: toolResultMessage(call.name, { blocked: true, reason }),
-            ...(call.id ? { callId: call.id } : {}),
-          });
-          yield { kind: "tool_result", call, ok: false, summary: reason };
-          if (verdict === "abort") {
-            // It repeated after being told. Ending the turn is the only remaining move that
-            // does not burn the user's budget on a model that is not listening.
-            repeatAbort = true;
-            yield {
-              kind: "blocked",
-              tool: call.name,
-              reason: `${call.name} repeated identically after being refused — ending the turn`,
-            };
-            break;
-          }
           continue;
         }
 
@@ -613,7 +784,12 @@ export async function* runAgentTurn(
         yield { kind: "tool_use", call };
         let outcome: ToolOutcome;
         try {
-          outcome = await deps.runTool(tool, withDryRun(stripForce(call.args), tuning.dryRun));
+          outcome = dryRunSkipped(tool, tuning.dryRun)
+            ? {
+                ok: true,
+                summary: `dry-run: ${call.name} was NOT executed. Turn dry-run off to apply it.`,
+              }
+            : await deps.runTool(tool, withDryRun(stripForce(call.args), tuning.dryRun));
         } catch (e) {
           const summary = e instanceof Error ? e.message : String(e);
           // PostToolUse still fires on a THROWN tool. An observer that only ever sees the happy
@@ -757,6 +933,27 @@ export async function* runAgentTurn(
       yield { kind: "blocked", reason: "cancelled — the turn was interrupted" };
       break;
     }
+    /**
+     * The transport paused on inactivity (agent/idle-watchdog.ts). Fold whatever prose it
+     * produced before going quiet — exactly the same fold `capped` uses for its own last
+     * round's tool results — so `/continue` (or simply the user's next message, which already
+     * carries `thread` forward via `carryForward`) picks up from here with nothing lost and no
+     * new user message appended. A distinct `paused` event, not a fake `capped`/`done`, so the
+     * host can render "paused — will resume" rather than "finished" or "hit the step cap".
+     */
+    if (pausedThisRound) {
+      // No double-push: if this round ALSO had tool calls before the transport went idle, the
+      // fold above (toolMessages.length > 0) already pushed a narration message containing
+      // this exact assistantText alongside the tool-call/result record — pushing it again here
+      // would duplicate the model's own prose in the thread. Only fold here for the pure
+      // "paused mid-prose, no tool call this round" case, mirroring the terminal-answer
+      // branch's identical guard just below.
+      if (toolMessages.length === 0 && assistantText.trim()) {
+        thread.messages.push({ role: "assistant", content: assistantText });
+      }
+      yield { kind: "paused", reason: "idle-timeout", idleMs: pausedIdleMs, canContinue: true };
+      break;
+    }
     // The turn completes when the model asked for no tool this round — that is the only
     // signal that means "I am answering" rather than "I am working". `sawFinal` alone cannot
     // end a round in which tools ran, because showing the model what they returned IS the
@@ -776,6 +973,42 @@ export async function* runAgentTurn(
        * No double-push: a round with BOTH text and tool calls folds through the branch above,
        * whose `narration` already contains `assistantText`, and never reaches here.
        */
+      /**
+       * "I am about to do X" is not X.
+       *
+       * A round with no tool call is normally the answer — but a model that ends on
+       * "Let me get started." has announced work and performed none, and ending there reports a
+       * finished turn for a task nobody did. Observed live: `mkdir` in round 1, a plan in round
+       * 2, turn over at 2 of 48, ten requested files never written. The same model carried
+       * straight on when told by hand that nothing had been created, so the intent was real and
+       * only the tool call was missing.
+       *
+       * Bounded, visible, and it does not force the outcome: the nudge explicitly permits "the
+       * task is already complete", so a model that really has finished says so and the NEXT round
+       * ends the turn through the ordinary path. `nudges` counts against the turn, never the
+       * round, so this cannot become a loop of its own.
+       */
+      if (
+        nudges < maxNudges &&
+        round + 1 < maxRounds &&
+        announcesUnfinishedWork(assistantText) &&
+        !cancelled
+      ) {
+        nudges += 1;
+        if (assistantText.trim()) {
+          thread.messages.push({ role: "assistant", content: assistantText });
+        }
+        thread.messages.push({ role: "user", content: CONTINUATION_NUDGE });
+        // Said out loud: a turn that silently continues after appearing to finish is worse than
+        // one that stops, because the user cannot tell what the agent thinks it is doing.
+        yield {
+          kind: "status",
+          text:
+            "the model described work without doing it — asking it to act (nudge " +
+            `${nudges}/${maxNudges})`,
+        };
+        continue;
+      }
       if (assistantText.trim()) {
         thread.messages.push({ role: "assistant", content: assistantText });
       }
@@ -809,6 +1042,13 @@ export async function* runAgentTurn(
  * rule exists because models answer "create hello.py" by pretty-printing the file and
  * stopping, and the `propose_edit`-with-smallest-hunks rule exists because they otherwise
  * rewrite a whole file to change one line.
+ *
+ * NOTE (preamble dispatch): this text is now ALSO registered as a `PreambleContributor`
+ * (`agent/protocol/contributors/tool-discipline.ts`), which is how the live CLI session finally
+ * receives it — `cliProfiles.resolveTuning()` never called `defaultTuning()` below, so this
+ * string was reachable only from tests and Desktop's hand-assembled `AGENT_PANE_SYSTEM`. This
+ * export is UNCHANGED and stays exactly as it is for the hosts that still compose their own
+ * persona string with it inline.
  */
 export const AGENT_TOOL_DISCIPLINE =
   "To DO anything to the system you MUST call the matching tool. " +

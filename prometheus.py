@@ -462,6 +462,25 @@ SCRIPT_VERSION = "0.15.0"
 HOME = Path.home()
 
 
+def _resolve_prom_dir() -> Path:
+    """Prometheus' OWN config dir — the single source of truth for `~/.config/prometheus`.
+
+    `$PROMETHEUS_CONFIG_DIR` overrides it so a test run, a sandbox or a probe never writes
+    into the real user's dir. Without an override there was no way to isolate the engine at
+    all: a single unit test that trips the global crash guard (SECTION main) overwrote the
+    user's genuine `last-crash.log` — the very file the crash guard tells them to report.
+
+    Defined next to HOME (not down in SECTION 7B) because several module-level constants
+    below resolve at import time and MUST all agree; four separate copies of this expression
+    used to drift apart under an override.
+    """
+    override = (os.environ.get("PROMETHEUS_CONFIG_DIR") or "").strip()
+    return Path(override).expanduser() if override else HOME / ".config" / "prometheus"
+
+
+PROM_DIR = _resolve_prom_dir()
+
+
 # ============================================================================
 #  SECTION 1 — Output helpers (color, logging)
 # ============================================================================
@@ -575,6 +594,43 @@ def emit_table_json(command: str, render, **extra) -> int:
     return emit_json({"command": command, "ok": True, "lines": buf.getvalue().splitlines(), **extra})
 
 
+def emit_console_json(command: str, render, **extra) -> int:
+    """Bridge-safe emit for READ commands that report through `Log.*` rather than `print`.
+
+    `emit_table_json` captures `sys.stdout`, which is enough for the commands that build a table
+    with bare prints. It is NOT enough for the read actions that narrate through `Log`, because
+    `Log.STREAM` is already rerouted to stderr under --json: capturing stdout would produce a
+    correct-but-empty `lines[]`, and capturing nothing at all produced NO envelope, which is what
+    actually happened. The MCP bridge prepends --json unconditionally and rejects a call whose
+    stdout is not one JSON object, so `apps installed|status|versions|logs` (and the worldsim
+    twins) failed hard for the agent — half of them with "stdout was not valid JSON" from leaked
+    raw text, the other half with "produced no JSON on stdout" from an empty stream.
+
+    So both sinks are pointed at one buffer for the duration of the render, and the captured text
+    becomes `lines[]`. Non-JSON runs render exactly as before.
+    """
+    if not JSON_OUT:
+        return render()
+    import io
+
+    buf = io.StringIO()
+    old_stdout, old_stream = sys.stdout, Log.STREAM
+    sys.stdout = buf
+    Log.STREAM = buf
+    try:
+        rc = render()
+    finally:
+        sys.stdout = old_stdout
+        Log.STREAM = old_stream
+    return emit_json({
+        "command": command,
+        "ok": rc == 0,
+        "exit_code": rc,
+        "lines": buf.getvalue().splitlines(),
+        **extra,
+    })
+
+
 # Default wall-clock cap so a stuck OR foreground-blocking command can never hang
 # Prometheus: the child is killed on expiry and the shell terminates. Generous so big
 # clones / pip downloads / docker pulls finish. A long-running SERVICE that must KEEP
@@ -640,10 +696,32 @@ def _run_timed(cmd, *, timeout: int, **kw) -> subprocess.CompletedProcess:
 
 
 def _read_json(path: Path) -> dict:
+    """Read a JSON object from `path`, or {} — NEVER a non-dict.
+
+    The annotation said `dict` and the body returned whatever `json.loads` produced, so a file
+    holding `0`, `null`, `[]` or `"x"` came back as that value. Every one of this function's
+    ~18 call sites then does `.get(...)`, `key in ...` or item assignment on it, so a single
+    malformed file turns into a raw TypeError out of the middle of an install.
+
+    Found live on a real machine: `~/.config/prometheus/trust.json` contained the single token
+    `0`, so `is_trusted()` raised `TypeError: argument of type 'int' is not a container or
+    iterable` and `record_trust()` raised `'int' object does not support item assignment` — i.e.
+    every gate that reached the WARN tier, and every trust decision, died with exit 1.
+
+    A corrupt file is discarded rather than propagated: the caller's own "nothing recorded yet"
+    path is always a safe answer, and refusing to start is not.
+    """
     try:
-        return json.loads(path.read_text())
+        data = json.loads(path.read_text())
     except (FileNotFoundError, json.JSONDecodeError):
         return {}
+    except OSError:
+        # unreadable (permissions, a directory where a file was expected) — same story
+        return {}
+    if isinstance(data, dict):
+        return data
+    Log.warn(f"ignoring {path}: expected a JSON object, found {type(data).__name__}")
+    return {}
 
 
 # ============================================================================
@@ -800,7 +878,7 @@ CLAUDE_SKILLS_DIR = HOME / ".claude" / "skills"
 # integrates lands here; it is NOT a trust assertion — nemesis re-checks every file
 # in it at each startup + on demand. `_pin_iter_sources` + the startup pin-audit
 # include it, and `skills integrate` copies nemesis-green skills from other agents in.
-PROMETHEUS_SKILLS_DIR = HOME / ".config" / "prometheus" / "prometheus_skills"
+PROMETHEUS_SKILLS_DIR = PROM_DIR / "prometheus_skills"
 
 
 def _read_settings() -> dict:
@@ -808,11 +886,42 @@ def _read_settings() -> dict:
 
 
 def _write_settings(data: dict) -> None:
+    """Persist the agent's settings file — never CLOBBERING a config we could not read.
+
+    `_read_settings` goes through `_read_json`, which swallows `JSONDecodeError` and returns
+    `{}`. Every caller here is a read-modify-write, so an unparseable `settings.json` meant the
+    modify step started from an empty dict and this function then wrote it back: `env`, `model`,
+    `hooks`, `statusLine`, `effortLevel`, `theme`, `editorMode` — every key the user had —
+    replaced by whatever this one caller happened to assemble, with no backup and no warning.
+    One stray trailing comma from a hand-edit, or one interrupted non-atomic write, and the
+    whole file was gone.
+
+    Two guards: back the file up (and SAY so) when it is present but unreadable, and write
+    through a temp + rename so an interrupted write can never be what makes it unreadable next
+    time.
+    """
     if DRY_RUN:
         Log.step(f"[dry-run] write {USER_SETTINGS}")
         return
     USER_SETTINGS.parent.mkdir(parents=True, exist_ok=True)
-    USER_SETTINGS.write_text(json.dumps(data, indent=2))
+    if USER_SETTINGS.exists():
+        try:
+            json.loads(USER_SETTINGS.read_text())
+        except (json.JSONDecodeError, OSError, ValueError):
+            _backup_file(USER_SETTINGS)
+            Log.warn(f"{USER_SETTINGS} did not parse as JSON — its previous contents were "
+                     f"backed up next to it (.prom.bak) before this rewrite; merge anything "
+                     f"you still need back by hand")
+    tmp = USER_SETTINGS.with_name(USER_SETTINGS.name + ".tmp")
+    try:
+        tmp.write_text(json.dumps(data, indent=2))
+        os.replace(tmp, USER_SETTINGS)
+    except OSError:
+        try:
+            tmp.unlink(missing_ok=True)   # never leave a half-written .tmp orphan behind
+        except OSError:
+            pass
+        raise
 
 
 def _backup_file(path: Path) -> None:
@@ -1408,8 +1517,11 @@ def _adapt_git_clone(p: Plugin, spec: InstallSpec, host: AIHost, osi: OSInfo) ->
         return True
     if DRY_RUN:
         Log.step(f"[dry-run] git clone --depth 1 {spec.repo_url} -> {dest} (staged)")
-        # still show the verdict a real run would gate on (nemesis fetches the
-        # repo itself into a temp snapshot; nothing is written here)
+        # Still show the verdict a real run would gate on — nemesis fetches the repo into its
+        # own temp snapshot, so no install artifact is written. The gate's WARN tier CAN still
+        # ask (or auto-approve under --yes); `_save_trust` is what refuses to remember the
+        # answer under DRY_RUN, so this stays a preview instead of pre-approving a later
+        # real install.
         enforce_gate(spec.repo_url, f"{p.name} ({spec.repo_url}, dry-run)")
         return True
     dest.parent.mkdir(parents=True, exist_ok=True)
@@ -2104,9 +2216,11 @@ def is_installed(p: Plugin, host: AIHost, spec: InstallSpec) -> Optional[bool]:
 #  high-signal patterns; it is NOT a guarantee. Treat a clean verdict as "no
 #  known-bad patterns found", not "proven safe".
 # ============================================================================
+import atexit
 import math
 import re
 import tempfile
+import urllib.error
 import urllib.request
 from glob import glob as _glob
 
@@ -2117,7 +2231,7 @@ STRICT = False
 FORCE_UNSAFE = False
 SHOW_INFO = False
 
-TRUST_FILE = HOME / ".config" / "prometheus" / "trust.json"
+TRUST_FILE = PROM_DIR / "trust.json"
 
 SEVERITY_ORDER = {"info": 0, "low": 1, "medium": 2, "high": 3, "critical": 4}
 
@@ -2129,6 +2243,53 @@ _SCAN_NAMES = {"Makefile", "makefile", "Dockerfile"}
 _SCAN_PREFIXES = ("install", "setup", "bootstrap", "postinstall", "preinstall")
 _MAX_FILE_BYTES = 2_000_000
 _SKIP_DIRS = {".git", "node_modules", ".venv", "venv", "__pycache__", "dist", "build"}
+
+# Markdown an AI AGENT loads and acts on. This scanner reads no `.md` at all, on the premise —
+# still written at the rule table below — that markdown "does not run when the plugin installs".
+# For a skill, a slash command or a subagent that premise is false: the file IS the program, and
+# the interpreter is a language model. A plugin whose entire payload is `skills/demo/SKILL.md`
+# and `commands/deploy.md` was therefore reported CLEAN by this layer, which matters most where
+# this layer is the only one running (see `_serve_tree_gate_ok`, and any run with the gate off).
+#
+# Deliberately NOT every `.md`: ordinary prose is full of fenced install snippets, and reading
+# it all here — with no equivalent of nemesis's doc-suppression — would turn every README with a
+# `curl … | sh` line into a finding. The carve-out mirrors nemesis's: agent-instruction files by
+# NAME, and the directories whose markdown is agent input whatever the file is called.
+_AGENT_MD_SUFFIXES = {".md", ".markdown", ".mdx", ".mdc"}
+_AGENT_MD_NAMES = {
+    "skill.md", "agents.md", "claude.md", "gemini.md", "copilot-instructions.md",
+    "cursorrules.md", "windsurfrules.md",
+}
+_AGENT_MD_DIRS = ("commands", "agents", "skills", "prompts", "rules", "command")
+
+
+def _is_agent_markdown(fn: str, dirpath: str) -> bool:
+    """True for markdown an agent executes: by filename, or by the directory it sits in."""
+    low = fn.lower()
+    if os.path.splitext(low)[1] not in _AGENT_MD_SUFFIXES:
+        return False
+    if low in _AGENT_MD_NAMES:
+        return True
+    parts = {p.lower().lstrip(".") for p in Path(dirpath).parts}
+    return any(d in parts for d in _AGENT_MD_DIRS)
+
+
+def _is_scannable(fn: str, dirpath: str) -> bool:
+    """Does this file get read by the 5C regex layer? One predicate, so the COUNT cannot drift
+    from what was actually inspected."""
+    return (Path(fn).suffix.lower() in _SCAN_SUFFIXES
+            or fn in _SCAN_NAMES
+            or fn.lower().startswith(_SCAN_PREFIXES)
+            or _is_agent_markdown(fn, dirpath))
+
+
+def _count_scannable(root: Path) -> int:
+    """How many files the 5C layer would actually open under `root`."""
+    n = 0
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames if d not in _SKIP_DIRS]
+        n += sum(1 for fn in filenames if _is_scannable(fn, dirpath))
+    return n
 
 
 @dataclass
@@ -2401,10 +2562,7 @@ def _walk_and_scan(root: Path) -> list[Finding]:
     for dirpath, dirnames, filenames in os.walk(root):
         dirnames[:] = [d for d in dirnames if d not in _SKIP_DIRS]
         for fn in filenames:
-            keep = (Path(fn).suffix.lower() in _SCAN_SUFFIXES
-                    or fn in _SCAN_NAMES
-                    or fn.lower().startswith(_SCAN_PREFIXES))
-            if not keep:
+            if not _is_scannable(fn, dirpath):
                 continue
             fpath = Path(dirpath) / fn
             try:
@@ -2527,12 +2685,51 @@ _GATE_POLICIES = {
 }
 
 
+def _silent_unlink(path: str) -> None:
+    """Best-effort removal for the temp policy files; never raises at interpreter exit."""
+    try:
+        os.unlink(path)
+    except OSError:
+        pass
+
+
+# Temp policy files minted under --dry-run, one per tier, cleaned up when the process ends.
+_DRY_RUN_POLICY_FILES: dict[str, str] = {}
+
+
 def _gate_policy_file(tier: str) -> Optional[str]:
     body = _GATE_POLICIES.get(tier)
     if not body:
         return None
     p = PROM_DIR / f"nemesis-policy-{tier}.json"
     want = json.dumps(body, indent=2) + "\n"
+    if DRY_RUN:
+        """--dry-run is documented as "print actions, change nothing", and this wrote.
+
+        `pentest install` runs its two pentest-tier gates BEFORE the dry-run early return, and
+        the gate path lands here — which mkdir -p'd PROM_DIR and, by design, OVERWROTE a
+        "drifted/hand-edited" policy with the code-side default. So previewing an install
+        silently destroyed a policy file the operator had deliberately tuned.
+
+        Skipping the write outright would drop the gate to its laxer DEFAULT policy and make the
+        preview report a different verdict than the real install, which is its own kind of lie.
+        So the body goes to a TEMP file instead: the scan runs at exactly the right tier, and
+        nothing under PROM_DIR is created or touched.
+        """
+        cached = _DRY_RUN_POLICY_FILES.get(tier)
+        if cached and os.path.exists(cached):
+            return cached
+        try:
+            fd, tmp = tempfile.mkstemp(prefix=f"nemesis-policy-{tier}-", suffix=".json")
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                fh.write(want)
+            _DRY_RUN_POLICY_FILES[tier] = tmp
+            atexit.register(lambda path=tmp: _silent_unlink(path))
+            return tmp
+        except OSError as e:
+            Log.warn(f"cannot stage {tier} gate policy for the dry run ({e}) — nemesis runs "
+                     f"with its laxer DEFAULT policy for this scan")
+            return None
     try:
         # _GATE_POLICIES is the source of truth: rewrite a drifted/hand-edited
         # file so a code-side tightening actually reaches the gate.
@@ -3066,7 +3263,10 @@ def scan_spec(plugin_name: str, spec: InstallSpec) -> ScanReport:
         if spec.method == "git_clone_shell" and spec.shell_steps:  # also scan setup commands
             text = "\n".join(" ".join(c) for steps in spec.shell_steps.values() for c in steps)
             findings += _scan_text("<setup_steps>", text)
-        nfiles = sum(1 for _ in root.rglob("*") if _.is_file())
+        # what was INSPECTED, not what exists: this counted every file under the tree while the
+        # walker opened only the allowlisted subset, so "files: N" overstated the scan — the
+        # number a reader uses to judge whether a clean verdict means anything.
+        nfiles = _count_scannable(root)
         return ScanReport(plugin_name, source, _git_identity(root), findings, nfiles)
     finally:
         if tmp_to_clean:
@@ -3079,6 +3279,22 @@ def _load_trust() -> dict:
 
 
 def _save_trust(data: dict) -> None:
+    """Persist the trust store — unless this is a --dry-run.
+
+    Guarded at the SINK rather than at each caller so every writer is covered at once
+    (`record_trust`, `revoke_trust`, and the two WARN-approval paths in
+    `_gate_confirm_warn`).
+
+    A dry run reaching this function is not hypothetical: `install_repo_spec` calls
+    `enforce_gate` under DRY_RUN on purpose, to show the verdict a real run would gate on.
+    If that gate hit the WARN tier and the user answered `y` (or passed `--yes`), the
+    approval was WRITTEN — so the next REAL install of the same artifact skipped the prompt
+    entirely, silently pre-approved by a run whose whole contract is that it changes
+    nothing. A security decision is exactly the last thing a dry run may persist.
+    """
+    if DRY_RUN:
+        Log.step("[dry-run] trust store NOT written — a real run will ask again")
+        return
     TRUST_FILE.parent.mkdir(parents=True, exist_ok=True)
     TRUST_FILE.write_text(json.dumps(data, indent=2))
 
@@ -4929,6 +5145,21 @@ def _print_layout_map(lay: ToolLayout, n: int, kind: str) -> None:
 
 def _prompt_install_path(tool: str) -> Optional[Path]:
     """Pick a base folder: paste a path or browse by number. Returns the chosen base (root is resolved after)."""
+    # NON-INTERACTIVE FIRST, before a single line of the chooser is printed.
+    #
+    # This check sat AFTER the whole browser UI, so a piped/CI run printed a folder picker nobody
+    # could answer, then returned None — and every caller reads None as "the user cancelled" and
+    # returns 0. `apps versions yt-dlp` therefore exited 0 with ok:true having done nothing, and
+    # the hint named `models install` no matter which verb the user had actually run.
+    #
+    # Raising (rather than returning None) fixes all NINE call sites at once: `main()` already
+    # turns a RuntimeError into a clean message and exit 2, and under --json into a proper
+    # envelope. A caller cannot mistake it for a cancellation.
+    if not sys.stdin.isatty():
+        raise RuntimeError(
+            f"cannot choose an install folder for '{tool}': no interactive terminal. "
+            "Pass one explicitly with `--path /your/folder`."
+        )
     Log.head(f"Choose where to install {tool} (separated space on disk)")
     Log.info("This tool lands in its OWN versioned tree. Planned layout:")
     for line in _layout_preview(tool):
@@ -4937,9 +5168,6 @@ def _prompt_install_path(tool: str) -> Optional[Path]:
              f"'{tool}', it becomes the root; otherwise '{tool}/' is created inside it.")
     print("    Controls:  [number] enter subfolder · .. up · ~ home · "
           "/abs/path or name jump · '.' SELECT current dir · q cancel")
-    if not sys.stdin.isatty():
-        Log.err(f"non-interactive — pass a folder: `models install {tool} --path /your/folder`")
-        return None
     cur = Path.cwd()
     while True:
         try:
@@ -5990,7 +6218,7 @@ def _print_repo_tools() -> None:
                 "compose": "docker-compose stack (folder you pick)"}
     for t in REPO_TOOLS:
         tag = Log._c(f"[{t.category}]", "yellow")
-        kt = Log._c(kind_tag[t.kind], kind_col.get(t.kind, "dim"))
+        kt = Log._c(kind_tag.get(t.kind, "external tool"), kind_col.get(t.kind, "dim"))
         print(f"  {tag} {Log._c(t.id, 'bold')} — {t.name}   {kt}")
         print(f"      {t.blurb}")
         print(f"      {Log._c('safest: ' + t.recommend, 'green')}")
@@ -6666,7 +6894,7 @@ def cmd_apps(args, osi: OSInfo) -> int:
     if action == "wizard":
         return _apps_wizard(osi)
     if action == "installed":
-        return _apps_installed_overview(osi)
+        return emit_console_json("apps", lambda: _apps_installed_overview(osi), action="installed")
     if action == "update-all":
         return _apps_update_all(osi)
     if not getattr(args, "tool", None):
@@ -6674,6 +6902,16 @@ def cmd_apps(args, osi: OSInfo) -> int:
     t = repo_tool_registry().get(args.tool)
     if not t:
         Log.err(f"unknown app: {args.tool}. Try: apps list"); return 2
+    # status/versions/logs are READ actions the MCP bridge calls: they must land as an envelope.
+    if action in ("status", "versions", "logs"):
+        return emit_console_json(
+            "apps",
+            lambda: _apps_run_action(
+                t, osi, action, getattr(args, "path", None), getattr(args, "version", None)
+            ),
+            action=action,
+            tool=t.id,
+        )
     return _apps_run_action(t, osi, action, getattr(args, "path", None), getattr(args, "version", None))
 
 
@@ -6812,17 +7050,31 @@ def _worldsim_wizard(osi: OSInfo) -> int:
 def cmd_worldsim(args, osi: OSInfo) -> int:
     action = getattr(args, "action", None) or "list"
     if action == "list":
-        _print_worldsim_tools(); return 0   # human-table READ (engine-bridge catalog.ts parses text)
+        # human-table READ; under --json emit the SAME bridge-safe `lines[]` envelope its
+        # siblings do (`apps list`, `models list`, `inventory`). It was the only one of the four
+        # still printing raw text under --json, so a consumer that asked for JSON got something
+        # that is not JSON — the exact `error (bad_json)` case emit_table_json exists to prevent.
+        return emit_table_json("worldsim", _print_worldsim_tools, action="list")
     if action == "wizard":
         return _worldsim_wizard(osi)
     if action == "installed":
-        return _worldsim_installed_overview(osi)
+        return emit_console_json(
+            "worldsim", lambda: _worldsim_installed_overview(osi), action="installed"
+        )
     if not getattr(args, "tool", None):
         Log.err(f"usage: worldsim {action} <id>  (see `worldsim list`, or `worldsim wizard`)"); return 2
     t = worldsim_tool_registry().get(args.tool)
     if not t:
         Log.err(f"unknown world-sim engine: {args.tool}. Try: worldsim list"); return 2
     path = _worldsim_path(t, getattr(args, "path", None))
+    # status/versions/logs are READ actions the MCP bridge calls: they must land as an envelope.
+    if action in ("status", "versions", "logs"):
+        return emit_console_json(
+            "worldsim",
+            lambda: _apps_run_action(t, osi, action, path, getattr(args, "version", None)),
+            action=action,
+            tool=t.id,
+        )
     return _apps_run_action(t, osi, action, path, getattr(args, "version", None))
 
 
@@ -7156,6 +7408,28 @@ def _localai_envelope(action: str, tool: Optional[str]) -> dict:
     if action == "models":
         base["models"] = [_model_row(m) for m in OPEN_MODELS]
         base["open_endpoints"] = dict(OPEN_AI_ENDPOINTS)
+        # The reasoning-effort table this build resolves `--effort` against. Additive on a
+        # versioned envelope, so a pre-effort consumer is unaffected. `provenance` travels
+        # with each rule on purpose: two thirds of the table is inferred rather than measured,
+        # and a consumer deserves to know which rows to trust.
+        _eff_rules, _eff_notes = effort_rules()
+        base["effort"] = {
+            "tiers": list(EFFORT_TIERS),
+            "rules": len(_eff_rules),
+            "provenance": {
+                # `unattributed` closes the books: `rules` counts every LAYER (builtin + user +
+                # project) while only builtins carry a provenance, so without this bucket the
+                # three counts summed to less than `rules` and a consumer could not tell whether
+                # rows were missing or merely unlabelled.
+                **{k: sum(1 for r in _eff_rules if r.get("provenance") == k)
+                   for k in ("measured", "published", "inferred")},
+                "unattributed": sum(
+                    1 for r in _eff_rules
+                    if r.get("provenance") not in ("measured", "published", "inferred")),
+            },
+            "source": str(_EFFORT_BUILTIN_ARTIFACT.name),
+            "notes": _eff_notes,
+        }
         return base
     if action == "endpoints":
         base["local"] = dict(LOCAL_AI_ENDPOINTS)
@@ -8944,20 +9218,62 @@ def _vault_all_repos() -> list[VaultRepo]:
 
 # ---- GitHub metadata + download (stdlib only; works unauthenticated) --------
 def _online() -> bool:
+    """Can we reach GitHub at all?
+
+    ANY HTTP response proves connectivity — including 403. This used to catch every exception
+    and return False, so an exhausted anonymous API quota (GitHub answers 403 "API rate limit
+    exceeded") made a fully-online machine report itself OFFLINE, and every vault operation
+    quietly did nothing while reporting success. Verified against a local server answering 403:
+    the old shape returned False.
+    """
     try:
         urllib.request.urlopen("https://api.github.com", timeout=6)    # noqa: S310
         return True
+    except urllib.error.HTTPError:
+        return True            # we reached GitHub; it just refused this request
     except Exception:
         return False
 
 
+def _gh_rate_limited(e: "urllib.error.HTTPError") -> bool:
+    """Is this HTTPError GitHub's anonymous-quota refusal (403/429 + a zero remaining budget)?"""
+    if e.code not in (403, 429):
+        return False
+    remaining = e.headers.get("X-RateLimit-Remaining") if e.headers else None
+    if remaining == "0":
+        return True
+    try:
+        return "rate limit" in (e.read().decode("utf-8", "replace") or "").lower()
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def _gh_api(path: str):
+    """One GitHub API call. Returns the parsed body, or None when the resource is unavailable.
+
+    A rate-limit refusal RAISES instead of returning None. It used to collapse into the same
+    None as a 404, so the caller concluded "no version on record" and moved on: the command
+    reported ok:true having checked nothing. Those are opposite facts — "there is no newer
+    version" versus "I was not allowed to look" — and only one of them is safe to act on.
+    `main()` turns the RuntimeError into a clean message and a proper --json envelope.
+    """
     url = f"https://api.github.com/{path}"
     try:
         req = urllib.request.Request(url, headers={
             "Accept": "application/vnd.github+json", "User-Agent": "prometheus-vault"})
         with urllib.request.urlopen(req, timeout=20) as r:              # noqa: S310
             return json.loads(r.read().decode("utf-8", "replace"))
+    except urllib.error.HTTPError as e:
+        if _gh_rate_limited(e):
+            reset = (e.headers.get("X-RateLimit-Reset") if e.headers else None) or ""
+            when = ""
+            if reset.isdigit():
+                when = f" (resets at {time.strftime('%H:%M', time.localtime(int(reset)))})"
+            raise RuntimeError(
+                "GitHub's anonymous API quota is exhausted" + when +
+                " — cannot check versions. Wait for the reset, or set GITHUB_TOKEN."
+            ) from e
+        return None
     except Exception:
         return None
 
@@ -9614,32 +9930,49 @@ def cmd_auto(args, osi: "OSInfo") -> int:
     if not JSON_OUT:
         Log.step(f"1/3 threat feeds: {out['steps'].get('feeds', {}).get('note') or 'ready'}")
 
-    au = _step("audit", lambda: audit_sources(quarantine=True, quarantine_new=True))
-    if au is not None:
-        out["steps"]["audit"] = {k: len(au[k]) for k in
-                                 ("new", "clean", "repinned", "quarantined", "missing")}
-    if not JSON_OUT and au is not None:
-        a = out["steps"]["audit"]
-        Log.step(f"2/3 audit: {a['new']} new · {a['clean']} clean · {a['repinned']} re-pinned · "
-                 f"{a['quarantined']} quarantined · {a['missing']} missing")
+    # `audit_sources`/`defang_installed_sources` have no preview mode (they quarantine/re-pin/
+    # rewrite files directly) — under --dry-run they are SKIPPED rather than run for real, so
+    # a typed --dry-run can never silently perform one of these writes. `integrate_green_skills`
+    # DOES support a real dry_run (below), so it still previews normally.
+    if DRY_RUN:
+        out["steps"]["audit"] = {"skipped": True,
+                                 "note": "dry-run: audit quarantines/re-pins files with no preview mode"}
+        if not JSON_OUT:
+            Log.step(f"2/3 audit: {out['steps']['audit']['note']}")
+    else:
+        au = _step("audit", lambda: audit_sources(quarantine=True, quarantine_new=True))
+        if au is not None:
+            out["steps"]["audit"] = {k: len(au[k]) for k in
+                                     ("new", "clean", "repinned", "quarantined", "missing")}
+        if not JSON_OUT and au is not None:
+            a = out["steps"]["audit"]
+            Log.step(f"2/3 audit: {a['new']} new · {a['clean']} clean · {a['repinned']} re-pinned · "
+                     f"{a['quarantined']} quarantined · {a['missing']} missing")
 
-    ig = _step("integrate", integrate_green_skills)
+    ig = _step("integrate", lambda: integrate_green_skills(dry_run=DRY_RUN))
     if ig is not None:
         out["steps"]["integrate"] = {k: len(ig[k]) for k in
                                      ("integrated", "already", "skipped_unsafe", "errors")}
     if not JSON_OUT and ig is not None:
         i = out["steps"]["integrate"]
         Log.step(f"3/3 integrate: {i['integrated']} green skill(s) added · "
-                 f"{i['already']} already · {i['skipped_unsafe']} unsafe skipped")
+                 f"{i['already']} already · {i['skipped_unsafe']} unsafe skipped"
+                 f"{' (dry-run — nothing copied)' if DRY_RUN else ''}")
 
     if getattr(args, "defang", False):
-        d = _step("defang", lambda: defang_installed_sources(keep="trusted"))
-        if d is not None:
-            out["steps"]["defang"] = {"wiped": d["urls_neutralized"],
-                                      "trusted_kept": d["urls_kept_trusted"]}
+        if DRY_RUN:
+            out["steps"]["defang"] = {"skipped": True,
+                                      "note": "dry-run: defang rewrites files with no preview mode"}
             if not JSON_OUT:
-                Log.step(f"defang: {d['urls_neutralized']} URL(s) wiped, "
-                         f"{d['urls_kept_trusted']} official-doc URL(s) kept")
+                Log.step(f"defang: {out['steps']['defang']['note']}")
+        else:
+            d = _step("defang", lambda: defang_installed_sources(keep="trusted"))
+            if d is not None:
+                out["steps"]["defang"] = {"wiped": d["urls_neutralized"],
+                                          "trusted_kept": d["urls_kept_trusted"]}
+                if not JSON_OUT:
+                    Log.step(f"defang: {d['urls_neutralized']} URL(s) wiped, "
+                             f"{d['urls_kept_trusted']} official-doc URL(s) kept")
 
     # each scheduled run re-asserts its own schedule (keeps it healthy while it runs)
     try:
@@ -10153,14 +10486,37 @@ def cmd_install(args, osi: OSInfo) -> int:
     events: list = []
     failures = _run_installs(targets, detected, osi, events)
     if getattr(args, "arm", False):                  # P5.6 auto-arm (Claude)
+        # Arm ONLY what actually installed.
+        #
+        # This looped over every requested target unconditionally, ignoring the `failures` the
+        # line above had just counted. So a plugin the nemesis gate BLOCKED — or one that failed
+        # outright, or was refused fail-closed for having no gate coverage — still had
+        # `enabledPlugins[id] = true` and its marketplace written into ~/.claude/settings.json.
+        # The scanner refused to put the code on disk and Prometheus then told Claude to load it
+        # every session: a persistent instruction pointing at an artifact that was rejected, or
+        # (worse) at a marketplace entry Claude may resolve and fetch on its own.
+        # `skipped`/`already` are not failures — the first never ran, the second is present.
+        installed_ok = {e.plugin for e in events if e.result in ("installed", "already")}
+        refused = {e.plugin for e in events if e.result in ("blocked", "failed")}
+        armed: list[str] = []
         for p in targets:
+            if p.name not in installed_ok:
+                if p.name in refused:
+                    Log.warn(f"NOT auto-arming {p.name} — its install was refused "
+                             f"(blocked/failed); settings.json is left untouched for it")
+                continue
             for spec in p.targets.values():
                 if spec.method == "claude_plugin":
                     if spec.marketplace_name and spec.marketplace_repo:
                         set_extra_marketplace(spec.marketplace_name, spec.marketplace_repo)
                     for pid in _claude_plugin_ids(spec):
                         set_enabled_plugin(pid, True)
-        Log.ok("auto-armed: enabledPlugins + extraKnownMarketplaces written (skills self-fire each session)")
+                    armed.append(p.name)
+        if armed:
+            Log.ok(f"auto-armed: {', '.join(sorted(set(armed)))} — enabledPlugins + "
+                   f"extraKnownMarketplaces written (skills self-fire each session)")
+        else:
+            Log.warn("auto-arm: nothing was armed (no target installed successfully)")
     if JSON_OUT:
         return emit_json(_install_events_json("install", args.name, events, detected,
                                               failures, dry_run=DRY_RUN))
@@ -10203,9 +10559,14 @@ def _uninstall_foreign_claude(plugin_id: str) -> int:
     uninstall <id>`. Also a foreign SKILL.md folder if the name matches."""
     if skill_state(plugin_id) != "absent":
         Log.head(f"Uninstall (foreign skill): {plugin_id}")
-        if not (ASSUME_YES or DRY_RUN or FORCE) and sys.stdin.isatty():
-            if input(f"    delete ~/.claude/skills/{plugin_id}? [y/N] ").strip().lower() not in ("y", "yes"):
-                Log.warn("declined"); return 0
+        # `and sys.stdin.isatty()` had the polarity backwards: with stdin NOT a tty the whole
+        # confirmation was skipped and the rmtree below ran anyway. So
+        # `prometheus uninstall <id> < /dev/null` — a shell script, a cron job, an agent that
+        # pipes stdin — deleted the skill folder outright with no --yes and no prompt. The
+        # `_confirm` helper twenty lines down is this file's own convention and gets it right:
+        # non-interactive without an explicit flag is NO.
+        if not _confirm(f"delete ~/.claude/skills/{plugin_id}?"):
+            Log.warn("declined"); return 0
         d, _md, _dis = _skill_paths(plugin_id)
         if DRY_RUN:
             Log.step(f"[dry-run] rm -rf {d}")
@@ -10220,9 +10581,9 @@ def _uninstall_foreign_claude(plugin_id: str) -> int:
         Log.err(f"unknown plugin/skill: {plugin_id}. Try: list / inventory / skills list")
         return 2
     Log.head(f"Uninstall (foreign): {plugin_id}")
-    if not (ASSUME_YES or DRY_RUN or FORCE) and sys.stdin.isatty():
-        if input(f"    Remove {plugin_id}? [y/N] ").strip().lower() not in ("y", "yes"):
-            Log.warn("declined"); return 0
+    # same inverted guard as the skill branch above — a non-tty must not mean "yes".
+    if not _confirm(f"Remove {plugin_id}?"):
+        Log.warn("declined"); return 0
     run([cli, "plugin", "uninstall", plugin_id], check=False)
     Log.ok(f"requested removal of {plugin_id}")
     return 0
@@ -10421,6 +10782,12 @@ def cmd_audit(args, osi: OSInfo) -> int:
     """C1 — scan plugin install artifacts, no install."""
     if args.revoke:
         n = revoke_trust(args.name)
+        # Under --json this returned 0 with EMPTY stdout — no envelope at all, so a caller could
+        # not tell a successful revoke from a no-op from a crash. `revoked` is reported plainly:
+        # 0 is an honest answer (nothing was remembered for that name), not a failure.
+        if JSON_OUT:
+            return emit_json({"command": "audit", "ok": True, "action": "revoke",
+                              "name": args.name, "revoked": n})
         Log.ok(f"revoked {n} trust entr{'y' if n == 1 else 'ies'} for {args.name}")
         return 0
 
@@ -10724,7 +11091,7 @@ def cmd_disable(args, osi: OSInfo) -> int:
 # Computed from HOME (defined early) rather than PROM_DIR (defined later in the
 # file) so these module-level constants resolve at import time; the value is
 # identical to PROM_DIR / "…".
-_PROM_CFG_DIR = HOME / ".config" / "prometheus"
+_PROM_CFG_DIR = PROM_DIR
 _URL_PIN_DIR = _PROM_CFG_DIR / "url_pins"
 _URL_PIN_MANIFEST = _URL_PIN_DIR / "pins.json"
 _URL_PIN_LOCK = _URL_PIN_DIR / ".pins.lock"   # serialize pin manifest read-modify-write
@@ -11130,6 +11497,24 @@ def _quarantine_and_restore(path: Path, rec: dict, verdict: dict) -> dict:
                 restored = True
             except OSError:
                 restored = False
+        # NEUTRALIZE when the blessed restore did not happen.
+        #
+        # Overwriting with the blessed copy is the ONLY thing that made the drifted file safe, so
+        # a missing blessed blob (pruned, never synced) or a write that raises — a read-only file,
+        # `chmod 444` — left BLOCK-verdict content fully in place and still loadable by the agent,
+        # while the record was appended to `quarantined` and the startup hook announced
+        # "were QUARANTINED (blessed copy restored)". The twin below, `_quarantine_new`, already
+        # disables a dangerous first-seen source by renaming it out of the way; only one of the
+        # two was hardened. Same remedy here, so "quarantined" means the same thing on both paths.
+        if not restored:
+            try:
+                disabled = path.with_name(path.name + ".url-quarantined")
+                path.rename(disabled)
+                man_disabled = str(disabled)
+            except OSError:
+                man_disabled = ""  # could not disable either; the vault copy is still evidence
+        else:
+            man_disabled = ""
     man = {
         "schema": "prometheus.url_quarantine/1",
         "quarantined_at": _now_iso(),
@@ -11142,11 +11527,19 @@ def _quarantine_and_restore(path: Path, rec: dict, verdict: dict) -> dict:
         "blessed_sha256": rec.get("norm_sha256"),
         "reason": "content drift on a pinned source re-gated to a dangerous verdict",
     }
+    # present only when the restore failed AND the file was renamed out of the way instead
+    if not DRY_RUN and not restored and man_disabled:
+        man["disabled_path"] = man_disabled
     man["mode"] = "drift-restore-blessed"
     man["sig"] = _sign_pin(man)
     if not DRY_RUN:
         _write_json_atomic(qdir / "manifest.json", man)
+    # `neutralized` is what a caller should report on: TRUE means the dangerous bytes are no
+    # longer where the agent loads them, whether that happened by restore or by rename.
+    neutralized = restored or bool(not DRY_RUN and man_disabled)
     return {"original": str(path), "vault": str(qdir), "restored_blessed": restored,
+            "neutralized": neutralized,
+            **({"disabled_path": man_disabled} if (not DRY_RUN and man_disabled) else {}),
             "verdict": verdict.get("verdict")}
 
 
@@ -11464,11 +11857,21 @@ def _maybe_startup_pin_audit(osi: "OSInfo", command: str) -> None:
             except OSError:
                 pass
             sfh.close()
-    q, rp = len(res.get("quarantined", [])), len(res.get("repinned", []))
+    quarantined = res.get("quarantined", []) or []
+    q, rp = len(quarantined), len(res.get("repinned", []))
     if q:
+        # Say what actually happened per source rather than asserting the happy path. The message
+        # claimed "(blessed copy restored)" unconditionally, so a restore that could not run —
+        # a pruned blessed blob, a read-only file — was reported as a completed quarantine while
+        # the dangerous bytes were still live. `neutralized` is true when the content is no longer
+        # where the agent loads it, by restore OR by rename.
+        live = [r for r in quarantined if isinstance(r, dict) and not r.get("neutralized")]
         Log.err(f"⚠ URL-injection watch: {q} installed source(s) drifted into a "
-                f"DANGEROUS verdict and were QUARANTINED (blessed copy restored). "
+                f"DANGEROUS verdict and were QUARANTINED. "
                 f"Review: prometheus skills audit --list-quarantine")
+        if live:
+            Log.err(f"  ‼ {len(live)} could NOT be neutralized and are STILL IN PLACE: "
+                    + ", ".join(str(r.get("original", "?")) for r in live[:3]))
     elif rp:
         Log.warn(f"URL-injection watch: {rp} installed source(s) changed and were "
                  f"re-gated + re-pinned. Review: prometheus skills audit")
@@ -11493,7 +11896,9 @@ def cmd_quarantine(args, osi: "OSInfo") -> int:
         entries = sorted(_quarantine_list(), key=lambda m: str(m.get("quarantined_at", "")),
                          reverse=True)
         if JSON_OUT:
-            return emit_json({"command": "quarantine", "action": "list", "entries": [{
+            # `ok` is not optional: every consumer decides success with it, and this was the
+            # one envelope in the command surface that omitted it.
+            return emit_json({"command": "quarantine", "action": "list", "ok": True, "entries": [{
                 "dir": e.get("_dir"), "original_path": e.get("original_path"),
                 "verdict": e.get("verdict"), "reasons": (e.get("blocking_reasons") or [])[:4],
                 "quarantined_at": e.get("quarantined_at"), "hmac_ok": _quar_hmac_ok(e),
@@ -11739,8 +12144,28 @@ def cmd_skills_audit(args, osi: "OSInfo") -> int:
     ok = exit_code == 0
 
     if JSON_OUT:
-        return emit_json({"command": "skills-audit", "ok": ok, "summary": summary,
-                          "skills": skills, "_exit": exit_code})
+        # The envelope contract is that an `ok:false` carries an `error` saying WHY. This one
+        # emitted none, so every consumer that branches on `.ok` saw a failure with nothing to
+        # report — and here `ok:false` does not even mean "the command failed", it means "drift
+        # was detected", which is the scan working exactly as intended. Say that.
+        detail = ", ".join(
+            f"{n} {label}"
+            for label, n in (
+                ("re-pinned", len(res["repinned"])),
+                ("awaiting review", len(res["drift_review"])),
+                ("quarantined", len(res["quarantined"])),
+                ("unreadable", len(res["errors"])),
+            )
+            if n
+        )
+        env = {"command": "skills-audit", "ok": ok, "summary": summary,
+               "skills": skills, "_exit": exit_code}
+        if not ok:
+            env["error"] = (
+                f"content drift detected in installed sources: {detail}. "
+                "Run `prometheus skills audit` for the per-source detail."
+            )
+        return emit_json(env)
 
     Log.head("URL-injection source audit (L5 content-pinning)")
     total = sum(summary.values())
@@ -11910,8 +12335,16 @@ def cmd_skills(args, osi: OSInfo) -> int:
             print(f"  {s:<36} {Log._c(st, col)}")
         return 0
     if not args.skill:
+        # Under --json this printed a bare `FAIL …` line and NO envelope, so the CLI reported
+        # "prometheus.py produced no JSON on stdout (crashed before emitting)" — the user was
+        # shown an internal diagnostic about a crash that never happened, instead of "you left
+        # out the skill name". Every --json path must emit exactly one JSON object.
+        if JSON_OUT:
+            return emit_json({"command": "skills", "ok": False, "action": action,
+                "error": f"`skills {action}` needs a skill name", "hint": "skills list",
+                "_exit": 1})
         Log.err(f"`skills {action}` needs a skill name (see `skills list`)")
-        return 2
+        return 1
     fn = {"enable": enable_skill, "disable": disable_skill,
           "mute": mute_skill, "unmute": unmute_skill}[action]
     ok = fn(args.skill)
@@ -12338,7 +12771,15 @@ def _models_config(args) -> int:
                 return emit_json({"command": "models", "ok": False, "action": "config", "error": str(e), "_exit": 2})
             Log.err(str(e)); return 2
         if JSON_OUT:
-            return emit_json({"command": "models", "ok": True, "action": "config", "models_root": str(root), "exists": True})
+            # `exists` is reported HONESTLY: under --dry-run the folder was not created, so
+            # claiming True would be the same lie the mutation itself was. `dry_run` tells a
+            # machine caller the setting was NOT persisted.
+            return emit_json({"command": "models", "ok": True, "action": "config",
+                              "models_root": str(root), "exists": root.exists(),
+                              **({"dry_run": True} if DRY_RUN else {})})
+        if DRY_RUN:
+            Log.ok(f"[dry-run] models_root would be set: {root} (nothing written)")
+            return 0
         Log.ok(f"models_root set: {root}")
         return 0
     root = get_models_root()
@@ -12414,7 +12855,6 @@ def cmd_models(args, osi: OSInfo) -> int:
 #  keeps its stuff, what's in it — then act globally or per-agent with full
 #  clarity on which tools are Claude-only / agent-specific / universal.
 # ============================================================================
-PROM_DIR = HOME / ".config" / "prometheus"
 SESSION_REPORT = PROM_DIR / "last-run.md"
 PURGE_DIR = PROM_DIR / "purged"
 STALE_DAYS = 120                                    # config untouched longer = "stale"
@@ -12482,6 +12922,15 @@ def set_models_root(path: str) -> Path:
     expanded = Path(os.path.expanduser(os.path.expandvars(str(path)))).resolve()
     if expanded.exists() and not expanded.is_dir():
         raise RuntimeError(f"{expanded} exists but is not a directory")
+    # --dry-run means NOTHING on disk changes. Validation above still runs (a dry run that
+    # reports success for a path it would have rejected is worthless), but the mkdir and the
+    # config write below are exactly the two mutations the flag exists to withhold: without
+    # this, `prometheus --dry-run models config --set-root DIR` CREATED DIR and PERSISTED the
+    # new models_root, then reported ok — a dry run that silently repointed the user's model
+    # library. Callers surface the dry-run state; see `_models_config`.
+    if DRY_RUN:
+        Log.step(f"[dry-run] would create {expanded} and set models_root")
+        return expanded
     try:
         expanded.mkdir(parents=True, exist_ok=True)
     except OSError as e:
@@ -13540,7 +13989,27 @@ global flags go BEFORE the subcommand (e.g. `%(prog)s --verbose install all`).
 #  a rich card + a deep tutorial + every install method. Powers the CLI verbs
 #  and the GUI's [Install] [Remove] [Learn more] buttons (via --json).
 # ============================================================================
-DOSSIER_DIR = Path(__file__).resolve().parent / "AI_SKILLS_WONDERLAND"
+def _dossier_dir() -> Path:
+    """Where the rich dossiers live: `$PROMETHEUS_DOSSIER_DIR`, else beside the engine.
+
+    The default is `<repo>/AI_SKILLS_WONDERLAND`, which is right for a checkout that still
+    carries them. It is NOT right for every install: on this machine the whole directory was
+    relocated (a repo-hygiene pass moved the docs to `~/ALPHA_local_only/PROMETHEUS/
+    AI_SKILLS_WONDERLAND/`), leaving the engine pointed at a directory with zero `*.md` files —
+    so `tutorial`, `methods` and `describe` answered "no tutorial/dossier found for '<id>'" for
+    EVERY catalog id, which reads as "you typed the wrong id" rather than "the docs are not
+    here". Measured: 6/6 real ids failed, and `DOSSIER_DIR.glob('*.md')` returned nothing.
+
+    An env override is the honest fix — the engine cannot guess where someone moved them, and
+    inventing dossiers to fill the gap would be worse than saying nothing.
+    """
+    override = os.environ.get("PROMETHEUS_DOSSIER_DIR", "").strip()
+    if override:
+        return Path(override).expanduser()
+    return Path(__file__).resolve().parent / "AI_SKILLS_WONDERLAND"
+
+
+DOSSIER_DIR = _dossier_dir()
 
 
 def _catalog_index() -> dict[str, tuple[str, object]]:
@@ -13590,11 +14059,25 @@ def _no_dossier_message(idd: str) -> str:
     """The dossier catalog (AI_SKILLS_WONDERLAND/) is the maintainer's own curated content and
     is not part of this repo — every id will hit this path on a fresh clone. Say THAT, rather
     than a per-id "not found" that reads like a typo or a missing single file."""
-    if not DOSSIER_DIR.exists():
+    absent = not DOSSIER_DIR.exists()
+    empty = False
+    if not absent:
+        try:
+            empty = next(DOSSIER_DIR.glob("*.md"), None) is None
+        except OSError:
+            empty = True
+    if absent or empty:
+        # A directory that exists but holds no *.md is the SAME situation as one that is not
+        # there, and it is the commoner one: the catalog gets relocated (a repo-hygiene pass
+        # moving docs out of the tree) and the engine keeps pointing at the empty shell. Saying
+        # "not found for '<id>'" there reads as a typo; it is nothing to do with the id.
+        where = "isn't part of this checkout (it's maintained separately)" if absent else (
+            f"directory has no dossiers in it ({DOSSIER_DIR})"
+        )
         return (
-            f"no tutorial/dossier for '{idd}' — the dossier catalog isn't part of this "
-            "checkout (it's maintained separately), so no id has one here. `describe`, "
-            "`list` and installs all still work without it."
+            f"no tutorial/dossier for '{idd}' — the dossier catalog {where}, so no id has one "
+            "here. Point PROMETHEUS_DOSSIER_DIR at the directory if you keep them elsewhere. "
+            "`describe`, `list` and installs all still work without it."
         )
     return f"no tutorial/dossier found for '{idd}'."
 
@@ -13654,6 +14137,18 @@ def cmd_describe(args, osi: OSInfo) -> int:
     return 0
 
 
+def _read_dossier(path: Path) -> str:
+    """Read a dossier's markdown, tolerating bytes that are not valid UTF-8.
+
+    `path.read_text()` raised UnicodeDecodeError on a dossier containing a latin-1 accent, and
+    `tutorial`/`methods` died with a raw decoder message (and, before the crash guard, "please
+    report this bug"). A stray byte in a DOCUMENTATION file must not take the command down —
+    the user wants to read the tutorial, and one mangled character is a far better outcome than
+    no tutorial at all. `errors="replace"` marks the damage visibly rather than hiding it.
+    """
+    return path.read_text(encoding="utf-8", errors="replace")
+
+
 def cmd_tutorial(args, osi: OSInfo) -> int:
     """Print the deep tutorial (the dossier markdown) — the 'Learn more' button."""
     idd = getattr(args, "id", None)
@@ -13668,7 +14163,7 @@ def cmd_tutorial(args, osi: OSInfo) -> int:
         if JSON_OUT:
             return emit_json({"command": "tutorial", "ok": False, "error": _no_dossier_message(idd), "_exit": 2})
         Log.err(_no_dossier_message(idd)); return 2
-    text = path.read_text()
+    text = _read_dossier(path)
     if JSON_OUT:
         return emit_json({"command": "tutorial", "ok": True, "id": idd, "text": text})
     print(text)
@@ -13689,7 +14184,7 @@ def cmd_methods(args, osi: OSInfo) -> int:
         if JSON_OUT:
             return emit_json({"command": "methods", "ok": False, "error": _no_dossier_message(idd), "_exit": 2})
         Log.err(_no_dossier_message(idd)); return 2
-    text = path.read_text()
+    text = _read_dossier(path)
     # slice the "## Install" section up to the next top-level "## "
     lines = text.splitlines()
     out, capture = [], False
@@ -13717,6 +14212,80 @@ def cmd_methods(args, osi: OSInfo) -> int:
 #  how to improve it. Authorized-use-by-design — never scans third parties; for
 #  deeper testing of assets you own, it points to the ROE-gated `pentest` armory.
 # ============================================================================
+# A listen address bound to one of these is reachable from off-box; anything else is not.
+_WILDCARD_LISTEN_HOSTS = {"*", "0.0.0.0", "::", "[::]", "[::ffff:0.0.0.0]"}
+
+
+def _listen_host(addr: str) -> str:
+    """The host half of a `host:port` listen address, IPv6 brackets kept."""
+    addr = addr.strip()
+    if addr.startswith("["):
+        end = addr.find("]")
+        return addr[:end + 1] if end != -1 else addr
+    return addr.rsplit(":", 1)[0] if ":" in addr else addr
+
+
+def _public_listeners(out: str, tool: str) -> list:
+    """Rows of `lsof -nP -iTCP -sTCP:LISTEN` / `ss -tlnp` whose LOCAL address is a wildcard.
+
+    Only the local address may be inspected. `ss` prints a Peer Address:Port column that reads
+    `0.0.0.0:*` (`*:*` on older iproute2) for EVERY IPv4 LISTEN socket, so a substring search over
+    the whole line flags every loopback-bound service as public — while a genuinely public IPv6
+    listener renders as `[::]:8080` and matches none of the IPv4 needles, so it is missed. Both
+    directions are wrong, on a verb whose entire output is a security verdict.
+    """
+    rows = []
+    for line in out.splitlines():
+        parts = line.split()
+        if not parts:
+            continue
+        if tool == "ss":
+            if parts[0].lower() in ("state", "netid"):      # column header
+                continue
+            if len(parts) < 4 or parts[0].upper() != "LISTEN":
+                continue
+            addr = parts[3]                                  # State Recv-Q Send-Q Local:Port …
+        else:
+            if "(LISTEN)" not in parts:
+                continue
+            i = parts.index("(LISTEN)")
+            if i == 0:
+                continue
+            addr = parts[i - 1]
+        if _listen_host(addr) in _WILDCARD_LISTEN_HOSTS:
+            rows.append(line)
+    return rows
+
+
+def _sshd_directive(text: str, key: str) -> Optional[str]:
+    """The EFFECTIVE value of an sshd_config keyword, or None when it is not set.
+
+    The check used to be `"passwordauthentication yes" in text.lower()` over the whole file,
+    which matches the COMMENTED-OUT default line every stock sshd_config ships:
+    `#PasswordAuthentication yes`. On a machine with password auth disabled, `harden` reported
+    "SSH allows password authentication" — a false alarm in a security tool, which is worse than
+    silence because it teaches the user to discount the output. Measured against
+    /etc/ssh/sshd_config line 64 (`#PasswordAuthentication yes`) on this machine.
+
+    sshd_config is line-based: `#` starts a comment, and where a keyword is repeated the FIRST
+    occurrence wins. Directives inside a `Match` block apply conditionally; this reads the global
+    section only, which is the conservative reading for a coarse warning.
+    """
+    key = key.lower()
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = line.replace("=", " ").split()
+        if len(parts) < 2:
+            continue
+        if parts[0].lower() == "match":
+            break  # stop at the first Match block: past here the settings are conditional
+        if parts[0].lower() == key:
+            return parts[1].lower()
+    return None
+
+
 def cmd_harden(args, osi: OSInfo) -> int:
     is_mac = sys.platform == "darwin"
     Log.head("Harden your vault — local security posture (read-only · THIS machine only)")
@@ -13727,12 +14296,14 @@ def cmd_harden(args, osi: OSInfo) -> int:
     # 1) services listening on ALL interfaces
     try:
         if shutil.which("lsof"):
+            tool = "lsof"
             out = subprocess.run(["lsof", "-nP", "-iTCP", "-sTCP:LISTEN"], capture_output=True, text=True, timeout=12).stdout
         elif shutil.which("ss"):
+            tool = "ss"
             out = subprocess.run(["ss", "-tlnp"], capture_output=True, text=True, timeout=12).stdout
         else:
-            out = ""
-        public = [l for l in out.splitlines() if ("0.0.0.0" in l or "*:" in l or ":::" in l)]
+            tool, out = "", ""
+        public = _public_listeners(out, tool) if tool else []
         if public:
             findings.append(("warn", f"{len(public)} service(s) listening on ALL interfaces (0.0.0.0/*)",
                              "bind sensitive services to 127.0.0.1; expose only via a trusted reverse proxy / VPN (Tailscale, Cloudflare)"))
@@ -13762,10 +14333,10 @@ def cmd_harden(args, osi: OSInfo) -> int:
     try:
         sshd = Path("/etc/ssh/sshd_config")
         if sshd.exists() and os.access(sshd, os.R_OK):
-            t = sshd.read_text(errors="ignore").lower()
-            if "permitrootlogin yes" in t:
+            text = sshd.read_text(errors="ignore")
+            if _sshd_directive(text, "permitrootlogin") == "yes":
                 findings.append(("warn", "SSH permits root login", "set `PermitRootLogin no` in /etc/ssh/sshd_config, then reload sshd"))
-            if "passwordauthentication yes" in t:
+            if _sshd_directive(text, "passwordauthentication") == "yes":
                 findings.append(("warn", "SSH allows password authentication", "use keys: `PasswordAuthentication no` (after adding your public key)"))
         else:
             findings.append(("info", "no readable sshd_config (SSH server likely off — good)", ""))
@@ -13835,6 +14406,628 @@ def cmd_harden(args, osi: OSInfo) -> int:
 #                ("leave-PC"/detach). bypass-permissions + system-prompt injection
 #                are typed-confirm gated.
 # ============================================================================
+# ============================================================================
+#  SECTION 6H-bis — REASONING EFFORT (the `/think` ladder), Python side
+#
+#  The TypeScript hosts (CLI, Studio, VS Code) resolve a user-facing effort tier
+#  — off < low < medium < high < max — against a capability table, because the
+#  backends do not share a concept: OpenAI-compatible servers take a
+#  `reasoning_effort` string, Ollama's native API a `think` field, Anthropic and
+#  Gemini a token budget or their own enum, gpt-oss a literal line of English,
+#  Qwen3 a trained-on token, and several models take nothing at all.
+#
+#  Sending the wrong one is not a no-op: it is a hard 400 on a GPT-4-class model
+#  and a silent nothing on LM Studio. So Python must not guess either.
+#
+#  SINGLE SOURCE OF TRUTH. The table is authored once, in
+#  studio/packages/core/src/ai/effort/rules.ts, and PUBLISHED to
+#  studio/config/effort-capabilities.builtin.json by
+#  studio/scripts/emit-effort-rules.mjs. This module reads that artifact; it does
+#  not carry its own copy. A TS-side rule added without regenerating fails a test
+#  on the TS side rather than silently leaving Python on a stale table.
+#
+#  Layering matches the TypeScript exactly: builtins, then ~/.prometheus/, then
+#  the project's .prometheus/ — later wins a tie, because the resolver scores how
+#  SPECIFIC each match is and a probe outranks any name guess.
+# ============================================================================
+
+EFFORT_TIERS = ("off", "low", "medium", "high", "max")
+_EFFORT_RULES_FILENAME = "effort-capabilities.json"
+_EFFORT_BUILTIN_ARTIFACT = (
+    Path(__file__).resolve().parent / "studio" / "config" / "effort-capabilities.builtin.json"
+)
+
+# Graded prose for a model with no request-parameter knob. Mirrors
+# packages/core/src/ai/effort/emulation.ts — the SAME words, so a tier means the
+# same thing whichever surface asked for it. `off` is absent on purpose: the
+# honest emulation of "do not deliberate" is silence, not a plea to think less.
+_EFFORT_EMULATION = {
+    "low": "Answer efficiently: keep your reasoning brief and give a direct response.",
+    "medium": (
+        "Think through the problem for a moment before answering, but keep the "
+        "deliberation short."
+    ),
+    "high": (
+        "Think carefully before you answer: consider edge cases, check your own "
+        "reasoning, and only respond once you are confident it is correct. Do not "
+        "shortcut this."
+    ),
+    "max": (
+        "Reason through this as thoroughly as you can before answering: enumerate the "
+        "alternatives, check your logic step by step, and only give your final answer "
+        "once you have verified it. Do not rush to a conclusion."
+    ),
+}
+# Mechanisms that already carry their own trained-on prompt text; never emulate on top.
+_EFFORT_OWN_PROMPT = ("system-prompt-line", "prompt-soft-switch")
+
+
+def _effort_read_rules(path: Path) -> tuple[list[dict], list[str]]:
+    """Parse one layer. Returns (rules, notes). A missing file is not a problem.
+
+    Fail-soft but never silent: a malformed override is reported, because a rule
+    the user believes is in force but which was dropped is worse than no override."""
+    if not path.exists():
+        return [], []
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as e:
+        return [], [f"{path}: not valid JSON — {e}"]
+    # A file that declares no `rules` key declares NOTHING — an empty layer, not an error.
+    # `parseEffortRules` draws that line (`list === undefined` returns no errors; only a
+    # PRESENT-but-wrong-typed `rules` is refused) and this reported a spurious warning for the
+    # same file, so `{"$comment": "..."}` was a clean config on one surface and a complaint on
+    # the other.
+    rules = raw.get("rules", _EFFORT_MISSING) if isinstance(raw, dict) else raw
+    if rules is _EFFORT_MISSING or rules is None:
+        return [], []
+    if not isinstance(rules, list):
+        return [], [f'{path}: expected "rules" to be an array']
+    out, notes = [], []
+    for i, r in enumerate(rules):
+        err = _effort_validate_rule(r, i)
+        if err:
+            notes.append(f"{path}: {err}")
+            continue
+        out.append(r)
+    return out, notes
+
+
+# Every mechanism `_effort_build_patch` can actually build a patch for. A file naming
+# anything else must be REFUSED, not accepted: an unknown mechanism falls through to
+# `{"kind": "none"}`, so the tier reads as applied while nothing goes on the wire —
+# the exact silent success this whole subsystem exists to prevent.
+_EFFORT_MECHANISMS = (
+    "effort-enum", "token-budget", "native-graded", "binary-toggle", "template-kwarg",
+    "system-prompt-line", "prompt-soft-switch", "always-on", "none",
+)
+# Mechanisms whose patch is a BODY field: without `field` they silently emit nothing.
+_EFFORT_NEEDS_FIELD = ("effort-enum", "native-graded", "binary-toggle", "token-budget")
+
+
+def _effort_validate_rule(r, i: int) -> Optional[str]:
+    """Validate ONE rule. Returns None when it is usable, else the reason it was refused.
+
+    Deliberately the SAME strictness as `rule-store.ts`'s `parseRule`. Two parsers with
+    different standards is worse than one: an override the TypeScript hosts reject but
+    Python accepts means `/think high` means different things in Studio and in the Python
+    CLI, on the same machine, with the same file."""
+    at = f"rule[{i}]"
+    if not isinstance(r, dict):
+        return f"{at}: not an object"
+    rid = r.get("id")
+    if not isinstance(rid, str) or not rid.strip():
+        return f'{at}: missing "id"'
+    if not isinstance(r.get("match"), dict):
+        return f'{at} ({rid}): missing "match" object'
+    cap = r.get("cap")
+    if not isinstance(cap, dict):
+        return f'{at} ({rid}): missing "cap" object'
+
+    mech = cap.get("mechanism")
+    if not isinstance(mech, str) or mech not in _EFFORT_MECHANISMS:
+        return f"{at} ({rid}): unknown mechanism {json.dumps(mech)}"
+
+    sup = cap.get("supported")
+    if not isinstance(sup, list) or not all(isinstance(t, str) for t in sup):
+        return f"{at} ({rid}): supported must be an array of strings"
+    for t in sup:
+        if t not in EFFORT_TIERS:
+            return f"{at} ({rid}): unknown tier {json.dumps(t)}"
+
+    if mech in _EFFORT_NEEDS_FIELD and not isinstance(cap.get("field"), str):
+        return f'{at} ({rid}): mechanism "{mech}" requires a "field"'
+    if mech == "template-kwarg" and not isinstance(cap.get("kwarg"), str):
+        return f'{at} ({rid}): mechanism "template-kwarg" requires a "kwarg"'
+
+    # `.get(key, _MISSING)` rather than `.get(key)`: an explicit `"modelIdRegex": null`
+    # is a MALFORMED rule, not an absent key. Collapsing the two made Python accept a rule
+    # `rule-store.ts` refuses (`if (rx !== undefined)` there), and the accepted rule then
+    # matched on runtime alone — one file, two readers, two meanings.
+    prefix = r["match"].get("modelIdPrefix", _EFFORT_MISSING)
+    if prefix is not _EFFORT_MISSING and not isinstance(prefix, str):
+        # `str.startswith` coerces nothing but `_effort_matches` compares with `in`/startswith
+        # on a value the file supplied; a non-string there matches by accident instead of being
+        # refused, which is how a typo becomes a silent rule.
+        return f"{at} ({rid}): modelIdPrefix must be a string"
+
+    # Every SUPPORTED tier must actually produce a patch. The `field`/`kwarg` checks above catch
+    # two shapes of this and no more: `effort-enum` with a field and no `enumMap`, `token-budget`
+    # with no `budgetMap`, a `promptMap` covering half its own `supported` — each parses,
+    # resolves, reports the tier as applied, and sends nothing. Asking the real patch builder is
+    # the only check that cannot drift from what the builder does. Mirrors rule-store.ts.
+    dead = [t for t in sup if _effort_build_patch(t, cap, None).get("kind") == "none"]
+    if dead:
+        return (f"{at} ({rid}): mechanism \"{mech}\" produces nothing for "
+                + ", ".join(json.dumps(t) for t in dead)
+                + " — the tier would report as applied while no setting reaches the model")
+
+    rx = r["match"].get("modelIdRegex", _EFFORT_MISSING)
+    if rx is not _EFFORT_MISSING:
+        if not isinstance(rx, str):
+            return f"{at} ({rid}): modelIdRegex must be a string"
+        try:
+            re.compile(_js_regex_to_py(rx), re.I)
+        except re.error:
+            return f"{at} ({rid}): modelIdRegex is not a valid regular expression"
+    return None
+
+
+_EFFORT_MISSING = object()  # sentinel: "key absent" is not "key present and null"
+
+# JavaScript spells a named group `(?<name>…)`; Python spells it `(?P<name>…)`. Everything
+# else these rules use (classes, alternation, lookahead, lookbehind) is identical in both.
+# `(?<=` and `(?<!` are lookbehind in BOTH dialects and must NOT be rewritten, hence the
+# `[A-Za-z_]` guard on the first character of the name.
+_JS_NAMED_GROUP = re.compile(r"\(\?<(?=[A-Za-z_])")
+
+
+def _js_regex_to_py(rx: str) -> str:
+    """The rule table's regexes are JavaScript source; this is the ONE translation point.
+
+    The overlap is near-total for the constructs these rules use, but it is NOT total, and
+    the gap is not academic: overrides come from a user-written file that BOTH this reader
+    and `rule-store.ts` parse. A construct one dialect compiles and the other rejects means
+    the same file silently means two different things on two surfaces — the exact split this
+    module exists to prevent. Named groups are the one mechanically translatable case; the
+    rest (a unicode-property escape, an empty `[]` class) still raise, and raising is correct — a REPORTED
+    refusal is fine, a silent divergence is not."""
+    return _JS_NAMED_GROUP.sub("(?P<", rx)
+
+
+def effort_rules(cwd: Optional[Path] = None) -> tuple[list[dict], list[str]]:
+    """The effective table: builtins, then the user layer, then the project layer."""
+    notes: list[str] = []
+    rules, n = _effort_read_rules(_EFFORT_BUILTIN_ARTIFACT)
+    notes += n
+    if not rules:
+        notes.append(
+            f"{_EFFORT_BUILTIN_ARTIFACT.name} is missing or empty — "
+            "run `node studio/scripts/emit-effort-rules.mjs`"
+        )
+    user, n = _effort_read_rules(HOME / ".prometheus" / _EFFORT_RULES_FILENAME)
+    notes += n
+    proj: list[dict] = []
+    if os.environ.get("PROM_NO_PROJECT_CONFIG") != "1":
+        d = (cwd or Path.cwd()).resolve()
+        stop = HOME.resolve()
+        user_path = (HOME / ".prometheus" / _EFFORT_RULES_FILENAME).resolve()
+        while True:
+            cand = d / ".prometheus" / _EFFORT_RULES_FILENAME
+            # Running from $HOME itself makes the project candidate BE the user layer. Loading
+            # it again duplicated every rule and every diagnostic — the same override reported
+            # twice, and a `notes` list that made one malformed rule look like two.
+            if cand.exists() and cand.resolve() != user_path:
+                proj, n = _effort_read_rules(cand); notes += n; break
+            if d == stop or d.parent == d:
+                break
+            d = d.parent
+    return rules + user + proj, notes
+
+
+def effort_runtime_from_base_url(base_url: str, locality: Optional[str] = None) -> str:
+    """Classify an endpoint URL into a runtime. Ports are the reliable local signal.
+
+    Never returns "ollama-native": port 11434 answers BOTH the /v1 shim and the
+    native /api/chat, and they take different knobs, so guessing would put a
+    top-level `think` on an OpenAI-shaped body.
+
+    `locality` defaults to None, NOT to "local": the TypeScript twin treats an absent
+    locality as "unknown", and defaulting differently here meant the two resolvers
+    classified the same URL differently — a user override matching
+    `runtime: "openai-compatible"` would fire on one surface and not the other."""
+    u = base_url.lower()
+    if "11434" in u:
+        return "ollama"
+    if "1234" in u:
+        return "lmstudio"
+    if "8080" in u:
+        return "llamacpp"
+    if "8000" in u:
+        return "vllm"
+    if "api.openai.com" in u:
+        return "openai"
+    if "anthropic.com" in u:
+        return "anthropic"
+    if "googleapis.com" in u or "generativelanguage" in u:
+        return "gemini"
+    return "openai-compatible" if locality == "local" else "unknown"
+
+
+def _effort_specificity(m: dict) -> int:
+    """More constraints = more specific; a PROBE outranks a name, because a model id
+    is a guess and a probe is an answer. Mirrors rules.ts exactly."""
+    n = 0
+    if m.get("runtime"): n += 2
+    if m.get("capability"): n += 8
+    if m.get("capabilityAbsent"): n += 8
+    if m.get("modelIdPrefix"): n += 3
+    if m.get("modelIdRegex"): n += 3
+    if m.get("locality"): n += 1
+    return n
+
+
+def _effort_matches(m: dict, model_id: str, runtime: Optional[str],
+                    locality: Optional[str], probed: Optional[list]) -> bool:
+    if m.get("runtime") and m["runtime"] != runtime:
+        return False
+    if m.get("locality") and m["locality"] != locality:
+        return False
+    if "capability" in m:
+        if probed is None or m["capability"] not in probed:
+            return False
+    if "capabilityAbsent" in m:
+        if probed is None or m["capabilityAbsent"] in probed:
+            return False
+    lid = model_id.lower()
+    if m.get("modelIdPrefix") and not lid.startswith(str(m["modelIdPrefix"]).lower()):
+        return False
+    if m.get("modelIdRegex"):
+        if not re.search(_js_regex_to_py(m["modelIdRegex"]), lid, re.I):
+            return False
+    return True
+
+
+_EFFORT_UNKNOWN_CAP = {"mechanism": "none", "supported": [],
+                       "note": "no reasoning control is known for this model"}
+
+
+def effort_capability(model_id: str, runtime: Optional[str] = None,
+                      locality: Optional[str] = None,
+                      probed: Optional[list] = None,
+                      rules: Optional[list[dict]] = None) -> tuple[Optional[dict], dict]:
+    """Pick the winning rule. Highest specificity wins; a TIE goes to the LATER rule,
+    which is what makes an appended user/workspace override an override."""
+    table = rules if rules is not None else effort_rules()[0]
+    best, best_score = None, -1
+    for r in table:
+        if not _effort_matches(r.get("match", {}), model_id, runtime, locality, probed):
+            continue
+        s = _effort_specificity(r["match"])
+        if s >= best_score:
+            best, best_score = r, s
+    if best is None:
+        return None, dict(_EFFORT_UNKNOWN_CAP)
+    cap = dict(best["cap"])
+    # Normalise `supported` into ladder order so the clamp below is predictable.
+    cap["supported"] = [t for t in EFFORT_TIERS if t in cap.get("supported", [])]
+    return best, cap
+
+
+def _effort_nearest(want: str, supported: list[str]) -> Optional[str]:
+    """Closest supported tier. Ties break DOWNWARD — silently spending more of the
+    user's money (or their laptop's battery) is the worse surprise.
+
+    EXCEPT across the off/on boundary. `off` is a MODE, not the bottom of the ladder:
+    on a two-value switch (`["off", "medium"]` — Qwen3's `/think` vs `/no_think`) `low`
+    is equidistant from both ends, and the plain downward tie-break resolved it to
+    `off`, so asking for a LITTLE thinking turned thinking off entirely. Distance is
+    the right metric among degrees of thinking and the wrong one across that line.
+    Mirrors `nearestTier` in ai/effort/types.ts."""
+    if not supported:
+        return None
+    if want in supported:
+        return want
+    pool = supported
+    if want != "off" and any(t != "off" for t in supported):
+        pool = [t for t in supported if t != "off"]
+    target = EFFORT_TIERS.index(want)
+    best, best_d = None, 1 << 30
+    for t in pool:
+        d = abs(EFFORT_TIERS.index(t) - target)
+        if d < best_d:
+            best, best_d = t, d
+    return best
+
+
+def effort_resolve(tier: str, cap: dict, max_tokens: Optional[int] = None,
+                   force: bool = False) -> dict:
+    """What `tier` actually means for this model.
+
+    Returns {requested, applied, mechanism, patch, degraded, emulation}. `applied`
+    is the tier IN FORCE by any route — a tier carried by prose has an empty patch
+    and is still applied, because an instruction is in front of the model and the
+    answer will differ. `applied: None` means genuinely nothing is happening."""
+    if tier not in EFFORT_TIERS:
+        # TypeScript makes this a compile error (`EffortTier` is a union); Python has no such
+        # guard, and the forced path indexes a fixed vocabulary — so an out-of-ladder tier used
+        # to raise KeyError out of a function whose entire contract is that it never throws at
+        # a transport. Refuse cleanly instead.
+        return {"requested": tier, "applied": None, "mechanism": cap.get("mechanism", "none"),
+                "patch": {"kind": "none"},
+                "degraded": {"reason": "no-capability",
+                             "message": f"{tier!r} is not a reasoning-effort tier "
+                                        f"(expected one of {', '.join(EFFORT_TIERS)})"},
+                "emulation": None, "constraints": cap.get("constraints")}
+    mech = cap.get("mechanism", "none")
+    supported = cap.get("supported", [])
+    note = cap.get("note")
+
+    def _forced(why: str) -> dict:
+        vocab = {"off": "none", "low": "low", "medium": "medium", "high": "high", "max": "max"}
+        return {"requested": tier, "applied": tier, "mechanism": mech,
+                "patch": {"kind": "body", "path": "reasoning_effort", "value": vocab[tier]},
+                "degraded": {"reason": "forced",
+                             "message": f"{why}; sent anyway because effort forcing is on — "
+                                        "the provider may reject this request"},
+                "emulation": None, "constraints": cap.get("constraints")}
+
+    if mech == "always-on":
+        if force:
+            return _forced(note or "this model always reasons at a fixed depth")
+        return {"requested": tier, "applied": None, "mechanism": mech,
+                "patch": {"kind": "none"},
+                "degraded": {"reason": "always-on",
+                             "message": note or "this model always reasons at a fixed depth"},
+                "emulation": None, "constraints": cap.get("constraints")}
+
+    if mech == "none" or not supported:
+        if force:
+            return _forced(note or "this model has no reasoning control")
+        emu = _EFFORT_EMULATION.get(tier)
+        if emu:
+            return {"requested": tier, "applied": tier, "mechanism": mech,
+                    "patch": {"kind": "none"},
+                    "degraded": {"reason": "emulated",
+                                 "message": f"{note or 'this model has no reasoning control'}; "
+                                            "using step-by-step prompting"},
+                    "emulation": {"via": "prompt-cot", "text": emu},
+                    "constraints": cap.get("constraints")}
+        reason = "runtime-ignores" if (note and "ignores" in note) else "no-capability"
+        return {"requested": tier, "applied": None, "mechanism": mech,
+                "patch": {"kind": "none"},
+                "degraded": {"reason": reason,
+                             "message": note or "this model has no reasoning control"},
+                "emulation": None, "constraints": cap.get("constraints")}
+
+    applied = _effort_nearest(tier, supported)
+    if applied is None:
+        return {"requested": tier, "applied": None, "mechanism": mech,
+                "patch": {"kind": "none"},
+                "degraded": {"reason": "no-capability",
+                             "message": note or "this model has no reasoning control"},
+                "emulation": None, "constraints": cap.get("constraints")}
+
+    degraded = None
+    if applied != tier:
+        degraded = {"reason": "tier-clamped",
+                    "message": (f"{note}; {tier} served as {applied}" if note
+                                else f"{tier} is not available on this model; served as {applied}")}
+
+    patch = _effort_build_patch(applied, cap, max_tokens)
+    if cap.get("optimistic") and degraded is None:
+        degraded = {"reason": "runtime-ignores",
+                    "message": note or "this runtime may ignore the setting depending on the model template"}
+    emu = _EFFORT_EMULATION.get(tier) if cap.get("optimistic") else None
+    return {"requested": tier, "applied": applied, "mechanism": mech, "patch": patch,
+            "degraded": degraded,
+            "emulation": {"via": "prompt-cot", "text": emu} if emu else None,
+            "constraints": cap.get("constraints")}
+
+
+def _effort_build_patch(tier: str, cap: dict, max_tokens: Optional[int]) -> dict:
+    mech = cap.get("mechanism")
+    field = cap.get("field")
+    if mech in ("effort-enum", "native-graded"):
+        if not field:
+            return {"kind": "none"}
+        if tier == "off" and cap.get("offValue") is not None:
+            return {"kind": "body", "path": field, "value": cap["offValue"]}
+        v = (cap.get("enumMap") or {}).get(tier)
+        return {"kind": "none"} if v is None else {"kind": "body", "path": field, "value": v}
+    if mech == "binary-toggle":
+        if not field:
+            return {"kind": "none"}
+        on = cap["onValue"] if cap.get("onValue") is not None else True
+        off = cap["offValue"] if cap.get("offValue") is not None else False
+        return {"kind": "body", "path": field, "value": off if tier == "off" else on}
+    if mech == "token-budget":
+        if not field:
+            return {"kind": "none"}
+        b = cap.get("budgetBounds") or {}
+        if tier == "off":
+            dis = b.get("disableWith")
+            return {"kind": "none"} if dis is None else {"kind": "body", "path": field, "value": dis}
+        n = (cap.get("budgetMap") or {}).get(tier)
+        if n is None:
+            return {"kind": "none"}
+        if b:
+            n = min(max(n, b.get("min", n)), b.get("max", n))
+        if (cap.get("constraints") or {}).get("budgetUnderMaxTokens") and max_tokens is not None:
+            n = min(n, max(1, max_tokens - 1))
+        return {"kind": "body", "path": field, "value": n}
+    if mech == "template-kwarg":
+        kw = cap.get("kwarg")
+        return {"kind": "none"} if not kw else {"kind": "kwarg", "name": kw, "value": tier != "off"}
+    if mech in ("system-prompt-line", "prompt-soft-switch"):
+        text = (cap.get("promptMap") or {}).get(tier)
+        if text is None:
+            return {"kind": "none"}
+        return {"kind": "prompt", "slot": cap.get("promptSlot") or "system-append", "text": text}
+    return {"kind": "none"}
+
+
+def _effort_set_path(obj: dict, path: str, value) -> None:
+    """Set a dotted path, creating intermediate dicts but PRESERVING existing ones —
+    `generationConfig.thinkingConfig.thinkingBudget` must not wipe a temperature
+    already sitting in `generationConfig`."""
+    parts = path.split(".")
+    cur = obj
+    for k in parts[:-1]:
+        if not isinstance(cur.get(k), dict):
+            cur[k] = {}
+        cur = cur[k]
+    cur[parts[-1]] = value
+
+
+def effort_apply(body: dict, res: Optional[dict]) -> dict:
+    """Apply a resolution's BODY/KWARG patch to an outgoing request. Returns a NEW dict.
+    A prompt-shaped patch belongs to the message list — see `effort_apply_messages`."""
+    if not res:
+        return dict(body)
+    out = dict(body)
+    cons = res.get("constraints") or {}
+    if cons.get("noTemperature"):
+        out.pop("temperature", None)
+    p = res.get("patch") or {}
+    if p.get("kind") == "body":
+        value = p["value"]
+        if cons.get("budgetUnderMaxTokens") and isinstance(out.get("max_tokens"), int) \
+                and isinstance(value, int):
+            value = min(value, max(1, out["max_tokens"] - 1))
+        _effort_set_path(out, p["path"], value)
+    elif p.get("kind") == "kwarg":
+        prev = out.get("chat_template_kwargs")
+        out["chat_template_kwargs"] = {**(prev if isinstance(prev, dict) else {}),
+                                       p["name"]: p["value"]}
+    if cons.get("pinTemperature") is not None:
+        out["temperature"] = cons["pinTemperature"]
+    if cons.get("minMaxTokens") is not None:
+        cur = out.get("max_tokens")
+        if isinstance(cur, int) and 0 < cur < cons["minMaxTokens"]:
+            out["max_tokens"] = cons["minMaxTokens"]
+    return out
+
+
+def effort_apply_messages(messages: list[dict], res: Optional[dict]) -> list[dict]:
+    """Apply the PROMPT half: a trained-on literal (gpt-oss `Reasoning: high`, Qwen3
+    `/think`) or the emulation nudge for a model with no parameter at all."""
+    if not res:
+        return list(messages)
+    out = [dict(m) for m in messages]
+    p = res.get("patch") or {}
+    text, slot = None, "system-append"
+    if p.get("kind") == "prompt":
+        text, slot = p["text"], p.get("slot", "system-append")
+    elif res.get("emulation") and res["mechanism"] not in _EFFORT_OWN_PROMPT:
+        text = res["emulation"]["text"]
+    if not text:
+        return out
+    if slot == "system-append":
+        for m in out:
+            if m.get("role") == "system":
+                m["content"] = f"{m.get('content', '')}\n{text}".strip()
+                return out
+        out.insert(0, {"role": "system", "content": text})
+        return out
+    for m in reversed(out):
+        if m.get("role") == "user":
+            m["content"] = f"{m.get('content', '')} {text}".strip()
+            return out
+    return out
+
+
+def _effort_split_reasoning(text: str, tag: Optional[str]) -> tuple[str, str]:
+    """Split inline `<tag>…</tag>` deliberation out of a completion. Returns (visible, thinking).
+
+    The Python twin of `ai/effort/reasoning-tag.ts`, minus the streaming state machine: this
+    reader is non-streaming (`"stream": False`), so the whole body is in hand and a single pass
+    is enough. The SEMANTICS are the ones that module fixed and must match it exactly —
+    including the last rule, which is the non-obvious one:
+
+      an UNTERMINATED open tag flushes as THINKING, not as text. A model cut off mid-thought
+      was still thinking, and promoting a truncated deliberation to "the answer" is the exact
+      failure this splits out.
+
+    `reasoningTag` has been in the capability table since it was written and has been read by
+    four TypeScript surfaces (backends.ts, agent-runtime.ts, ai-ipc.ts, the VS Code client) and
+    by nothing here — so `prometheus chat --local` on an R1-style model printed paragraphs of
+    deliberation as the answer, and in the REPL fed them back as assistant context every turn."""
+    if not tag or not text:
+        return text, ""
+    open_t, close_t = f"<{tag}>", f"</{tag}>"
+    visible, thinking, rest, inside = [], [], text, False
+    while rest:
+        needle = close_t if inside else open_t
+        at = rest.find(needle)
+        if at < 0:
+            (thinking if inside else visible).append(rest)
+            break
+        (thinking if inside else visible).append(rest[:at])
+        rest = rest[at + len(needle):]
+        inside = not inside
+    return "".join(visible), "".join(thinking)
+
+
+def effort_probe_capabilities(base_url: str, model: str, timeout: float = 2.5) -> Optional[list]:
+    """Ask an Ollama daemon what this model can do (`/api/show` -> `capabilities`).
+
+    This is what makes the difference between `/think` working and reporting "not
+    available": the probe-driven rules outrank every model-name guess, deliberately,
+    because reasoning support is version-scoped (Gemma 2/3 cannot think, Gemma 4 can).
+
+    LOCAL ONLY and bounded: a wedged runner that accepts the socket and never answers
+    must not hang the caller. Returns None when the probe did not reach an Ollama."""
+    import http.client, urllib.request, urllib.error
+    root = base_url.rstrip("/")
+    if root.endswith("/v1"):
+        root = root[:-3].rstrip("/")
+    try:
+        req = urllib.request.Request(
+            root + "/api/show", data=json.dumps({"model": model}).encode(),
+            method="POST", headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            payload = json.loads(r.read())
+    except (urllib.error.URLError, http.client.HTTPException,
+            OSError, ValueError, TimeoutError):
+        # `http.client.HTTPException` is NOT an OSError — `IncompleteRead` and `BadStatusLine`
+        # escaped every arm here and crashed the whole chat command from a best-effort probe.
+        return None
+    caps = payload.get("capabilities")
+    if isinstance(caps, list):
+        return [c for c in caps if isinstance(c, str)]
+    return None
+
+
+def _effort_json_block(requested: Optional[str], res: Optional[dict]) -> dict:
+    """The `effort` key for a machine envelope, or {} when the user asked for nothing.
+
+    Reports what ACTUALLY happened, not what was asked: `applied` is the tier in force by any
+    route, `mechanism` says how, and `degraded` names the reason when those differ. A consumer
+    that only ever saw the requested tier could not tell a working knob from an emulated one."""
+    if not requested:
+        return {}
+    if not res:
+        return {"effort": {"requested": requested, "applied": None, "mechanism": "none"}}
+    d = res.get("degraded")
+    return {"effort": {
+        "requested": res["requested"],
+        "applied": res["applied"],
+        "mechanism": res["mechanism"],
+        "wire": res["patch"].get("kind"),
+        **({"degraded": {"reason": d["reason"], "message": d["message"]}} if d else {}),
+        **({"emulated_via": res["emulation"]["via"]} if res.get("emulation") else {}),
+    }}
+
+
+def describe_effort(res: Optional[dict]) -> str:
+    """One-line summary for `--json` and the human line. `not available` is a narrow
+    claim: always-on, or `off` on a model that cannot reason at all."""
+    if not res or res.get("applied") is None:
+        return "not available"
+    return res["applied"]
+
+
 CHAT_LOCAL_ENDPOINTS = {
     "ollama":   "http://localhost:11434/v1",
     "lmstudio": "http://localhost:1234/v1",
@@ -14019,11 +15212,12 @@ def _ensure_ollama_daemon() -> bool:
     return False
 
 
-def chat_local(model: str, prompt: Optional[str], runner: str = "ollama") -> int:
+def chat_local(model: str, prompt: Optional[str], runner: str = "ollama",
+               effort: Optional[str] = None, force_effort: bool = False) -> int:
     """Agentic local chat: talk to a local OpenAI-compatible server (no cloud, no
     cost). One-shot if `prompt` given, else a small REPL. Fails gracefully if the
     runner isn't up."""
-    import urllib.request, urllib.error
+    import http.client, urllib.request, urllib.error
     base = CHAT_LOCAL_ENDPOINTS.get(runner)
     if not base:
         Log.err(f"unknown runner '{runner}'. Choose: {', '.join(CHAT_LOCAL_ENDPOINTS)}"); return 2
@@ -14031,15 +15225,79 @@ def chat_local(model: str, prompt: Optional[str], runner: str = "ollama") -> int
     if runner == "ollama":
         _ensure_ollama_daemon()  # best-effort: start the daemon if the user only has the CLI
 
+    # ── the `/think` ladder ────────────────────────────────────────────────────
+    # Resolve ONCE per session, not per turn: the capability is a property of the
+    # endpoint, and the probe is a network round trip. `None` means the user asked
+    # for nothing, and nothing is what goes on the wire.
+    eff_res = None
+    # Resolved whether or not a tier was asked for. The capability carries `reasoningTag` as
+    # well as the knob, and an R1-style model wraps its thinking in `<think>` on EVERY turn —
+    # tier or no tier — so gating this on `--effort` left the deliberation in the answer.
+    # The Ollama PROBE stays gated: it is a network round-trip and only the knob needs it.
+    rules, eff_notes = effort_rules()
+    probed = effort_probe_capabilities(base, model) if (effort and runner == "ollama") else None
+    _, cap = effort_capability(model, effort_runtime_from_base_url(base, "local"),
+                               "local", probed, rules)
+    reasoning_tag = cap.get("reasoningTag")
+    if effort:
+        for n in eff_notes:
+            Log.warn(f"effort rules: {n}")
+        eff_res = effort_resolve(effort, cap, force=force_effort)
+        if not JSON_OUT:
+            d = eff_res.get("degraded")
+            if eff_res.get("applied") is None:
+                Log.warn(f"think → {effort} (not available — {d['message'] if d else 'no reasoning control'})")
+            elif d and d["reason"] == "emulated":
+                Log.info(f"think → {eff_res['applied']} (emulated — {d['message']})")
+            elif d:
+                Log.info(f"think → {eff_res['applied']} ({d['message']})")
+            else:
+                Log.info(f"think → {eff_res['applied']}")
+
+    # A one-slot box for out-of-band facts about the LAST turn: `ask` returns only the visible
+    # answer, and the JSON envelope still needs the deliberation it split off.
+    last: dict = {}
+
     def ask(msgs: list[dict]) -> Optional[str]:
-        body = json.dumps({"model": model, "messages": msgs, "stream": False}).encode()
+        # The prompt half first (a trained-on literal, or the emulation nudge), then
+        # the body half — so a knobless model still gets the tier, in words.
+        sent = effort_apply_messages(msgs, eff_res) if eff_res else msgs
+        payload = effort_apply({"model": model, "messages": sent, "stream": False}, eff_res)
+        body = json.dumps(payload).encode()
         req = urllib.request.Request(url, data=body, method="POST",
                                      headers={"Content-Type": "application/json",
                                               "Authorization": "Bearer local"})
         try:
             with urllib.request.urlopen(req, timeout=300) as r:
                 data = json.loads(r.read())
-            return data["choices"][0]["message"]["content"]
+            content = data["choices"][0]["message"]["content"]
+            visible, thinking = _effort_split_reasoning(content, reasoning_tag)
+            if thinking:
+                last["thinking"] = thinking
+                if not JSON_OUT:
+                    Log.info(f"({len(thinking)} chars of <{reasoning_tag}> reasoning hidden — -v to show)")
+                    Log.debug(thinking)
+            return visible
+        except urllib.error.HTTPError as e:
+            # MUST precede the URLError arm: HTTPError SUBCLASSES URLError, so every HTTP status
+            # from a perfectly reachable server was being reported as "cannot reach the server"
+            # — with a "start it: ollama serve" hint — while the body that says what actually
+            # went wrong (an unknown model, a rejected `reasoning_effort` value) was discarded.
+            detail = ""
+            try:
+                raw = e.read().decode("utf-8", "replace")[:600]
+                try:
+                    err = json.loads(raw).get("error")
+                    detail = err.get("message") if isinstance(err, dict) else str(err or "")
+                except ValueError:
+                    detail = raw.strip()
+            except (OSError, AttributeError):
+                pass
+            Log.err(f"{runner} refused the request (HTTP {e.code}){': ' + detail if detail else ''}")
+            if e.code == 404:
+                Log.step(f"the server is up but does not know '{model}' — check the model name"
+                         + (f" (`ollama pull {model}`)" if runner == "ollama" else ""))
+            return None
         except urllib.error.URLError as e:
             Log.err(f"cannot reach the local {runner} server at {base} ({e.reason}).")
             if runner == "ollama":
@@ -14047,7 +15305,8 @@ def chat_local(model: str, prompt: Optional[str], runner: str = "ollama") -> int
             else:
                 Log.step("open LM Studio → load a model → 'Start Server' (http://localhost:1234)")
             return None
-        except (KeyError, IndexError, TypeError, ValueError, OSError) as e:  # noqa: BLE001 — never crash the chat
+        except (KeyError, IndexError, TypeError, ValueError, OSError,
+                http.client.HTTPException) as e:  # noqa: BLE001 — never crash the chat
             # IndexError/TypeError guard an empty/malformed `choices` array (a server can
             # legitimately return `choices: []`), which would otherwise crash the turn.
             Log.err(f"unexpected response from {runner}: {e}"); return None
@@ -14059,11 +15318,19 @@ def chat_local(model: str, prompt: Optional[str], runner: str = "ollama") -> int
         if out is None:
             if JSON_OUT:
                 return emit_json({"command": "chat", "ok": False, "mode": "local",
-                                  "error": f"local {runner} server unreachable", "_exit": 1})
+                                  "error": f"local {runner} server unreachable", "_exit": 1,
+                                  **_effort_json_block(effort, eff_res)})
             return 1
         if JSON_OUT:
+            # The human path prints ":: think → high (emulated — …)"; a machine consumer needs
+            # the same fact or it cannot tell an applied tier from a clamped or emulated one.
             return emit_json({"command": "chat", "ok": True, "mode": "local",
-                              "model": model, "runner": runner, "response": out})
+                              "model": model, "runner": runner, "response": out,
+                              # Removed from `response`, not destroyed: a consumer that wants the
+                              # deliberation can still have it, and one that does not is no longer
+                              # handed it as the answer.
+                              **({"reasoning": last["thinking"]} if last.get("thinking") else {}),
+                              **_effort_json_block(effort, eff_res)})
         print(out)
         return 0
     if JSON_OUT:
@@ -14105,7 +15372,9 @@ def cmd_chat(args, osi: OSInfo) -> int:
         Log.step(f"use a terminal chat instead:  prometheus chat --cli {local} [--bypass] [--tmux] [--open]")
         return 2
     if local:
-        return chat_local(local, prompt, runner=getattr(args, "runner", None) or "ollama")
+        return chat_local(local, prompt, runner=getattr(args, "runner", None) or "ollama",
+                          effort=getattr(args, "effort", None),
+                          force_effort=bool(getattr(args, "force_effort", False)))
 
     if not cli:
         if JSON_OUT:
@@ -14118,6 +15387,20 @@ def cmd_chat(args, osi: OSInfo) -> int:
         return 0
 
     # ---- terminal chat (paid CLI) ----
+    # `--effort` is an AGENTIC-mode knob: a terminal chat hands the conversation to another
+    # vendor's CLI, which owns its own reasoning settings and takes none of ours. Accepting the
+    # flag and doing nothing with it is the silent no-op this subsystem exists to eliminate, so
+    # say so rather than let the user believe a tier is in force.
+    if getattr(args, "effort", None) or getattr(args, "force_effort", False):
+        if JSON_OUT:
+            return emit_json({"command": "chat", "ok": False, "mode": "terminal",
+                              "error": "--effort/--force-effort apply to agentic mode only "
+                                       f"(--local); '{cli}' owns its own reasoning settings",
+                              "_exit": 2})
+        Log.err(f"--effort applies to agentic mode only; '{cli}' owns its own reasoning settings.")
+        Log.step(f"agentic:  prometheus chat --local <model> --effort <tier>   ·   "
+                 f"terminal: prometheus chat --cli {cli}   (set effort inside that CLI)")
+        return 2
     bypass = bool(getattr(args, "bypass", False))
     sysf = getattr(args, "system_prompt", None)
     argv, env, notes = build_terminal_cmd(
@@ -14422,6 +15705,15 @@ def build_parser() -> argparse.ArgumentParser:
     p_chat = sub.add_parser("chat", help="9th functionality: agentic LOCAL chat (free) OR terminal chat for paid CLIs (claude/codex/gemini/cursor/opencode) — preview→OPEN, system-prompt, bypass, tmux")
     p_chat.add_argument("--local", metavar="MODEL", help="AGENTIC mode: run in-app against a local model (ollama tag / LM Studio model id)")
     p_chat.add_argument("--runner", choices=["ollama", "lmstudio"], help="local runner for --local (default: ollama)")
+    p_chat.add_argument("--effort", choices=list(EFFORT_TIERS), metavar="TIER",
+                        help="AGENTIC mode: reasoning effort — off|low|medium|high|max. "
+                             "Translated per-backend (reasoning_effort, a token budget, a "
+                             "trained-on prompt line); a model with no knob gets it as a "
+                             "step-by-step instruction instead, and says so.")
+    p_chat.add_argument("--force-effort", action="store_true", dest="force_effort",
+                        help="AGENTIC mode: send the effort knob even where the capability "
+                             "table says this model has none. Off by default — a forwarded "
+                             "reasoning_effort is a hard 400 on some models.")
     p_chat.add_argument("--cli", choices=["claude", "codex", "gemini", "cursor", "opencode"], help="TERMINAL mode: which paid CLI to launch")
     p_chat.add_argument("--model", metavar="M", help="terminal mode: model id for the CLI")
     p_chat.add_argument("--system-prompt", metavar="FILE", dest="system_prompt", help="terminal mode: a system-prompt file to load (appended by default)")
@@ -14720,6 +16012,14 @@ def main(argv: Optional[list[str]] = None) -> int:
         Log.err("interrupted")
         return 2
     except RuntimeError as e:
+        # A RuntimeError is the engine's "refuse cleanly" channel (e.g. no interactive terminal
+        # to choose an install folder). Under --json it printed NOTHING to stdout, so the CLI
+        # reported "prometheus.py produced no JSON on stdout (crashed before emitting)" — an
+        # internal diagnostic about a crash that did not happen. Every --json path emits exactly
+        # one JSON object; this one was missing.
+        if JSON_OUT:
+            return emit_json({"command": getattr(args, "command", "?"), "ok": False,
+                              "error": str(e), "_exit": 2})
         Log.err(str(e))
         return 2
     except SystemExit:

@@ -309,6 +309,9 @@ export const DEFAULT_BINDINGS: Record<Action, KeyName> = {
   "line-end": "ctrl-e",
   search: "ctrl-r",
   redraw: "ctrl-l",
+  // ⌃T now OPENS the trait rail focused on the `tool` cell rather than flipping tools blind
+  // (reducer.ts's `ctrl-t` case). The action keeps its name so existing `[keymap]` tables that
+  // rebound `toggle-tools` keep working — it is still the key that reaches the tools switch.
   "toggle-tools": "ctrl-t",
   "cycle-pane": "ctrl-g",
   "save-transcript": "ctrl-s",

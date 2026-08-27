@@ -1908,6 +1908,19 @@ function EditorGroup({ group }: { group: number }): ReactElement {
         const uri = (e as CustomEvent<{ uri?: string }>).detail?.uri;
         const model = editor.getModel();
         if (!uri || !model || model.uri.toString() !== uri) return;
+        /**
+         * The dirty check the comment above already promised.
+         *
+         * It said "Only reloads if THIS editor hosts that uri and it isn't dirty (never clobber
+         * unsaved edits)" — and only the uri half was implemented. A Local History revert (or
+         * anything else dispatching `ide:reload-file`) called `setValue` over a buffer with
+         * unsaved edits and then `markDirty(uri, false)`, so the work was destroyed AND the tab
+         * was marked clean, removing the last cue that anything had been lost.
+         *
+         * Read through `getState()` rather than the render-time `tabs`: this listener is
+         * registered once per editor and would otherwise close over a stale snapshot.
+         */
+        if (useTabsStore.getState().tabs.docs.some((d) => d.uri === uri && d.dirty)) return;
         void ide()
           ?.fsRead(uri)
           .then((r) => {
@@ -2867,7 +2880,24 @@ function TabBar({ group }: { group: number }): ReactElement {
                     !window.confirm(`${t.name} has unsaved changes. Close without saving?`)
                   )
                     return;
-                  close(t.uri);
+                  /**
+                   * Discarding a buffer must drop its CRASH-RECOVERY copy too.
+                   *
+                   * The APP-067 record is written on every keystroke and cleared on exactly one
+                   * condition: a successful save. So "Close without saving" left it behind, and
+                   * reopening the file preferred that text over the bytes on disk and marked the
+                   * tab dirty — the edit the user explicitly threw away came back, shadowing the
+                   * real file, and a Cmd-S then wrote it. It survived a restart too, because the
+                   * blob is persisted to localStorage.
+                   *
+                   * Only when the uri is leaving the LAST group: with a split still showing the
+                   * file, the buffer is still open and its recovery copy still earns its keep.
+                   */
+                  const lastRow = tabs.docs.filter((d) => d.uri === t.uri).length <= 1;
+                  if (lastRow) useDirtyRecoveryStore.getState().clear(t.uri);
+                  // pass the GROUP: a split shares the uri across panes, so closing by uri
+                  // alone would take the other pane's tab with it.
+                  close(t.uri, t.group);
                 }}
                 style={{
                   background: "transparent",

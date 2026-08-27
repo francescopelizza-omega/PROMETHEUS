@@ -10,12 +10,15 @@ import type { AgentEvent } from "./events.js";
 import { HOOK_REFUSAL_HINT } from "./hooks.js";
 import {
   type AgentTuning,
+  DEFAULT_MAX_ROUNDS,
   type LLMClient,
   type LlmTurn,
+  MAX_EFFORT_MAX_ROUNDS,
   type Thread,
   type ToolOutcome,
   capBytes,
   defaultTuning,
+  roundsForEffort,
   runAgentTurn,
 } from "./loop.js";
 import { PLAN_REFUSAL_HINT } from "./permission-modes.js";
@@ -276,6 +279,26 @@ test("loop CLI-032: a declined command feeds a refusal + the loop continues (don
   assert.equal(events.at(-1)?.kind, "done", "done still fires after a decline");
 });
 
+test("effort `max` raises the DEFAULT round ceiling; an explicit maxRounds still wins", () => {
+  // The one resource-shaped thing an effort tier may legitimately move. Extra rounds help only
+  // where they GATHER NEW INFORMATION — another read, another grep, another test run — which is
+  // exactly what an agentic turn spends rounds on. Temperature and max_tokens headroom are
+  // deliberately NOT tied to effort: the first is not an effort control in either direction,
+  // the second removes a failure mode without adding any effort.
+  assert.equal(roundsForEffort(undefined), DEFAULT_MAX_ROUNDS);
+  for (const tier of ["off", "low", "medium", "high"] as const) {
+    assert.equal(roundsForEffort(tier), DEFAULT_MAX_ROUNDS, `${tier} must not move the ceiling`);
+  }
+  assert.equal(roundsForEffort("max"), MAX_EFFORT_MAX_ROUNDS);
+  assert.ok(MAX_EFFORT_MAX_ROUNDS > DEFAULT_MAX_ROUNDS);
+});
+
+test("lowering the ceiling for off/low would be the WRONG shape — pinned so nobody adds it", () => {
+  // `off`/`low` ask for less DELIBERATION, not for less work. A turn that runs out of rounds
+  // fails to finish; it does not answer more briefly.
+  assert.equal(roundsForEffort("off"), roundsForEffort("high"));
+});
+
 test("loop CLI-032/072: maxRounds bounds a runaway loop + emits a distinct capped event", async () => {
   let round = 0;
   const llm: LLMClient = {
@@ -361,6 +384,122 @@ test("loop CLI-072: capped run folds tool state into the thread → resume compl
     .join("");
   assert.match(text, /finished with RESULT-ABC/, "resume continued from preserved tool state");
   assert.ok(!resumed.some((e) => e.kind === "capped"), "the resumed turn completed under the cap");
+});
+
+/* ── inactivity-pause (idle-watchdog): the transport pauses, not aborts, on true silence ──── */
+
+test("loop: a transport-level paused LlmTurn folds streamed text and yields a distinct paused event", async () => {
+  const thread: Thread = { messages: [{ role: "user", content: "do a long thing" }] };
+  const events = await collect(
+    runAgentTurn(thread, defaultTuning(MODEL), {
+      llm: {
+        async *turn() {
+          yield { kind: "text", text: "working on it…" };
+          yield { kind: "paused", idleMs: 42_000 };
+        },
+      },
+      runTool: async () => ({ ok: true, summary: "" }),
+    }),
+  );
+  const paused = events.find((e) => e.kind === "paused");
+  assert.ok(paused, "a paused event must be emitted");
+  assert.deepEqual(paused, {
+    kind: "paused",
+    reason: "idle-timeout",
+    idleMs: 42_000,
+    canContinue: true,
+  });
+  // NOT capped, not a fake done/blocked.
+  assert.ok(!events.some((e) => e.kind === "capped"));
+  assert.ok(!events.some((e) => e.kind === "blocked"));
+  // the streamed prose was folded into the thread before the pause.
+  assert.ok(
+    thread.messages.some((m) => m.role === "assistant" && m.content === "working on it…"),
+    "the streamed text must survive the pause, not be discarded",
+  );
+});
+
+test("loop: a paused turn on a LATER round leaves an earlier round's tool results intact", async () => {
+  const thread: Thread = { messages: [{ role: "user", content: "multi-step task" }] };
+  let round = 0;
+  const events = await collect(
+    runAgentTurn(
+      thread,
+      { ...defaultTuning(MODEL), yes: true },
+      {
+        llm: {
+          async *turn() {
+            round++;
+            if (round === 1) {
+              yield { kind: "tool_call", call: { name: "prometheus_list", args: {} } };
+              return;
+            }
+            yield { kind: "text", text: "still going…" };
+            yield { kind: "paused", idleMs: 5_000 };
+          },
+        },
+        runTool: async () => ({ ok: true, summary: "ROUND-1-RESULT" }),
+      },
+    ),
+  );
+  assert.ok(events.some((e) => e.kind === "paused"));
+  assert.ok(
+    thread.messages.some((m) => m.role === "tool" && /ROUND-1-RESULT/.test(m.content)),
+    "an earlier round's tool result must survive a LATER round's pause",
+  );
+});
+
+test("loop: the user's cancel wins over a simultaneous idle-pause — never reports paused", async () => {
+  // The abort must land DURING the round (not before it starts) to exercise the real race: the
+  // top-of-loop abort check would otherwise short-circuit before the model is ever called at
+  // all, which proves nothing about the ordering this test targets.
+  const ac = new AbortController();
+  const events = await collect(
+    runAgentTurn({ messages: [] }, defaultTuning(MODEL), {
+      llm: {
+        async *turn() {
+          yield { kind: "text", text: "…" };
+          ac.abort(); // the user hits Ctrl-C right as the model would otherwise idle-pause
+          yield { kind: "paused", idleMs: 1_000 };
+        },
+      },
+      runTool: async () => ({ ok: true, summary: "" }),
+      signal: ac.signal,
+    }),
+  );
+  assert.ok(!events.some((e) => e.kind === "paused"), "cancel must win — no paused event");
+  assert.ok(events.some((e) => e.kind === "blocked"));
+});
+
+test("loop: a paused turn's mutated thread is genuinely resumable with no new user message", async () => {
+  const thread: Thread = { messages: [{ role: "user", content: "hi" }] };
+  await collect(
+    runAgentTurn(thread, defaultTuning(MODEL), {
+      llm: {
+        async *turn() {
+          yield { kind: "text", text: "partial answer" };
+          yield { kind: "paused", idleMs: 1_000 };
+        },
+      },
+      runTool: async () => ({ ok: true, summary: "" }),
+    }),
+  );
+  // Simulate /continue: re-run on the SAME (already-mutated) thread, no new user message.
+  let sawResumeContent = false;
+  await collect(
+    runAgentTurn(thread, defaultTuning(MODEL), {
+      llm: {
+        async *turn(t) {
+          sawResumeContent = t.messages.some(
+            (m) => m.role === "assistant" && m.content === "partial answer",
+          );
+          yield { kind: "final", text: "done" };
+        },
+      },
+      runTool: async () => ({ ok: true, summary: "" }),
+    }),
+  );
+  assert.ok(sawResumeContent, "the resumed turn must see the paused round's folded prose");
 });
 
 test("loop CLI-072: a pending gate wins over the cap (a cap never bypasses a BLOCK)", async () => {
@@ -918,4 +1057,169 @@ test("loop: no hooks configured ⇒ the runner is never consulted (zero-config c
     }),
   );
   assert.deepEqual(seen, []);
+});
+
+/* ── canary tripwire (point 6b): a per-turn token planted for the model, never for the caller ──── */
+
+test("loop: onCanaryTripped fires when the model's text contains the planted token", async () => {
+  let tripped: { textSnippet: string } | undefined;
+  const events = await collect(
+    runAgentTurn({ messages: [] }, defaultTuning(MODEL), {
+      llm: {
+        async *turn(thread) {
+          const canaryMsg = thread.messages.find((m) => /session-canary/.test(m.content));
+          assert.ok(
+            canaryMsg,
+            "the canary instruction block was planted in the thread sent to the model",
+          );
+          const token = /marker: ([0-9a-f]+)/.exec(canaryMsg?.content ?? "")?.[1];
+          assert.ok(token, "a hex token was embedded in the canary instruction block");
+          yield { kind: "final", text: `leaking it: ${token}` };
+        },
+      },
+      runTool: async () => ({ ok: true, summary: "" }),
+      onCanaryTripped: (info) => {
+        tripped = info;
+      },
+    }),
+  );
+  assert.ok(tripped, "onCanaryTripped was called");
+  assert.match(tripped?.textSnippet ?? "", /leaking it:/);
+  assert.equal(events.at(-1)?.kind, "done");
+});
+
+test("loop: ordinary text never trips the canary", async () => {
+  let tripped = false;
+  await collect(
+    runAgentTurn({ messages: [] }, defaultTuning(MODEL), {
+      llm: scriptedLlm([{ kind: "final", text: "just a normal answer, nothing hex-shaped here" }]),
+      runTool: async () => ({ ok: true, summary: "" }),
+      onCanaryTripped: () => {
+        tripped = true;
+      },
+    }),
+  );
+  assert.equal(tripped, false);
+});
+
+test("loop: the canary is planted on a COPY of the thread — the caller's own thread is untouched", async () => {
+  const thread: Thread = { messages: [{ role: "user", content: "hi" }] };
+  await collect(
+    runAgentTurn(thread, defaultTuning(MODEL), {
+      llm: scriptedLlm([{ kind: "final", text: "ok" }]),
+      runTool: async () => ({ ok: true, summary: "" }),
+      onCanaryTripped: () => {},
+    }),
+  );
+  // the turn folds the assistant's own reply back in (by design — see loop.ts), so the caller's
+  // thread grows by exactly one message; what must NOT appear is the canary system message.
+  assert.equal(thread.messages.length, 2, "only the folded assistant reply was added");
+  assert.ok(!thread.messages.some((m) => /session-canary/.test(m.content)));
+});
+
+test("loop: omitting onCanaryTripped plants no token at all (zero-cost opt-out)", async () => {
+  const events = await collect(
+    runAgentTurn({ messages: [] }, defaultTuning(MODEL), {
+      llm: {
+        async *turn(thread) {
+          assert.ok(
+            !thread.messages.some((m) => /session-canary/.test(m.content)),
+            "no canary block was sent to the model when there is nowhere to report a trip",
+          );
+          yield { kind: "final", text: "fine" };
+        },
+      },
+      runTool: async () => ({ ok: true, summary: "" }),
+    }),
+  );
+  assert.equal(events.at(-1)?.kind, "done");
+});
+
+test("loop: two separately-triggered turns get different canary tokens", async () => {
+  const tokens: string[] = [];
+  const captureLlm: LLMClient = {
+    async *turn(thread) {
+      const canaryMsg = thread.messages.find((m) => /session-canary/.test(m.content));
+      const token = /marker: ([0-9a-f]+)/.exec(canaryMsg?.content ?? "")?.[1];
+      if (token) tokens.push(token);
+      yield { kind: "final", text: "ok" };
+    },
+  };
+  for (let i = 0; i < 2; i++) {
+    await collect(
+      runAgentTurn({ messages: [] }, defaultTuning(MODEL), {
+        llm: captureLlm,
+        runTool: async () => ({ ok: true, summary: "" }),
+        onCanaryTripped: () => {},
+      }),
+    );
+  }
+  assert.equal(tokens.length, 2);
+  assert.notEqual(tokens[0], tokens[1], "each turn mints its own random token");
+});
+
+test("loop: a canary token split across two streamed text chunks is still caught", async () => {
+  // An ordinary streaming/network artifact, not adversarial model behavior — the token must not
+  // need to land whole inside one `{kind:"text"}` event to be detected.
+  let tripped: { textSnippet: string } | undefined;
+  await collect(
+    runAgentTurn({ messages: [] }, defaultTuning(MODEL), {
+      llm: {
+        async *turn(thread) {
+          const canaryMsg = thread.messages.find((m) => /session-canary/.test(m.content));
+          const token = /marker: ([0-9a-f]+)/.exec(canaryMsg?.content ?? "")?.[1] ?? "";
+          const mid = Math.floor(token.length / 2);
+          yield { kind: "text", text: `here it is: ${token.slice(0, mid)}` };
+          yield { kind: "final", text: token.slice(mid) };
+        },
+      },
+      runTool: async () => ({ ok: true, summary: "" }),
+      onCanaryTripped: (info) => {
+        tripped = info;
+      },
+    }),
+  );
+  assert.ok(tripped, "the split token was still detected");
+});
+
+test("loop: a canary leak in REASONING output (not just the final answer) trips the tripwire", async () => {
+  let tripped: { textSnippet: string } | undefined;
+  await collect(
+    runAgentTurn({ messages: [] }, defaultTuning(MODEL), {
+      llm: {
+        async *turn(thread) {
+          const canaryMsg = thread.messages.find((m) => /session-canary/.test(m.content));
+          const token = /marker: ([0-9a-f]+)/.exec(canaryMsg?.content ?? "")?.[1];
+          yield { kind: "reasoning", text: `thinking about ${token}...` };
+          yield { kind: "final", text: "done" };
+        },
+      },
+      runTool: async () => ({ ok: true, summary: "" }),
+      onCanaryTripped: (info) => {
+        tripped = info;
+      },
+    }),
+  );
+  assert.ok(tripped, "a leak visible only in reasoning output still trips the canary");
+});
+
+test("loop: the canary fires at most ONCE per turn even if the token appears repeatedly", async () => {
+  let trips = 0;
+  await collect(
+    runAgentTurn({ messages: [] }, defaultTuning(MODEL), {
+      llm: {
+        async *turn(thread) {
+          const canaryMsg = thread.messages.find((m) => /session-canary/.test(m.content));
+          const token = /marker: ([0-9a-f]+)/.exec(canaryMsg?.content ?? "")?.[1];
+          yield { kind: "text", text: `first: ${token} ` };
+          yield { kind: "final", text: `second: ${token}` };
+        },
+      },
+      runTool: async () => ({ ok: true, summary: "" }),
+      onCanaryTripped: () => {
+        trips += 1;
+      },
+    }),
+  );
+  assert.equal(trips, 1, "a repeated leak within the same turn is one finding, not a flood");
 });

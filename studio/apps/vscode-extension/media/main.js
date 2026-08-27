@@ -28,6 +28,7 @@
   const form = document.getElementById("composer");
   const input = /** @type {HTMLTextAreaElement} */ (document.getElementById("prompt"));
   const send = /** @type {HTMLButtonElement} */ (document.getElementById("send"));
+  const cancel = /** @type {HTMLButtonElement} */ (document.getElementById("cancel"));
 
   /** The assistant bubble currently being streamed into, if any. */
   let open = null;
@@ -59,6 +60,9 @@
     send.disabled = busy;
     input.disabled = busy;
     send.textContent = busy ? "Running…" : "Send";
+    // Cancel is the ONLY control enabled while busy — everything else about the composer stays
+    // locked for the same reason it always has (one turn at a time).
+    cancel.hidden = !busy;
   }
 
   window.addEventListener("message", (event) => {
@@ -117,6 +121,10 @@
     input.value = "";
     setBusy(true);
     vscode.postMessage({ type: "send", text });
+  });
+
+  cancel.addEventListener("click", () => {
+    vscode.postMessage({ type: "cancel" });
   });
 
   // Enter sends, Shift+Enter makes a newline — the convention every chat surface uses, and

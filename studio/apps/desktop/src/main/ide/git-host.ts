@@ -336,7 +336,26 @@ export function parseStatus(stdout: string): Omit<GitStatus, "ok" | "error"> {
   let ahead: number | undefined;
   let behind: number | undefined;
 
-  for (const raw of stdout.split("\n")) {
+  /**
+   * NUL-separated records (`-z`), not lines.
+   *
+   * Without `-z`, git C-QUOTES any path holding a space (always), a non-ASCII byte, a quote, a
+   * backslash or a control char — ` M "caf\303\251.py"`, `R  "src/old name.py" -> "src/new
+   * name.py"`. The old parser took `raw.slice(3)` verbatim, so the path it produced carried the
+   * surrounding quotes and octal escapes, and every per-file operation fed that back as a
+   * pathspec: `git add -- '"src/my file.py"'` exits 128, `git diff --` returns empty, blame
+   * returns nothing. `core.quotepath=false` does NOT rescue the space case — only `-z` does.
+   * Core's own git layer already used `-z` for exactly this reason; this host was the copy that
+   * missed it.
+   *
+   * With `-z` the pathnames are emitted raw, and a rename/copy is TWO records: `R  <new path>`
+   * followed by the original path on its own. `records` is walked by index so that pairing can
+   * be consumed explicitly. The final record is always empty (records are terminated, not
+   * separated).
+   */
+  const records = stdout.split("\u0000");
+  for (let i = 0; i < records.length; i += 1) {
+    const raw = records[i] ?? "";
     if (!raw) continue;
     if (raw.startsWith("## ")) {
       const info = raw.slice(3);
@@ -357,12 +376,17 @@ export function parseStatus(stdout: string): Omit<GitStatus, "ok" | "error"> {
     }
     const x = raw[0] ?? " ";
     const y = raw[1] ?? " ";
-    let path = raw.slice(3);
+    const path = raw.slice(3);
+    // A rename/copy on either side puts the ORIGINAL path in the very next record. Consume it
+    // here rather than splitting on " -> ", which is not a delimiter under -z and which a path
+    // could legitimately contain.
     let origPath: string | undefined;
-    if (path.includes(" -> ")) {
-      const [from, to] = path.split(" -> ");
-      origPath = from;
-      path = to ?? path;
+    if (x === "R" || x === "C" || y === "R" || y === "C") {
+      const next = records[i + 1];
+      if (next) {
+        origPath = next;
+        i += 1;
+      }
     }
 
     if (x === "?" && y === "?") {
@@ -494,10 +518,16 @@ export class GitHost {
     }
   }
 
-  /** Grouped working-tree status (`git status --porcelain=v1 -b`, file 07 §6.2). */
+  /**
+   * Grouped working-tree status (`git status --porcelain=v1 -b -z`, file 07 §6.2).
+   *
+   * `-z` is load-bearing, not a micro-optimisation: without it git C-quotes any path containing a
+   * space or a non-ASCII byte, and the quoted string then fails as a pathspec for every per-file
+   * stage / unstage / diff / blame. See `parseStatus`.
+   */
   async status(root: string): Promise<GitStatus> {
     try {
-      const r = await this.run(root, ["status", "--porcelain=v1", "-b"]);
+      const r = await this.run(root, ["status", "--porcelain=v1", "-b", "-z"]);
       if (r.exitCode !== 0) {
         return {
           ok: false,
@@ -734,6 +764,22 @@ export class GitHost {
     }
   }
 
+  /**
+   * The current HEAD sha (`git rev-parse HEAD`), or undefined when there is none.
+   *
+   * Undefined covers every "nothing to key trust on" case — not a repository, a fresh repo with
+   * no commits, git missing — which the run gate treats as "scan it".
+   */
+  async headSha(root: string): Promise<string | undefined> {
+    try {
+      const r = await this.run(root, ["rev-parse", "HEAD"]);
+      const sha = r.stdout.trim();
+      return r.exitCode === 0 && /^[0-9a-f]{7,64}$/i.test(sha) ? sha : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
   /** The configured URL of a remote (`git remote get-url -- <name>`, APP-085). `--`
    *  blocks a `-`-leading remote name; the URL is then run through PURE parseRemote by
    *  the caller (never string-concatenated into an API URL). */
@@ -870,7 +916,7 @@ export class GitHost {
       if (r.exitCode !== 0) {
         return { ...empty, error: (r.stderr || "git show failed").trim() };
       }
-      const [h, an, ae, adate, s, b] = r.stdout.split(" ");
+      const [h, an, ae, adate, s, b] = r.stdout.split("\x00");
       return {
         ok: true,
         sha: (h ?? sha).trim(),

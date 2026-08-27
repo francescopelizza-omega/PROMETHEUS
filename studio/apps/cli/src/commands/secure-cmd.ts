@@ -98,7 +98,12 @@ export const defaultSecureDeps: SecureDeps = {
 };
 
 function sub(ctx: CliContext): string {
-  return ctx.args.command[1] ?? "scan";
+  // `unmatchedSub` (parse.ts) is set when a second word WAS typed but didn't match secure's
+  // whitelist — without checking it first, that typo silently vanished into `positionals[0]`
+  // and this always defaulted to "scan", running a REAL nemesis scan against the literal typo
+  // string with no indication the action was unrecognized. Only a genuinely bare `/secure`
+  // (no second word at all) still defaults to "scan".
+  return ctx.args.unmatchedSub ?? ctx.args.command[1] ?? "scan";
 }
 
 /* ── `secure scan`: streamed progress + normalized findings + scripting exit (CLI-040) ── *
@@ -450,7 +455,7 @@ export async function runSecureCommand(
           `prometheus secure ${verb}: unknown secure verb.\n` +
           `  ${c.dim("try:")} scan · db · trust · disinfect · quarantine · ignore · accept · audit · verdict · purge`,
         json: { ok: false, error: "unknown-verb", command: `secure ${verb}` },
-        exitCode: 2,
+        exitCode: 1,
       };
   }
 }

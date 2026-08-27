@@ -46,8 +46,20 @@ export interface SettingsIpcOptions {
    * `adoptSecurityPosture` — so there is no window in which a locked-down GLOBAL profile is
    * configured but not yet in force; this seam is what additionally picks up a per-workspace
    * layer once a workspace is actually open.
+   *
+   * `raw` carries the UNMERGED global/workspace layers (plus the workspace root, when any) —
+   * `effective.hooks` has already been through `layerSettings`' array-replace merge and cannot
+   * be trusted for anything security-relevant; a caller vetting hooks needs the two raw layers
+   * separately (see `agent-hooks.ts`'s `setHookSettings`).
    */
-  onEffective?: (effective: coreSettings.Settings) => void;
+  onEffective?: (
+    effective: coreSettings.Settings,
+    raw: {
+      workspaceRoot?: string;
+      global: Record<string, unknown>;
+      workspace: Record<string, unknown>;
+    },
+  ) => void;
 }
 
 /** Register the `settings:*` handlers. Returns a disposer (mirrors sibling IPC modules). */
@@ -57,8 +69,12 @@ export function registerSettingsIpcHandlers(opts: SettingsIpcOptions): () => voi
   const publish = async (workspaceRoot?: string): Promise<void> => {
     if (!opts.onEffective) return;
     try {
-      const { effective } = await loadEffective(globalPath, workspaceRoot);
-      opts.onEffective(effective as unknown as coreSettings.Settings);
+      const { effective, global, workspace } = await loadEffective(globalPath, workspaceRoot);
+      opts.onEffective(effective as unknown as coreSettings.Settings, {
+        ...(workspaceRoot ? { workspaceRoot } : {}),
+        global,
+        workspace,
+      });
     } catch {
       /* keep the last known posture rather than silently widening to the default */
     }
@@ -80,7 +96,11 @@ export function registerSettingsIpcHandlers(opts: SettingsIpcOptions): () => voi
       // TIGHTENS the posture would otherwise not take effect until some unrelated write
       // happened to pass a root. `settings:list` is the renderer's first call and it carries
       // the root, so this is where a per-workspace posture actually lands.
-      opts.onEffective?.(effective as unknown as coreSettings.Settings);
+      opts.onEffective?.(effective as unknown as coreSettings.Settings, {
+        ...(workspaceRoot ? { workspaceRoot } : {}),
+        global,
+        workspace,
+      });
       // APP-058: rich rows (per-scope raw values + the full definedIn chain), profile layer
       // INCLUDED so a profile-set key is labeled "profile", not mislabeled "default".
       const bySchemaKey = resolveRichRows(global, profile, workspace);

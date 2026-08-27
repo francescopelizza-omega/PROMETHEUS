@@ -28,6 +28,7 @@ import { c } from "../render.js";
 import { type KeymapResolution, renderKeymap } from "../tui/keys.js";
 import { clipToWidth, stringWidth } from "../tui/width.js";
 import { type ContextComponent, type UsageStats, contextBreakdown } from "./agent-runtime.js";
+import { CONTEXT_WINDOW_PRESETS, parseContextWindowInput } from "./context-window-setting.js";
 import { renderFaq } from "./faq.js";
 import {
   type DiffRole,
@@ -46,6 +47,14 @@ import {
   samePath,
   truncateDiff,
 } from "./git-helpers.js";
+import { IDLE_TIMEOUT_PRESETS_MIN, parseIdleTimeoutInput } from "./idle-timeout-setting.js";
+import {
+  type ModelCandidate,
+  renderModelCandidates,
+  resolveModelCandidate,
+} from "./model-candidates.js";
+import { runModelHealthCommand } from "./model-health-command.js";
+import { MAX_SUBAGENTS } from "./orchestrator.js";
 import { type SteeringFile, renderSteeringList } from "./steering.js";
 import type { ResolveResult } from "./working-set.js";
 
@@ -91,6 +100,14 @@ function describeThink(ctx: SlashCtx): string {
     return `not available (${res.degraded?.message ?? "no reasoning control"})`;
   }
   const label = tier ?? `${res.applied} (default)`;
+  // THREE states, not two. `emulated` is the one that used to be misreported as "not
+  // available": no request parameter carries the tier, but a graded instruction goes in front
+  // of the model on every turn, so the tier IS in force and the answer does change. Naming it
+  // matters — a user comparing models needs to tell "steered by prompt" from "steered by the
+  // provider's own reasoning budget", and they are worth very different amounts.
+  if (res.degraded?.reason === "emulated") {
+    return `${label} (emulated — ${res.degraded.message})`;
+  }
   return res.degraded ? `${label} → ${res.applied} (${res.degraded.message})` : label;
 }
 
@@ -298,6 +315,33 @@ export interface SlashCtx {
   runRecall: (rest: string) => Promise<void>;
   /** open the /invoke repo-install picker (catalog + green✓/red✗ marks → nemesis-gated install). */
   runInvoke: (rest: string) => Promise<void>;
+  /**
+   * `/model` (alias `/worker`) — every chat model this session could switch to RIGHT NOW (served
+   * local models + configured cloud endpoints with a working key), and a way to actually switch.
+   * `select` moves BOTH the display tuning AND the live request endpoint — `tune({model})` alone
+   * updates only the footer. Optional so existing fake SlashCtx fixtures keep compiling; `/model`
+   * reports "not available on this surface" rather than pretending a switch worked when it didn't
+   * reach the live endpoint.
+   */
+  modelPicker?: {
+    candidates: () => ModelCandidate[];
+    /**
+     * Switch to `id`.
+     *
+     * May be async, and the real hosts are: a switch is not finished until the new endpoint has
+     * been MEASURED (`ai/endpoint-probe.ts`). `modelCandidates` mints an endpoint carrying the
+     * 8192 floor and no `probedCapabilities`, so a `select` that returned before the probe
+     * landed left the very next `/think` reporting "not available" for a model that advertises
+     * `thinking`. Kept as a union rather than a bare Promise so a synchronous test double stays
+     * a valid picker.
+     */
+    select: (
+      id: string,
+    ) =>
+      | { ok: true; label: string }
+      | { ok: false; reason: string }
+      | Promise<{ ok: true; label: string } | { ok: false; reason: string }>;
+  };
   /** the subagent orchestrator knobs (tmux auto-fan-out). */
   agents: {
     count: () => number;
@@ -377,6 +421,54 @@ export interface SlashCtx {
      */
     test: (event: agent.HookEvent, payload: string, tool?: string) => Promise<HookTestOutcome[]>;
   };
+  /**
+   * `/context window` — the persisted auto-compact ceiling in tokens (default 250,000),
+   * independent of the model's own measured/assumed window (the host combines both via
+   * `Math.min`). Optional so existing fake SlashCtx fixtures keep compiling; `/context window`
+   * reports "not available on this surface" rather than throwing when a host has not wired it.
+   */
+  contextWindowTokens?: {
+    get: () => number;
+    set: (tokens: number) => void;
+  };
+  /**
+   * `/timeout` — the persisted inactivity-pause threshold in ms (default 10 min; see
+   * `agent.idleWatchdog.DEFAULT_IDLE_TIMEOUT_MS`). Optional so existing fake SlashCtx fixtures
+   * keep compiling; `/timeout` reports "not available on this surface" when unwired.
+   */
+  idleTimeoutSetting?: {
+    get: () => number;
+    set: (ms: number) => void;
+  };
+  /**
+   * `/cd` — move to a different project directory mid-session WITHOUT quitting and relaunching:
+   * validates `dir` first (a bad path is a no-op, not a wrecked conversation), then rotates the
+   * session (fresh id, empty transcript, project-scoped state re-derived) while keeping tuning
+   * exactly as it was. `rotated: false` means `dir` resolved to the CURRENT directory — a no-op
+   * a user can reach by accepting the pre-filled default with a bare Enter, so it must not carry
+   * out the rotation (or its cost: a cleared transcript, a fresh id, a dropped repo map) just
+   * because the prompt was answered. See the host's `changeProjectDirectory` for the full
+   * contract. Optional so existing fake SlashCtx fixtures keep compiling; `/cd` falls back to a
+   * plain `/cwd`-style directory change (no rotation) when a host has not wired it.
+   */
+  /**
+   * `/traits` — focus the model's trait rail (the ⌃T mode): dim/undim tools + thinking and move
+   * the effort dial with the arrow keys. Returns false on a surface that paints no rail, which
+   * is not a failure — the readline host has no chrome to focus, and the command says so and
+   * points at the equivalent one-shot commands instead.
+   */
+  focusTraitRail?: () => boolean;
+  changeProjectDirectory?: (dir: string) =>
+    | {
+        ok: true;
+        movedTo: string;
+        newSessionId: string;
+        rotated: boolean;
+        /** present when `dir` resolved inside Prometheus's OWN repo and was redirected to the
+         *  user's home directory instead — the ORIGINAL path that triggered the redirect. */
+        redirectedFromOwnRepo?: string;
+      }
+    | { ok: false; error: string };
 }
 
 export type SlashGroup =
@@ -408,11 +500,43 @@ export interface SlashCmd {
 
 /* --------------------------------- helpers -------------------------------- */
 
-const toks = (rest: string): string[] =>
-  rest
-    .trim()
-    .split(/\s+/)
-    .filter((t) => t.length > 0);
+/**
+ * Split a verb command's argument text into tokens, honoring "..."/'...' quoting (quotes
+ * stripped) so a value containing a space — a file path, a git branch, a nemesis target — reaches
+ * the underlying verb as ONE argument instead of being silently truncated at the first space (the
+ * previous plain `.split(/\s+/)` dropped everything after it with no error, and typing quotes
+ * around the value made it strictly worse — the literal quote characters became part of the
+ * first/last token, since nothing here is a real shell that would strip them). An unterminated
+ * quote is handled leniently — everything from the opening quote to the end of input becomes part
+ * of that one token — there is no shell to reprompt for a missing closing quote.
+ */
+const toks = (rest: string): string[] => {
+  const out: string[] = [];
+  const s = rest.trim();
+  let i = 0;
+  while (i < s.length) {
+    while (i < s.length && /\s/.test(s[i] as string)) i++;
+    if (i >= s.length) break;
+    let token = "";
+    while (i < s.length && !/\s/.test(s[i] as string)) {
+      const ch = s[i] as string;
+      if (ch === '"' || ch === "'") {
+        const quote = ch;
+        i++;
+        while (i < s.length && s[i] !== quote) {
+          token += s[i];
+          i++;
+        }
+        if (i < s.length) i++; // skip the closing quote
+      } else {
+        token += ch;
+        i++;
+      }
+    }
+    out.push(token);
+  }
+  return out;
+};
 
 /** Deterministic comma-grouping (NOT toLocaleString — its separator is locale-dependent and would
  *  break goldens: on a European locale 1000000 → "1.000.000"). CLI-057/058. */
@@ -515,6 +639,28 @@ function renderSaveTokens(paid: boolean): string {
     ),
   );
   return lines.join("\n");
+}
+
+/**
+ * `/context window`'s picker input: a 1-based preset index (`CONTEXT_WINDOW_PRESETS`), or a
+ * free-form size Prometheus can parse (`300000` / `300k` / `1.2m`). Null when neither matches.
+ */
+function resolveContextWindowChoice(input: string): number | null {
+  const idx = Number(input);
+  if (Number.isInteger(idx) && idx >= 1 && idx <= CONTEXT_WINDOW_PRESETS.length) {
+    return CONTEXT_WINDOW_PRESETS[idx - 1] ?? null;
+  }
+  return parseContextWindowInput(input);
+}
+
+/** `/timeout`'s picker input: a 1-based preset index (in minutes) or a free-form duration
+ *  (`10`, `10m`, `600s`, `1h`). Null when neither matches. */
+function resolveIdleTimeoutChoice(input: string): number | null {
+  const idx = Number(input);
+  if (Number.isInteger(idx) && idx >= 1 && idx <= IDLE_TIMEOUT_PRESETS_MIN.length) {
+    return (IDLE_TIMEOUT_PRESETS_MIN[idx - 1] ?? 10) * 60_000;
+  }
+  return parseIdleTimeoutInput(input);
 }
 
 /**
@@ -815,9 +961,9 @@ export const SLASH_REGISTRY: readonly SlashCmd[] = Object.freeze([
   },
   {
     name: "condense",
-    aliases: ["compact"],
+    aliases: ["compact", "compress"],
     group: "session",
-    summary: "Summarize + reclaim context (keeps project memory).",
+    summary: "Summarize + reclaim context (keeps project memory) — sends older turns to the model.",
     args: "[focus]",
     run: async (rest, ctx) => {
       await ctx.compact(rest.trim());
@@ -862,16 +1008,61 @@ export const SLASH_REGISTRY: readonly SlashCmd[] = Object.freeze([
   },
   {
     name: "cwd",
-    aliases: ["cd"],
     group: "session",
-    summary: "Show or change the working directory (tab-completes).",
+    summary: "Show or change the working directory in place (tab-completes; keeps the session).",
     args: "[path]",
     run: async (rest, ctx) => {
       const dir = rest.trim() || (await ctx.askPath("Change directory to:", ctx.cwd()));
       if (dir) {
         ctx.setCwd(dir);
-        ctx.write(c.dim(`cwd → ${dir}`));
+        // Read back the REAL resulting cwd rather than echoing the raw argument: `setCwd`
+        // silently redirects away from Prometheus's own repo (printing its own warning first),
+        // so echoing `dir` verbatim here could show a path Prometheus never actually moved to.
+        ctx.write(c.dim(`cwd → ${ctx.cwd()}`));
       }
+    },
+  },
+  {
+    name: "cd",
+    group: "session",
+    summary:
+      "Move to a different project: starts a fresh session there (tuning kept), without quitting.",
+    args: "[path]",
+    /**
+     * Distinct from `/cwd`: this is a PROJECT switch, not an in-place directory change. The old
+     * conversation is not lost — its transcript is already fully on disk — but the live pane,
+     * history, and session id all start over in the new directory so the agent's context matches
+     * the project it is actually looking at. Model, system prompt, tools, gate, dry-run,
+     * verbosity, effort, autonomy level, and permission mode all carry over unchanged.
+     */
+    run: async (rest, ctx) => {
+      const dir = rest.trim() || (await ctx.askPath("Move to project:", ctx.cwd()));
+      if (!dir) return;
+      if (!ctx.changeProjectDirectory) {
+        // Graceful degrade on a surface that hasn't wired the rotation: still move, in place.
+        ctx.setCwd(dir);
+        ctx.write(c.dim(`cwd → ${dir} (this surface can't start a fresh session — context kept)`));
+        return;
+      }
+      const res = ctx.changeProjectDirectory(dir);
+      if (!res.ok) {
+        ctx.write(c.red(`/cd: ${res.error}`));
+        return;
+      }
+      if (res.redirectedFromOwnRepo) {
+        ctx.write(
+          c.yellow(`⚠ refused to move into Prometheus's own repo (${res.redirectedFromOwnRepo})`) +
+            c.dim(` — redirected to ${res.movedTo}`),
+        );
+      }
+      if (!res.rotated) {
+        ctx.write(c.dim(`already in ${res.movedTo} — nothing to do`));
+        return;
+      }
+      ctx.write(
+        c.green(`✓ moved to ${res.movedTo}`) +
+          c.dim(` — fresh session ${res.newSessionId.slice(0, 10)}… (model/tuning kept)`),
+      );
     },
   },
   {
@@ -989,28 +1180,202 @@ export const SLASH_REGISTRY: readonly SlashCmd[] = Object.freeze([
       ctx.write(c.red(`/memory: unknown "${sub}" — use refresh | edit <n|path> | create | update`));
     },
   },
-  macro(
-    "mention",
-    "context",
-    "Attach a file's content to the conversation.",
-    (r) => `Read the file ${r || "<path>"} and keep it in mind for the next requests.`,
-    { args: "<file>" },
-  ),
+  {
+    name: "mention",
+    group: "context",
+    summary: "Attach a file's content to the conversation.",
+    args: "<file>",
+    run: (rest, ctx) => {
+      const file = rest.trim();
+      // a bare `/mention` used to leak the literal template placeholder "<path>" into the
+      // agent prompt (a bogus filename it would have to guess at or fail to open) — every
+      // OTHER required-arg macro in this registry falls back to natural-language filler; this
+      // one has no sensible filler at all, so it short-circuits instead, like /background.
+      if (!file) {
+        ctx.write(c.dim("usage: /mention <file>"));
+        return;
+      }
+      return ctx.sendToAgent(`Read the file ${file} and keep it in mind for the next requests.`);
+    },
+  },
   {
     name: "context",
     group: "context",
-    summary: "Show conversation size + context usage.",
-    run: (_r, ctx) => {
-      for (const line of renderContext(ctx)) ctx.write(line);
+    summary:
+      "Show conversation size + context usage; 'window [size]' views/sets the auto-compact ceiling.",
+    args: "[window [size]]",
+    run: async (rest, ctx) => {
+      const [sub, ...args] = toks(rest);
+      if (sub !== "window") {
+        for (const line of renderContext(ctx)) ctx.write(line);
+        if (ctx.contextWindowTokens) {
+          ctx.write(
+            c.dim(
+              `  auto-compact ceiling: ${grp(ctx.contextWindowTokens.get())} tokens — /context window to change`,
+            ),
+          );
+        }
+        return;
+      }
+      if (!ctx.contextWindowTokens) {
+        ctx.write(c.dim("this surface has no context-window setting"));
+        return;
+      }
+      const { get, set } = ctx.contextWindowTokens;
+      const apply = (input: string): boolean => {
+        const chosen = resolveContextWindowChoice(input);
+        if (chosen === null) {
+          ctx.write(
+            c.red(
+              `/context window: can't parse "${input}" — pick a menu number, or type an exact size (300000, 300k, 1.2m)`,
+            ),
+          );
+          return false;
+        }
+        set(chosen);
+        ctx.write(c.green(`✓ context window → ${grp(chosen)} tokens`));
+        return true;
+      };
+      const direct = args.join(" ").trim();
+      if (direct) {
+        apply(direct);
+        return;
+      }
+      // no-arg: the terminal's "dropdown" — a numbered menu, current value marked. A value set
+      // via a free-form size (e.g. `/context window 325000`) may not match any preset exactly, so
+      // the current value is ALSO stated outright — relying solely on a per-row "← current" mark
+      // would otherwise leave a custom setting invisible, indistinguishable from "nothing set".
+      const cur = get();
+      const curIsPreset = CONTEXT_WINDOW_PRESETS.includes(cur);
+      ctx.write(
+        c.bold("Context window (auto-compact ceiling)") +
+          c.dim(` — current: ${grp(cur)} tokens${curIsPreset ? "" : " (custom)"}`),
+      );
+      for (const [i, n] of CONTEXT_WINDOW_PRESETS.entries()) {
+        const mark = n === cur ? c.green("  ← current") : "";
+        ctx.write(`  ${i + 1}) ${grp(n)}${mark}`);
+      }
+      const ans = (
+        await ctx.ask("pick a number, or type an exact size (e.g. 300000, 300k): ")
+      ).trim();
+      if (!ans) {
+        ctx.write(c.dim("(cancelled)"));
+        return;
+      }
+      apply(ans);
+    },
+  },
+
+  {
+    name: "timeout",
+    group: "context",
+    summary:
+      "Show or set how long Prometheus waits, in true silence, before PAUSING a turn (default 10 min).",
+    args: "[minutes]",
+    run: async (rest, ctx) => {
+      if (!ctx.idleTimeoutSetting) {
+        ctx.write(c.dim("this surface has no inactivity-timeout setting"));
+        return;
+      }
+      const { get, set } = ctx.idleTimeoutSetting;
+      const apply = (input: string): boolean => {
+        const chosen = resolveIdleTimeoutChoice(input);
+        if (chosen === null) {
+          ctx.write(
+            c.red(
+              `/timeout: can't parse "${input}" — pick a menu number, or type a duration (10, 10m, 600s, 1h)`,
+            ),
+          );
+          return false;
+        }
+        set(chosen);
+        ctx.write(c.green(`✓ inactivity-pause threshold → ${Math.round(chosen / 60_000)} min`));
+        return true;
+      };
+      const direct = rest.trim();
+      if (direct) {
+        apply(direct);
+        return;
+      }
+      const curMin = Math.round(get() / 60_000);
+      const curIsPreset = IDLE_TIMEOUT_PRESETS_MIN.includes(curMin);
+      ctx.write(
+        c.bold("Inactivity-pause threshold") +
+          c.dim(
+            ` — current: ${curMin} min${curIsPreset ? "" : " (custom)"}. A turn PAUSES (not aborts) after this much true silence; /continue resumes it, or just keep typing.`,
+          ),
+      );
+      for (const [i, m] of IDLE_TIMEOUT_PRESETS_MIN.entries()) {
+        const mark = m === curMin ? c.green("  ← current") : "";
+        ctx.write(`  ${i + 1}) ${m} min${mark}`);
+      }
+      const ans = (await ctx.ask("pick a number, or type a duration (e.g. 15m, 900s): ")).trim();
+      if (!ans) {
+        ctx.write(c.dim("(cancelled)"));
+        return;
+      }
+      apply(ans);
     },
   },
 
   /* ---- model / tuning ---- */
-  verb("worker", "model", "Show or switch the active worker model.", {
-    verb: "model",
+  {
+    name: "worker",
     aliases: ["model"],
-    args: "[name]",
-  }),
+    group: "model",
+    summary: "Show or switch the active chat model (local + configured cloud endpoints).",
+    args: "[id]",
+    run: async (rest, ctx) => {
+      const picker = ctx.modelPicker;
+      if (!picker) {
+        ctx.write(c.dim("model switching isn't available on this surface."));
+        return;
+      }
+      const candidates = picker.candidates();
+      // Awaited: the real hosts measure the new endpoint before reporting success, so the `✓`
+      // line means "switched AND measured" — which is what makes a `/think` typed straight
+      // after it answer for the model the user just chose rather than the one they left.
+      const apply = async (picked: ModelCandidate): Promise<void> => {
+        const r = await picker.select(picked.id);
+        ctx.write(r.ok ? c.green(`✓ model → ${r.label}`) : c.red(r.reason));
+      };
+      const arg = rest.trim();
+      if (arg) {
+        const picked =
+          candidates.find((cd) => cd.id === arg) ?? resolveModelCandidate(candidates, arg);
+        if (!picked) {
+          const known = candidates.map((cd) => cd.label).join(", ");
+          ctx.write(
+            c.red(
+              `no model matching "${arg}"${known ? ` — known: ${known}` : " — run /setup first"}`,
+            ),
+          );
+          return;
+        }
+        await apply(picked);
+        return;
+      }
+      // bare: the numbered baseline picker (the TUI intercepts this case earlier with a real
+      // arrow-key overlay — see tui/app.ts — so this path is what every OTHER host runs).
+      ctx.write(renderModelCandidates(candidates));
+      if (candidates.length === 0) return;
+      const ans = (await ctx.ask("pick a number, or Enter to cancel: ")).trim();
+      if (!ans) {
+        ctx.write(c.dim("(cancelled)"));
+        return;
+      }
+      const n = Number(ans);
+      const picked =
+        Number.isInteger(n) && n >= 1 && n <= candidates.length
+          ? candidates[n - 1]
+          : resolveModelCandidate(candidates, ans);
+      if (!picked) {
+        ctx.write(c.red(`no model matching "${ans}"`));
+        return;
+      }
+      await apply(picked);
+    },
+  },
   {
     name: "think",
     aliases: ["effort"],
@@ -1026,8 +1391,17 @@ export const SLASH_REGISTRY: readonly SlashCmd[] = Object.freeze([
         // nothing, which is the exact failure this feature exists to remove.
         const res = ctx.effortResolution?.(v);
         if (res && res.applied === null) {
+          // Genuinely nothing in force: `always-on` (fixed depth, no dial) or `off` on a model
+          // that cannot reason at all. A much narrower claim than this line used to make.
           ctx.write(
             `${c.cyan(`think → ${v}`)} ${c.dim(`(not available — ${res.degraded?.message ?? "no reasoning control"})`)}`,
+          );
+        } else if (res?.degraded?.reason === "emulated") {
+          // The third state. No parameter went on the wire, but a graded instruction goes in
+          // front of the model every turn — so the tier IS applied, and saying "not available"
+          // here (which is what this did) was false about the outcome while true about the knob.
+          ctx.write(
+            `${c.cyan(`think → ${res.applied}`)} ${c.dim(`(emulated — ${res.degraded.message})`)}`,
           );
         } else if (res?.degraded) {
           ctx.write(`${c.cyan(`think → ${res.applied}`)} ${c.dim(`(${res.degraded.message})`)}`);
@@ -1074,6 +1448,24 @@ export const SLASH_REGISTRY: readonly SlashCmd[] = Object.freeze([
   {
     // Arm/disarm agent tool use live (CLI-018). Global via tuning.tools.enabled, per-tool
     // via tuning.tools.deny — the loop's exposedTools filter reads both at the model seam.
+    name: "traits",
+    aliases: ["rail", "dim"],
+    group: "model",
+    summary: "Focus the model rail: dim/undim tools + thinking, move the effort dial (same as ⌃T).",
+    /**
+     * The typed way into the rail, for the many people who never learn a chord.
+     *
+     * It is deliberately the SAME mode ⌃T opens rather than a second control surface: two ways
+     * in, one behaviour, so whichever a user finds first is the one they keep.
+     */
+    run: (_rest, ctx) => {
+      if (ctx.focusTraitRail?.()) return;
+      ctx.write(
+        c.dim("no trait rail on this surface — use /tools on|off and /effort <tier> instead"),
+      );
+    },
+  },
+  {
     name: "tools",
     group: "model",
     summary: "List / arm / disarm agent tools (global or per tool).",
@@ -1283,6 +1675,14 @@ export const SLASH_REGISTRY: readonly SlashCmd[] = Object.freeze([
     },
   },
   {
+    name: "model-health",
+    group: "info",
+    summary:
+      "Show what Prometheus has learned about each model endpoint: transport (native/text), " +
+      "circuit-breaker state, and whether its context window was measured or just assumed.",
+    run: (_r, ctx) => runModelHealthCommand({ home: ctx.home, write: ctx.write }),
+  },
+  {
     name: "updates",
     aliases: ["update", "upgrade"],
     group: "config",
@@ -1312,7 +1712,11 @@ export const SLASH_REGISTRY: readonly SlashCmd[] = Object.freeze([
   /* ---- agents / orchestration ---- */
   {
     name: "demos",
-    aliases: ["swarm", "orchestrate", "fleet"],
+    // NOT "orchestrate" — a separate macro further down (primary name "orchestrate", aliases
+    // spawn/parallel/batch) already owns that identifier. BY_NAME's build loop has no
+    // duplicate-key guard, so declaring it here too would silently lose to whichever of the
+    // two is registered last, while this alias list kept claiming it worked.
+    aliases: ["swarm", "fleet"],
     group: "agents",
     summary:
       "Multi-CLI agent swarm: orchestrator + dedicated subagents (claude/codex/gemini/…) that talk + spawn children.",
@@ -1326,14 +1730,29 @@ export const SLASH_REGISTRY: readonly SlashCmd[] = Object.freeze([
     summary: "Show/set the subagent fan-out count (auto-scales under tmux).",
     args: "[n]",
     run: (rest, ctx) => {
+      /**
+       * The accepted range is the REAL cap.
+       *
+       * This took 1–16 and answered `✓ subagents → 16`, while `spawnCapFor` clamps the value to
+       * `MAX_SUBAGENTS` (8) — so half the range confirmed a number the delegation budget could
+       * never reach, and the 9th spawn came back "this turn has already spawned 8 sub-agents
+       * (limit 8)" for a setting the user had been told was accepted. A confirmation that is not
+       * true of the system is worse than a refusal.
+       */
       const n = Number(rest.trim());
-      if (Number.isInteger(n) && n >= 1 && n <= 16) {
-        ctx.agents.setCount(n);
-        ctx.write(c.green(`✓ subagents → ${n}`));
+      if (Number.isInteger(n) && n >= 1) {
+        const applied = Math.min(n, MAX_SUBAGENTS);
+        ctx.agents.setCount(applied);
+        ctx.write(
+          applied === n
+            ? c.green(`✓ subagents → ${applied}`)
+            : c.yellow(`✓ subagents → ${applied}`) +
+                c.dim(` (asked for ${n}; the delegation budget caps a turn at ${MAX_SUBAGENTS})`),
+        );
       } else {
         const cur = ctx.agents.count();
         ctx.write(
-          `${c.bold("Orchestrator")}\n  subagents: ${c.bold(String(cur))}${ctx.agents.insideTmux ? c.dim("  (tmux active — auto-scales per prompt)") : c.dim("  (tmux off — single agent)")}\n  ${c.dim("set with /agents <n> (1–16). Roster: build · plan · explore · scout.")}`,
+          `${c.bold("Orchestrator")}\n  subagents: ${c.bold(String(cur))}${ctx.agents.insideTmux ? c.dim("  (tmux active — auto-scales per prompt)") : c.dim("  (tmux off — single agent)")}\n  ${c.dim(`set with /agents <n> (1–${MAX_SUBAGENTS}). Roster: build · plan · explore · scout.`)}`,
         );
       }
     },
@@ -1622,6 +2041,62 @@ export const SLASH_REGISTRY: readonly SlashCmd[] = Object.freeze([
     fixed: ["repoint"],
     args: "<tool> --base-url URL",
   }),
+  {
+    name: "hug",
+    group: "models",
+    summary:
+      "Bring in a model from a local folder or Hugging Face — convert + install for " +
+      "Ollama / llama.cpp / vLLM / LM Studio, one copy shared across all of them.",
+    args: "[path|repo-id]",
+    run: async (rest, ctx) => {
+      const source = rest.trim() || (await ctx.ask("Model source — local path or org/repo: "));
+      if (!source.trim()) {
+        ctx.write(c.dim("(cancelled)"));
+        return;
+      }
+
+      const targets = ["ollama", "llamacpp", "vllm", "lmstudio"] as const;
+      ctx.write(c.bold("Target runtime") + c.dim(" — where should this model be servable from?"));
+      for (const [i, t] of targets.entries()) {
+        ctx.write(`  ${i + 1}) ${t}${t === "ollama" ? c.dim("  (default)") : ""}`);
+      }
+      const targetAns = (await ctx.ask("pick a number (Enter = ollama): ")).trim();
+      const target = targetAns ? targets[Number.parseInt(targetAns, 10) - 1] : "ollama";
+      if (!target) {
+        ctx.write(c.red(`/hug: "${targetAns}" isn't one of the listed numbers — cancelled`));
+        return;
+      }
+
+      const quants = ["q4_k_m", "q5_k_m", "q6_k", "q8_0", "f16"] as const;
+      ctx.write(
+        c.bold("Quantization") +
+          c.dim(" — size/quality tradeoff (moot for Ollama's own HF passthrough)"),
+      );
+      for (const [i, q] of quants.entries()) {
+        ctx.write(
+          `  ${i + 1}) ${q}${q === "q4_k_m" ? c.dim("  (default — usual good-enough pick)") : ""}`,
+        );
+      }
+      const quantAns = (await ctx.ask("pick a number (Enter = q4_k_m): ")).trim();
+      const quant = quantAns ? quants[Number.parseInt(quantAns, 10) - 1] : "q4_k_m";
+      if (!quant) {
+        ctx.write(c.red(`/hug: "${quantAns}" isn't one of the listed numbers — cancelled`));
+        return;
+      }
+
+      // Always show the quant: it is genuinely moot ONLY for Ollama's zero-download
+      // HF-repo passthrough — for a LOCAL source + ollama it is still applied (the
+      // model gets converted and quantized before `ollama create`), so suppressing it
+      // whenever target === "ollama" (regardless of source) would hide a materially
+      // relevant choice from the confirm prompt.
+      const proceed = await ctx.confirm(`Install ${source} → ${target} (${quant})?`);
+      if (!proceed) {
+        ctx.write(c.dim("(cancelled)"));
+        return;
+      }
+      await ctx.runVerb(["model", "hug", source, "--target", target, "--quant", quant, "--yes"]);
+    },
+  },
   verb("localai", "models", "Audit AI repos (paid vs free-local) + catalog.", { args: "[action]" }),
   verb("providers", "models", "Inference providers (Tier-A free/local first).", {
     verb: "provider",
@@ -1823,9 +2298,10 @@ export const SLASH_REGISTRY: readonly SlashCmd[] = Object.freeze([
   },
   {
     name: "recall",
-    aliases: ["resume", "sessions", "session"],
+    aliases: ["restore", "resume", "sessions", "session"],
     group: "session",
-    summary: "Pick + recall a past session (history picker: id + first words of the prompt).",
+    summary:
+      "Restore a past session (picker: full session id + what it actually did, freshest first).",
     run: (rest, ctx) => ctx.runRecall(rest),
   },
   {
@@ -1979,8 +2455,10 @@ export function renderHelp(): string {
     ["/scan · /list · /install <x>", "detect agents · catalog · install (gated)"],
     ["/harden · /secure scan <t>", "audit this machine · gate a target"],
     ["/agents [n] · /orchestrate <t>", "subagent fan-out · decompose a big task"],
-    ["/recall · /stats", "past-session picker · session usage"],
-    ["/reset · /condense · /quit", "fresh start · reclaim context · exit"],
+    ["/restore · /stats", "past-session picker · session usage"],
+    ["/reset · /compress · /quit", "fresh start · reclaim context · exit"],
+    ["/cd <dir> · /cwd <dir>", "switch project (fresh session) · move in place (keeps context)"],
+    ["/context window [size]", "view/set the auto-compact ceiling (default 250k tokens)"],
   ];
   for (const [k, v] of picks) lines.push(`  ${c.cyan(k)}\n      ${c.dim(v)}`);
   lines.push("");

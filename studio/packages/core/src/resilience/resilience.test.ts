@@ -197,3 +197,51 @@ test("withTimeout propagates the promise's own rejection", async () => {
     /inner/,
   );
 });
+
+test("a request the USER cancelled is not counted against the endpoint's health", async () => {
+  /**
+   * The breaker counted every thrown error as evidence the endpoint is failing. A turn the user
+   * stopped with ESC is an AbortError, so five cancels in a row — routine with a slow local
+   * model — opened the breaker, and the next perfectly ordinary message was refused for the
+   * whole 30s cool-down with "circuit open — fail-fast". Reproduced against the real shared
+   * `endpointBreaker`.
+   */
+  const b = new CircuitBreaker({ failureThreshold: 5, coolDownMs: 30_000 });
+  const cancelled = { isEndpointFailure: () => false };
+  for (let i = 0; i < 5; i++) {
+    await assert.rejects(
+      b.exec(async () => {
+        throw new AbortError("stopped by the user");
+      }, cancelled),
+    );
+  }
+  assert.equal(await b.exec(async () => "answered"), "answered");
+
+  // …and a genuinely failing endpoint still trips it, on the same instance
+  const dead = new CircuitBreaker({ failureThreshold: 5, coolDownMs: 30_000 });
+  for (let i = 0; i < 5; i++) {
+    await assert.rejects(
+      dead.exec(async () => {
+        throw new Error("ECONNREFUSED");
+      }),
+    );
+  }
+  await assert.rejects(
+    dead.exec(async () => "should never run"),
+    (e: unknown) => e instanceof CircuitOpenError,
+  );
+
+  // a cancelled probe while HALF-OPEN must not consume the probe budget either
+  const half = new CircuitBreaker({ failureThreshold: 1, coolDownMs: 0, halfOpenMax: 1 });
+  await assert.rejects(
+    half.exec(async () => {
+      throw new Error("down");
+    }),
+  );
+  await assert.rejects(
+    half.exec(async () => {
+      throw new AbortError("stopped by the user");
+    }, cancelled),
+  );
+  assert.equal(await half.exec(async () => "recovered"), "recovered");
+});

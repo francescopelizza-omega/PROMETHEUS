@@ -7,6 +7,7 @@
  *   - prometheus.py   (copied verbatim)
  *   - nemesis         (copied verbatim, chmod 0755 on posix)
  *   - VERSION.json    { engine, studioBuilt, builtAt }
+ *   - studio/config/effort-capabilities.builtin.json  (the engine READS this at runtime)
  *
  * The engine is the SINGLE source of truth at the repo root; we never fork it.
  * `engine` is read from prometheus.py's SCRIPT_VERSION; `studioBuilt` is the git
@@ -35,6 +36,19 @@ const out = join(studio, "staging", "engine");
 const SRC = {
   prometheus: join(repoRoot, "prometheus.py"),
   nemesis: join(repoRoot, "nemesis"),
+  /**
+   * The published reasoning-effort table.
+   *
+   * `prometheus.py` is NOT self-contained on this one point: `_EFFORT_BUILTIN_ARTIFACT`
+   * resolves `studio/config/effort-capabilities.builtin.json` RELATIVE TO ITS OWN PATH, and
+   * that file is the only table it has — the builtins live in TypeScript and are published
+   * here precisely so the engine need not carry a second copy. Staging the script alone put it
+   * at `<Resources>/engine/prometheus.py` with no `studio/config/` beside it, so every packaged
+   * build resolved an EMPTY table: `--effort` reported "no reasoning control" for every model
+   * on earth, while the same command worked from a checkout. The layout below is the repo's,
+   * verbatim, so both resolve identically and there is no second path to keep in sync.
+   */
+  effortTable: join(studio, "config", "effort-capabilities.builtin.json"),
 };
 
 for (const [name, p] of Object.entries(SRC)) {
@@ -71,6 +85,9 @@ mkdirSync(out, { recursive: true });
 
 copyFileSync(SRC.prometheus, join(out, "prometheus.py"));
 copyFileSync(SRC.nemesis, join(out, "nemesis"));
+const effortOut = join(out, "studio", "config", "effort-capabilities.builtin.json");
+mkdirSync(dirname(effortOut), { recursive: true });
+copyFileSync(SRC.effortTable, effortOut);
 if (process.platform !== "win32") {
   chmodSync(join(out, "prometheus.py"), 0o755);
   chmodSync(join(out, "nemesis"), 0o755);
@@ -84,6 +101,14 @@ const version = {
 writeFileSync(join(out, "VERSION.json"), `${JSON.stringify(version, null, 2)}\n`);
 
 console.log(`staged engine → ${out}`);
+const stagedRules = JSON.parse(readFileSync(effortOut, "utf8")).rules?.length ?? 0;
+if (stagedRules === 0) {
+  // A zero-rule table is indistinguishable at runtime from a MISSING one: every model resolves
+  // to "no reasoning control". Failing the build is the only way that stays visible.
+  console.error("stage-engine: the effort table staged with 0 rules — run emit-effort-rules.mjs");
+  process.exit(1);
+}
 console.log(
   `  prometheus.py + nemesis + VERSION.json (engine ${version.engine}, build ${version.studioBuilt})`,
 );
+console.log(`  studio/config/effort-capabilities.builtin.json (${stagedRules} rules)`);

@@ -144,3 +144,56 @@ test("an UNPRICED model reports no cost rather than a free one", async () => {
     Reflect.deleteProperty(process.env, "TEST_API_KEY");
   }
 });
+
+/* ── V4 re-check: a sub-agent's ANSWER must not carry the model's thinking ───*/
+
+/** A client that streams `parts` as successive deltas. */
+function streamingFactory(parts: readonly string[]) {
+  return ((endpoint) => ({
+    async *chat() {
+      for (let i = 0; i < parts.length; i++) {
+        yield { delta: parts[i], ...(i === parts.length - 1 ? { done: true } : {}) };
+      }
+      void endpoint;
+    },
+  })) as unknown as NonNullable<InvokerDeps["aiClientFactory"]>;
+}
+
+test("api backend: an R1-style model's inline thinking is stripped from the RESULT", async () => {
+  // This matters more than the transcript cases the splitter was first wired into: what an
+  // invoke returns is a sub-agent's result, folded into a parent agent's thread and fed to
+  // another model — so a leaked deliberation becomes another model's INPUT. It is also what
+  // `priceCall` measures. The tag is split across deltas, as a real stream delivers it.
+  const invoke = makeInvoker({
+    client: fakeEngine(),
+    aiClientFactory: streamingFactory(["<thi", "nk>weighing it up</think>", "The answer is 4."]),
+  });
+  const backend = orch.apiBackendFor("together") as orch.BackendRef;
+  backend.env = { TOGETHER_API_KEY: "sk-x" };
+  backend.model = "deepseek-r1-distill-llama-70b";
+  const out = await invoke(req(backend));
+  assert.equal(out.text, "The answer is 4.", "the deliberation leaked into the sub-agent result");
+});
+
+test("api backend: a model with NO reasoning tag returns its text byte-identically", async () => {
+  const invoke = makeInvoker({
+    client: fakeEngine(),
+    aiClientFactory: streamingFactory(["plain <think>not special</think> answer"]),
+  });
+  const backend = orch.apiBackendFor("together") as orch.BackendRef;
+  backend.env = { TOGETHER_API_KEY: "sk-x" };
+  const out = await invoke(req(backend));
+  assert.equal(out.text, "plain <think>not special</think> answer");
+});
+
+test("api backend: an UNTERMINATED thought never becomes the result", async () => {
+  const invoke = makeInvoker({
+    client: fakeEngine(),
+    aiClientFactory: streamingFactory(["<think>I was cut off"]),
+  });
+  const backend = orch.apiBackendFor("together") as orch.BackendRef;
+  backend.env = { TOGETHER_API_KEY: "sk-x" };
+  backend.model = "deepseek-r1-distill-llama-70b";
+  const out = await invoke(req(backend));
+  assert.equal(out.text, "(no output)", "a truncated deliberation was promoted to the answer");
+});

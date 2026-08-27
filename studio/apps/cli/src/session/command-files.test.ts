@@ -125,3 +125,36 @@ test("positional and $ARGUMENTS substitution survive the reordering", async () =
   const out = await expandCommand(cmd("Fix $1 in $2"), ["the bug", "main.ts"], deps());
   assert.match(out.prompt, /Fix the bug in main\.ts/);
 });
+
+test("a shell command containing an `@` still gets its OUTPUT spliced in", async () => {
+  /**
+   * The reads loop rewrites every `@ref` occurrence in the template before the runs loop splits
+   * on the run token. When the parser reported an `@` INSIDE a command as a fileRef, that
+   * rewrite mutated the token, `text.split(token)` matched nothing, and the command's output —
+   * for a command the human had already been prompted about and approved, and which really did
+   * execute through the gate — was silently dropped on the floor.
+   */
+  const ran: string[] = [];
+  const out = await expandCommand(cmd("Version: !`npm view react@latest version`"), [], {
+    readFile: async () => {
+      throw new Error("no file should be read for a ref that lives inside a command");
+    },
+    runShell: async (c: string) => {
+      ran.push(c);
+      return "19.2.0";
+    },
+  });
+
+  assert.deepEqual(ran, ["npm view react@latest version"], "the command did not run as written");
+  assert.match(out.prompt, /19\.2\.0/, "the approved command's output was thrown away");
+  assert.doesNotMatch(out.prompt, /refused/i);
+  assert.deepEqual(out.rejected, []);
+
+  // self-validating: a real `@ref` in the same template is still resolved as a read
+  const both = await expandCommand(cmd("!`echo a@b` and @notes.md"), [], {
+    readFile: async (p: string) => `body of ${p}`,
+    runShell: async () => "ok",
+  });
+  assert.match(both.prompt, /body of notes\.md/);
+  assert.match(both.prompt, /--- \$ echo a@b ---/);
+});

@@ -245,3 +245,31 @@ test("download() REAL GATE: a malicious LOCAL staging dir is BLOCKED + quarantin
     rmSync(lib, { recursive: true, force: true });
   }
 });
+
+test("hardware() REFUSES a failed scan instead of inventing a machine", async () => {
+  /**
+   * `HardwareProfileSchema` is a DEFAULTING parser: every field it cannot find gets a fallback —
+   * missing `os` becomes "linux", missing cpu becomes 0 cores, missing `ram_gb` becomes 0. That
+   * is right for a real-but-partial scan and catastrophic for a FAILED one, because a failure
+   * envelope has none of the fields, so every default fires at once and the result reads as a
+   * confident answer about a machine that does not exist.
+   *
+   * On this real macOS/arm64 host, a failing sidecar produced os "linux", cpu brand "", 0 cores,
+   * 0 GB RAM, accel "cpu" — reported as a SUCCESS — and model-fit scoring then answered from
+   * those numbers.
+   */
+  const client = createModelHubClient({ sidecarDir: "/no/such/sidecar/dir", timeoutMs: 5_000 });
+  await assert.rejects(client.hardware(), (e: unknown) => {
+    assert.ok(e instanceof Error);
+    assert.match(e.message, /hw\.scan (failed|returned no data)/);
+    return true;
+  });
+
+  // self-validating: the schema ITSELF still fabricates, which is exactly why the caller must
+  // check the envelope before handing it over. If this ever stops being true the guard above is
+  // no longer load-bearing and this test should be revisited rather than deleted.
+  const fabricated = HardwareProfileSchema.parse({ ok: false, error: "sidecar not found" });
+  assert.equal(fabricated.os, "linux");
+  assert.equal(fabricated.ramGb, 0);
+  assert.equal(fabricated.cpu.cores, 0);
+});

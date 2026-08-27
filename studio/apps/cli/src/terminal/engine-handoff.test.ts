@@ -24,7 +24,12 @@ import {
 
 import type { CommandOutcome } from "../context.js";
 import { setColorEnabled } from "../render.js";
-import { type TerminalChatDeps, type TerminalChatOpts, runTerminalChat } from "./engine-handoff.js";
+import {
+  type TerminalChatDeps,
+  type TerminalChatOpts,
+  runTerminalChat,
+  ttyTypedConfirm,
+} from "./engine-handoff.js";
 
 setColorEnabled(false);
 
@@ -273,4 +278,74 @@ test("crash-free: a seam that throws becomes a friendly non-zero code (no raw st
 
   assert.equal(res, 1);
   assert.ok(out.some((l) => /launch failed: pty exploded/.test(l)));
+});
+
+test("the bypass typed-confirm approves ONLY the exact phrase, and never without a TTY", async () => {
+  /**
+   * `defaultRunLiveTerminal` passed `runLiveTerminal` no deps, so its `confirm` fell back to the
+   * module's own `async () => false`. Fail-closed is the right default for an absent seam, but
+   * production never supplied one — so every `--bypass` launch answered "bypass not confirmed"
+   * and no input existed that could approve it. The gate was unreachable, not strict.
+   *
+   * This pins the reader that now fills that seam: exact match approves, anything else denies,
+   * and a non-interactive stdin denies WITHOUT reading (a pipe has nobody to type the phrase,
+   * and blocking there would hang the caller rather than answer it).
+   */
+  const realIsTty = process.stdin.isTTY;
+  const realWrite = process.stdout.write;
+  const chunks: string[] = [];
+  (process.stdout as { write: unknown }).write = (s: string): boolean => {
+    chunks.push(String(s));
+    return true;
+  };
+
+  try {
+    // no TTY → denied, and nothing is even printed to a pipe
+    Object.defineProperty(process.stdin, "isTTY", { value: false, configurable: true });
+    assert.equal(await ttyTypedConfirm("type it", "BYPASS"), false);
+    assert.deepEqual(chunks, [], "a non-interactive stdin must not be prompted at all");
+
+    // TTY → the exact phrase approves; a near-miss does not
+    Object.defineProperty(process.stdin, "isTTY", { value: true, configurable: true });
+    for (const [typed, expected] of [
+      ["BYPASS\n", true],
+      ["bypass\n", false],
+      ["BYPASS extra\n", false],
+      ["\n", false],
+    ] as const) {
+      const stdin = process.stdin as unknown as {
+        resume(): void;
+        pause(): void;
+        on(e: string, cb: (b: Buffer) => void): void;
+        off(e: string, cb: unknown): void;
+        once(e: string, cb: () => void): void;
+      };
+      const real = {
+        resume: stdin.resume,
+        pause: stdin.pause,
+        on: stdin.on,
+        off: stdin.off,
+        once: stdin.once,
+      };
+      stdin.resume = () => {};
+      stdin.pause = () => {};
+      stdin.off = () => {};
+      stdin.once = () => {};
+      stdin.on = (e: string, cb: (b: Buffer) => void): void => {
+        if (e === "data") queueMicrotask(() => cb(Buffer.from(typed)));
+      };
+      try {
+        assert.equal(
+          await ttyTypedConfirm("type it", "BYPASS"),
+          expected,
+          `for ${JSON.stringify(typed)}`,
+        );
+      } finally {
+        Object.assign(stdin, real);
+      }
+    }
+  } finally {
+    Object.defineProperty(process.stdin, "isTTY", { value: realIsTty, configurable: true });
+    process.stdout.write = realWrite;
+  }
 });

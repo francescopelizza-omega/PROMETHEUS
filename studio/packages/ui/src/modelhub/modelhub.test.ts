@@ -57,7 +57,7 @@ import {
 } from "./util.js";
 
 test("inert strips ANSI escapes and control bytes, trims, rejects non-strings", () => {
-  assert.equal(inert("[31mqwen3[0m"), "qwen3");
+  assert.equal(inert("\x1b[31mqwen3\x1b[0m"), "qwen3");
   assert.equal(inert("a b\tc"), "a b c");
   assert.equal(inert("  spaced  "), "spaced");
   assert.equal(inert(undefined), "");
@@ -111,7 +111,7 @@ test("fitChipText shows the caps reason (NOT a fits chip) when NOT runnable (§4
     verdict: "FITS",
     ratio: null,
     runnable: false,
-    blockedReason: "[31mvLLM only[0m",
+    blockedReason: "\x1b[31mvLLM only\x1b[0m",
   });
   assert.equal(dirty, "✕ vLLM only");
 });
@@ -255,9 +255,9 @@ test("recommendedExplainer handles the OVERFLOW (no recommendation) case", () =>
 });
 
 test("recommendedExplainer inerts crafted reason strings", () => {
-  const line = recommendedExplainer({ label: "Q8_0" }, ["[31mevil[0m reason"]);
+  const line = recommendedExplainer({ label: "Q8_0" }, ["\x1b[31mevil\x1b[0m reason"]);
   assert.ok(line.includes("evil reason"));
-  assert.ok(!line.includes(""));
+  assert.ok(!line.includes("\x1b"));
 });
 
 /* ── §5 gateToVerdict adapter (fail-closed) ────────────────────────────────── */
@@ -287,7 +287,7 @@ test("gateToVerdict FAILS CLOSED on block/error: safe_to all false, score 100 (C
 
 test("gateToVerdict NEVER fabricates findings + inerts reasons", () => {
   const v = gateToVerdict(
-    { verdict: "warn", score: 40, reasons: ["[33msuspicious[0m url"] },
+    { verdict: "warn", score: 40, reasons: ["\x1b[33msuspicious\x1b[0m url"] },
     "x/y",
   );
   assert.deepEqual(v.top_findings, []);

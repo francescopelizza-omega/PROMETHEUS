@@ -168,6 +168,35 @@ export interface RunGateOptions {
   readTrusted?: () => TrustedSource[];
   /** injectable gate runner (defaults to the REAL engine-bridge `gate()`); tests stub it. */
   runGate?: (target: string) => Promise<SecurityVerdict>;
+  /**
+   * Resolve the workspace's current HEAD sha when the REQUEST did not carry one.
+   *
+   * `hasTrustedVerdict` returns undefined the moment `id.head` is absent, and no renderer ever
+   * sent it — so step 1 below, the documented "clean verdict bound to the current HEAD ⇒ ALLOW
+   * immediately, no fresh scan, no F5 re-prompt", could never fire in production. Every Run and
+   * every Debug paid for a full nemesis scan of the tree, and a repo whose scan tiers `warn`
+   * re-prompted on every launch with no way to make it stop.
+   *
+   * Resolved HERE rather than pushed onto the renderer: main already has the workspace root and
+   * a git host, the renderer is the least-trusted surface in the app (C5), and a trust-store
+   * lookup keyed on a sha the RENDERER supplied would be a worse contract than one keyed on a
+   * sha main read for itself. Injectable so tests need no repository.
+   */
+  resolveHead?: (workspaceRoot: string) => Promise<string | undefined>;
+}
+
+/**
+ * Read the workspace's HEAD sha with plain git, or undefined when it is not a repository.
+ *
+ * Best-effort by design: a non-repo workspace, a fresh repo with no commits, or a missing git
+ * binary all mean "no sha to key trust on", which correctly falls through to a fresh scan.
+ */
+async function defaultResolveHead(workspaceRoot: string): Promise<string | undefined> {
+  // Through the git HOST, not `child_process` — C5 allows that import only inside
+  // @prometheus/engine-bridge, and the lint rule is right: this module has no business
+  // spawning. `headSha` already returns undefined for every "no sha" case.
+  const { GitHost } = await import("./git-host.js");
+  return new GitHost().headSha(workspaceRoot);
 }
 
 /**
@@ -201,10 +230,19 @@ export async function runGate(
   }
 
   // 1) trusted at this HEAD? → skip the scan.
+  // The request rarely carries `head` (no renderer sends it), so resolve it here — without a
+  // sha the trust lookup below cannot match anything and the fast path is dead.
   const readTrusted = opts.readTrusted ?? (() => listTrusted());
+  let ident = id;
+  if (!ident.head) {
+    const resolved = await (opts.resolveHead ?? defaultResolveHead)(workspaceRoot).catch(
+      () => undefined,
+    );
+    if (resolved) ident = { ...id, head: resolved };
+  }
   let trustEntry: TrustedSource | undefined;
   try {
-    trustEntry = hasTrustedVerdict(id, readTrusted());
+    trustEntry = hasTrustedVerdict(ident, readTrusted());
   } catch {
     // a broken trust read is NOT a reason to allow — fall through to a fresh scan.
     trustEntry = undefined;

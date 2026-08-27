@@ -528,3 +528,69 @@ test("an error with no message still produces a reportable sentence", () => {
   const a = ANTHROPIC_WIRE.parse('{"type":"error","error":{}}');
   assert.ok((a.error ?? "").length > 0);
 });
+
+test("EVERY tool call in a frame is parsed, not just the first", () => {
+  /**
+   * `WireEvent.toolCall` is a single object and both parsers took exactly one entry per frame —
+   * OpenAI read `tool_calls[0]`, Gemini took the first `functionCall` part. A server that batches
+   * a turn's parallel calls into ONE frame therefore lost all but the first: the agent ran 1 of N
+   * requested actions, and because the thread sent back also held only the survivor, the model
+   * could not tell the rest had vanished — it just re-asked, burning rounds.
+   *
+   * Gemini is where this actually bites: it delivers parallel function calls as several
+   * `functionCall` parts inside one candidate. The OpenAI branch was a latent gap.
+   */
+  const openai = OPENAI_WIRE.parse(
+    JSON.stringify({
+      choices: [
+        {
+          delta: {
+            tool_calls: [
+              { index: 0, id: "a", function: { name: "read_file", arguments: '{"p":1}' } },
+              { index: 1, id: "b", function: { name: "grep", arguments: '{"q":2}' } },
+            ],
+          },
+        },
+      ],
+    }),
+  );
+  assert.equal(openai.toolCalls?.length, 2, "the second parallel call was dropped");
+  assert.equal(openai.toolCalls?.[1]?.name, "grep");
+  assert.equal(openai.toolCall?.name, "read_file", "the single-call field must still be the first");
+  assert.equal(openai.toolCalls?.[1]?.index, 1, "the provider's own index must be preserved");
+
+  const gemini = GEMINI_WIRE.parse(
+    JSON.stringify({
+      candidates: [
+        {
+          content: {
+            parts: [
+              { functionCall: { name: "read_file", args: { p: 1 } } },
+              { functionCall: { name: "grep", args: { q: 2 } } },
+            ],
+          },
+        },
+      ],
+    }),
+  );
+  assert.equal(gemini.toolCalls?.length, 2, "Gemini's second parallel call was dropped");
+  assert.deepEqual(
+    gemini.toolCalls?.map((c) => c.name),
+    ["read_file", "grep"],
+  );
+  // distinct indices, or the hosts' accumulator Map merges them into one unparseable call
+  assert.notEqual(gemini.toolCalls?.[0]?.index, gemini.toolCalls?.[1]?.index);
+
+  // a frame with ONE call is unchanged in both shapes
+  const one = OPENAI_WIRE.parse(
+    JSON.stringify({
+      choices: [
+        {
+          delta: { tool_calls: [{ index: 0, id: "a", function: { name: "x", arguments: "{}" } }] },
+        },
+      ],
+    }),
+  );
+  assert.equal(one.toolCalls?.length, 1);
+  assert.equal(one.toolCall?.name, "x");
+});

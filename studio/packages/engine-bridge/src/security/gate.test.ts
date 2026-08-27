@@ -70,3 +70,20 @@ test("CONTRACT: real nemesis blocks a known-malicious file", async (t) => {
   assert.ok(v.findings.length >= 1, "should surface at least one finding");
   assert.equal(v.findings[0]?.klass, "malware");
 });
+
+test("an option-shaped scan target FAILS CLOSED — it is never handed to nemesis as a flag", async () => {
+  /**
+   * nemesis reads `-` as "the body is on stdin". `runNemesis` writes no stdin for a gate and
+   * closes the pipe, so `gate("-")` made it scan an EMPTY body and answer
+   * `verdict:"allow", risk_score:0, exit 0` — a clean SecurityVerdict for something that was
+   * never scanned, whose `target` had even been replaced by nemesis's own `"<stdin>"`.
+   * Reachable: a `.promext` manifest's `repo` is taken verbatim, wins over the staging dir, and
+   * is handed to this function by the desktop extension host.
+   */
+  for (const target of ["-", "-rf", "--help", "  --policy=/tmp/x"]) {
+    const v = await gate(target);
+    assert.equal(v.verdict, "error", `${target} must fail closed`);
+    assert.equal(v.risk_score, 100);
+    assert.equal(v.target, target, "the verdict must name the target that was REQUESTED");
+  }
+});

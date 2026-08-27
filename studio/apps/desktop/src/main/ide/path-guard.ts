@@ -39,8 +39,36 @@ export function uriToFsPath(uri: string): string {
   return uri;
 }
 
-/** Directories whose entire subtree is off-limits (resolved absolute paths). */
+/**
+ * Directories whose entire subtree is off-limits.
+ *
+ * Each entry is returned in BOTH spellings — plain `resolve()` and fully canonicalised — because
+ * the path being CHECKED goes through `canonical()` (which realpaths its existing ancestor) and
+ * these did not. Any home that is not already canonical therefore never matched: the probe
+ * resolved to the real location while the list stayed on the symlinked one. Measured with a
+ * symlinked home, `~/.aws/notes.txt` — a file only the directory rule can catch — was ALLOWED
+ * under both spellings. The hand-written `/private/etc` entry below was the same bug, patched
+ * once by hand for macOS's `/etc` and never generalised.
+ */
 function sensitiveDirs(): string[] {
+  return bothSpellings(rawSensitiveDirs());
+}
+
+/** Every path in `list`, plain-resolved AND canonicalised, de-duplicated. */
+function bothSpellings(list: string[]): string[] {
+  const out = new Set<string>();
+  for (const entry of list) {
+    out.add(resolve(entry));
+    try {
+      out.add(canonical(entry));
+    } catch {
+      /* a path that cannot be canonicalised is still denied by its resolved spelling */
+    }
+  }
+  return [...out];
+}
+
+function rawSensitiveDirs(): string[] {
   const home = homedir();
   return [
     resolve(home, ".ssh"),
@@ -71,7 +99,9 @@ function sensitiveFiles(): Set<string> {
       ".zshrc",
       ".zprofile",
       ".profile",
-    ].map((f) => resolve(home, f)),
+      // Same canonicalisation as sensitiveDirs(): the checked path is realpath'd, so a home
+      // that is not already canonical would never match a plain-resolved entry.
+    ].flatMap((f) => bothSpellings([resolve(home, f)])),
   );
 }
 
@@ -184,6 +214,9 @@ export function grantWorkingSetRoot(dir: string): void {
   const before = grantedRoots.size;
   grantedRoots.add(canonical(uriToFsPath(dir)));
   if (grantedRoots.size !== before) saveGrants();
+  // A grant changes the picture: whatever was refused before this can now be re-declared, so the
+  // fail-closed latch must not outlive the condition that set it.
+  refusedEveryDeclaredRoot = false;
 }
 
 /** The directories a human has picked this session (canonical absolute paths). */
@@ -191,7 +224,26 @@ export function getGrantedRoots(): readonly string[] {
   return [...grantedRoots];
 }
 
+/**
+ * Is `dir` a granted root, or inside one?
+ *
+ * Used to decide whether a DERIVED open (a worktree cut from a repo) may inherit the grant its
+ * parent already has. Deliberately not exported as "grant this because the renderer says so" —
+ * the caller must have a path main itself produced from an already-granted one.
+ */
+export function isGrantedRoot(dir: string): boolean {
+  if (typeof dir !== "string" || !dir) return false;
+  const abs = canonical(uriToFsPath(dir));
+  return [...grantedRoots].some((root) => abs === root || isUnder(abs, root));
+}
+
 /** Test seam: forget every grant (a fresh app). */
+/** Test-only: forget what the renderer declared (see `getDeclaredRoots`). */
+export function clearDeclaredRoots(): void {
+  declaredRoots = [];
+  refusedEveryDeclaredRoot = false;
+}
+
 export function clearGrantedRoots(): void {
   grantedRoots.clear();
   persistPath = null;
@@ -265,6 +317,42 @@ function saveGrants(): void {
  * nothing ever opened must still be able to save a loose file the user typed into. There is no
  * working set to be outside of yet, because the human has not chosen one.
  */
+/**
+ * What the renderer last DECLARED as open, whether or not those roots were approved for writing.
+ *
+ * "Which folder is open" and "which roots may be written to" are different questions, and
+ * conflating them broke read-only features: `codebase:overview` and persona discovery both read
+ * `getWorkingSetRoots()[0]`, which is empty whenever the open folder was never granted (opened
+ * from recents, drag-drop, a worktree switch). "Meet your codebase" then answered
+ * "no workspace folder is open" with a folder plainly open on screen. Reproduced through the
+ * real handler.
+ *
+ * This list is deliberately NOT consulted by any write guard — the grant model is unchanged.
+ */
+let declaredRoots: string[] = [];
+
+/**
+ * A declaration was made and EVERY root was refused, with no grant to fall back on.
+ *
+ * This is not the same state as "nothing has been declared yet", and collapsing the two is what
+ * made the guard fail OPEN: `workingSetRoots` ends up `[]` in both, and an empty working set
+ * means "allow everything". So on a fresh profile — or one whose grants file is corrupt or
+ * missing — `ide:workingSet.set` correctly answered "none of the declared roots are inside a
+ * folder you opened", and the very next `ide:fs.write` wrote to that same refused root, and to
+ * any arbitrary absolute path. Measured: a refused declaration then allowed
+ * `~/Desktop/pwned.txt`.
+ *
+ * Setting it makes the empty working set DENY instead of allow. That is the opposite of the
+ * widening `setWorkingSetRoots` warns against below — it closes the guard, and the three
+ * properties `working-set.test.ts` pins all still hold.
+ */
+let refusedEveryDeclaredRoot = false;
+
+/** The folders the renderer says are open (canonical, may be un-granted). */
+export function getDeclaredRoots(): readonly string[] {
+  return declaredRoots;
+}
+
 export function setWorkingSetRoots(roots: readonly string[]): {
   accepted: number;
   refused: string[];
@@ -272,6 +360,7 @@ export function setWorkingSetRoots(roots: readonly string[]): {
   const declared = roots
     .filter((r): r is string => typeof r === "string" && r.length > 0)
     .map((r) => canonical(uriToFsPath(r)));
+  declaredRoots = [...declared];
   const refused: string[] = [];
   const accepted: string[] = [];
   for (const r of declared) {
@@ -279,8 +368,31 @@ export function setWorkingSetRoots(roots: readonly string[]): {
     if ([...grantedRoots].some((g) => r === g || isUnder(r, g))) accepted.push(r);
     else refused.push(r);
   }
-  // Nothing legitimate declared ⇒ fall back to the human's grants, never to "no guard".
+  /**
+   * Nothing legitimate declared ⇒ fall back to the human's grants, never to "no guard".
+   *
+   * This fallback has a REAL cost that is not a bug in this line: once the human has picked any
+   * folder through the native dialog, opening a DIFFERENT project by a route that does not use
+   * the picker (Home ▸ a recent project, drag-drop, a worktree switch) leaves the guard pinned to
+   * the old one, and every save in the project actually on screen is refused with "refusing to
+   * write outside the working set". Reproduced: grant projA, declare [projB] → roots in force
+   * `[projA]`, projB refused, projA allowed.
+   *
+   * The fix is NOT to widen here — `working-set.test.ts` pins three properties that depend on
+   * this fallback: a renderer cannot widen its own scope, declaring `/` does not put the whole
+   * filesystem in scope, and an empty declaration does not turn the guard off once a folder is
+   * open. Weakening it to `accepted` breaks all three, which is a security regression, not a fix.
+   *
+   * The real gap is upstream: the non-picker openers never record a grant the way the picker
+   * does. That is a product decision about how a recents click / drop / worktree switch earns
+   * one, so it is left to the humans who own that flow — see the round-6 record. What IS fixed
+   * here is the diagnosis: the refusal used to say only "not approved", which reads as a bug in
+   * the file being saved rather than as "this project was never granted".
+   */
   workingSetRoots = accepted.length > 0 ? accepted : [...grantedRoots];
+  // Fail CLOSED when a declaration was made, nothing was accepted, and there is no grant to fall
+  // back on — otherwise the empty working set below reads as "allow everything".
+  refusedEveryDeclaredRoot = declared.length > 0 && workingSetRoots.length === 0;
   // a root change invalidates prior approvals — they were granted against the old scope.
   approvedOutside.clear();
   return { accepted: accepted.length, refused };
@@ -293,6 +405,7 @@ export function getWorkingSetRoots(): readonly string[] {
 
 /** Whether `uri` resolves inside the working set (true when no roots are set). */
 export function isInsideWorkingSet(uri: string): boolean {
+  if (refusedEveryDeclaredRoot) return false;
   if (workingSetRoots.length === 0) return true;
   const abs = canonical(uriToFsPath(uri));
   return workingSetRoots.some((root) => isUnder(abs, root));
@@ -315,11 +428,32 @@ export function clearOutsideApprovals(): void {
  */
 export function assertInsideWorkingSet(uri: string): string {
   const abs = canonical(uriToFsPath(uri));
+  if (refusedEveryDeclaredRoot) {
+    throw new Error(
+      `refusing to write: this workspace was never approved (${abs}). ` +
+        "Open it with File ▸ Open Folder to approve it.",
+    );
+  }
   if (workingSetRoots.length === 0) return abs;
   if (workingSetRoots.some((root) => isUnder(abs, root))) return abs;
   if (approvedOutside.has(abs)) return abs;
+  /**
+   * Name the ACTUAL cause when the working set belongs to a different project.
+   *
+   * The commonest way to see this refusal is not "you edited a stray file" — it is that the
+   * project on screen was opened by a route that never recorded a grant (Home ▸ recents,
+   * drag-drop, a worktree switch), so `setWorkingSetRoots` fell back to the folder the human last
+   * picked through the native dialog. "not approved" reads as a problem with the file; it is
+   * really a problem with how the folder was opened, and the old message gave the user nothing
+   * to act on.
+   */
+  const declaredElsewhere = !workingSetRoots.some((root) => isUnder(abs, root));
+  const hint =
+    declaredElsewhere && workingSetRoots.length > 0
+      ? " This usually means the folder was opened from recents, a drag-drop or a worktree switch, which does not record an approval — re-open it with File ▸ Open Folder to approve it."
+      : "";
   throw new Error(
     `refusing to write outside the working set (not approved): ${abs}. ` +
-      `Working set: ${workingSetRoots.join(", ")}`,
+      `Working set: ${workingSetRoots.join(", ")}.${hint}`,
   );
 }

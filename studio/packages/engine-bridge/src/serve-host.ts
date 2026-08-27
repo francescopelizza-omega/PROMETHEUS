@@ -104,6 +104,24 @@ function defaultSpawn(cmd: string, args: string[]): { pid?: number; unref?: () =
     stdio: "ignore",
     env: safeChildEnv(),
   });
+  /**
+   * A spawn that FAILS emits `error` asynchronously, and an EventEmitter with no listener for
+   * `error` rethrows it as an uncaught exception.
+   *
+   * `start()` below already handles the failure properly — it sees no pid and returns a tidy
+   * `{ok:false, error:"failed to spawn <cmd> (no pid)"}` — but the raw ENOENT still surfaced a
+   * tick later, past the point any caller could catch it. Every other spawn site in this package
+   * attaches this listener (run.ts, sidecar-runner.ts, security/gate.ts, catalog.ts,
+   * modelhub/localai.ts, system-probe.ts); this was the one that did not, and it was invisible
+   * because the production caller injects no seam while every test does.
+   *
+   * Nothing is reported from here: the pid check is the reported path, and duplicating the
+   * message would produce two errors for one failure. This listener exists so the failure stays
+   * a returned value instead of becoming an uncaught throw.
+   */
+  child.on("error", () => {
+    /* handled by the `no pid` check in `start()` */
+  });
   return child;
 }
 

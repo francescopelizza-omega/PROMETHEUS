@@ -26,9 +26,28 @@ import { lstatSync, mkdirSync, readFileSync, renameSync, rmSync } from "node:fs"
 import { dirname, isAbsolute, resolve } from "node:path";
 
 import type { ToolOutcome } from "../../loop.js";
-import { isPathAllowed } from "./working-set.js";
+import { isPathAllowed, scopedAbsolute } from "./working-set.js";
 
 /** A captured pre-image, for a host that can undo. */
+/**
+ * Read a file as text ONLY if the bytes round-trip exactly; otherwise `null`.
+ *
+ * `readFileSync(path, "utf8")` does NOT throw on binary — it substitutes U+FFFD for every
+ * invalid sequence — so a `catch` around it never fires for the case it was written for, and the
+ * lossy string that comes back looks like a perfectly ordinary file. Two separate call sites in
+ * this repo have been bitten by it: `delete_file`'s revert pre-image (a PNG went 264 bytes in,
+ * 522 bytes out) and `propose_edit`, which spliced the lossy string and WROTE IT BACK — a 1032
+ * byte PNG became 2058 bytes of replacement characters, reported as `ok: true, "edited …"`, and
+ * the pre-image kept for `/revert` was the corrupted text, so the damage could not be undone.
+ *
+ * One helper, so the next tool that reads a file for editing cannot drift away from it again.
+ */
+export function readTextExact(abs: string): string | null {
+  const raw = readFileSync(abs);
+  const text = raw.toString("utf8");
+  return Buffer.from(text, "utf8").equals(raw) ? text : null;
+}
+
 export interface FsPreImage {
   path: string;
   /** the bytes before the change — `""` when the path was empty OR did not exist. */
@@ -67,7 +86,9 @@ function resolveMutatePath(
   if (!rawPath || rawPath.startsWith("-")) {
     return { ok: false, summary: `${tool}: refusing invalid path: ${rawPath}` };
   }
-  const abs = isAbsolute(rawPath) ? rawPath : resolve(deps.cwd, rawPath);
+  // Same rule as the read guard: expand `~` before resolving, so the scope check judges the
+  // path the filesystem would actually see rather than a literal `~` directory under cwd.
+  const abs = scopedAbsolute(rawPath, deps.cwd);
   const roots = deps.roots;
   if (
     roots &&
@@ -110,20 +131,40 @@ export function deleteFileTool(args: Record<string, unknown>, deps: FsMutateDeps
     return { ok: true, summary: `deleted directory ${r.raw} (not revertible)` };
   }
   let preImage = "";
+  let capturable = true;
   try {
-    preImage = readFileSync(r.abs, "utf8");
+    /**
+     * ROUND-TRIP the bytes before trusting them as a pre-image.
+     *
+     * `readFileSync(path, "utf8")` does not throw on binary — it substitutes U+FFFD for every
+     * invalid sequence — so the `catch` below never fired for the case its comment described,
+     * and `/revert` wrote that lossy string back as if it were the file. Measured on a PNG:
+     * 264 bytes in, 522 bytes out, not identical. The user was told the delete had been
+     * reverted and got a corrupted file, which is worse than not reverting at all.
+     */
+    const text = readTextExact(r.abs);
+    if (text !== null) preImage = text;
+    else capturable = false; // genuinely binary — a string pre-image cannot represent it
   } catch {
-    // A binary or unreadable file still deletes; it just cannot be captured for revert.
-    preImage = "";
+    // unreadable: it still deletes, it just cannot be captured for revert.
+    capturable = false;
   }
   try {
     rmSync(r.abs);
   } catch (err) {
     return { ok: false, summary: `delete_file: failed: ${errText(err)}` };
   }
-  // A delete is by construction an "it existed" case — `rmSync` above would have thrown.
-  deps.onPreImage?.({ path: r.abs, preImage, existed: true });
-  return { ok: true, summary: `deleted ${r.raw}` };
+  // Only record a pre-image we can actually restore byte-for-byte. Recording a lossy one would
+  // put a corrupt file into the checkpoint and make `/revert` report a success it did not do.
+  if (capturable) {
+    // A delete is by construction an "it existed" case — `rmSync` above would have thrown.
+    deps.onPreImage?.({ path: r.abs, preImage, existed: true });
+  }
+  // Say when it is NOT revertible — the same honesty the directory branch above already applies.
+  return {
+    ok: true,
+    summary: capturable ? `deleted ${r.raw}` : `deleted ${r.raw} (binary — not revertible)`,
+  };
 }
 
 /** `move_file` — rename/move, refusing to clobber unless the caller asked for it explicitly. */

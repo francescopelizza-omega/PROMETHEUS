@@ -440,13 +440,39 @@ export type {
 export type { ContextWindowResult, ContextWindowSource } from "./ai/context-window.js";
 export {
   DEFAULT_CONTEXT_WINDOW,
+  CONTEXT_PROBE_AWAIT_MS,
   probeContextWindow,
   contextFromOllamaShow,
   contextFromModelsEntry,
+  capabilitiesFromOllamaShow,
+  revisionFromOllamaShow,
 } from "./ai/context-window.js";
+export type {
+  EndpointProbe,
+  EndpointProbeDeps,
+  EndpointProbeOutcome,
+} from "./ai/endpoint-probe.js";
+export { createEndpointProbe, PROBE_CACHE_TTL_MS } from "./ai/endpoint-probe.js";
+export type {
+  ContextWindowOrigin,
+  EndpointHealthRecord,
+  ModelHealthStore,
+  TransportMode,
+} from "./ai/model-health.js";
+export {
+  NO_BREAKER_SNAPSHOT,
+  buildHealthRecord,
+  describeBreaker,
+  describeContextWindow,
+  describeTransport,
+  formatHealthTable,
+  mergeHealthRecord,
+  parseEndpointHealthRecord,
+} from "./ai/model-health.js";
 export {
   createAiClient,
   CloudPolicyError,
+  ModelIdlePausedError,
   parseSseChunk,
   deltaFromPayload,
   // Exported so a host driving its OWN SSE loop (the CLI's native tool transport does, to

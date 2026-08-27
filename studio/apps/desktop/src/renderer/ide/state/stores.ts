@@ -59,7 +59,9 @@ export interface TabsStore {
   workspaceRoot: string | null;
   setWorkspaceRoot(root: string | null): void;
   open(uri: string, opts: OpenOpts): void;
-  close(uri: string): void;
+  /** close ONE tab row. `group` names the pane — omit it only when there is no split, since a
+   *  split shares the uri across groups and closing by uri alone would close both panes. */
+  close(uri: string, group?: number): void;
   activate(uri: string): void;
   markDirty(uri: string, dirty: boolean): void;
   /** split the focused group; returns the new group id for the caller to mount. */
@@ -88,7 +90,7 @@ export const useTabsStore = create<TabsStore>((set, get) => ({
   workspaceRoot: restoredTabs.workspaceRoot,
   setWorkspaceRoot: (root): void => set({ workspaceRoot: root }),
   open: (uri, opts): void => set((s) => ({ tabs: openTab(s.tabs, uri, opts) })),
-  close: (uri): void => set((s) => ({ tabs: closeTab(s.tabs, uri) })),
+  close: (uri, group): void => set((s) => ({ tabs: closeTab(s.tabs, uri, group) })),
   activate: (uri): void => set((s) => ({ tabs: activateTab(s.tabs, uri) })),
   markDirty: (uri, dirty): void => set((s) => ({ tabs: setDirty(s.tabs, uri, dirty) })),
   split: (): number => {
@@ -130,9 +132,12 @@ export interface DirtyRecoveryStore {
   buffers: DirtyRecord[];
   /** capture one buffer's current unsaved text (called debounced from the editor). */
   record(uri: string, text: string): void;
-  /** drop a buffer's recovery copy — called on a successful save. */
+  /** drop a buffer's recovery copy — on a successful save, and on an explicit DISCARD
+   *  ("Close without saving"), which otherwise left the thrown-away text to resurrect. */
   clear(uri: string): void;
-  /** the recovered text for a uri, or undefined (consumed once on restore). */
+  /** the recovered text for a uri, or undefined. A pure LOOKUP: it does not consume the record
+   *  (the caller clears it when the buffer is saved or discarded) — the previous wording said
+   *  "consumed once on restore", which nothing implemented. */
   recovered(uri: string): string | undefined;
 }
 

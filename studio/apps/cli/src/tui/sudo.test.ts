@@ -10,6 +10,7 @@ import {
   interpretSudoAnswer,
   isElevated,
   resolveSudoDecision,
+  runElevationGate,
   sudoWarningLines,
 } from "./sudo.js";
 
@@ -72,4 +73,71 @@ test("resolveSudoDecision: authorize → bypass reachable", () => {
 test("resolveSudoDecision: a null answer when elevated is treated as decline (fail-safe)", () => {
   const d = resolveSudoDecision("root", null);
   assert.equal(d.bypassLocked, true);
+});
+
+test("the elevation gate is runnable by EVERY host, and a host with nobody to ask declines", async () => {
+  /**
+   * The red warning, the mandatory acknowledgement and the bypass clamp lived inside the TUI and
+   * nowhere else. `sudo prometheus --plain` / `--tmux` / `-p`, and every scheduled task, opened a
+   * root session with none of them — restoring the persisted authorisation level unclamped and
+   * auto-approving against it — while the same `sudo prometheus` in the default TUI stopped for a
+   * full-screen acknowledgement. `--plain`/`--tmux` is the surface used over SSH and inside tmux,
+   * where a sudo launch is likeliest of all.
+   *
+   * `isElevated` was exported with no production caller anywhere, which is the shape of a gate
+   * that was written and then only half-wired.
+   */
+  const realEnv = process.env.SUDO_USER;
+  process.env.SUDO_USER = "someone";
+  try {
+    // a host that CAN ask: an explicit "n" declines and locks bypass
+    const lines: string[] = [];
+    const declined = await runElevationGate({
+      write: (l) => lines.push(l),
+      ask: async () => "n",
+    });
+    assert.equal(declined.bypassLocked, true);
+    assert.ok(
+      lines.some((l) => l.includes("ELEVATED PRIVILEGES")),
+      "the warning must be printed on every host, not just the TUI",
+    );
+
+    // the [Y/n] default authorises, exactly as in the TUI
+    const ok = await runElevationGate({ write: () => {}, ask: async () => "" });
+    assert.equal(ok.bypassLocked, false);
+
+    // NOBODY to ask (headless, a pipe, a scheduled task) → the safe branch, not a skip
+    const headless = await runElevationGate({ write: () => {} });
+    assert.equal(headless.bypassLocked, true, "an unattended elevated run must lock bypass");
+    assert.equal(headless.startMode, "default");
+
+    // a prompt that throws is a decline, never an authorisation
+    const threw = await runElevationGate({
+      write: () => {},
+      ask: async () => {
+        throw new Error("tty went away");
+      },
+    });
+    assert.equal(threw.bypassLocked, true);
+  } finally {
+    if (realEnv === undefined) Reflect.deleteProperty(process.env, "SUDO_USER");
+    else process.env.SUDO_USER = realEnv;
+  }
+});
+
+test("an UNELEVATED process passes straight through the gate", async () => {
+  const realUser = process.env.SUDO_USER;
+  const realUid = process.env.SUDO_UID;
+  Reflect.deleteProperty(process.env, "SUDO_USER");
+  Reflect.deleteProperty(process.env, "SUDO_UID");
+  try {
+    if (process.getuid?.() === 0) return; // running as root for real — nothing to assert
+    const lines: string[] = [];
+    const d = await runElevationGate({ write: (l) => lines.push(l) });
+    assert.equal(d.bypassLocked, false, "a normal run must not be clamped");
+    assert.deepEqual(lines, [], "a normal run must print nothing at all");
+  } finally {
+    if (realUser !== undefined) process.env.SUDO_USER = realUser;
+    if (realUid !== undefined) process.env.SUDO_UID = realUid;
+  }
 });

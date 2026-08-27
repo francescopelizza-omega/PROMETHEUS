@@ -26,6 +26,7 @@ import {
   rotateSessions,
   safeSessionId,
   searchSessions,
+  updateSessionSummary,
 } from "./history-store.js";
 
 test("descriptorOf takes the first 15 words, hard-chunked + ellipsized", () => {
@@ -73,9 +74,64 @@ test("formatPicker renders ids + descriptors, or an empty message", () => {
   const out = formatPicker([
     { id: "deadbeef0000", ts: "2026-06-26T09:30:00Z", descriptor: "make a thing", cwd: "/x" },
   ]);
-  assert.match(out, /deadbeef/);
+  assert.match(out, /deadbeef0000/); // the FULL id, not a sliced prefix
   assert.match(out, /make a thing/);
   assert.match(out, /Pick a number/);
+});
+
+test("formatPicker prefers lastSummary over descriptor when both are present", () => {
+  const out = formatPicker([
+    {
+      id: "abc1234567",
+      ts: "2026-06-26T09:30:00Z",
+      descriptor: "the very first prompt",
+      lastSummary: "edited 2 files · ran 1 command — fix the bug",
+      cwd: "/x",
+    },
+  ]);
+  assert.match(out, /edited 2 files/);
+  assert.doesNotMatch(out, /the very first prompt/);
+});
+
+test("formatPicker column-aligns ids of differing width across records", () => {
+  const out = formatPicker([
+    { id: "short1", ts: "2026-06-26T09:30:00Z", descriptor: "aaa", cwd: "/x" },
+    {
+      id: "a-much-longer-session-id-0123456789",
+      ts: "2026-06-26T09:31:00Z",
+      descriptor: "bbb",
+      cwd: "/x",
+    },
+  ]);
+  const lines = out.split("\n").filter((l) => /^\s+\d+\)/.test(l));
+  assert.equal(lines.length, 2);
+  // both summaries ("aaa"/"bbb") start at the same column once the shorter id is padded out.
+  assert.equal(lines[0]?.indexOf("aaa"), lines[1]?.indexOf("bbb"));
+});
+
+test("updateSessionSummary refreshes lastSummary in place; a missing id / unreadable home is a no-op", () => {
+  const home = mkdtempSync(join(tmpdir(), "prom-recall-summary-"));
+  try {
+    recordSession(home, { id: "s1", ts: "2026-06-26T10:00:00Z", descriptor: "first", cwd: "/a" });
+    recordSession(home, { id: "s2", ts: "2026-06-26T11:00:00Z", descriptor: "second", cwd: "/b" });
+    updateSessionSummary(home, "s1", "edited 1 file — first");
+    const recs = listSessions(home);
+    assert.equal(recs.find((r) => r.id === "s1")?.lastSummary, "edited 1 file — first");
+    assert.equal(recs.find((r) => r.id === "s2")?.lastSummary, undefined);
+    // a second update on the same id overwrites, not appends.
+    updateSessionSummary(home, "s1", "ran 1 command — first");
+    assert.equal(
+      listSessions(home).find((r) => r.id === "s1")?.lastSummary,
+      "ran 1 command — first",
+    );
+    // an unknown id is a no-op, not a crash or a new record.
+    updateSessionSummary(home, "no-such-id", "whatever");
+    assert.equal(listSessions(home).length, 2);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+  // an unreadable home must not throw.
+  assert.doesNotThrow(() => updateSessionSummary("/no/such/home/here", "s1", "x"));
 });
 
 /* ── CLI-012: per-session TURN transcripts ─────────────────────────────────── */
@@ -610,4 +666,50 @@ test("deleteSession removes the ACCOUNTING file too — it used to survive an ex
   } finally {
     rmSync(home, { recursive: true, force: true });
   }
+});
+
+test("deleteSession rewrites the index ATOMICALLY and under the lock", async () => {
+  /**
+   * The index rewrite is the THIRD read-modify-write of index.jsonl, and it took neither of the
+   * protections the other two take: `claimIndexLock`'s own doc named only `updateSessionSummary`
+   * and `pruneIndex`. It also used a plain `writeFileSync`, which TRUNCATES before writing — a
+   * crash in that window leaves a truncated index and every session before the cut is gone
+   * from `/recall`.
+   */
+  const { mkdtempSync, existsSync, readFileSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const home = mkdtempSync(join(tmpdir(), "prom-hs-del-"));
+
+  for (const id of ["aaaaaaaa", "bbbbbbbb", "cccccccc"]) {
+    recordSession(home, {
+      id,
+      ts: `2026-01-0${id[0] === "a" ? 1 : id[0] === "b" ? 2 : 3}T00:00:00Z`,
+      descriptor: id,
+      cwd: "/w",
+    });
+  }
+  assert.equal(listSessions(home).length, 3);
+
+  assert.equal(deleteSession(home, "bbbbbbbb"), true);
+  const left = listSessions(home)
+    .map((r) => r.id)
+    .sort();
+  assert.deepEqual(left, ["aaaaaaaa", "cccccccc"], "only the named session is pruned");
+
+  // the index is still well-formed JSONL (an atomic replace, never a partial truncate)
+  const raw = readFileSync(join(home, "sessions", "index.jsonl"), "utf8");
+  for (const line of raw.split("\n").filter((l) => l.trim())) JSON.parse(line);
+
+  // the lock is RELEASED — a leaked lock would make every later rewrite skip silently
+  assert.equal(
+    existsSync(join(home, "sessions", "index.jsonl.lock")),
+    false,
+    "deleteSession must not leak the index lock",
+  );
+
+  // deleting the last record leaves a valid (empty) index rather than a corrupt one
+  deleteSession(home, "aaaaaaaa");
+  deleteSession(home, "cccccccc");
+  assert.deepEqual(listSessions(home), []);
 });

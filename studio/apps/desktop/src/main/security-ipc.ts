@@ -450,7 +450,17 @@ export function registerSecurityIpcHandlers(wiring: SecurityIpcWiring = {}): () 
         }
         // op === "audit" — a UI refresh is read-only unless quarantine explicitly set
         const r = await urlSourceAudit({ ...(req.quarantine ? { quarantine: true } : {}) }, config);
-        return { ok: r.ok, op, result: r.result, ...(r.error ? { error: r.error } : {}) };
+        // `summary` and `skills` are what the engine actually emits; `result` is derived from
+        // them by `urlSourceAudit`. Forwarding all three means the panel renders and a future
+        // consumer can read the raw rows instead of the grouping.
+        return {
+          ok: r.ok,
+          op,
+          result: r.result,
+          ...(r.summary ? { summary: r.summary } : {}),
+          ...(r.skills ? { skills: r.skills } : {}),
+          ...(r.error ? { error: r.error } : {}),
+        };
       } catch (e) {
         return { ok: false, op, error: errString(e) };
       }

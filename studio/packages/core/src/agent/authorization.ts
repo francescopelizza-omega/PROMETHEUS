@@ -162,10 +162,21 @@ export function authLevelName(level: number): string {
 
 /**
  * Classify a tool into an authorization category from its ref + annotations.
- * Order matters: readOnly wins first, then the CLI-local file writers, then network installs,
- * then shell commands, then irreversible destructive, else a plain local config mutation.
+ * Order matters: network reach wins first, then read-only, then the CLI-local file writers,
+ * then network installs, then shell commands, then irreversible destructive, else a plain
+ * local config mutation.
+ *
+ * `openWorldHint` is checked BEFORE `readOnlyHint` because the two annotations are orthogonal
+ * and a tool can carry both: `web_search` modifies nothing locally (readOnly is honest) while
+ * still sending the query off the machine (openWorld is also honest). Testing readOnly first
+ * collapsed that to "read", so web_search auto-ran with no prompt at the default level —
+ * directly contradicting the comment on its own annotations, which says it must always be
+ * confirmed "exactly like web_fetch" because "the human should see what is about to be sent
+ * off the machine". Reaching the network is the risk here; not mutating local state does not
+ * cancel it.
  */
 export function classifyAuth(ref: string, ann: AuthToolEffect | undefined): AuthCategory {
+  if (ann?.openWorldHint) return "install"; // network / remote code — outranks readOnly
   if (ann?.readOnlyHint) return "read";
   const base = ref.includes(":") ? (ref.split(":").pop() ?? ref) : ref;
   if (ref === "write_file" || ref === "propose_edit" || base === "write" || base === "edit") {

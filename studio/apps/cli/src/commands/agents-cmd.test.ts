@@ -197,6 +197,21 @@ test("prometheus agents attach: unknown run → exit 2", async () => {
   assert.equal(res.exitCode, 2);
 });
 
+test("prometheus agents <typo>: reports unknown-verb, never silently defaults to list", async () => {
+  // regression: command[1] is undefined for a TWO_WORD mismatch (parse.ts sets `unmatchedSub`
+  // instead), so a typo used to silently fall through to the "list" branch.
+  const reg = new RunRegistry({ now: fixedNow });
+  reg.register({ id: "r1", model: "qwen", controller: new AbortController() });
+  const out: string[] = [];
+  const res = await runAgentsCommand(
+    ctxFor(["agents", "kli", "r1", "--json"]),
+    agentsDeps(reg, out),
+  );
+  assert.equal(res.exitCode, 1);
+  assert.equal((res.json as { error: string }).error, "unknown-verb");
+  assert.equal((res.json as { command: string }).command, "agents kli");
+});
+
 /* ── the TRIGGER: startDetachedRun writes to the table `agents` reads ─────────*/
 
 /**

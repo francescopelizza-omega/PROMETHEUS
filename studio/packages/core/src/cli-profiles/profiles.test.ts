@@ -496,3 +496,60 @@ test("the plain resolver is the SAFE one — the hole cannot be reintroduced by 
   });
   assert.equal(eff.engine.gateMode, "enforce");
 });
+
+/* ── [agent] effort — a configured tier has to survive session start (P3) ───*/
+
+test("[agent] effort round-trips TOML → profile → AgentTuning", () => {
+  // The whole point of the key: `effort = "high"` in a profile was a line the file accepted
+  // and nothing read, so a session always started unset regardless.
+  const p = parseProfile('[agent]\nmodel = "ollama:qwen3:8b"\neffort = "high"\n', "x");
+  assert.equal(p?.agent.effort, "high");
+  assert.equal(resolveTuning(p as CliProfile).effort, "high");
+  const back = parseProfile(serializeProfile(p as CliProfile), "x");
+  assert.equal(back?.agent.effort, "high");
+});
+
+test("a typo'd tier is REFUSED, not carried as a string that fails a comparison later", () => {
+  // `effort = "maximum"` must read as "not configured", which is what it is — and must not
+  // reach `AgentTuning.effort` as a value nothing in the ladder matches.
+  const p = parseProfile('[agent]\nmodel = "m"\neffort = "maximum"\n', "x");
+  assert.equal(p?.agent.effort, undefined);
+  assert.equal(resolveTuning(p as CliProfile).effort, undefined);
+});
+
+test("UNSET is not `off` — the two mean different things to the badge and to /status", () => {
+  const p = parseProfile('[agent]\nmodel = "m"\n', "x");
+  assert.equal(resolveTuning(p as CliProfile).effort, undefined);
+  const off = parseProfile('[agent]\nmodel = "m"\neffort = "off"\n', "x");
+  assert.equal(resolveTuning(off as CliProfile).effort, "off");
+});
+
+test("--effort / --force-effort win over every config layer (flags are the human, §6)", () => {
+  const profile: CliProfile = { agent: { model: "m", effort: "low" }, engine: {} };
+  const merged = mergeFlags(profile, { effort: "max", effortForce: true });
+  assert.equal(merged.agent.effort, "max");
+  assert.equal(resolveTuning(merged).effort, "max");
+  assert.equal(resolveTuning(merged).effortForce, true);
+  // …and an absent flag leaves the configured value alone.
+  assert.equal(mergeFlags(profile, {}).agent.effort, "low");
+});
+
+test("the PROJECT layer may pin a tier but NOT force past the capability table", () => {
+  // `.prometheus.toml` arrives with the code. A repo pinning `effort = "high"` is a
+  // preference; a repo enabling `effortForce` would be deciding, for anyone who cloned it,
+  // to send parameters this table says will 400 — the same reason the project layer may
+  // tighten the safety posture and never loosen it.
+  const builtin: CliProfile = { agent: { model: "builtin" }, engine: {} };
+  const user: CliProfile = { agent: { model: "u", effortForce: true }, engine: {} };
+  const project: CliProfile = {
+    agent: { model: "p", effort: "max", effortForce: true },
+    engine: {},
+  };
+
+  const fromProject = resolveEffectiveProfile({ builtin, project });
+  assert.equal(fromProject.agent.effort, "max", "a project MAY pin the tier");
+  assert.equal(fromProject.agent.effortForce, undefined, "a project may NOT enable forcing");
+
+  const fromUser = resolveEffectiveProfile({ builtin, user, project });
+  assert.equal(fromUser.agent.effortForce, true, "the user's own machine still may");
+});

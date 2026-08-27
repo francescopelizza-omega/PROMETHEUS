@@ -6,20 +6,23 @@
  * stops a write outside the working set. So it gets tests, and the UI does not.
  */
 import assert from "node:assert/strict";
-import { mkdtempSync, realpathSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import test from "node:test";
 
 import {
   approveOutsideWorkingSet,
   assertInsideWorkingSet,
+  assertNotSensitivePath,
+  clearDeclaredRoots,
   clearGrantedRoots,
   clearOutsideApprovals,
   getGrantedRoots,
   getWorkingSetRoots,
   grantWorkingSetRoot,
   initGrantedRoots,
+  isGrantedRoot,
   isInsideWorkingSet,
   setWorkingSetRoots,
 } from "./path-guard.js";
@@ -195,13 +198,128 @@ test("grants SURVIVE a restart — reopening a recent project is still guarded",
   assert.throws(() => assertInsideWorkingSet(join(OUTSIDE, "a.txt")), /outside the working set/);
 });
 
-test("a corrupt or absent grants file yields NO grants — the safe direction", () => {
+test("a corrupt or absent grants file yields NO grants — and NO grants must FAIL CLOSED", () => {
+  /**
+   * The title of this test used to end "— the safe direction", and that premise was WRONG.
+   *
+   * No grants really does mean no accepted roots, but `workingSetRoots` then fell back to the
+   * empty grant set, and an empty working set meant "allow everything" — so the state this test
+   * called safe was the fully-OPEN one. Measured: on a fresh (or corrupt) profile,
+   * `ide:workingSet.set` refused the declaration and the very next `ide:fs.write` created a file
+   * at an arbitrary absolute path. The assertion below is the half that was missing.
+   */
   const userData = realpathSync(mkdtempSync(join(tmpdir(), "prom-ud2-")));
   writeFileSync(join(userData, "workspace-grants.json"), "{ not json", "utf8");
   clearGrantedRoots();
   initGrantedRoots(userData);
   assert.deepEqual([...getGrantedRoots()], []);
-  // the human re-picks the folder once and it works again
+
+  // A declaration that is entirely refused must leave the guard CLOSED, not open.
+  assert.equal(setWorkingSetRoots([ROOT]).accepted, 0);
+  assert.throws(
+    () => assertInsideWorkingSet(join(ROOT, "a.txt")),
+    /never approved/,
+    "a refused declaration left the guard open",
+  );
+  assert.throws(
+    () => assertInsideWorkingSet(join(tmpdir(), "somewhere-else", "evil.txt")),
+    /never approved/,
+    "an arbitrary absolute path was writable after a refused declaration",
+  );
+  assert.equal(isInsideWorkingSet(join(ROOT, "a.txt")), false);
+
+  // the human re-picks the folder once and it works again — the latch must not outlive the grant
   grantWorkingSetRoot(ROOT);
   assert.equal(setWorkingSetRoots([ROOT]).accepted, 1);
+  assert.doesNotThrow(() => assertInsideWorkingSet(join(ROOT, "a.txt")));
+});
+
+test("NOTHING declared yet still allows — the fail-closed latch is only for a REFUSED declaration", () => {
+  // the control that keeps the fix from being a blanket ban: before any workspace is declared
+  // there is nothing to scope, and denying there would break the app at startup.
+  const userData = realpathSync(mkdtempSync(join(tmpdir(), "prom-ud3-")));
+  clearGrantedRoots();
+  initGrantedRoots(userData);
+  clearDeclaredRoots();
+  setWorkingSetRoots([]);
+  assert.equal(isInsideWorkingSet(join(ROOT, "a.txt")), true);
+});
+
+test("the sensitive-path list is canonicalised the same way the probed path is", () => {
+  /**
+   * regression: the checked path went through `canonical()` (which realpaths its existing
+   * ancestor) while `sensitiveDirs()`/`sensitiveFiles()` used plain `resolve()`. Any home that is
+   * not already canonical therefore never matched — on macOS `/tmp` → `/private/tmp` is enough to
+   * show it. Measured with a symlinked home: `~/.aws/notes.txt`, a file only the DIRECTORY rule
+   * can catch, was ALLOWED under both spellings. The hand-written `/private/etc` entry in the
+   * list was this same bug, patched once for `/etc` and never generalised.
+   */
+  const realHome = realpathSync(mkdtempSync(join(tmpdir(), "prom-home-")));
+  mkdirSync(join(realHome, ".aws"), { recursive: true });
+  writeFileSync(join(realHome, ".aws", "notes.txt"), "aws stuff", "utf8");
+  const linkHome = join(dirname(realHome), `${basename(realHome)}-link`);
+  symlinkSync(realHome, linkHome);
+
+  const prevHome = process.env.HOME;
+  process.env.HOME = linkHome;
+  try {
+    // notes.txt is caught ONLY by the sensitive-directory rule, never by a basename rule.
+    for (const spelling of [
+      join(linkHome, ".aws", "notes.txt"),
+      join(realHome, ".aws", "notes.txt"),
+    ]) {
+      assert.throws(
+        () => assertNotSensitivePath(spelling),
+        /sensitive/i,
+        `a credential directory was readable via ${spelling}`,
+      );
+    }
+    // control: an ordinary file under the same home is still fine.
+    writeFileSync(join(realHome, "ok.txt"), "hello", "utf8");
+    assert.doesNotThrow(() => assertNotSensitivePath(join(linkHome, "ok.txt")));
+  } finally {
+    if (prevHome === undefined) delete process.env.HOME;
+    else process.env.HOME = prevHome;
+  }
+});
+
+test("isGrantedRoot answers for the grant a DERIVED open may inherit — and nothing wider", () => {
+  /**
+   * `grantWorkingSetRoot` had exactly one call site (the native Open-Folder dialog), so a repo
+   * cloned by the built-in Repo Manager, a worktree cut from a granted repo, and a project opened
+   * from Home ▸ recents all had no grant behind them: main refused the declaration and every save
+   * in the project on screen was refused. `isGrantedRoot` is what lets main record a grant for a
+   * path IT produced from one that was already granted — never for a path the renderer supplied.
+   */
+  clearGrantedRoots();
+  const repo = realpathSync(mkdtempSync(join(tmpdir(), "prom-repo-")));
+  const unrelated = realpathSync(mkdtempSync(join(tmpdir(), "prom-other-")));
+  assert.equal(isGrantedRoot(repo), false, "nothing is granted before the human acts");
+
+  grantWorkingSetRoot(repo);
+  assert.equal(isGrantedRoot(repo), true);
+  assert.equal(isGrantedRoot(join(repo, "packages", "core")), true, "inside a grant is granted");
+  assert.equal(isGrantedRoot(unrelated), false, "an unrelated tree must NOT inherit");
+  assert.equal(isGrantedRoot(""), false);
+});
+
+test("a worktree derived from a GRANTED repo becomes writable; one from an ungranted repo does not", () => {
+  // the inheritance rule the worktree handler applies, exercised through the guard itself:
+  // grant is recorded for the new path only when the SOURCE repo is already granted.
+  clearGrantedRoots();
+  clearDeclaredRoots();
+  const repo = realpathSync(mkdtempSync(join(tmpdir(), "prom-wtrepo-")));
+  const worktree = realpathSync(mkdtempSync(join(tmpdir(), "prom-wt-")));
+
+  // ungranted parent → the handler would NOT grant, so declaring the worktree is refused
+  assert.equal(isGrantedRoot(repo), false);
+  assert.equal(setWorkingSetRoots([worktree]).accepted, 0);
+  assert.throws(() => assertInsideWorkingSet(join(worktree, "a.txt")), /never approved/);
+
+  // granted parent → the handler grants the derived path, and it becomes writable
+  grantWorkingSetRoot(repo);
+  assert.equal(isGrantedRoot(repo), true, "precondition: the parent is granted");
+  grantWorkingSetRoot(worktree); // what ideWorktreeCreate does when isGrantedRoot(root)
+  assert.equal(setWorkingSetRoots([worktree]).accepted, 1);
+  assert.doesNotThrow(() => assertInsideWorkingSet(join(worktree, "a.txt")));
 });

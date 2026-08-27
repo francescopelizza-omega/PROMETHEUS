@@ -13,7 +13,13 @@ export {
   rawValueAt,
 } from "./layering.js";
 export type { Profile } from "./profiles.js";
-export { BUILTIN_PROFILES, DEFAULT_PROFILE_ID, getProfile, applyProfile } from "./profiles.js";
+export {
+  BUILTIN_PROFILES,
+  DEFAULT_PROFILE_ID,
+  getProfile,
+  applyProfile,
+  resolveProfileLayer,
+} from "./profiles.js";
 
 // The four security settings, turned into decisions something can actually enforce.
 export type { EgressKind, NetworkPolicy, SecurityPosture } from "./posture.js";

@@ -51,6 +51,23 @@ export function isTooBroad(subject: string): boolean {
 export function deriveSubject(ref: string, argv?: readonly string[]): string | null {
   if (argv && argv.length > 0) {
     if (argv.some((a) => a === "--force" || a.startsWith("--force="))) return null;
+    /**
+     * A `*` in the APPROVED command is a shell glob. A `*` in a stored subject is a PERMISSION
+     * wildcard. They look identical and mean opposite things, so a subject derived from a
+     * concrete call must never carry one across.
+     *
+     * `permission-engine.ts` matches a `bash:` pattern positionally and documents it plainly:
+     * "a trailing `*` matches any remaining args". So answering "always allow" to a single
+     * `rm *` — where the user meant "these files, here, now" — stored `bash:rm *`, which from
+     * then on matched `rm` with ANY arguments: `rm -rf /`, `rm -rf ~`, forever, in every
+     * session, with no further prompt. `isTooBroad` did not catch it because it only refuses a
+     * body that is EXACTLY `*`.
+     *
+     * Refusing to remember is the right answer rather than escaping it: the matcher has no
+     * escape syntax, and "allow this once" remains available. The user loses nothing but the
+     * shortcut they could not have meant to ask for.
+     */
+    if (argv.some((a) => a.includes("*"))) return null;
     const cmd = argv.join(" ").trim();
     if (cmd === "") return null;
     const subject = `bash:${cmd}`;

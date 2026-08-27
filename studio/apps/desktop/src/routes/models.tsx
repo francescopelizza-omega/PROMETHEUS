@@ -24,7 +24,7 @@
  */
 
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { type ReactElement, useCallback, useEffect, useState } from "react";
+import { type CSSProperties, type ReactElement, useCallback, useEffect, useState } from "react";
 
 import {
   Button,
@@ -157,6 +157,21 @@ function asFit(res: ModelFitResult | undefined): FitResultData | null {
     ranked: Array.isArray(f.ranked) ? f.ranked : [],
     reasons: Array.isArray(f.reasons) ? f.reasons : [],
   } as unknown as FitResultData;
+}
+
+/* ── /hug: local folder or HF repo → target runtime, one copy shared everywhere ── */
+
+const HUG_TARGETS = ["ollama", "llamacpp", "vllm", "lmstudio"] as const;
+type HugTarget = (typeof HUG_TARGETS)[number];
+
+/** POSIX absolute (/…), home (~…), explicit relative (./…, ../…), or a Windows
+ *  drive-letter absolute path — anything else is treated as an HF repo id. */
+function isLocalSource(s: string): boolean {
+  return /^([a-zA-Z]:[\\/]|\/|~|\.\.?\/)/.test(s.trim());
+}
+function hugModelId(source: string): string {
+  const s = source.trim();
+  return isLocalSource(s) ? (s.split(/[\\/]/).filter(Boolean).pop() ?? s) : s;
 }
 
 export function ModelsRoute(): ReactElement {
@@ -455,6 +470,129 @@ export function ModelsRoute(): ReactElement {
     }
   }, [installingRunner, handlePull]);
 
+  // ── /hug: local folder or HF repo → target runtime (fetch → convert → install) ──
+  const [hugSource, setHugSource] = useState("");
+  const [hugTarget, setHugTarget] = useState<HugTarget>("ollama");
+  const [hugQuant, setHugQuant] = useState("q4_k_m");
+  const [hugBusy, setHugBusy] = useState(false);
+  const [hugPhase, setHugPhase] = useState<string | null>(null);
+  const [hugMessage, setHugMessage] = useState<string | null>(null);
+
+  const onBrowseHugFolder = useCallback(async (): Promise<void> => {
+    try {
+      const picked = await window.prometheus.folderOpen({ title: "Choose a local model folder" });
+      if (picked.ok && picked.path) setHugSource(picked.path);
+    } catch {
+      /* the native picker failing isn't actionable — leave the field as the user left it */
+    }
+  }, []);
+
+  const onHugInstall = useCallback(async (): Promise<void> => {
+    const source = hugSource.trim();
+    if (!source || hugBusy) return;
+    const target = hugTarget;
+    const quant = hugQuant;
+    const isLocal = isLocalSource(source);
+    const modelId = hugModelId(source);
+    setHugBusy(true);
+    setHugMessage(null);
+    try {
+      // FAST PATH: Ollama + an HF repo → Ollama's OWN HF-hosted-GGUF passthrough.
+      // Zero local download, zero duplication — Ollama fetches + stores the bytes itself.
+      if (!isLocal && target === "ollama") {
+        setHugPhase("pulling");
+        setHugMessage(`ollama pull hf.co/${source}…`);
+        const r = await modelsApi().pull({ id: modelId, tag: `hf.co/${source}` });
+        if (r.ok && r.installed) {
+          setHugMessage(`✓ hugged ${modelId} → ollama${r.endpoint ? ` — ${r.endpoint}` : ""}`);
+          void qc.invalidateQueries({ queryKey: qk.modelLibrary("all") });
+        } else if (r.installable) {
+          setHugMessage(
+            "⚠ Ollama isn't installed yet — use the Pull island's installer, then retry.",
+          );
+        } else {
+          setHugMessage(`✗ ${r.error ?? "pull failed"}`);
+        }
+        return;
+      }
+
+      // Everything else needs the raw weights locally: fetch (if HF) → convert → install.
+      let srcDir = source;
+      if (!isLocal) {
+        setHugPhase("fetching");
+        setHugMessage(`fetching ${source} from Hugging Face…`);
+        let fetchRes = await modelsApi().fetchHf({ repo: source });
+        if (!fetchRes.ok && fetchRes.installable) {
+          setHugMessage("installing the hf CLI…");
+          const inst = await modelsApi().installHfCli();
+          if (!inst.ok) {
+            setHugMessage(`✗ ${inst.error ?? "could not install the hf CLI"}`);
+            return;
+          }
+          fetchRes = await modelsApi().fetchHf({ repo: source });
+        }
+        if (!fetchRes.ok || !fetchRes.path) {
+          setHugMessage(`✗ ${fetchRes.error ?? "fetch failed"}`);
+          return;
+        }
+        srcDir = fetchRes.path;
+      }
+
+      // vLLM reads the raw HF/local directory directly — it never needs the GGUF
+      // conversion at all, so skip convert entirely for that target.
+      let ggufPath: string | undefined;
+      if (target !== "vllm") {
+        setHugPhase("converting");
+        setHugMessage("converting → GGUF, always via llama.cpp's own tools…");
+        let conv = await modelsApi().convert({ src: srcDir, quant, id: modelId });
+        if (!conv.ok && conv.installable) {
+          setHugMessage("installing llama.cpp's converter…");
+          const inst = await modelsApi().installConverter();
+          if (!inst.ok) {
+            setHugMessage(`✗ ${inst.error ?? "could not install llama.cpp's converter"}`);
+            return;
+          }
+          conv = await modelsApi().convert({ src: srcDir, quant, id: modelId });
+        }
+        if (!conv.ok) {
+          setHugMessage(
+            conv.lowDisk
+              ? `⚠ ${conv.error}${conv.hint ? ` — ${conv.hint}` : ""}`
+              : `✗ ${conv.error ?? "conversion failed"}`,
+          );
+          return;
+        }
+        ggufPath = conv.canonicalPath ?? conv.path;
+      }
+
+      setHugPhase("installing");
+      setHugMessage(`installing into ${target}…`);
+      // convert() already fully quantizes (or intentionally leaves it untouched) — the
+      // resulting GGUF is already at the requested precision, so it must NEVER be
+      // handed to install-target's ollama branch again (which expects an UNquantized
+      // source for its own --quantize flag, not an already-quantized one).
+      const install =
+        target === "vllm"
+          ? await modelsApi().installTarget({ target: "vllm", id: modelId, src: srcDir })
+          : await modelsApi().installTarget({ target, id: modelId, gguf: ggufPath });
+      if (install.ok) {
+        setHugMessage(
+          `✓ hugged ${modelId} → ${target}${install.endpoint ? ` — ${install.endpoint}` : ""}${
+            install.path ? ` (${install.path})` : ""
+          }`,
+        );
+        void qc.invalidateQueries({ queryKey: qk.modelLibrary("all") });
+      } else {
+        setHugMessage(`✗ ${install.error ?? "install failed"}`);
+      }
+    } catch (e) {
+      setHugMessage(`✗ ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setHugBusy(false);
+      setHugPhase(null);
+    }
+  }, [hugSource, hugTarget, hugQuant, hugBusy, qc]);
+
   const downloadRows: DownloadRowData[] = Object.values(downloads).sort((a, b) =>
     a.id < b.id ? -1 : 1,
   );
@@ -524,6 +662,19 @@ export function ModelsRoute(): ReactElement {
           endpoints={endpoints}
           authLevel={authLevel}
           loading={endpointsQ.isPending}
+        />
+        <HugIsland
+          source={hugSource}
+          onSourceChange={setHugSource}
+          onBrowseFolder={() => void onBrowseHugFolder()}
+          target={hugTarget}
+          onTargetChange={setHugTarget}
+          quant={hugQuant}
+          onQuantChange={setHugQuant}
+          onInstall={() => void onHugInstall()}
+          busy={hugBusy}
+          phase={hugPhase}
+          message={hugMessage}
         />
       </div>
 
@@ -1203,6 +1354,126 @@ function EndpointsIsland(props: {
             </li>
           ))}
         </ul>
+      )}
+    </Panel>
+  );
+}
+
+/** The shared inline `<select>` style — matches ModelHub.tsx's discover-tab source toggle. */
+const hugSelectStyle: CSSProperties = {
+  flex: 1,
+  padding: "5px 8px",
+  borderRadius: "var(--radius-md, 6px)",
+  border: "1px solid var(--border-subtle)",
+  background: "var(--bg-surface-2)",
+  color: "var(--text-primary)",
+  fontSize: "0.8rem",
+};
+
+/**
+ * §3 "Hug a model": a local folder or Hugging Face repo → convert (if needed) →
+ * install into Ollama / llama.cpp / vLLM / LM Studio — one copy shared across all
+ * of them, never re-downloaded. The desktop counterpart of the CLI's `/hug` wizard.
+ */
+function HugIsland(props: {
+  source: string;
+  onSourceChange: (v: string) => void;
+  onBrowseFolder: () => void;
+  target: HugTarget;
+  onTargetChange: (t: HugTarget) => void;
+  quant: string;
+  onQuantChange: (q: string) => void;
+  onInstall: () => void;
+  busy: boolean;
+  phase: string | null;
+  message: string | null;
+}): ReactElement {
+  const {
+    source,
+    onSourceChange,
+    onBrowseFolder,
+    target,
+    onTargetChange,
+    quant,
+    onQuantChange,
+    onInstall,
+    busy,
+    phase,
+    message,
+  } = props;
+  return (
+    <Panel elevation="e1" title="Hug a model">
+      <div style={{ display: "flex", gap: 6, minWidth: 0 }}>
+        <input
+          type="text"
+          aria-label="Model source"
+          placeholder="local path or org/repo"
+          value={source}
+          onChange={(e) => onSourceChange(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") onInstall();
+          }}
+          style={{
+            flex: 1,
+            minWidth: 0, // §7
+            background: "var(--bg-inset)",
+            border: "1px solid var(--border-chip)",
+            borderRadius: "var(--radius-md, 6px)",
+            color: "var(--text-primary)",
+            fontFamily: "var(--font-mono)",
+            fontSize: "0.8rem",
+            padding: "5px 9px",
+          }}
+        />
+        <Button variant="secondary" onClick={onBrowseFolder} disabled={busy}>
+          Browse…
+        </Button>
+      </div>
+
+      <div style={{ display: "flex", gap: 6, marginTop: "var(--space-3, 6px)" }}>
+        <select
+          value={target}
+          onChange={(e) => onTargetChange(e.target.value as HugTarget)}
+          aria-label="Target runtime"
+          disabled={busy}
+          style={hugSelectStyle}
+        >
+          <option value="ollama">Ollama</option>
+          <option value="llamacpp">llama.cpp</option>
+          <option value="vllm">vLLM</option>
+          <option value="lmstudio">LM Studio</option>
+        </select>
+        <select
+          value={quant}
+          onChange={(e) => onQuantChange(e.target.value)}
+          aria-label="Quantization"
+          disabled={busy || target === "vllm"}
+          title={
+            target === "vllm"
+              ? "vLLM reads the original weights directly — no quantization step"
+              : undefined
+          }
+          style={hugSelectStyle}
+        >
+          <option value="q4_k_m">Q4_K_M</option>
+          <option value="q5_k_m">Q5_K_M</option>
+          <option value="q6_k">Q6_K</option>
+          <option value="q8_0">Q8_0</option>
+          <option value="f16">F16</option>
+          <option value="bf16">BF16</option>
+        </select>
+      </div>
+
+      <div style={{ marginTop: "var(--space-3, 6px)" }}>
+        <Button variant="primary" onClick={onInstall} disabled={busy || !source.trim()}>
+          {busy ? `⏳ ${phase ?? "working"}…` : "🤗 Install"}
+        </Button>
+      </div>
+
+      {message && (
+        <p style={{ margin: "8px 0 0", color: "var(--text-primary)", fontSize: "0.78rem" }}>
+          {message}
+        </p>
       )}
     </Panel>
   );

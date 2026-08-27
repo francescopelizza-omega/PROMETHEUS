@@ -1,6 +1,7 @@
-import { updates } from "@prometheus/core";
+import { cliProfiles, updates } from "@prometheus/core";
 import type { EngineClient } from "@prometheus/engine-bridge";
 import { runAgentsCommand } from "./commands/agents-cmd.js";
+import { runBudgetCommandFromCtx } from "./commands/budget-cmd.js";
 import { runCompletion } from "./commands/completion.js";
 import { runDiagram } from "./commands/diagram-cmd.js";
 /**
@@ -20,8 +21,10 @@ import { runKeymap } from "./commands/keymap.js";
 import { runList } from "./commands/list.js";
 import { runMan } from "./commands/man.js";
 import { runMcpCommand } from "./commands/mcp-cmd.js";
+import { runMeetCommandFromCtx } from "./commands/meet-cmd.js";
 import { runMetadataCommand } from "./commands/metadata-cmd.js";
 import { runModelCommand } from "./commands/model-cmd.js";
+import { runPersonaCommandFromCtx } from "./commands/persona-cmd.js";
 import { runConfig, runProfile } from "./commands/profile.js";
 import {
   runProviderConnect,
@@ -35,6 +38,7 @@ import { runRefactor } from "./commands/refactor-cmd.js";
 import { runRepoCommand } from "./commands/repo-cmd.js";
 import { routeViaRegistry, specIdFor } from "./commands/route.js";
 import { runScan } from "./commands/scan.js";
+import { runTasksCommand } from "./commands/schedule-cmd.js";
 import { runSecureCommand } from "./commands/secure-cmd.js";
 import { runSessions } from "./commands/sessions-cmd.js";
 import { runTest } from "./commands/test-cmd.js";
@@ -44,7 +48,8 @@ import { runDoctor, runDoctorBridge } from "./doctor-bridge.js";
 
 import { prometheusHome } from "./home.js";
 import { type ParsedArgs, parseArgs } from "./parse.js";
-import { RECOGNIZED_VERBS } from "./route-table.js";
+import { c } from "./render.js";
+import { RECOGNIZED_VERBS, ROUTED_VERBS } from "./route-table.js";
 import { isTerminalChatCli, routeTerminalChat } from "./terminal/chat-route.js";
 import { runUpdates } from "./updates/updates-cmd.js";
 
@@ -75,6 +80,9 @@ export async function dispatch(
   if (parsed.command.length === 0 || parsed.command[0] === "help") {
     return runHelp(ctx);
   }
+  // A MISTYPED command is not a request for help on one — see parse.ts. Checked before the
+  // help-topic branch below, which would otherwise look the typo up as a topic.
+  if (parsed.unknownCommand) return unknownCommand(parsed.command, ctx);
   if (parsed.help && key(parsed.command) !== "help") {
     // `prometheus <cmd> --help` → that command's help from the registry (CLI-049); an unknown command
     // topic yields exit 2 + the nearest-match suggestion inside helpForTopic.
@@ -100,6 +108,39 @@ function isKnownCommand(path: string[]): boolean {
   // a verb is "known" if it's a recognized §2 noun OR maps to a CommandSpec
   // (the canonical parity registry) — so spec'd verbs never read as unknown.
   return (path.length > 0 && RECOGNIZED.has(path[0] as string)) || specIdFor(path) !== undefined;
+}
+
+/**
+ * An unrecognised verb, reported as what it is.
+ *
+ * This used to hand the argv to `runHelp`, which reads the first token as a HELP TOPIC — so
+ * `prometheus keys` answered "unknown help topic: keys" and `prometheus wroktree` answered
+ * "unknown help topic: wroktree". Both are commands the user tried to RUN, and the reply talked
+ * about a help system they never invoked, suggesting the nearest help TOPIC rather than the
+ * nearest command.
+ *
+ * The suggestion now comes from `ROUTED_VERBS` — the same single source the help screen and the
+ * router derive from — so "keys" points at `keymap`, which is the verb that actually exists.
+ */
+function unknownCommand(path: string[], ctx: CliContext): CommandOutcome {
+  const typed = path.join(" ");
+  const near = cliProfiles.nearestKey(path[0] ?? "", [...ROUTED_VERBS]);
+  const lines = [c.red(`unknown command: ${typed}`)];
+  if (near) lines.push(c.dim(`did you mean "${near}"?`));
+  lines.push(c.dim("`prometheus help` lists every command."));
+  return {
+    text: lines.join("\n"),
+    json: {
+      ok: false,
+      error: "unknown-command",
+      command: typed,
+      ...(near ? { didYouMean: near } : {}),
+    },
+    // A mistyped COMMAND is the same class as a mistyped verb or a missing argument: bad args,
+    // which CLI-084 numbers 1. It exited 2 — the security-block code — so `$? -eq 2` fired on a
+    // typo. See `usageError` for the full reasoning.
+    exitCode: 1,
+  };
 }
 
 /** The interactive REPL/TUI needs the Ink view (apps/cli/src/repl) — a TTY thing. */
@@ -227,6 +268,14 @@ async function runByKey(path: string[], ctx: CliContext): Promise<CommandOutcome
     case "agents attach":
     case "agents kill":
       return runAgentsCommand(ctx);
+    case "tasks":
+      return runTasksCommand(ctx);
+    case "persona":
+      return runPersonaCommandFromCtx(ctx);
+    case "budget":
+      return runBudgetCommandFromCtx(ctx);
+    case "meet":
+      return Promise.resolve(runMeetCommandFromCtx(ctx));
     case "mcp":
     case "mcp list":
     case "mcp add":
@@ -246,7 +295,7 @@ async function runByKey(path: string[], ctx: CliContext): Promise<CommandOutcome
       if (specId) return routeViaRegistry(specId, ctx);
       // recognized §2 verb with no spec → engine passthrough / honest stub.
       if (isKnownCommand(path)) return runGeneric(path, ctx);
-      return { ...runHelp(ctx), exitCode: 2 };
+      return unknownCommand(path, ctx);
     }
   }
 }

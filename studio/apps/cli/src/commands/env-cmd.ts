@@ -43,7 +43,10 @@ const SCRIPT = "envmgr.py" as const;
 
 /** Resolve the env subverb (["env","create"] → "create"); bare `env` → "list". */
 function sub(ctx: CliContext): string {
-  return ctx.args.command[1] ?? "list";
+  // see secure-cmd.ts's identical fix: `unmatchedSub` (parse.ts) distinguishes "a second word
+  // WAS typed but didn't match env's whitelist" from "nothing was typed" — without it, a typo
+  // silently defaulted to `list` instead of reaching this file's own "unknown env verb" case.
+  return ctx.args.unmatchedSub ?? ctx.args.command[1] ?? "list";
 }
 
 /** `--conda`/`--kind conda` → conda; default venv. */
@@ -297,7 +300,7 @@ export async function runEnvCommand(
       return {
         text: `prometheus env ${verb}: unknown env verb.\n  ${c.dim("try:")} list · info · doctor · use · export · create · clone · delete · import ·\n       add · remove · update · upgrade · enable · disable · cuda · templates · template`,
         json: { ok: false, error: "unknown-verb", command: `env ${verb}` },
-        exitCode: 2,
+        exitCode: 1,
       };
   }
 }

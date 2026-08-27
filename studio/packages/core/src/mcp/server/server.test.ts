@@ -9,16 +9,11 @@ import { computeIsError } from "./isError.js";
 import { type EngineRunner, runMcpTool, validateArgs } from "./runner.js";
 import { PROMETHEUS_TOOLS } from "./tools.js";
 
-test("catalog is 14 ported + 5 studio = 19 tools, unique names", () => {
+test("catalog is 14 ported + 4 studio = 18 tools, unique names", () => {
   assert.equal(PROMETHEUS_TOOLS.length, 14);
-  assert.equal(TOOLS.length, 19);
-  assert.equal(new Set(toolNames()).size, 19);
-  for (const t of [
-    "prometheus_scan",
-    "prometheus_install",
-    "prometheus_models",
-    "prometheus_mcp_discover",
-  ]) {
+  assert.equal(TOOLS.length, 18);
+  assert.equal(new Set(toolNames()).size, 18);
+  for (const t of ["prometheus_scan", "prometheus_install", "prometheus_models"]) {
     assert.ok(getTool(t), `${t} present`);
   }
 });
@@ -79,7 +74,6 @@ test("toArgv: studio action tools map action+tool+flags", () => {
     "ollama",
   ]);
   assert.deepEqual(getTool("prometheus_localai")?.toArgv({}), ["localai", "audit"]);
-  assert.deepEqual(getTool("prometheus_mcp_discover")?.toArgv({}), ["mcp", "discover"]);
 });
 
 test("validateArgs: defaults + required + enum + type checks", () => {
@@ -135,4 +129,63 @@ test("computeIsError: audit high/critical = error; medium/low/clean = informatio
   assert.equal(computeIsError("prometheus_install", { ok: false }), true);
   assert.equal(computeIsError("prometheus_install", { ok: true }), false);
   assert.equal(computeIsError("prometheus_scan", {}), false);
+});
+
+test("every exposed tool maps to a subcommand the engine actually has", () => {
+  /**
+   * `prometheus_mcp_discover` mapped to `["mcp", "discover"]` and prometheus.py has no `mcp`
+   * subcommand at all — `invalid choice: 'mcp'`. This catalog is what the standalone
+   * `prometheus-studio-mcp` binary registers in `tools/list`, so an external MCP client saw a
+   * tool promising to list configured MCP servers and got an argparse error on every call. It
+   * was removed rather than repointed: the discovery it advertised lives in TypeScript, which
+   * the engine bridge cannot reach.
+   *
+   * The verbs below are prometheus.py's own `<command>` choices. A tool whose first argv element
+   * is not one of them cannot work, and a test asserting its broken argv — which is what existed
+   * — only pins the breakage in place.
+   */
+  const ENGINE_VERBS = new Set([
+    "vault",
+    "wizard",
+    "scan",
+    "superscan",
+    "matrix",
+    "where",
+    "purge",
+    "schedule",
+    "inventory",
+    "list",
+    "doctor",
+    "bundle",
+    "install",
+    "uninstall",
+    "status",
+    "enable",
+    "disable",
+    "skills",
+    "quarantine",
+    "secure",
+    "auto",
+    "info",
+    "audit",
+    "scaffold-skill",
+    "sync",
+    "models",
+    "apps",
+    "worldsim",
+    "localai",
+    "chat",
+    "describe",
+    "tutorial",
+    "methods",
+    "harden",
+    "pentest",
+  ]);
+  for (const tool of TOOLS) {
+    const verb = tool.toArgv({})[0];
+    assert.ok(
+      verb && ENGINE_VERBS.has(verb),
+      `"${tool.name}" runs \`prometheus ${verb}\`, which is not an engine subcommand`,
+    );
+  }
 });

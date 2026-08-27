@@ -135,3 +135,42 @@ test("toArgv throws — the todo tools are host-served, never engine verbs", () 
   assert.throws(() => TODO_WRITE_TOOL.toArgv({}), /host runtime/);
   assert.throws(() => TODO_READ_TOOL.toArgv({}), /host runtime/);
 });
+
+test("a malformed todowrite REFUSES instead of silently wiping the plan", () => {
+  /**
+   * `parseTodos` is deliberately forgiving — it would rather keep a task with a typo'd status
+   * than lose the plan. But a payload that is not a list AT ALL parsed to the empty list, so the
+   * store was cleared and the model was told `ok: true, "task list updated"`. It had just lost
+   * its own plan, mid-task, with no way to know. Reproduced against the compiled module: a
+   * two-item list, then `todowrite {}` → 0 items, ok: true.
+   */
+  const store = new TodoStore();
+  runTodoTool(
+    "todowrite",
+    { todos: [{ text: "ship the fix", status: "in_progress" }, { text: "write the test" }] },
+    store,
+  );
+  assert.equal(store.list().length, 2, "precondition");
+
+  for (const [label, args] of [
+    ["field omitted", {}],
+    ["a bare string", { todos: "ship it" }],
+    ["an object", { todos: { a: 1 } }],
+    ["an array with nothing usable in it", { todos: [null, {}, ""] }],
+  ] as const) {
+    const out = runTodoTool("todowrite", args as Record<string, unknown>, store);
+    assert.equal(out?.ok, false, `${label} was accepted`);
+    assert.match(out?.summary ?? "", /UNCHANGED|nothing was written/);
+    assert.equal(store.list().length, 2, `${label} wiped the plan`);
+  }
+
+  // an EXPLICIT empty array is a legitimate "clear the list" and must still work
+  const cleared = runTodoTool("todowrite", { todos: [] }, store);
+  assert.equal(cleared?.ok, true);
+  assert.equal(store.list().length, 0);
+
+  // …and a JSON string holding a real array is still accepted (some models send one)
+  const viaString = runTodoTool("todowrite", { todos: JSON.stringify([{ text: "x" }]) }, store);
+  assert.equal(viaString?.ok, true);
+  assert.equal(store.list().length, 1);
+});

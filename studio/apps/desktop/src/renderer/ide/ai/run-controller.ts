@@ -427,6 +427,16 @@ class AgentRunController {
           task,
           exposed,
           typeof args.maxRounds === "number" ? args.maxRounds : undefined,
+          // The child's preamble is assembled against the SAME endpoint facts this turn already
+          // has (`deps.effort` is the resolution `createRendererLlmClient` above was just given)
+          // rather than `childTuning`'s permanent "unknown"/no-window placeholder — without
+          // `effortMechanism` specifically, a child on a model with a WORKING native mechanism
+          // got the textual effort nudge on top of it too, double-injecting the tier.
+          {
+            locality: deps.endpoint.locality,
+            contextWindow: deps.endpoint.contextWindow,
+            ...(deps.effort ? { effortMechanism: deps.effort.mechanism } : {}),
+          },
         );
         // A persona layers on top of the tuning the ROLE already produced — it can only ADD
         // denies and ADD prompt text, never undo either. `childTuning` has already applied the
@@ -456,6 +466,12 @@ class AgentRunController {
                 ? runToolRef(tool, a)
                 : Promise.resolve({ ok: false, summary: "the tool runner is not ready" }),
             confirm: (call) => this.confirmToolCall(sid, deps, call),
+            // Point 6b: a sub-agent is exactly the surface most likely to touch untrusted
+            // content — it must not run with the canary tripwire silently disabled just because
+            // it's a delegated turn.
+            onCanaryTripped: (info) => {
+              void deps.ide?.canaryTrip?.(info);
+            },
           });
           deps.onToolNote(`⤶ sub-agent done (${out.toolCalls} tool call(s))`);
           return { ok: out.ok, summary: out.text };
@@ -508,6 +524,12 @@ class AgentRunController {
           deps.onToolNote(
             `(reached the ${rounds}-round limit with work still queued — send "continue" to resume)`,
           ),
+        // Point 6b: the loop detected its own planted token in the model's output. Forward to
+        // MAIN, which owns the audit disk — a harness/older preload without `canaryTrip` just
+        // drops it (the trip already happened; this is only the record of it).
+        onCanaryTripped: (info) => {
+          void deps.ide?.canaryTrip?.(info);
+        },
         // `withRememberedGrants` sits UNDER the broker: it can only remove a question the
         // broker already routed to a human, never add an approval the broker refused. A `deny`
         // grant still wins, structurally, over any allow.
@@ -811,10 +833,24 @@ class AgentRunController {
     }
   }
 
-  /** USER cancel (■ stop / tab close / turn revert): abort + drop awaiting/pending state. */
+  /**
+   * USER cancel (■ stop / tab close / turn revert): abort + drop awaiting/pending state.
+   *
+   * The controller entry is deliberately NOT deleted here. `finalize` is what clears the store's
+   * `busy` flag, and it is guarded by `this.abort.get(sid) !== ac` so a superseded run can never
+   * reap a newer one's state. Deleting the entry here made that guard fail for the run being
+   * cancelled: the aborted run reached `finalize`, found `undefined !== ac`, and returned before
+   * `setBusy(sid, false)` — so `busy` stayed true forever. The composer, the Send button and
+   * `send()` itself all key off that flag, so pressing ◼ Stop permanently disabled the chat tab
+   * it was meant to interrupt; the only ways out were closing the tab, a session restore, a
+   * destructive ⤺ revert, or reloading the app.
+   *
+   * Leaving the entry is safe in both directions: `start` runs `finalize` unconditionally after
+   * its try/catch, so an aborted run always reaches it and cleans up; and if the user starts a
+   * NEW run first, `beginRun` replaces the entry and the stale run's guard correctly skips.
+   */
   cancel(sid: string): void {
     this.abort.get(sid)?.abort();
-    this.abort.delete(sid);
     // Resolve any suspended confirm as DENIED before dropping the entry, or the generator
     // sits on a promise nobody will ever settle and the turn leaks.
     const entry = this.awaiting.get(sid);

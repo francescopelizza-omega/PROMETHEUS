@@ -14,6 +14,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import type { SessionTurn } from "../domain/session.js";
+import { carryForward } from "./carry-forward.js";
 import { estimateTurnTokens, shouldCompact } from "./compact.js";
 
 const turn = (over: Partial<SessionTurn> & { id: string }): SessionTurn =>
@@ -91,4 +92,29 @@ test("reasoning counts too, because it is billed and it is in the window", () =>
     events: [{ kind: "reasoning", text: "z".repeat(8_000) }] as never,
   });
   assert.ok(estimateTurnTokens(thinking) > 1_500);
+});
+
+test("carryForward returns the CONVERSATION only — system messages are not 'dropped'", () => {
+  /**
+   * The caller re-adds system messages separately (`withPreamble`), so `carryForward` strips
+   * them. Comparing raw lengths therefore counted every system message as trimmed: on the first
+   * turn of a session, with a 100k budget and nothing actually dropped, the CLI printed
+   * "3 older message(s) dropped from this turn" — every single round. A warning that fires when
+   * nothing happened trains the user to ignore the one that matters.
+   */
+  const body = [
+    { role: "system", content: "You are Prometheus." },
+    { role: "system", content: "steering" },
+    { role: "system", content: "repo map" },
+    { role: "user", content: "hi" },
+  ];
+  const trimmed = carryForward(body as never, { budgetTokens: 100_000 });
+  assert.equal(trimmed.length, 1, "only the conversation comes back");
+  assert.ok(
+    trimmed.every((m) => (m as { role: string }).role !== "system"),
+    "system messages are the caller's to re-add",
+  );
+  // the honest count compares against the NON-system messages
+  const carried = body.filter((m) => m.role !== "system");
+  assert.equal(carried.length - trimmed.length, 0, "nothing was actually dropped here");
 });

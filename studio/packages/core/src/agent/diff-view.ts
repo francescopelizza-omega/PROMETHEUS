@@ -7,8 +7,12 @@
  * light up only what actually changed. No IO, no color; the CLI paints the returned structure.
  *
  * Line-level diff is an LCS (Myers-equivalent for the common case); word-level is a token LCS.
- * Both are bounded — a file above SIZE_GUARD lines skips the O(n·m) table and returns a single
- * whole-file replacement hunk (`truncated`), so a giant overwrite never hangs the render.
+ * Both are bounded, and BOTH bounds are load-bearing:
+ *   - a file above SIZE_GUARD lines skips the line-level table and returns a single whole-file
+ *     replacement hunk (`truncated`), so a giant overwrite never hangs the render;
+ *   - a line above WORD_GUARD tokens skips the word-level table and marks the whole line
+ *     changed, so a minified one-liner cannot allocate a quadratic table and abort the process.
+ * The second bound did not exist: this header asserted it while `wordSpans` ran unguarded.
  */
 
 /** One word-level segment of a modified line: the text + whether it differs from the pair line. */
@@ -46,6 +50,23 @@ export interface EditView {
 }
 
 const SIZE_GUARD = 4000; // lines; above this we don't build the O(n·m) LCS table
+
+/**
+ * Token budget for the WORD-level table, which is a second O(n·m) allocation the line guard
+ * above does not cover.
+ *
+ * `SIZE_GUARD` bounds lines; `wordSpans` then builds `(m+1) × (n+1)` numbers over the TOKENS of
+ * a single line, and `tokenize` emits one token per punctuation character. A minified or
+ * generated one-liner is tens of thousands of tokens, so the table is quadratic in that: 50k
+ * tokens each side is 2.5 billion array slots. A V8 heap OOM is a fatal abort, not a catchable
+ * error, so the process died (exit 134) while the user was being asked to approve the edit —
+ * the file being previewed is exactly the kind a model reformats. The module header claimed
+ * "Both are bounded"; only one was.
+ *
+ * Over the budget the pair simply gets no word-level highlighting: the whole line reads as
+ * changed, which is what a minified line means anyway.
+ */
+const WORD_GUARD = 2500; // tokens per side (~6.25M slots worst case)
 
 type LineTag = { tag: " " | "-" | "+"; text: string };
 
@@ -102,6 +123,13 @@ function wordSpans(oldLine: string, newLine: string): { del: WordSpan[]; add: Wo
   const b = tokenize(newLine);
   const m = a.length;
   const n = b.length;
+  // Refuse the quadratic table on a pathological line rather than letting V8 abort the process.
+  if (m > WORD_GUARD || n > WORD_GUARD) {
+    return {
+      del: oldLine === "" ? [] : [{ text: oldLine, changed: true }],
+      add: newLine === "" ? [] : [{ text: newLine, changed: true }],
+    };
+  }
   const dp: number[][] = Array.from({ length: m + 1 }, () => new Array<number>(n + 1).fill(0));
   for (let i = m - 1; i >= 0; i--) {
     for (let j = n - 1; j >= 0; j--) {

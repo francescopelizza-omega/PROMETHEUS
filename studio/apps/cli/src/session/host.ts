@@ -32,24 +32,26 @@
  * line-handlers are all INJECTED seams so the whole loop is unit-testable with a
  * scripted fake driver (see host.test.ts) — no real TTY, engine, or model needed.
  */
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { isAbsolute, join, resolve } from "node:path";
 import { type Interface as ReadlineInterface, createInterface } from "node:readline";
 
 import {
   repl,
   type AiEndpoint,
+  CONTEXT_PROBE_AWAIT_MS,
   DEFAULT_CONTEXT_WINDOW,
   agent,
   ai,
   cliProfiles,
+  createEndpointProbe,
   loadPricing,
   mcpServer,
   orchestration,
-  probeContextWindow,
 } from "@prometheus/core";
 
 import type { ConfirmResult } from "@prometheus/core/agent-loop";
+import type { ToolAnnotations } from "@prometheus/core/agent-tools";
 import { type EngineClient, createEngineClient } from "@prometheus/engine-bridge";
 import { defaultOpenEditor, loadEffectiveStartupProfileWithNotes } from "../profile-store.js";
 
@@ -57,6 +59,7 @@ import { PROM_VERSION } from "../commands/help.js";
 import { runInvoke } from "../commands/invoke.js";
 import { readTokenToggles } from "../commands/token-toggles.js";
 import { type CommandOutcome, outcomeFromError } from "../context.js";
+import { guardOwnRepo, resolveCwd } from "../cwd-guard.js";
 import { ensureHomeTree, prometheusHome, resolveCategory } from "../home.js";
 import { runDemos } from "../orchestration/demos-cmd.js";
 import type { ParsedArgs } from "../parse.js";
@@ -65,6 +68,7 @@ import { insideTmux } from "../tmux/tmux.js";
 import { type KeymapResolution, resolveKeymap } from "../tui/keys.js";
 import { detectColorCaps } from "../tui/palette.js";
 import { runUpdates, updatesStartupNotice } from "../updates/updates-cmd.js";
+import { loadContextWindowTokens, saveContextWindowTokens } from "./context-window-setting.js";
 import {
   type SessionRecord,
   type TurnLine,
@@ -77,19 +81,27 @@ import {
   loadTurns,
   recordSession,
   rotateSessions,
+  updateSessionSummary,
 } from "./history-store.js";
+import { loadIdleTimeoutMs, saveIdleTimeoutMs } from "./idle-timeout-setting.js";
 import { createKeyResolver, keychainProviders } from "./key-resolver.js";
+import { newSessionId } from "./session-id.js";
+import { turnSummaryOf } from "./turn-summary.js";
 
 import {
   createHookRunner,
+  expandHome,
   loadMemoryIndexBlock,
   loadPermissionRules,
   nodePreviewIo,
+  resolveEffectiveHooks,
   runSystemTool,
 } from "@prometheus/core/agent-system-host";
 import { copyReplyStatus, lastAssistantReply } from "../tui/clipboard.js";
+import { runElevationGate } from "../tui/sudo.js";
 import {
   type BudgetGuard,
+  type CheckpointHook,
   type ContextComponent,
   type EditRecord,
   type MessageTurnResult,
@@ -115,9 +127,11 @@ import { realGitSpawn } from "./git-helpers.js";
 
 import { loadAgentFiles } from "./agent-file-store.js";
 import { type LoadedCommand, expandCommand, loadCommandFiles } from "./command-files.js";
+import { loadEffortRules } from "./effort-rules.js";
 import { loadGrantsInto, saveGrants } from "./grants-store.js";
-import { loadHooksDetailed } from "./hooks-config.js";
+import { type HooksSource, loadHooksDetailed } from "./hooks-config.js";
 import { type McpSession, openMcpSession, withMcpTools } from "./mcp-session.js";
+import { modelCandidates, resolveModelCandidate } from "./model-candidates.js";
 import {
   type Backends,
   backendSummary,
@@ -133,7 +147,7 @@ import {
   spawnCapFor,
   startDetachedRun,
 } from "./orchestrator.js";
-import { completePath } from "./path-completer.js";
+import { completePath, completeSlashArg } from "./path-completer.js";
 import { applyRepoMapVerb, makeRepoMapState, repoMapStats } from "./repo-map-state.js";
 import { type SessionCtx as LegacySlashCtx, type SlashResult, execSlash } from "./slash-exec.js";
 import {
@@ -144,7 +158,8 @@ import {
   findSlash,
 } from "./slash-registry.js";
 import { createSteeringController } from "./steering.js";
-import { createWorkingSet } from "./working-set.js";
+import { execVarsFromEnv } from "./system-tools.js";
+import { createWorkingSet, isPathAllowed } from "./working-set.js";
 
 /** The live AgentTuning type (re-exported by core under the `agent` namespace). */
 type AgentTuning = agent.AgentTuning;
@@ -284,6 +299,10 @@ export function seedTuningWithNotes(parsed: ParsedArgs): {
     ...(parsed.gateMode ? { gateMode: parsed.gateMode } : {}),
     ...(parsed.dryRun ? { dryRun: true } : {}),
     ...(parsed.yes ? { yes: true } : {}),
+    // The `/think` ladder, pinned from the command line. Flags are the human at the keyboard,
+    // so they win outright over `[agent] effort` in every config layer.
+    ...(parsed.effort ? { effort: parsed.effort } : {}),
+    ...(parsed.forceEffort ? { effortForce: true } : {}),
   });
   return {
     tuning: cliProfiles.resolveTuning(merged),
@@ -451,7 +470,7 @@ export function banner(state: repl.ReplState, backendLine: string): string {
     ...mark,
     "",
     `${c.dim("model")}   ${backendLine}`,
-    `${c.dim("cwd")}     ${c.dim(shortCwd(state.cwd))}`,
+    `${c.dim("cwd")}     ${c.dim(bannerCwd(state.cwd))}`,
   ];
   const tips = [
     c.dim("Tips:"),
@@ -471,6 +490,23 @@ function shortCwd(dir: string): string {
   return dir.startsWith(`${home}/`) || dir.startsWith(`${home}\\`)
     ? `~${dir.slice(home.length)}`
     : dir;
+}
+
+/**
+ * Like `shortCwd`, but for the ONE-TIME startup banner only: the home folder itself is shown as
+ * its real, full path (`/Users/name` / `/home/name`), never a bare `~`.
+ *
+ * A lone `~` reads clearly to an experienced terminal user and is nearly invisible to everyone
+ * else — the ONE line in the whole banner that answers "where am I", reduced to a single
+ * low-contrast glyph. A NESTED path (`~/projects/foo`) still collapses, same as `shortCwd`: it is
+ * never just that one character, so it stays legible, and the banner stays short for a deep tree.
+ * The persistent per-turn status lines (`footer()` here, the TUI's own `/profile`-adjacent cwd
+ * chip in tui/status.ts) intentionally keep the plain `shortCwd` behavior — the tilde there is
+ * seen on every single prompt, not just once at the start.
+ */
+function bannerCwd(dir: string): string {
+  const home = process.env.HOME ?? process.env.USERPROFILE ?? "";
+  return home && dir === home ? dir : shortCwd(dir);
 }
 
 /**
@@ -554,12 +590,13 @@ export async function launchSession(parsed: ParsedArgs, deps: SessionDeps = {}):
     rejected: projectRejections,
     budget: profileBudget,
   } = seedTuningWithNotes(parsed);
-  const cwd = parsed.cwd ?? process.cwd();
+  const cwd = resolveCwd(parsed.cwd, writeLine);
   let state = repl.initialReplState(tuning, cwd);
   // capture the profile's system prompt BEFORE any /system override → /system reset (CLI-017).
   const systemPromptDefault = state.tuning.systemPrompt;
-  // per-session working set of extra readable dirs (/add-dir, CLI-004).
-  const ws = createWorkingSet();
+  // per-session working set of extra readable dirs (/add-dir, CLI-004). `let`: /cd resets it for
+  // the new project — see session-bridge.ts's identical fix/comment.
+  let ws = createWorkingSet();
   // pre-image log for applied propose_edit calls (CLI-010).
   const editHistory: EditRecord[] = [];
   // turn-atomic workspace checkpoints for /revert + /checkpoints (CLI-015).
@@ -592,42 +629,6 @@ export async function launchSession(parsed: ParsedArgs, deps: SessionDeps = {}):
   // the one a call in this same session just wrote.
   const loadMemory = (): string | null => loadMemoryIndexBlock(home, state.cwd);
 
-  /**
-   * LIFECYCLE HOOKS (`agent/hooks.ts`) — settings-configured shell run around the turn.
-   *
-   * Loaded ONCE per session, and only built into a runner when the user actually configured
-   * something: with an empty list `hookRunner` stays undefined and every hook seam in the loop
-   * is a cheap array check, so the zero-config path costs nothing.
-   *
-   * The runner is created HERE, in the host, because `agent/loop.ts` is pure — it may not
-   * import `node:child_process` (C5), and the desktop's copy of the loop runs in a renderer
-   * that could not spawn even if it wanted to.
-   */
-  const { hooks: sessionHooks, source: hooksSource } = loadHooksDetailed({ home, cwd: state.cwd });
-  const hookRunner =
-    sessionHooks.length > 0 ? createHookRunner({ cwd: state.cwd, env: process.env }) : undefined;
-  /**
-   * SessionStart output, captured once and replayed by the getter on every turn.
-   *
-   * Kicked off eagerly (not awaited) so a slow session-open script never delays the first
-   * prompt: whatever has landed by the time a turn assembles its thread is injected, and a hook
-   * that finishes later is picked up by the next turn. A hook that fails contributes nothing.
-   */
-  let sessionStartBlock: string | null = null;
-  if (hookRunner) {
-    void agent
-      .runSessionStartHooks(sessionHooks, hookRunner, {
-        cwd: state.cwd,
-        onError: (m) => writeLine(c.dim(`hook: ${m}`)),
-      })
-      .then((block) => {
-        sessionStartBlock = block ?? null;
-      })
-      .catch(() => {
-        /* fail-soft: hooks never take the session down */
-      });
-  }
-
   // Remembered "don't ask again" grants, and the session task list.
   //
   // Both existed and were wired in the TUI host only, so which agent capabilities you had
@@ -641,8 +642,11 @@ export async function launchSession(parsed: ParsedArgs, deps: SessionDeps = {}):
    * `.prometheus.toml`, which may only TIGHTEN). `ctx.permissionRules` had two mentions in the
    * whole repository — a declaration and a read — and no assignment, so the rule list was
    * always empty and the documented feature could not be reached at all.
+   *
+   * `let`, not `const`: `/cd` (below) re-derives this for the NEW cwd when it rotates projects —
+   * a project's own tightened rules must govern it, not whatever the OLD project declared.
    */
-  const permissionRules = loadPermissionRules({ home: deps.configHome, cwd });
+  let permissionRules = loadPermissionRules({ home: deps.configHome, cwd });
   /** What THIS endpoint has been observed to do about tool calls, across the whole session. */
   let toolCapability = agent.protocol.initialCapability();
   const grants = new agent.ScopedPermissionStore();
@@ -650,10 +654,14 @@ export async function launchSession(parsed: ParsedArgs, deps: SessionDeps = {}):
   // Sub-agent personas from markdown. Already clamped by SCOPE inside `loadAgentFile`: a file
   // that arrived with a cloned repo is read-only, cannot pick a model, and its text is fenced
   // as untrusted persona guidance rather than becoming the system prompt.
-  const agentFiles = loadAgentFiles(cwd, home);
+  //
+  // `let`: `/cd` re-derives this for the NEW cwd — a persona file from the OLD project silently
+  // keeping its trust in a different one would be a correctness (and trust) bug, not a convenience.
+  let agentFiles = loadAgentFiles(cwd, home);
   // User-defined `/name` commands. Built-in names are refused at load time, and the dispatcher
-  // consults the built-in registry first — a repo cannot redefine `/gate`.
-  const commandFiles = loadCommandFiles(cwd, new Set(allSlashNames()), home);
+  // consults the built-in registry first — a repo cannot redefine `/gate`. `let`: re-derived by
+  // `/cd` for the same reason as `agentFiles` above.
+  let commandFiles = loadCommandFiles(cwd, new Set(allSlashNames()), home);
   const todos = new agent.TodoStore();
 
   // Backend detection (fail-soft): probe for a live local runner+model, else note the
@@ -663,6 +671,101 @@ export async function launchSession(parsed: ParsedArgs, deps: SessionDeps = {}):
     deps.backends ??
     (await detectBackends({ client }).catch(() => ({ liveRunners: [], paidClis: [] }) as Backends));
   let endpoint: AiEndpoint | undefined = backends.localEndpoint;
+  /**
+   * The in-flight context-window/capability probe, if one was kicked off below — awaited
+   * (bounded) exactly once, right before the FIRST turn reads `endpoint.contextWindow`, so that
+   * turn budgets against the real number instead of racing it. See `CONTEXT_PROBE_AWAIT_MS`.
+   */
+  let contextProbe: Promise<unknown> | undefined;
+  /**
+   * The session's ONE measuring seam, cache and all — the TUI bridge's twin. See
+   * `ai/endpoint-probe.ts`: `/model`, `/worker` and `/setup` each rebind `endpoint` to a
+   * freshly built object carrying neither a measured window nor `probedCapabilities`, and
+   * before this existed nothing re-measured, so a model switch silently reverted compaction
+   * and the tool preamble to the 8192 floor and `/think` to "not available".
+   */
+  const endpointProbe = createEndpointProbe({ fetch: fetch as never });
+  /**
+   * The session's EFFECTIVE effort capability table: the builtins, plus any user or workspace
+   * override file. Loaded ONCE — it is disk-backed, and re-reading it per turn would put two
+   * file stats on the request path for a table that only changes when a human edits it.
+   *
+   * Malformed entries are reported rather than swallowed: a rule the user believes is in force
+   * but which was silently dropped is worse than no override at all.
+   */
+  let effortRulesLoad = loadEffortRules(state.cwd, home);
+  // Say what was refused. A malformed override is the one case where silence is worse than
+  // noise: the user edited a file specifically to change this behaviour.
+  for (const note of effortRulesLoad.notes) {
+    writeLine(`  ! effort rules: ${note}`);
+  }
+  /**
+   * Point the session at `next` AND (re)measure it. EVERY rebind goes through here.
+   *
+   * Returns the in-flight probe so an interactive caller (`/model`, `/setup` — the user is
+   * already waiting on a command) can await it and have `/think`/`/status` be right on the very
+   * next line, while session start stays fire-and-forget and lets the existing bounded
+   * `contextProbe` wait ahead of the first turn cover the race.
+   */
+  const adoptEndpoint = (next: AiEndpoint): Promise<void> => {
+    /**
+     * A new endpoint starts with a CLEAN capability slate.
+     *
+     * `toolCapability` is documented as "what THIS endpoint has been observed to do about tool
+     * calls" but was a single session-scoped variable that nothing ever reset. So one model
+     * rejecting native tool calls latched the whole session into the text protocol, and
+     * `/model` to a model that supports them natively kept the degraded transport for the rest
+     * of the session — with the preamble still teaching a text syntax the new model does not
+     * need. The observation is only ever true of the endpoint it was made against.
+     */
+    toolCapability = agent.protocol.initialCapability();
+    endpoint = next;
+    // pre-load the local model NOW (fire-and-forget) so the user's next prompt is warm.
+    warmupLocalModel(next);
+    const settled = endpointProbe
+      .attach(next)
+      .then((r) => {
+        // A slow probe for a model the user has ALREADY switched away from must not resurrect
+        // it. Identity is (id, model): `/model` rebuilds the object, so reference equality
+        // would never hold, and the id alone is not unique across a runner's models.
+        if (endpoint?.id !== next.id || endpoint?.model !== next.model) return;
+        if (r.measured) {
+          endpoint = r.endpoint;
+          return;
+        }
+        if (r.failed) {
+          // `source:"default"` means the probe FAILED, not that 8192 is real. Silently keeping
+          // the floor is indistinguishable from a genuinely small model, so a large-window
+          // model whose probe failed would compact and budget the tool preamble as if it were
+          // about to overflow all session, with no visible sign anything went wrong.
+          writeLine(
+            `  ! could not measure ${next.model}'s real context window — using the ${DEFAULT_CONTEXT_WINDOW}-token floor (context budgeting may be too conservative)`,
+          );
+        }
+      })
+      .catch(() => {
+        /* fail-soft: the documented floor stands */
+      });
+    contextProbe = settled;
+    /**
+     * Interactive callers await THIS, not `settled`.
+     *
+     * `probeContextWindow` bounds each request at `PROBE_TIMEOUT_MS`, but it makes TWO of them
+     * in sequence, so a wedged runner could still freeze `/model` for ~5s with no output. This
+     * caps the wait at the same `CONTEXT_PROBE_AWAIT_MS` the pre-turn wait uses; the probe is
+     * NOT cancelled — it keeps running and adopts its answer when it lands, guarded against
+     * having been switched away from in the meantime.
+     *
+     * The timer is unref'd so a one-shot run is never held open by a wait nobody is watching.
+     */
+    return Promise.race([
+      settled,
+      new Promise<void>((resolve) => {
+        const t = setTimeout(resolve, CONTEXT_PROBE_AWAIT_MS);
+        t.unref?.();
+      }),
+    ]);
+  };
   /**
    * The cloud providers configured on this machine — the endpoints an interactive session
    * could never reach.
@@ -698,42 +801,19 @@ export async function launchSession(parsed: ParsedArgs, deps: SessionDeps = {}):
         model: { provider: backends.localRunner?.name ?? "ollama", modelId: endpoint.model ?? "" },
       },
     });
-    // pre-load the local model NOW (fire-and-forget) so the user's first prompt is warm.
-    warmupLocalModel(endpoint);
     /**
-     * …and ask the runner how big this model's context ACTUALLY is.
+     * Warm the local model AND ask the runner how big its context ACTUALLY is / what it can do.
      *
-     * Every endpoint builder hard-codes 8192. TWO things budget against that number and both
-     * were wrong here by up to 32x on a 262144-window model: auto-compaction, which compacted a
-     * huge-window session as though it were about to overflow, and the TOOL PREAMBLE, whose
-     * budget decides whether the model is shown tool descriptions at all.
+     * Every endpoint builder hard-codes 8192. THREE things budget against that number and all
+     * three were wrong here by up to 32x on a 262144-window model: auto-compaction, which
+     * compacted a huge-window session as though it were about to overflow; the TOOL PREAMBLE,
+     * whose budget decides whether the model is shown tool descriptions at all; and — via the
+     * same probe's `capabilities` array — whether `/think` has any mechanism to work with.
      *
-     * The TUI bridge has probed since the probe existed; this host never did — the same
-     * two-hosts-drift that left it without a task list. Fire-and-forget and fail-soft: an
-     * unreachable runner keeps the documented floor.
+     * Fire-and-forget here (the bounded wait ahead of the first turn closes the race);
+     * `/model` and `/setup` await the same seam instead.
      */
-    if (endpoint.locality === "local" && endpoint.model) {
-      void probeContextWindow(endpoint.baseUrl, endpoint.model, fetch as never)
-        .then((r) => {
-          if (r.source !== "default") {
-            if (endpoint && r.contextWindow !== endpoint.contextWindow) {
-              endpoint = { ...endpoint, contextWindow: r.contextWindow };
-            }
-            return;
-          }
-          // `source:"default"` means the probe FAILED, not that 8192 is real — see the TUI
-          // bridge's matching comment. Silently keeping the floor is indistinguishable from a
-          // genuinely small model, so a large-window model whose probe failed would compact
-          // and budget the tool preamble as if it were about to overflow all session, with no
-          // visible sign anything went wrong.
-          writeLine(
-            `  ! could not measure ${endpoint?.model}'s real context window — using the ${DEFAULT_CONTEXT_WINDOW}-token floor (context budgeting may be too conservative)`,
-          );
-        })
-        .catch(() => {
-          /* fail-soft: the documented floor stands */
-        });
-    }
+    void adoptEndpoint(endpoint);
   }
 
   // Orchestrator mode: when we're inside a live tmux session, start with 3 subagents by
@@ -753,15 +833,60 @@ export async function launchSession(parsed: ParsedArgs, deps: SessionDeps = {}):
   let explicitAgents: number | null = null;
 
   // `pathMode` flips the readline completer into filesystem-path tab-completion for the
-  // duration of an askPath() prompt (a folder picker); otherwise tab is a no-op.
+  // duration of an askPath() prompt (a folder picker). Outside such a prompt Tab is no longer
+  // a dead key: it completes the path ARGUMENT of a path-taking slash command (`/cd ~/pro`),
+  // the same set the TUI's dropdown completes, so the two hosts behave identically.
   let pathMode = false;
+  /**
+   * Does the autonomy ladder auto-approve this call WITHOUT asking a human?
+   *
+   * This host used to answer with `agent.authDecision(level, name, annotations)` alone, while
+   * the TUI host and the one-shot host both refine that answer for the two tools where the tool
+   * NAME is not enough to know the risk:
+   *
+   *   - `write_file` has no working-set guard of its own — the confirm prompt IS its
+   *     authorization. `authDecision` alone auto-approved it at level >= 2 ("auto-approve
+   *     edits") for ANY absolute path, so `write_file {path:"~/.zshrc"}` was written without a
+   *     prompt under `prometheus --plain` while the same level under the TUI asked. The
+   *     authorisation level is persisted and shared by both surfaces, so the user's setting
+   *     silently meant something weaker depending on which one they launched.
+   *   - `run_command`'s risk is its COMMAND, not its name. `execAuthDecision` grades the parsed
+   *     command's tier (read / write / install / destructive); `authDecision` cannot see it, so
+   *     level 4 auto-ran installs and destructive shell commands here that the TUI still asked
+   *     about.
+   *
+   * Fail-closed throughout: an unparseable command or an unresolvable path is NOT auto-approved,
+   * it falls through to the prompt.
+   */
+  const hostAutoApproves = (call: agent.ToolCall, annotations?: ToolAnnotations): boolean => {
+    const level = hostAuthLevel;
+    if (call.name === "write_file") {
+      const raw = typeof call.args.path === "string" ? call.args.path : "";
+      if (!raw) return false;
+      const abs = isAbsolute(raw) ? raw : resolve(state.cwd, raw);
+      const inScope = isPathAllowed(abs, [state.cwd, ...ws.list()]);
+      return agent.scopedWriteDecision(level, call.name, annotations, inScope) === "allow";
+    }
+    if (call.name === "run_command") {
+      const line = typeof call.args.command === "string" ? call.args.command : "";
+      if (!line) return false;
+      const parsed = agent.parseCommand(line, { vars: execVarsFromEnv() });
+      if (!parsed.ok) return false; // unparseable ⇒ the prompt decides, never the ladder
+      const cls = agent.classifyCommand(parsed.command);
+      if (!cls.ok) return false;
+      return agent.execAuthDecision(level, cls.tier) === "allow";
+    }
+    return agent.authDecision(level, call.name, annotations) === "allow";
+  };
+
   const rl =
     deps.makeReadline?.() ??
     createInterface({
       input: process.stdin,
       output: process.stdout,
       prompt: "",
-      completer: (line: string): [string[], string] => (pathMode ? completePath(line) : [[], line]),
+      completer: (line: string): [string[], string] =>
+        pathMode ? completePath(line) : (completeSlashArg(line) ?? [[], line]),
     });
 
   // Connect the configured MCP servers so their tools join the catalog for this session.
@@ -831,9 +956,15 @@ export async function launchSession(parsed: ParsedArgs, deps: SessionDeps = {}):
   let continueCount = 0;
   // The persisted session (created lazily on the first agentic turn).
   let session: agent.Session | undefined;
-  // /recall session-history: a per-session id + a one-time record on the first real prompt.
-  const sessionId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+  // /recall (/restore) session-history: a per-session id + a one-time record on the first real
+  // prompt. `let`, not `const`: `/cd` (below) mints a fresh one when it rotates to a new project.
+  let sessionId = newSessionId();
   let sessionRecorded = false;
+  // /context window: the user-chosen ceiling auto-compact budgets against (default 250k tokens),
+  // independent of — and always combined via Math.min with — the model's own measured window.
+  let contextWindowSetting = loadContextWindowTokens(home);
+  // (A) `/timeout` — the inactivity-pause threshold this session's turns use (default 10 min).
+  let idleTimeoutMsSetting = loadIdleTimeoutMs(home);
 
   const promptLine = (): void => write(`${c.role("›", "brand")} `);
 
@@ -858,6 +989,58 @@ export async function launchSession(parsed: ParsedArgs, deps: SessionDeps = {}):
         resolveConfirm(a === "y" || a === "yes");
       });
     });
+
+  /**
+   * LIFECYCLE HOOKS (`agent/hooks.ts`) — settings-configured shell run around the turn.
+   *
+   * Loaded ONCE per session, and only built into a runner when the user actually configured
+   * something: with an empty list `hookRunner` stays undefined and every hook seam in the loop
+   * is a cheap array check, so the zero-config path costs nothing.
+   *
+   * The runner is created HERE, in the host, because `agent/loop.ts` is pure — it may not
+   * import `node:child_process` (C5), and the desktop's copy of the loop runs in a renderer
+   * that could not spawn even if it wanted to.
+   *
+   * The workspace layer can only NARROW the global hooks or ADD ones that pass a nemesis scan
+   * and a one-time trust confirmation over `confirm` — never silently replace or auto-run a
+   * repo-supplied command. That confirmation is why hook resolution waits until after `confirm`
+   * is defined rather than sitting at the top of the function with the rest of session setup.
+   */
+  const rawHooks = loadHooksDetailed({ home, cwd: state.cwd });
+  const { hooks: sessionHooks, refused: hookRefusals } = await resolveEffectiveHooks({
+    home,
+    cwd: state.cwd,
+    globalHooks: rawHooks.globalHooks,
+    workspaceHooks: rawHooks.workspaceHooks,
+    confirm,
+  });
+  const hooksSource: HooksSource = rawHooks.workspaceHooks !== undefined ? "workspace" : "global";
+  for (const r of hookRefusals) {
+    writeLine(c.dim(`hook refused (${r.event}): ${r.command} — ${r.reason}`));
+  }
+  const hookRunner =
+    sessionHooks.length > 0 ? createHookRunner({ cwd: state.cwd, env: process.env }) : undefined;
+  /**
+   * SessionStart output, captured once and replayed by the getter on every turn.
+   *
+   * Kicked off eagerly (not awaited) so a slow session-open script never delays the first
+   * prompt: whatever has landed by the time a turn assembles its thread is injected, and a hook
+   * that finishes later is picked up by the next turn. A hook that fails contributes nothing.
+   */
+  let sessionStartBlock: string | null = null;
+  if (hookRunner) {
+    void agent
+      .runSessionStartHooks(sessionHooks, hookRunner, {
+        cwd: state.cwd,
+        onError: (m) => writeLine(c.dim(`hook: ${m}`)),
+      })
+      .then((block) => {
+        sessionStartBlock = block ?? null;
+      })
+      .catch(() => {
+        /* fail-soft: hooks never take the session down */
+      });
+  }
 
   /**
    * The AGENT's confirm: yes/no, plus the two answers that make "don't ask again" real.
@@ -946,15 +1129,17 @@ export async function launchSession(parsed: ParsedArgs, deps: SessionDeps = {}):
   const runHostSetup = async (): Promise<void> => {
     const r = await runSetup({ client, write: writeLine, ask, askPath, home });
     if (r.endpoint) {
-      endpoint = r.endpoint;
       // a model dir change in /setup repointed paths.json — refresh the engine env.
       process.env.PROMETHEUS_MODELS_DIR = resolveCategory("open_models", home);
       state = repl.reduce(state, {
         type: "tune",
         patch: { model: { provider: "ollama", modelId: r.endpoint.model ?? "" } },
       });
-      // pre-load the just-chosen model so the next prompt is warm.
-      warmupLocalModel(endpoint);
+      // Adopt = point at it, warm it, AND measure it. `/setup` used to rebind without probing,
+      // which handed the freshly downloaded model the 8192 floor and no `probedCapabilities` —
+      // so `/think` reported "not available" for a model that had just been installed BECAUSE
+      // it can think. Awaited: the user is already standing at a wizard.
+      await adoptEndpoint(r.endpoint);
       writeLine(c.green(`✓ session now using ${r.endpoint.model}`));
     }
   };
@@ -963,6 +1148,133 @@ export async function launchSession(parsed: ParsedArgs, deps: SessionDeps = {}):
   const runHostPaths = async (): Promise<void> => {
     await runPathsWizard({ client, write: writeLine, ask, askPath, home });
     process.env.PROMETHEUS_MODELS_DIR = resolveCategory("open_models", home);
+  };
+
+  /**
+   * `/cd` — move to a different project WITHOUT quitting and relaunching Prometheus.
+   *
+   * The target directory is validated FIRST: a mistyped path must leave the live conversation
+   * completely untouched, not destroy it and then fail. Once validated, the session ROTATES —
+   * a fresh id, an empty transcript/history, project-scoped state (sub-agent personas, `/name`
+   * command files, `.prometheus.toml` permission rules, the built-in repo map, steering docs)
+   * re-derived for the NEW directory rather than left silently pointing at the old one. A
+   * persona or permission rule from the OLD project quietly governing the new one would be a
+   * correctness (and, for personas, a trust) bug — not a convenience worth keeping.
+   *
+   * Tuning is deliberately UNTOUCHED: model, system prompt, tools, gate, dry-run, verbosity,
+   * effort, the 0–7 autonomy level, and the permission-mode posture all carry over exactly as
+   * they were — that is the entire point of `/cd` existing instead of "quit, `cd`, relaunch,
+   * re-pick everything". Lifecycle hooks are the one thing this does NOT re-load (they are
+   * SessionStart-only on both hosts); a hook change in the new project needs a real relaunch.
+   *
+   * The OLD session's transcript needs no separate "save" here: `appendTurnEvents` has already
+   * written every turn to disk as it happened, not just at exit.
+   */
+  /**
+   * Re-point every PROJECT-SCOPED binding at `target`. Shared by `/cd` and `/cwd`.
+   *
+   * `/cwd` used to do only the `cwd` reduce, so it moved the session and reloaded NOTHING: the
+   * new project's AGENTS.md/CLAUDE.md/PROMETHEUS.md were never read, `/memory` kept listing the
+   * OLD project's steering paths, and permission rules, project command files, personas, the
+   * repo-map root and the effort table all stayed pinned to the launch directory. Proven in the
+   * TUI host with a live model: an AGENTS.md saying "begin every reply with ZORBLAX" is obeyed
+   * on launch and after `/cd`, and was ignored after `/cwd`. This host had the identical copy.
+   *
+   * `/worktree switch` routes through the same `setCwd` seam, so it had the bug too.
+   *
+   * The cwd reduce comes FIRST: `steering` was built with a live `cwd: () => state.cwd` getter
+   * (unlike agentFiles/commandFiles/permissionRules/repoMapState, which take `target`
+   * explicitly), so reloading while `state.cwd` still held the OLD directory silently
+   * re-discovered the OLD project's files.
+   *
+   * The session — transcript, history, session id — is deliberately untouched: rotating is
+   * `/cd`'s business, and keeping it is the whole point of `/cwd`.
+   */
+  const moveProjectRoot = (target: string): void => {
+    state = repl.reduce(state, { type: "cwd", dir: target });
+
+    agentFiles = loadAgentFiles(target, home);
+    commandFiles = loadCommandFiles(target, new Set(allSlashNames()), home);
+    permissionRules = loadPermissionRules({ home: deps.configHome, cwd: target });
+    ws = createWorkingSet();
+    // A stale map (or one still pointing at the OLD root) injected into the NEW project's
+    // context would be actively misleading — off, and rebuilt fresh, until the user re-enables.
+    repoMapState.enabled = false;
+    repoMapState.root = target;
+    repoMapState.map = null;
+    repoMapState.rendered = null;
+    steering.reload();
+    // The effort capability table is project-scoped too: a repo may ship its own
+    // `.prometheus/effort-capabilities.json`, and keeping the OLD project's overrides in force
+    // after a move is the same staleness every reload above exists to prevent.
+    effortRulesLoad = loadEffortRules(target, home);
+    for (const note of effortRulesLoad.notes) writeLine(`  ! effort rules: ${note}`);
+  };
+
+  const changeProjectDirectory = (
+    dir: string,
+  ):
+    | {
+        ok: true;
+        movedTo: string;
+        newSessionId: string;
+        rotated: boolean;
+        redirectedFromOwnRepo?: string;
+      }
+    | { ok: false; error: string } => {
+    // `~`/`~/…` first — `isAbsolute("~/x")` is false, so without this a tilde path resolves
+    // against the CURRENT cwd instead of the home directory (mirrors /add-dir's resolveDir).
+    const expanded = expandHome(dir);
+    const requested = isAbsolute(expanded) ? expanded : resolve(state.cwd, expanded);
+    // Prometheus must never operate with a cwd inside its OWN source repo (see cwd-guard.ts's
+    // own header for why) — a `/cd` into it is silently redirected to the user's home directory
+    // instead, exactly like a fresh session's own startup cwd already is.
+    const guard = guardOwnRepo(requested);
+    const target = guard.cwd;
+    let stat: ReturnType<typeof statSync>;
+    try {
+      stat = statSync(target);
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      return code === "ENOENT"
+        ? { ok: false, error: `no such directory: ${target}` }
+        : { ok: false, error: `cannot access ${target}: ${(err as Error).message}` };
+    }
+    if (!stat.isDirectory()) {
+      return { ok: false, error: `not a directory: ${target}` };
+    }
+    const redirectedFromOwnRepo = guard.redirected ? guard.requestedCwd : undefined;
+    // A no-op move (the pre-filled default accepted verbatim, or `/cd .`) must be genuinely
+    // harmless — askPath's own hint promises a bare Enter "keeps the default", so rotating the
+    // session (fresh id, cleared transcript/todos, dropped repo map) for a directory the user is
+    // ALREADY in would silently break that promise.
+    if (resolve(target) === resolve(state.cwd)) {
+      return {
+        ok: true,
+        movedTo: target,
+        newSessionId: sessionId,
+        rotated: false,
+        ...(redirectedFromOwnRepo ? { redirectedFromOwnRepo } : {}),
+      };
+    }
+
+    sessionId = newSessionId();
+    sessionRecorded = false;
+    session = undefined;
+    history = [];
+    capturedResume = null;
+    continueCount = 0;
+    todos.clear();
+    state = repl.reduce(state, { type: "clear" });
+    moveProjectRoot(target);
+
+    return {
+      ok: true,
+      movedTo: target,
+      newSessionId: sessionId,
+      rotated: true,
+      ...(redirectedFromOwnRepo ? { redirectedFromOwnRepo } : {}),
+    };
   };
 
   // ── per-handler context projectors (the host superset → each sibling shape) ── //
@@ -1025,6 +1337,8 @@ export async function launchSession(parsed: ParsedArgs, deps: SessionDeps = {}):
       ...(sessionHooks.length > 0 ? { hooks: sessionHooks } : {}),
       ...(hookRunner ? { hookRunner } : {}),
     },
+    // (A) `/timeout` — the session's inactivity-pause threshold.
+    idleTimeoutMs: idleTimeoutMsSetting,
     json: parsed.json,
     // Per-turn token accounting (CLI-029). Two things depended on this field and neither host
     // ever set it: `prometheus tokens report` read a store nothing wrote, so it was always
@@ -1079,6 +1393,9 @@ export async function launchSession(parsed: ParsedArgs, deps: SessionDeps = {}):
     ...(mcp ? { callMcpTool: (id, tool, args) => mcp.callTool(id, tool, args) } : {}),
     // a detected/adopted local endpoint → the real streaming path (not the offline fallback).
     ...(endpoint ? { endpoint } : {}),
+    // The session's effective effort capability table (builtins ⊕ user ⊕ workspace override
+    // files). Loaded once at startup — see `session/effort-rules.ts`.
+    effortRules: effortRulesLoad.rules,
     /**
      * The autonomy ladder decides FIRST, then the prompt — as it does in the TUI.
      *
@@ -1096,7 +1413,7 @@ export async function launchSession(parsed: ParsedArgs, deps: SessionDeps = {}):
      */
     confirm: (call) => {
       const tool = agent.exposedTools(tuning.tools).find((t) => t.name === call.name);
-      if (agent.authDecision(hostAuthLevel, call.name, tool?.annotations) === "allow") {
+      if (hostAutoApproves(call, tool?.annotations)) {
         return Promise.resolve(true as ConfirmResult);
       }
       // The PREVIEW comes before the prompt, not instead of it.
@@ -1169,7 +1486,22 @@ export async function launchSession(parsed: ParsedArgs, deps: SessionDeps = {}):
      * it, so the first compaction (or an immediate `/condense`) replaced the entire restored
      * conversation with `turnsToHistory([])` — nothing at all, silently.
      */
-    if (session) session = { ...session, turns: turnsFromRecords(records) };
+    /**
+     * Build the session when there ISN'T one — `if (session)` skipped exactly the case that
+     * matters.
+     *
+     * `session` stays undefined until the first turn of THIS process assigns it, and a resume
+     * is by definition the thing you do BEFORE any turn has run. So on a fresh
+     * `prometheus` + `/recall`, the restore repainted the transcript, refilled `history`, and
+     * left `session` undefined — the comment above describing a fix that never fired. Compaction
+     * then rebuilt `history` from the handful of turns worked since, silently deleting the whole
+     * restored conversation: the exact failure this line was written to prevent.
+     */
+    session = {
+      ...(session ??
+        agent.createSession(sessionId, r.descriptor || "resumed", r.ts, r.cwd || state.cwd)),
+      turns: turnsFromRecords(records),
+    };
     capturedResume = null;
     continueCount = 0;
     if (r.cwd) state = repl.reduce(state, { type: "cwd", dir: r.cwd });
@@ -1180,16 +1512,23 @@ export async function launchSession(parsed: ParsedArgs, deps: SessionDeps = {}):
       writeLine(c.dim(`  restored ${messages.length} msgs · ${elided} older elided for context`));
     }
     writeLine(c.dim("  model + system prompt kept from the current session"));
-    for (const line of painted) {
-      const role = (line as { role?: string }).role;
-      const text = (line as { text?: string }).text ?? "";
-      if (!text) continue;
-      state = repl.reduce(state, {
-        type: "message",
-        role: role === "user" ? "you" : "prometheus",
-        text,
-      });
-      writeLine(role === "user" ? `${c.dim("you")} ${text}` : text);
+    // `RestoredLine.role` is only ever "you" or "tool" (never "user") — matching against "user"
+    // (the previous bug) was always false, so EVERY restored line, including the human's own
+    // past prompts, was mislabeled role:"prometheus" here: no "you" indicator when printed, and
+    // tool-activity summary lines folded into the same bucket as if Prometheus had said them.
+    // This also fed exportTranscript/exportTranscriptJson, which read this same state.transcript.
+    // Mirrors session-bridge.ts's restoreSession exactly (its three-way branch on the real
+    // "you"/"prometheus"/tool values).
+    for (const p of painted) {
+      if (p.role === "you") {
+        state = repl.reduce(state, { type: "message", role: "you", text: p.text });
+        writeLine(`${c.dim("you")} ${p.text}`);
+      } else if (p.role === "prometheus") {
+        state = repl.reduce(state, { type: "message", role: "prometheus", text: p.text });
+        writeLine(p.text);
+      } else {
+        writeLine(c.dim(p.text));
+      }
     }
   };
 
@@ -1216,18 +1555,17 @@ export async function launchSession(parsed: ParsedArgs, deps: SessionDeps = {}):
     }
   };
 
-  // CLI-082: structured JSON export sibling — the readline host has no per-turn JSONL store, so it
-  // projects the in-memory transcript (you→user, prometheus/tool→assistant text) through the SAME
-  // buildSessionExport. Additive; never perturbs the plain-text path above.
+  // CLI-082: structured JSON export sibling — this host DOES maintain the same rich per-turn
+  // JSONL store the TUI does (appendTurnEvents below, read back via loadTurns for /recall), so
+  // it reads THAT instead of projecting the thin in-memory transcript. The projection used to
+  // force every non-user line to kind:"text" with no timestamp, so tool_use/verdict lines and
+  // per-turn `at` never appeared in this host's JSON export no matter what happened in the
+  // session — even though the richer data was sitting on disk the whole time. Matches
+  // session-bridge.ts's identical exportTranscriptJson. Additive; never perturbs the plain-text
+  // path above.
   const exportTranscriptJson = (file?: string): string => {
     try {
-      const lines: TurnLine[] = state.transcript.map((m) => {
-        const e = m as { role?: string; text?: string };
-        return e.role === "you"
-          ? { role: "user", text: e.text ?? "" }
-          : { kind: "text", text: e.text ?? "" };
-      });
-      const doc = buildSessionExport(sessionId, lines, now().toISOString());
+      const doc = buildSessionExport(sessionId, loadTurns(home, sessionId), now().toISOString());
       const stamp = now().toISOString().replace(/[:.]/g, "-");
       const dir = join(home, "logs", "sessions");
       mkdirSync(dir, { recursive: true });
@@ -1249,14 +1587,30 @@ export async function launchSession(parsed: ParsedArgs, deps: SessionDeps = {}):
    * Guarded on `session` and on a live policy: `autoCompactPolicy` returns null when the
    * threshold is 0, which DISABLES the check — that sentinel is load-bearing, so it is passed
    * through rather than defaulted around.
+   *
+   * The window fed to the policy is the SMALLER of the endpoint's own (measured or assumed)
+   * window and `contextWindowSetting` (`/context window`, default 250k) — a user-chosen ceiling
+   * always wins over a bigger number the model's metadata claims, and a genuinely smaller real
+   * window always wins over an optimistic setting. Compaction still fires at 85% of that number,
+   * not "at" it exactly — the margin is what gives a compaction round room to finish before the
+   * window is actually exhausted.
    */
   const maybeAutoCompact = async (): Promise<void> => {
     if (!session) return;
-    const window = endpoint?.contextWindow ?? DEFAULT_CONTEXT_WINDOW;
+    const window = Math.min(
+      endpoint?.contextWindow ?? DEFAULT_CONTEXT_WINDOW,
+      contextWindowSetting,
+    );
     const policy = autoCompactPolicy(COMPACT_THRESHOLD_PCT, window, COMPACT_KEEP_RECENT);
     if (!policy || !shouldAutoCompact(session, policy)) return;
     try {
-      const { summarize, offline } = makeSummarizer(turnCtxFor(writeLine));
+      // `turnAbort` is already armed by the time this runs (`handleLine` creates it before
+      // dispatching to `runAgentMessage`) — threading it is root cause 3's actual fix: this
+      // inner call used to get NO signal, so Esc/Ctrl-C could never reach it.
+      const { summarize, offline } = makeSummarizer(turnCtxFor(writeLine), {
+        ...(turnAbort ? { signal: turnAbort.signal } : {}),
+        onStatus: writeLine,
+      });
       const res = await compactSession(sessionId, session, policy, summarize, now().toISOString(), {
         offline,
       });
@@ -1333,6 +1687,18 @@ export async function launchSession(parsed: ParsedArgs, deps: SessionDeps = {}):
       if (note) writeLine(c.dim(`🛸 ${note}`));
     }
     state = repl.reduce(state, { type: "message", role: "you", text: input });
+    if (contextProbe) {
+      // Bounded, and UNCONDITIONAL on `session` existing — the previous placement (inside
+      // `maybeAutoCompact`, gated on `if (!session) return`) never ran on a brand-new
+      // session's first message (`session` is undefined until the first `persist()`), which
+      // is exactly the scenario root cause #1 was written to close. Mirrors the TUI bridge's
+      // own (already-correct) unconditional placement.
+      await Promise.race([
+        contextProbe.catch(() => undefined),
+        new Promise((r) => setTimeout(r, CONTEXT_PROBE_AWAIT_MS)),
+      ]);
+      contextProbe = undefined;
+    }
     // AUTO-COMPACT before the turn, exactly as the TUI host does.
     //
     // This host had manual `/compact` only, while `tui/session-bridge.ts` compacted on a
@@ -1378,6 +1744,10 @@ export async function launchSession(parsed: ParsedArgs, deps: SessionDeps = {}):
      */
     appendTurnEvents(home, sessionId, [{ role: "user", text: input }, ...res.events]);
     rotateSessions(home, { maxBytes: SESSION_TRANSCRIPT_CAP_BYTES, liveId: sessionId });
+    // /restore's picker column: what THIS turn actually did, refreshed every turn (mechanical —
+    // no model round-trip; see turn-summary.ts). A no-op until the index record exists, which it
+    // always does by now — `recordSession` runs earlier in the SAME `handleLine` call.
+    updateSessionSummary(home, sessionId, turnSummaryOf(input, res.events));
     if (res.reply.trim()) {
       state = repl.reduce(state, { type: "message", role: "prometheus", text: res.reply });
     }
@@ -1404,24 +1774,37 @@ export async function launchSession(parsed: ParsedArgs, deps: SessionDeps = {}):
     // CLI-072: a fresh (non-continued) turn resets the continue counter; stash/clear resume state.
     continueCount = 0;
     settleCap(res);
+    // yolo / level-7: keep going to the end of the task rather than stopping at the step cap and
+    // asking the human the mode explicitly promised would not be asked. Same seam as the TUI's.
+    if (agent.isRunToDoneMode(hostPermMode) && res.capped) {
+      await autoRunToDone(res, turnAbort?.signal);
+    }
   };
 
-  /** CLI-072: fold a turn's cap outcome into the resume state (stash on cap, clear on clean end). */
+  /** CLI-072: fold a turn's cap OR idle-pause outcome into the resume state (stash, clear on clean end). */
   const settleCap = (res: MessageTurnResult): void => {
-    if (res.capped) {
+    if (res.capped || res.paused) {
       capturedResume = res.thread;
-      const again = continueCount > 0 ? ` (resumed ${continueCount}×)` : "";
-      writeLine(c.dim(`⎿ paused at the step cap — /continue to resume${again}`));
+      // yolo (run-to-done) auto-resumes a CAPPED turn, so telling the user to /continue would
+      // contradict what is about to happen on its own. An idle PAUSE is still surfaced: that
+      // one waits for the human by design. Mirrors the TUI's settleCap exactly.
+      if (!agent.isRunToDoneMode(hostPermMode) || res.paused) {
+        const again = continueCount > 0 ? ` (resumed ${continueCount}×)` : "";
+        const why = res.paused
+          ? `paused after ${Math.round((res.pausedIdleMs ?? 0) / 1000)}s of inactivity`
+          : "paused at the step cap";
+        writeLine(c.dim(`⎿ ${why} — /continue to resume, or just keep typing${again}`));
+      }
     } else {
       capturedResume = null;
     }
   };
 
   /** Resume a capped turn with full prior tool state (CLI-072). Honest no-op when nothing paused. */
-  const runContinue = async (): Promise<void> => {
+  const runContinue = async (): Promise<MessageTurnResult | null> => {
     if (!capturedResume) {
       writeLine(c.dim("nothing to continue — the last turn finished within its step budget."));
-      return;
+      return null;
     }
     continueCount++;
     const resumeThread = capturedResume;
@@ -1451,11 +1834,84 @@ export async function launchSession(parsed: ParsedArgs, deps: SessionDeps = {}):
         })
       : history;
     settleCap(res);
-    if (!res.capped) continueCount = 0; // chain complete
+    // A pause (idle-timeout) is still an open chain, exactly like a round cap — `settleCap`
+    // above already re-stashed `capturedResume` for it, so the counter must not reset either,
+    // or "resumed N×" understates how many times this SAME chain has had to be continued.
+    if (!res.capped && !res.paused) continueCount = 0; // chain complete
+    return res;
+  };
+
+  /**
+   * yolo / level-7 RUN-TO-DONE: keep continuing a capped turn until the task finishes.
+   *
+   * `yolo` is defined as "bypass + run to done (auto-/continue, no pauses)" and `/permission-mode`
+   * prints that verbatim — "no prompts, no pauses". This host implemented only the confirm-skip
+   * half: `runAgentMessage` ended at `settleCap` and `isRunToDoneMode` appeared nowhere in the
+   * file, so a yolo turn hit the step cap and printed "paused at the step cap — /continue to
+   * resume", waiting for the human the mode had just promised it would not need. The TUI had
+   * done this since CLI-072; the same words meant two different things depending on which host
+   * you launched.
+   *
+   * Same budget/abort/stall logic as the TUI's copy — `decideAutoContinue` owns the policy, both
+   * hosts only drive it.
+   */
+  const autoRunToDone = async (first: MessageTurnResult, signal?: AbortSignal): Promise<void> => {
+    let acState = agent.initAutoContinue(Date.now());
+    let tokens = 0;
+    let cur: MessageTurnResult | null = first;
+    for (;;) {
+      if (!cur) break;
+      tokens += Math.ceil((cur.reply ?? "").length / 4); // ~4 chars/token, budget proxy
+      acState = cur.events.reduce(agent.observeEvent, acState);
+      const decision = agent.decideAutoContinue({
+        mode: hostPermMode,
+        capped: cur.capped,
+        state: acState,
+        budget: agent.DEFAULT_AUTO_CONTINUE_BUDGET,
+        nowMs: Date.now(),
+        tokensSpent: tokens,
+        progressDigest: agent.progressDigest(cur.events),
+      });
+      if (!decision.resume) {
+        if (cur.capped) writeLine(c.dim(`⎿ yolo auto-continue stopped: ${decision.reason}`));
+        break;
+      }
+      acState = decision.state;
+      if (signal?.aborted) {
+        writeLine(c.dim("⎿ yolo auto-continue: interrupted"));
+        break;
+      }
+      writeLine(c.dim(`⎿ yolo: auto-continuing (step ${acState.continues})…`));
+      cur = await runContinue();
+    }
   };
 
   // the 0–7 --authorisation level for the plain host: persisted across sessions like the TUI.
-  let hostAuthLevel = readSavedAuthLevel(home) ?? agent.DEFAULT_AUTH_LEVEL;
+  // `deps.configHome`, NOT `home` (== prometheusHome(), the accounting/state tree) — this store
+  // lives under `<configHome>/.config/prometheus-studio/` (cliProfiles.configDir), the SAME
+  // os.homedir()-rooted tree permissionRules/grants already correctly use a few lines below.
+  // Passing `home` here (a real, shipped bug found via a stray `~/.prometheus/.config/...`
+  // artifact on disk) silently wrote the saved level to `<prometheusHome>/.config/...` instead.
+  let hostAuthLevel = readSavedAuthLevel(deps.configHome) ?? agent.DEFAULT_AUTH_LEVEL;
+  /**
+   * ELEVATED-PRIVILEGE GATE — this host had none at all.
+   *
+   * The red warning, the mandatory acknowledgement and the bypass clamp lived inside the TUI
+   * and nowhere else, so `sudo prometheus --plain` (and `--tmux`, and the non-TTY fallback into
+   * this host) restored the persisted authorisation level UNCLAMPED and auto-approved against it
+   * as root, with nothing printed. The same `sudo prometheus` in the default TUI stopped for a
+   * full-screen acknowledgement first — same machine, same posture, same sudo. And this is the
+   * surface used over SSH and inside tmux, where a sudo launch is most likely of all.
+   *
+   * Declining is SAFE, not an abort: it forces ask-before-everything and locks bypass. The clamp
+   * mirrors the TUI's (`bypassLocked` ⇒ no full-autonomy tier).
+   */
+  const elevationDecision = await runElevationGate({
+    write: writeLine,
+    ask: (prompt) => new Promise<string>((res) => rl.question(prompt, (a) => res(a))),
+    red: (t) => (parsed.noColor ? t : `\x1b[1;37;41m${t}\x1b[0m`),
+  });
+  if (elevationDecision.bypassLocked && hostAuthLevel > 5) hostAuthLevel = 5;
   /**
    * The coarse autonomy POSTURE (`/permission-mode`), session-scoped.
    *
@@ -1473,13 +1929,22 @@ export async function launchSession(parsed: ParsedArgs, deps: SessionDeps = {}):
     tuning: () => state.tuning,
     cwd: () => state.cwd,
     getAuthLevel: () => hostAuthLevel,
+    // `/authorisation` and `/permission-mode` must sync the SAME two fields the TUI does
+    // (session-bridge.ts's identical setAuthLevel/setPermMode) — this host used to leave
+    // hostPermMode/hostAuthLevel as two fully independent variables, so `/permission-mode
+    // bypassPermissions`/`yolo` changed nothing about real approval behavior here (the confirm
+    // callback below consults ONLY hostAuthLevel), even though the command's own printed
+    // description claimed it had.
     setAuthLevel: (level) => {
       hostAuthLevel = agent.authLevelMeta(level).level;
-      saveAuthLevel(hostAuthLevel, home); // last-set becomes the next-session default
+      hostPermMode = agent.authLevelToMode(hostAuthLevel); // sync the coarse mode/indicator
+      saveAuthLevel(hostAuthLevel, deps.configHome); // last-set becomes the next-session default
     },
     getPermMode: () => hostPermMode,
     setPermMode: (mode) => {
       hostPermMode = mode;
+      hostAuthLevel = agent.modeToAuthLevel(mode);
+      saveAuthLevel(hostAuthLevel, deps.configHome);
     },
     /**
      * `/background <task>` — run a turn DETACHED and register it so `agents list` sees it.
@@ -1500,8 +1965,31 @@ export async function launchSession(parsed: ParsedArgs, deps: SessionDeps = {}):
           // `undefined` session ⇒ runMessageTurn mints a fresh one. Deliberate: two turns
           // appending to the live transcript concurrently would interleave, and a detached
           // run is not part of the conversation happening at the prompt.
+          //
+          // Recompute the delegation cap from the BACKGROUND task's own prompt — the shared
+          // `spawnCap` closure variable is only ever reassigned by the FOREGROUND message
+          // handler, so `/agents N` followed immediately by `/background` (no prior foreground
+          // message this session) ran the background task at the untouched default (8) instead
+          // of N. Overriding subagentBudget directly on this one ctx, rather than reassigning
+          // the shared `spawnCap` variable, also avoids racing a concurrently dequeued
+          // foreground turn's own recompute. Mirrors the TUI's identical fix.
+
+          const ctx = turnCtxFor((s) => rc.append(s));
           const res = await handlers.runMessageTurn(undefined, task, {
-            ctx: turnCtxFor((s) => rc.append(s)),
+            ctx: {
+              ...ctx,
+              subagentBudget: {
+                maxSpawns: spawnCapFor(task, explicitAgents, agent.DEFAULT_MAX_SPAWNS),
+              },
+              // A DEDICATED checkpoint namespace, not the shared (possibly-since-rotated)
+              // `sessionId` — see the TUI's identical fix/comment. Without this, a background
+              // run's file-edit checkpoint could land as the "most recent" one under the LIVE
+              // session's id, so a foreground /revert would silently restore-then-permanently-
+              // delete the background task's edits instead of the user's own last turn.
+              ...(ctx.checkpoint
+                ? { checkpoint: { store: ctx.checkpoint.store, sessionId: `bg-${rc.id}` } }
+                : {}),
+            },
             signal: rc.signal,
           });
           const reply = res.reply.trim();
@@ -1515,7 +2003,10 @@ export async function launchSession(parsed: ParsedArgs, deps: SessionDeps = {}):
       if (outcome.text) writeLine(outcome.text);
     },
     sendToAgent: runAgentMessage,
-    continueTurn: runContinue,
+    // the slash seam wants a void promise; the chain driver wants the result
+    continueTurn: async () => {
+      await runContinue();
+    },
     applyFromLastReply: async () => {
       const intents = agent.extractEditIntents(lastAssistantReply(history));
       if (intents.length === 0) {
@@ -1531,7 +2022,18 @@ export async function launchSession(parsed: ParsedArgs, deps: SessionDeps = {}):
         return;
       }
       const roots = [state.cwd, ...ws.list()];
-      for (const o of applyEditIntentsLocal(intents, roots, state.cwd)) {
+      // Without a real CheckpointHook here, /apply wrote files but never recorded a
+      // checkpoint — /checkpoints never listed the change and /revert couldn't undo it (or,
+      // worse, silently restored an unrelated earlier one instead). A synthetic turnId is fine:
+      // CheckpointStore only ever looks these up by sessionId, most-recent-first.
+      const checkpoint: CheckpointHook = {
+        store: checkpointStore,
+        turnId: `apply-${Date.now()}`,
+        sessionId,
+        turnNumber: (session?.turns.length ?? 0) + 1,
+        now: () => new Date().toISOString(),
+      };
+      for (const o of applyEditIntentsLocal(intents, roots, state.cwd, checkpoint)) {
         writeLine(o.ok ? `  ✓ ${o.summary}` : `  ✗ ${o.path}: ${o.summary}`);
       }
     },
@@ -1542,12 +2044,20 @@ export async function launchSession(parsed: ParsedArgs, deps: SessionDeps = {}):
     // it may quietly drop. Re-derived per call — `/setup` and `/model` can rebind `endpoint`.
     effortResolution: (tier) => {
       if (!endpoint) return undefined;
-      const cap = ai.resolveCapability({
-        modelId: endpoint.model ?? endpoint.id,
-        runtime: ai.runtimeFromBaseUrl(endpoint.baseUrl, endpoint.locality),
-        locality: endpoint.locality,
-      }).cap;
-      return ai.resolveEffort(tier, cap);
+      const cap = ai.resolveCapability(
+        {
+          modelId: endpoint.model ?? endpoint.id,
+          runtime: ai.runtimeFromBaseUrl(endpoint.baseUrl, endpoint.locality),
+          locality: endpoint.locality,
+          probedCapabilities: endpoint.probedCapabilities,
+        },
+        effortRulesLoad.rules,
+      ).cap;
+      // Report what the session will ACTUALLY do, forcing included — `/think` and `/status`
+      // must not describe a knob the transport is about to override.
+      return ai.resolveEffort(tier, cap, {
+        ...(state.tuning.effortForce ? { force: true } : {}),
+      });
     },
     control: (signal) => {
       if (signal === "quit") {
@@ -1562,14 +2072,27 @@ export async function launchSession(parsed: ParsedArgs, deps: SessionDeps = {}):
       }
     },
     setCwd: (dir) => {
-      state = repl.reduce(state, { type: "cwd", dir });
+      // `/cwd` moves in place (no session rotation), but it must be guarded exactly like `/cd`:
+      // Prometheus can never end up with a cwd inside its own repo, whichever command got it
+      // there.
+      const expanded = expandHome(dir);
+      const requested = isAbsolute(expanded) ? expanded : resolve(state.cwd, expanded);
+      const guard = guardOwnRepo(requested);
+      if (guard.redirected) {
+        writeLine(
+          `⚠ Prometheus refuses to operate inside its own repository (${guard.requestedCwd}) — redirected to ${guard.cwd}.`,
+        );
+      }
+      // Moves in place AND re-points the project-scoped state — see `moveProjectRoot`. Doing
+      // only the reduce here is what left the model reading the launch directory's rules.
+      moveProjectRoot(guard.cwd);
     },
     compact: async (focus) => {
       if (!session || session.turns.length <= COMPACT_KEEP_RECENT) {
         writeLine(c.dim("⎿ nothing to compact yet"));
         return;
       }
-      const { summarize, offline } = makeSummarizer(turnCtxFor(writeLine));
+      const { summarize, offline } = makeSummarizer(turnCtxFor(writeLine), { onStatus: writeLine });
       const sum = focus
         ? async (older: readonly agent.SessionTurn[]) =>
             `Focus: ${focus}\n${await summarize(older)}`
@@ -1661,7 +2184,12 @@ export async function launchSession(parsed: ParsedArgs, deps: SessionDeps = {}):
         confirm,
         install: async (name, opts) => {
           const outcome = await handlers.execVerb(
-            ["install", name, ...(opts?.yes ? ["--yes"] : [])],
+            [
+              "install",
+              name,
+              ...(opts?.dryRun ? ["--dry-run"] : []),
+              ...(opts?.yes ? ["--yes"] : []),
+            ],
             verbCtxFor(writeLine),
           );
           if (outcome.text) writeLine(outcome.text);
@@ -1703,6 +2231,22 @@ export async function launchSession(parsed: ParsedArgs, deps: SessionDeps = {}):
       }
       if (target) restorePastSession(target);
     },
+    modelPicker: {
+      candidates: () => modelCandidates(backends, cloudEndpoints, endpoint?.id),
+      // ASYNC because the switch is not complete until the new model has been MEASURED:
+      // `modelCandidates` mints an endpoint with the 8192 floor and no `probedCapabilities`, so
+      // returning before the probe lands is what made `/model qwen3.6` followed by `/think high`
+      // answer "not available" for a model that advertises `thinking`. One loopback POST.
+      select: async (id) => {
+        const candidates = modelCandidates(backends, cloudEndpoints, endpoint?.id);
+        const picked =
+          candidates.find((cd) => cd.id === id) ?? resolveModelCandidate(candidates, id);
+        if (!picked) return { ok: false, reason: `no model matching "${id}"` };
+        state = repl.reduce(state, { type: "tune", patch: { model: picked.model } });
+        await adoptEndpoint(picked.endpoint);
+        return { ok: true, label: picked.label };
+      },
+    },
     agents: {
       count: () => subagentCount,
       setCount: (n) => {
@@ -1725,11 +2269,19 @@ export async function launchSession(parsed: ParsedArgs, deps: SessionDeps = {}):
       revert: () => {
         const last = checkpointStore.list(sessionId).at(-1);
         if (!last) return "nothing to revert";
-        const { restored, deleted } = restoreCheckpoint(last, {
+        const { restored, deleted, skipped } = restoreCheckpoint(last, {
           roots: [state.cwd, ...ws.list()],
         });
-        checkpointStore.delete(last.id);
-        return `↩ reverted ${restored.length} file(s)${deleted.length ? ` · deleted ${deleted.length}` : ""}`;
+        // KEEP the checkpoint when anything was skipped: those entries are the only surviving
+        // copy of the original bytes, and deleting it would destroy exactly the pre-images
+        // `/revert` exists to restore. Say so — a silent "reverted 0 file(s)" reads as "there
+        // was nothing to do", not as "I could not touch your file".
+        if (skipped.length === 0) checkpointStore.delete(last.id);
+        const note = skipped.length
+          ? ` · ${skipped.length} outside the working set NOT reverted (checkpoint kept — ` +
+            `/add-dir ${skipped[0]} then /revert again)`
+          : "";
+        return `↩ reverted ${restored.length} file(s)${deleted.length ? ` · deleted ${deleted.length}` : ""}${note}`;
       },
       list: () => {
         const cps = checkpointStore.list(sessionId);
@@ -1832,6 +2384,25 @@ export async function launchSession(parsed: ParsedArgs, deps: SessionDeps = {}):
       }
       return { parts, ...(endpoint?.contextWindow ? { window: endpoint.contextWindow } : {}) };
     },
+    // /context window: the persisted auto-compact ceiling (default 250k) — see host.ts's
+    // `maybeAutoCompact` for how it combines with the endpoint's own window via Math.min.
+    contextWindowTokens: {
+      get: () => contextWindowSetting,
+      set: (n) => {
+        contextWindowSetting = n;
+        saveContextWindowTokens(home, n);
+      },
+    },
+    // `/timeout` — the persisted inactivity-pause threshold (default 10 min).
+    idleTimeoutSetting: {
+      get: () => idleTimeoutMsSetting,
+      set: (ms) => {
+        idleTimeoutMsSetting = ms;
+        saveIdleTimeoutMs(home, ms);
+      },
+    },
+    // /cd — see `changeProjectDirectory`'s own header for the full rotation semantics.
+    changeProjectDirectory: (dir) => changeProjectDirectory(dir),
   };
 
   /** Handle ONE input line. Always wrapped by the caller's try/catch. */

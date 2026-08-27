@@ -12,6 +12,8 @@
  */
 import { COMMAND_SPECS } from "@prometheus/core";
 
+import { ROUTED_VERBS } from "../route-table.js";
+
 import type { CliContext, CommandOutcome } from "../context.js";
 
 /** Global flags every `prometheus` invocation accepts (parse.ts §1 globals) — completed after any command. */
@@ -24,6 +26,8 @@ const GLOBAL_FLAGS = [
   "--force",
   "--profile",
   "--gate-mode",
+  "--effort",
+  "--force-effort",
   "--help",
   "--version",
 ] as const;
@@ -33,9 +37,22 @@ function isSafeName(name: string): boolean {
   return /^[A-Za-z0-9:_-]+$/.test(name);
 }
 
-/** The registry command ids (sorted, deduped, metachar-free) — the single source of command names. */
+/**
+ * The verbs a user can actually type, sorted, deduped and metachar-free.
+ *
+ * This used to map `COMMAND_SPECS` to their `id`, but a spec id is an INTERNAL identifier, not
+ * the token a user types: `env-list` is the spec behind `prometheus env list`. So the generated
+ * completion offered `env-list`, `model-hw`, `provider-list` and `secure-scan` — every one of
+ * which exits 2 with "unknown command" — while omitting 32 verbs that do exist (`mcp`, `env`,
+ * `model`, `repo`, `keymap`, `sessions`, `profile`, `agents`, `metadata`, …). Measured by
+ * running each one against the built binary.
+ *
+ * `ROUTED_VERBS` is the router's own list — the same one `index.ts` uses to suggest a nearest
+ * match — and it already excludes those four internal ids by name (`INTERNAL_SPEC_IDS`). The
+ * exclusion existed; this generator simply was not reading it.
+ */
 export function completionCommands(): string[] {
-  return [...new Set(COMMAND_SPECS.map((c) => c.id))].filter(isSafeName).sort();
+  return [...new Set(ROUTED_VERBS)].filter(isSafeName).sort();
 }
 
 /** Every flag name across the registry + the globals, as `--name` (deduped, safe, sorted). */

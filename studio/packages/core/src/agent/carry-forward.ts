@@ -59,6 +59,18 @@ export interface CarryForwardOptions {
 export const ELISION = (cutTokens: number): string =>
   `\n\n… [${cutTokens} tokens of this tool result elided to fit the context window; re-run the tool if you need the middle] …\n\n`;
 
+/**
+ * The marker left at the front of the oldest SURVIVING round when whole earlier rounds were
+ * dropped (pass 2, below). Unlike `ELISION` — which annotates the exact tool result it cut —
+ * a dropped round leaves no content behind to attach a marker to, so without this the model
+ * sees history simply start abruptly, with nothing telling it (as opposed to the human, who
+ * sees the terminal's own "context trimmed to fit" notice) that anything is missing. A model
+ * that cannot tell "this was never here" from "this was removed" is liable to keep confidently
+ * re-deriving or re-asserting things it already settled several rounds ago.
+ */
+export const ROUND_DROP = (roundCount: number): string =>
+  `[… ${roundCount} earlier round${roundCount === 1 ? "" : "s"} of this conversation were dropped to fit the context window — anything asked, decided, or written to disk in them is no longer visible here. If this turn seems to reference something from before this point, say so and ask, or re-read the relevant file, rather than guessing or re-doing it from scratch …]\n\n`;
+
 /** A message plus the messages that cannot be separated from it. */
 interface Round {
   messages: ThreadMessage[];
@@ -144,6 +156,26 @@ export function carryForward(
     first += 1;
   }
   const kept = capped.slice(first);
+
+  // A dropped round leaves no trace unless we leave one: prepend the marker to the oldest
+  // surviving round's own opening user message (guaranteed to exist and be `role:"user"` — see
+  // `toRounds`) rather than inserting a synthetic message of our own. That keeps the message
+  // list's role sequence exactly as the caller already expects (one user message opens a round),
+  // instead of introducing an extra system-role entry mid-thread that some wire formats may not
+  // expect outside position zero.
+  if (first > 0 && kept.length > 0) {
+    const round = kept[0] as Round;
+    const opening = round.messages[0];
+    if (opening) {
+      kept[0] = {
+        ...round,
+        messages: [
+          { ...opening, content: ROUND_DROP(first) + opening.content },
+          ...round.messages.slice(1),
+        ],
+      };
+    }
+  }
 
   // Pass 3 — the last round alone can still exceed the budget (one enormous tool result). Elide
   // its tool output too rather than returning something that cannot be sent. The user message and

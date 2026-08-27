@@ -19,12 +19,14 @@
  */
 
 import { estimateTextTokens } from "../agent/compact.js";
+import { IdleWatchdog } from "../agent/idle-watchdog.js";
 import { applyEffort, applyEffortToMessages } from "./effort/apply.js";
 import { runtimeFromBaseUrl } from "./effort/rules.js";
 import type { EffortResolution } from "./effort/types.js";
 import { applyPromptCache, cacheDialectFor } from "./prompt-cache.js";
 import { endpointBreaker, fetchModelWithRetry } from "./request.js";
 import { ContextOverflowError, preflightContext } from "./retry-policy.js";
+import { mergeWireUsage } from "./usage.js";
 import { selectWire } from "./wire.js";
 
 /* ------------------------------------------------------------------------- *
@@ -49,6 +51,14 @@ export interface AiEndpoint {
   supportsTools: boolean;
   /** the model name to send in the request body (defaults to a sane id). */
   model?: string;
+  /**
+   * Ollama `/api/show`'s `capabilities` array (e.g. `["completion","tools","thinking"]`),
+   * filled in by the SAME context-window probe that measures `contextWindow` — `undefined`
+   * until that probe resolves (or for any non-Ollama/cloud endpoint). This is what lets
+   * `ai/effort/rules.ts`'s probe-driven rules (`ollama-native-thinking`, etc.) actually match
+   * instead of falling through to `UNKNOWN_CAPABILITY` for every model, always.
+   */
+  probedCapabilities?: readonly string[];
 }
 
 /** Per-workspace privacy policy (file 07 §7.5). */
@@ -84,6 +94,24 @@ export interface ChatOpts {
    * OpenAI, Anthropic and Gemini.
    */
   promptCache?: boolean;
+  /**
+   * This request's inactivity-pause threshold — see `agent/idle-watchdog.ts`. Undefined ⇒
+   * `DEFAULT_IDLE_TIMEOUT_MS` (10 minutes).
+   *
+   * Previously ONLY the CLI's native tool-calling transport (`toolTurn` in
+   * apps/cli/session/agent-runtime.ts) had this protection; this shared `stream()` — the text/
+   * no-tools transport EVERY caller falls back to, and the ONLY transport the VS Code
+   * extension and `makeSummarizer`'s background call ever use — had none, so a cold-loading
+   * or wedged local model hung those callers exactly as the CLI hung before root-cause #1's
+   * fix, just on a different code path.
+   */
+  idleTimeoutMs?: number;
+  /** test-only clock injection for the idle watchdog, mirroring the same seam already exposed
+   *  on the CLI's `toolTurn`/`LlmClientDeps` for exactly the same reason (a 30s-floor watchdog
+   *  cannot be exercised with a fast real-timer test). Production never sets these. */
+  idleWatchdogNow?: () => number;
+  idleWatchdogSetTimeout?: (cb: () => void, ms: number) => ReturnType<typeof setTimeout>;
+  idleWatchdogClearTimeout?: (handle: ReturnType<typeof setTimeout>) => void;
 }
 
 /** A streamed chat delta. */
@@ -178,6 +206,45 @@ export class CloudPolicyError extends Error {
     );
     this.name = "CloudPolicyError";
     this.endpointId = endpointId;
+  }
+}
+
+/**
+ * Thrown by `stream()` when its OWN idle watchdog — not the caller's `signal` — aborted the
+ * fetch/read because the endpoint went silent for `idleTimeoutMs`. Distinguishing this from a
+ * generic abort/network failure is the whole point: a caller catching this converts a would-be
+ * hard failure into a graceful pause (no work discarded, resumable), exactly as
+ * `apps/cli/session/agent-runtime.ts`'s native `toolTurn` already does for its own transport.
+ */
+/**
+ * A provider reported a fault MID-STREAM, after the HTTP 200.
+ *
+ * Anthropic sends `{"type":"error","error":{…}}` on overload or a mid-generation fault,
+ * OpenAI-compatible servers send a bare `{"error":{…}}` frame, and Gemini reports a blocked
+ * prompt via `promptFeedback.blockReason`. `wire.ts` parses all three into `WireEvent.error` —
+ * and the stream loop below used to read only `delta`/`usage`/`done`, so every one of them was
+ * dropped on the floor. The turn ended normally with a truncated or completely empty answer and
+ * the user was told nothing at all. Reproduced against a real HTTP server: an `overloaded_error`
+ * after a text delta yielded `""` and threw nothing.
+ */
+export class ProviderStreamError extends Error {
+  readonly endpointId: string;
+  /** whatever text had already been streamed before the fault, so a host can still show it. */
+  readonly partial: string;
+  constructor(endpointId: string, message: string, partial: string) {
+    super(`${endpointId}: ${message}`);
+    this.name = "ProviderStreamError";
+    this.endpointId = endpointId;
+    this.partial = partial;
+  }
+}
+
+export class ModelIdlePausedError extends Error {
+  readonly idleMs: number;
+  constructor(idleMs: number) {
+    super(`model went silent for ${Math.round(idleMs / 1000)}s`);
+    this.name = "ModelIdlePausedError";
+    this.idleMs = idleMs;
   }
 }
 
@@ -295,17 +362,56 @@ export function usageFromPayload(payload: string): SseTokenUsage | null {
   } catch {
     return null;
   }
-  const u = (obj as { usage?: unknown }).usage as Record<string, unknown> | undefined;
-  if (!u || typeof u !== "object") return null;
-  const inTok = typeof u.prompt_tokens === "number" ? u.prompt_tokens : undefined;
-  const outTok = typeof u.completion_tokens === "number" ? u.completion_tokens : undefined;
+  /**
+   * Gemini reports usage under `usageMetadata` with NO `usage` key at all.
+   *
+   * This function gated on `usage.prompt_tokens` / `usage.completion_tokens` and returned null
+   * for anything else, despite its own docstring saying it normalizes the per-provider counters.
+   * The CLI's native tool transport uses it as its ONLY usage source — and native is the
+   * transport Claude and Gemini both take, since both wires report supportsTools:true — so every
+   * agentic Claude/Gemini turn fell through to a chars/4 estimate flagged `estimated: true`,
+   * and never recorded the cache counters at all.
+   */
+  const meta = (obj as { usageMetadata?: unknown }).usageMetadata;
+  if (isRecord(meta)) {
+    const inTok = finiteNonNeg(meta.promptTokenCount);
+    const outTok = finiteNonNeg(meta.candidatesTokenCount);
+    if (inTok !== undefined || outTok !== undefined) {
+      const inputTokens = inTok ?? 0;
+      const outputTokens = outTok ?? 0;
+      const cacheRead = finiteNonNeg(meta.cachedContentTokenCount);
+      return {
+        inputTokens,
+        outputTokens,
+        totalTokens: finiteNonNeg(meta.totalTokenCount) ?? inputTokens + outputTokens,
+        ...(cacheRead !== undefined ? { cacheRead } : {}),
+      };
+    }
+  }
+
+  /**
+   * Anthropic splits usage over two frames: `message_start` nests it under `message.usage` and
+   * carries input_tokens + the cache counters; `message_delta` puts `usage` at the top level
+   * with output_tokens only. Both are surfaced here — `mergeWireUsage` is what recombines them.
+   */
+  const top = (obj as { usage?: unknown }).usage;
+  const nested = isRecord((obj as { message?: unknown }).message)
+    ? ((obj as { message: Record<string, unknown> }).message.usage as unknown)
+    : undefined;
+  const u = (isRecord(top) ? top : isRecord(nested) ? nested : undefined) as
+    | Record<string, unknown>
+    | undefined;
+  if (!u) return null;
+
+  // OpenAI names first, then Anthropic's — a frame carries one vocabulary or the other.
+  const inTok = finiteNonNeg(u.prompt_tokens) ?? finiteNonNeg(u.input_tokens);
+  const outTok = finiteNonNeg(u.completion_tokens) ?? finiteNonNeg(u.output_tokens);
   const cache = cacheTokensFromUsage(u);
   // a payload with ONLY cache fields (no prompt/completion) is not a usage frame we accumulate.
   if (inTok === undefined && outTok === undefined) return null;
   const inputTokens = inTok ?? 0;
   const outputTokens = outTok ?? 0;
-  const totalTokens =
-    typeof u.total_tokens === "number" ? u.total_tokens : inputTokens + outputTokens;
+  const totalTokens = finiteNonNeg(u.total_tokens) ?? inputTokens + outputTokens;
   return { inputTokens, outputTokens, totalTokens, ...cache };
 }
 
@@ -454,39 +560,169 @@ export function createAiClient(
     if (!pre.ok) throw new ContextOverflowError(pre, endpoint.contextWindow);
 
     /**
-     * The request, with bounded retries — and the retry stops HERE, before a single token has
-     * been yielded.
-     *
-     * That boundary is the whole design. Everything below is a stream the consumer is already
-     * reading; retrying after a delta has been emitted would replay text the user has seen,
-     * which is worse than the failure. `fetchModelWithRetry` is shared with the other three
-     * transports so this judgement is made in one place.
+     * Our own controller so an IDLE PAUSE (or the caller's `opts.signal`) cancels the fetch +
+     * reader — RE-ARMED per attempt, mirroring `apps/cli/session/agent-runtime.ts`'s native
+     * `toolTurn` exactly (see its own comment on the same pattern). Before this, `opts.signal`
+     * was handed to `fetchModelWithRetry` directly as BOTH `signalFor` and `userSignal`, which
+     * gave the caller's own abort a way in but gave this transport no timer of its own — a
+     * cold-loading or wedged model hung here FOREVER, on the only transport the VS Code
+     * extension and `makeSummarizer`'s background call ever use.
      */
-    const res = await fetchModelWithRetry({
-      endpointId: endpoint.id,
-      url,
-      init: { method: "POST", headers, body },
-      doFetch,
-      // Fail fast on a dead endpoint (unreachable local runner, sidecar down) instead of
-      // paying the full retry schedule on every round of every turn — see `endpointBreaker`.
-      breaker: endpointBreaker(endpoint.id),
-      ...(opts.signal ? { signalFor: () => opts.signal, userSignal: opts.signal } : {}),
-      ...(deps.sleep ? { sleep: deps.sleep } : {}),
-      ...(deps.rng ? { rng: deps.rng } : {}),
-      ...(deps.onRetry ? { onRetry: deps.onRetry } : {}),
+    let ac = new AbortController();
+    /**
+     * STABLE across every retry attempt (never reassigned) — this is what the idle watchdog
+     * actually aborts, and what is threaded into `fetchModelWithRetry` below as `userSignal` so
+     * `retry()`'s own abort checks (before each attempt, and right after a failed one,
+     * `resilience/retry.ts:80,86`) see it regardless of whether a fetch is live or the loop is
+     * in its backoff SLEEP between attempts.
+     *
+     * Without this (verification pass #2's CRITICAL finding): `onIdle` used to abort the
+     * per-attempt `ac` directly, which is reassigned fresh on every `armAttempt()` call — an
+     * idle-fire landing during the backoff sleep (nothing pending on `ac` at that instant, the
+     * previous attempt already settled and the next hasn't started) aborted a controller nothing
+     * was listening to, was silently lost, and — because `IdleWatchdog` is a documented ONE-SHOT
+     * (`fired` latches true forever) — could never fire again for the rest of this call, so a
+     * genuine later stall in the same request hung forever instead of pausing.
+     */
+    const outerAc = new AbortController();
+    const onUserAbort = (): void => outerAc.abort();
+    if (opts.signal) {
+      if (opts.signal.aborted) outerAc.abort();
+      else opts.signal.addEventListener("abort", onUserAbort, { once: true });
+    }
+    // propagate immediately to whichever per-attempt controller is CURRENTLY live, so an active
+    // fetch/read is torn down right away rather than only on the NEXT attempt noticing.
+    outerAc.signal.addEventListener("abort", () => ac.abort(), { once: true });
+    const watchdog = new IdleWatchdog({
+      idleTimeoutMs: opts.idleTimeoutMs,
+      onIdle: () => outerAc.abort(),
+      ...(opts.idleWatchdogNow ? { now: opts.idleWatchdogNow } : {}),
+      ...(opts.idleWatchdogSetTimeout ? { setTimeoutFn: opts.idleWatchdogSetTimeout } : {}),
+      ...(opts.idleWatchdogClearTimeout ? { clearTimeoutFn: opts.idleWatchdogClearTimeout } : {}),
     });
-    if (!res.body) throw new Error(`AI endpoint ${endpoint.id}: empty response body`);
+    watchdog.arm();
+    const armAttempt = (): AbortSignal => {
+      ac = new AbortController();
+      // an idle-fire/cancel that landed during the backoff sleep (before this attempt even
+      // started) must still stop it from firing its own fetch.
+      if (outerAc.signal.aborted) ac.abort();
+      return ac.signal;
+    };
+    /**
+     * Interrupt the backoff sleep itself the INSTANT `outerAc` aborts, rather than letting the
+     * full delay elapse before `retry()`'s next top-of-loop check ever notices — the difference
+     * between an idle-pause registering immediately and one registering up to `maxMs`/a
+     * provider's `Retry-After` (capped at `adviceCapMs`) late. Scoped entirely to this call: the
+     * shared `resilience/retry.ts` primitive itself is untouched.
+     */
+    const abortableSleep = (ms: number): Promise<void> =>
+      deps.sleep
+        ? deps.sleep(ms)
+        : new Promise((resolve) => {
+            if (outerAc.signal.aborted) {
+              resolve();
+              return;
+            }
+            const t = setTimeout(resolve, ms);
+            outerAc.signal.addEventListener(
+              "abort",
+              () => {
+                clearTimeout(t);
+                resolve();
+              },
+              { once: true },
+            );
+          });
+    /** Did OUR watchdog (not the caller's `opts.signal`) cause this abort? */
+    const idlePaused = (): boolean =>
+      outerAc.signal.aborted && !opts.signal?.aborted && watchdog.didFire();
 
-    const decoder = new TextDecoder();
-    let buf = "";
-    const reader = res.body.getReader();
-    // `finally` runs on EVERY exit — normal end, `return` on [DONE], an error, AND a consumer
-    // breaking the for-await early (which invokes the generator's .return()). Cancelling the reader
-    // releases the lock + closes the response body/socket so nothing leaks or keeps streaming.
+    let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
     try {
+      /**
+       * The request, with bounded retries — and the retry stops HERE, before a single token has
+       * been yielded.
+       *
+       * That boundary is the whole design. Everything below is a stream the consumer is already
+       * reading; retrying after a delta has been emitted would replay text the user has seen,
+       * which is worse than the failure. `fetchModelWithRetry` is shared with the other three
+       * transports so this judgement is made in one place.
+       */
+      let res: Awaited<ReturnType<typeof doFetch>>;
+      try {
+        res = await fetchModelWithRetry({
+          endpointId: endpoint.id,
+          url,
+          init: { method: "POST", headers, body },
+          doFetch,
+          // Fail fast on a dead endpoint (unreachable local runner, sidecar down) instead of
+          // paying the full retry schedule on every round of every turn — see `endpointBreaker`.
+          breaker: endpointBreaker(endpoint.id),
+          signalFor: armAttempt,
+          // ALWAYS `outerAc.signal`, not just when the caller passed one: this is what makes an
+          // idle-fire landing during the backoff sleep observable to `retry()`'s own checks —
+          // `opts.signal`'s abort already propagates into it via the listener above.
+          userSignal: outerAc.signal,
+          sleep: abortableSleep,
+          ...(deps.rng ? { rng: deps.rng } : {}),
+          onRetry: (info) => {
+            watchdog.touch(); // a response — even a failing one — is evidence of life.
+            deps.onRetry?.(info);
+          },
+        });
+      } catch (err) {
+        if (idlePaused()) throw new ModelIdlePausedError(watchdog.idleForMs());
+        throw err;
+      }
+      if (!res.body) throw new Error(`AI endpoint ${endpoint.id}: empty response body`);
+
+      /**
+       * A 200 that is NOT an SSE stream is still an answer.
+       *
+       * Plenty of OpenAI-compatible servers, proxies and gateways ignore `stream: true` and
+       * reply with an ordinary JSON completion. The reader below looks only for `data:` lines,
+       * found none, and the turn ended with no text, no usage and no error — a completely silent
+       * answer, indistinguishable to the user from the model declining to reply. Reproduced
+       * against a real HTTP server: `text: ""`, `threw: NOTHING`.
+       *
+       * The content-type is the signal, and it is read BEFORE any of the stream machinery so a
+       * non-streaming server takes a short, obvious path rather than falling through the SSE
+       * parser and yielding nothing.
+       */
+      const contentType = res.headers?.get?.("content-type") ?? "";
+      if (contentType && !/text\/event-stream/i.test(contentType)) {
+        const whole = await res.text();
+        const ev = wire.parseWhole(whole);
+        if (ev.error !== undefined) throw new ProviderStreamError(endpoint.id, ev.error, "");
+        if (ev.usage && onUsage) onUsage(ev.usage);
+        if (ev.delta) {
+          yield ev.delta;
+          return;
+        }
+        // A body we could not read at all is a failure, not silence.
+        throw new ProviderStreamError(
+          endpoint.id,
+          `the endpoint answered 200 with ${contentType || "an unknown content type"} and no readable content`,
+          "",
+        );
+      }
+
+      const decoder = new TextDecoder();
+      let buf = "";
+      /** Text already handed to the caller — carried on a mid-stream fault so it is not lost. */
+      let streamed = "";
+      reader = res.body.getReader();
       for (;;) {
-        const { value, done } = await reader.read();
+        let value: Uint8Array | undefined;
+        let done: boolean;
+        try {
+          ({ value, done } = await reader.read());
+        } catch (err) {
+          if (idlePaused()) throw new ModelIdlePausedError(watchdog.idleForMs());
+          throw err;
+        }
         if (done) break;
+        watchdog.touch(); // REAL evidence of life — resets the idle countdown.
         buf += decoder.decode(value, { stream: true });
         const { payloads, rest } = parseSseChunk(buf);
         buf = rest;
@@ -494,21 +730,78 @@ export function createAiClient(
           // The FORMAT says what the bytes mean: OpenAI ends on `[DONE]`, Anthropic on a
           // `message_stop` event, and each puts its text and its usage somewhere different.
           const ev = wire.parse(p);
+          // A fault AFTER the 200 is still a failed turn. Reported, never swallowed — see
+          // `ProviderStreamError`. Usage that arrived on the same frame is banked first so a
+          // failed turn is still billed for what it actually consumed.
+          if (ev.error !== undefined) {
+            if (ev.usage && onUsage) onUsage(ev.usage);
+            throw new ProviderStreamError(endpoint.id, ev.error, streamed);
+          }
           if (ev.done) return;
           if (ev.usage && onUsage) onUsage(ev.usage);
-          if (ev.delta) yield ev.delta;
+          if (ev.delta) {
+            streamed += ev.delta;
+            yield ev.delta;
+          }
         }
       }
       // flush any trailing buffered frame (server closed without a final newline).
       const { payloads } = parseSseChunk(`${buf}\n`);
       for (const p of payloads) {
         const ev = wire.parse(p);
+        if (ev.error !== undefined) {
+          if (ev.usage && onUsage) onUsage(ev.usage);
+          throw new ProviderStreamError(endpoint.id, ev.error, streamed);
+        }
         if (ev.done) return;
         if (ev.usage && onUsage) onUsage(ev.usage);
-        if (ev.delta) yield ev.delta;
+        if (ev.delta) {
+          streamed += ev.delta;
+          yield ev.delta;
+        }
+      }
+
+      /**
+       * LAST RESORT: the stream produced nothing, but the body is a complete non-streamed
+       * completion.
+       *
+       * The fast path above only takes the whole-body route when a content-type is PRESENT and
+       * is not `text/event-stream` (`contentType && !…`). A 200 that carries a full JSON
+       * completion and NO content-type header at all therefore fell straight through to the SSE
+       * reader, which found no `data:` frames and yielded nothing — a silent empty answer, no
+       * error, indistinguishable from the model declining to reply. Measured against a raw
+       * `node:net` server so the header could genuinely be absent: header present →
+       * "the real answer"; header absent → "", nothing thrown.
+       *
+       * Recovering HERE rather than by loosening that conjunct keeps a server that streams real
+       * SSE without declaring a content-type working exactly as before — this runs only when the
+       * stream yielded no text at all — and it also rescues a MISLABELLED content-type, which
+       * the conjunct never would. The per-frame handling is not duplicated a third time; only
+       * the whole-body parse is reused.
+       */
+      if (streamed === "" && buf.trim() !== "") {
+        const ev = wire.parseWhole(buf);
+        if (ev.error !== undefined) throw new ProviderStreamError(endpoint.id, ev.error, "");
+        if (ev.usage && onUsage) onUsage(ev.usage);
+        if (ev.delta) {
+          yield ev.delta;
+          return;
+        }
+        // Read it, understood none of it — a failure, not silence (same rule as the fast path).
+        throw new ProviderStreamError(
+          endpoint.id,
+          `the endpoint answered 200 with ${contentType || "no content type"} and no readable content`,
+          "",
+        );
       }
     } finally {
-      await reader.cancel().catch(() => {});
+      watchdog.dispose();
+      if (opts.signal) opts.signal.removeEventListener("abort", onUserAbort);
+      // Runs on EVERY exit — normal end, `return` on [DONE], an idle pause, a real error, AND a
+      // consumer breaking the for-await early (which invokes the generator's .return()) —
+      // releasing the lock + closing the response body/socket so nothing leaks or keeps
+      // streaming.
+      await reader?.cancel().catch(() => {});
     }
   }
 
@@ -516,7 +809,7 @@ export function createAiClient(
     async *chat(messages: Msg[], opts: ChatOpts = {}): AsyncIterable<ChatChunk> {
       let usage: SseTokenUsage | undefined;
       for await (const delta of stream(messages, opts, (u) => {
-        usage = u;
+        usage = mergeWireUsage(usage, u);
       })) {
         yield { delta };
       }

@@ -197,3 +197,68 @@ test("runGate: a broken trust read does NOT allow — falls through to a fresh s
   assert.equal(res.decision, "allow");
   assert.equal(res.trusted, false);
 });
+
+test("a request with NO head still reaches the trusted fast path", async () => {
+  /**
+   * `hasTrustedVerdict` returns undefined the moment `id.head` is absent, and no renderer ever
+   * sent it — so the documented step 1 ("a clean verdict bound to the current HEAD ⇒ ALLOW
+   * immediately, no fresh scan, no F5 re-prompt") could never fire in production. Every Run and
+   * every Debug paid for a full nemesis scan, and a repo whose scan tiers `warn` re-prompted on
+   * every single launch with no way to make it stop.
+   *
+   * Main resolves the sha itself rather than trusting the renderer to supply it: a trust lookup
+   * keyed on a sha the least-trusted surface handed in would be a worse contract than one keyed
+   * on a sha main read for itself.
+   */
+  let scanned = 0;
+  const res = await runGate(
+    { workspaceRoot: "/proj/ws" }, // NOTE: no head — the shape every real caller sends
+    {
+      resolveHead: async () => HEAD,
+      readTrusted: () => [
+        {
+          key: `ws@editor#git:${HEAD}`,
+          name: "ws",
+          agent: "editor",
+          ident: `git:${HEAD}`,
+          verdict: "allow",
+        },
+      ],
+      runGate: async () => {
+        scanned += 1;
+        return verdict("allow");
+      },
+    },
+  );
+
+  assert.equal(res.decision, "allow");
+  assert.equal(res.trusted, true, "the trusted fast path did not fire");
+  assert.equal(scanned, 0, "a fresh nemesis scan ran despite a clean trusted verdict at HEAD");
+});
+
+test("an unresolvable HEAD falls through to a fresh scan rather than allowing", async () => {
+  // No repository, no commits, no git binary — all mean "no sha to key trust on". That must
+  // scan, never allow: the fast path is an optimisation, not a bypass.
+  let scanned = 0;
+  const res = await runGate(
+    { workspaceRoot: "/proj/ws" },
+    {
+      resolveHead: async () => undefined,
+      readTrusted: () => [
+        {
+          key: `ws@editor#git:${HEAD}`,
+          name: "ws",
+          agent: "editor",
+          ident: `git:${HEAD}`,
+          verdict: "allow",
+        },
+      ],
+      runGate: async () => {
+        scanned += 1;
+        return verdict("allow");
+      },
+    },
+  );
+  assert.equal(scanned, 1, "an unresolvable HEAD must still be scanned");
+  assert.equal(res.trusted, false);
+});

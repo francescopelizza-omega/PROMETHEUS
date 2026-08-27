@@ -43,24 +43,26 @@ import type {
   ToolCall,
   ToolOutcome,
 } from "@prometheus/core/agent-loop";
-import { AGENT_TOOL_DISCIPLINE, runAgentTurn } from "@prometheus/core/agent-loop";
+import { runAgentTurn } from "@prometheus/core/agent-loop";
 import { APPLY_PATCH_TOOL } from "@prometheus/core/agent-patch";
 import type {
+  PreambleCtx,
   ScanEvent,
   TextToolCall,
   ToolCapabilityState,
   ToolTransport,
 } from "@prometheus/core/agent-protocol";
 import {
+  CORE_ROUND_CONTRIBUTORS,
+  CORE_TURN_CONTRIBUTORS,
   ToolCallScanner,
+  assemblePreamble,
   toOpenAiTool as coreToOpenAiTool,
   initialCapability,
+  instructionBudget,
   negotiateTransport,
   observeTurn,
   parseMcpToolName,
-  preambleModeFor,
-  renderToolPreamble,
-  withToolPreamble,
 } from "@prometheus/core/agent-protocol";
 import { NO_ASKER_MESSAGE, QUESTION_TOOL } from "@prometheus/core/agent-question";
 import { SPAWN_AGENT_TOOL } from "@prometheus/core/agent-subagent";
@@ -78,10 +80,23 @@ import { ENGINE_VERBS, type ToolDef, isEngineVerb } from "@prometheus/core/agent
 import type { EffortResolution } from "@prometheus/core/ai-effort";
 import { NOTEBOOK_EDIT_TOOL, NOTEBOOK_EDIT_TOOL_NAME } from "../notebook/notebook-tool.js";
 
+// The PURE subpaths, never the bare `@prometheus/core` barrel: that barrel re-exports the MCP
+// node host and the engine bridge, so importing it from the renderer drags `node:fs`/`node:crypto`
+// into a browser bundle — a C5 violation that fails the renderer build outright.
+import { DEFAULT_CONTEXT_WINDOW } from "@prometheus/core/ai-context-window";
+import { buildHealthRecord } from "@prometheus/core/ai-model-health";
+
 import type { AgentSystemToolResult } from "../../../shared/ipc-contract.js";
 
 import { type AgentTools, parseApplyPatchArgs, parseProposeEditArgs } from "./agent-loop.js";
-import { type AiMsg, type RendererEndpoint, runChatTurn, splitTiming } from "./ai-client.js";
+import {
+  type AiMsg,
+  AiTurnError,
+  type BreakerSnapshotView,
+  type RendererEndpoint,
+  runChatTurn,
+  splitTiming,
+} from "./ai-client.js";
 
 /* ── the tools: core's shared set (Phase 6) ──────────────────────────────────*/
 
@@ -173,20 +188,22 @@ export const AGENT_PANE_ALLOW: readonly string[] = [
 /* ── the system prompt ───────────────────────────────────────────────────────*/
 
 /**
- * The pane's system prompt, composing core's `AGENT_TOOL_DISCIPLINE` verbatim.
- *
- * Only the FRAMING differs from the CLI's (an editor with an open workspace rather than a
- * terminal). The rules that actually change behaviour — call the tool instead of printing
- * code, smallest exact hunks, act directly because the gate handles safety — are the same
- * sentences, because the surfaces kept drifting when they were paraphrases.
+ * The pane's PERSONA string only — "who Prometheus is" and the editor-specific framing (an
+ * open workspace rather than a terminal). Behavioral rules (call the tool instead of printing
+ * code, smallest exact hunks, the pre-write recheck, effort-as-text) are no longer baked in
+ * here: the preamble dispatch pipeline (`withPreamble`, below) adds the SAME contributor set
+ * the CLI gets, so the two surfaces can no longer drift into differently-worded paraphrases.
  */
 export const AGENT_PANE_SYSTEM = [
   "You are Prometheus, an agentic coding assistant embedded in the user's editor, with REAL tools over their open workspace.",
   "`read_file`, `list_dir` and `grep` inspect it; `write_file` creates a NEW file; `propose_edit` changes an EXISTING one; `run_command` runs a command the user must approve.",
-  AGENT_TOOL_DISCIPLINE,
-  "Do NOT rewrite a whole existing file with `write_file` — that is for brand-new files only, and overwriting loses precision.",
   "Paths are relative to the workspace root.",
 ].join(" ");
+// AGENT_TOOL_DISCIPLINE (and the "don't rewrite a whole file" rule, folded into the
+// pre-write-recheck contributor's checklist) are no longer baked into this literal — the
+// preamble dispatch pipeline (`withPreamble` below) adds them, alongside pre-write-recheck and
+// effort-text, so this pane gets the SAME contributor set the CLI does instead of a
+// hand-maintained, always-slightly-different paraphrase.
 
 /* ── the LLMClient seam ──────────────────────────────────────────────────────*/
 
@@ -227,6 +244,47 @@ export interface RendererLlmOptions {
 }
 
 /**
+ * Persist this endpoint's health (transport, breaker, context window) after a turn — the
+ * Model Health feature (Settings ▸ Model Health, and the CLI's `/model-health`).
+ *
+ * Fire-and-forget: a lost health sample is never worth surfacing to the user, and the IPC
+ * bridge may simply be absent (e.g. under a test harness with no preload).
+ *
+ * `breaker` is undefined only when this turn ran through the direct-fetch escape hatch (never
+ * true in production — see `ChatTurnResult`'s own doc comment) — that turn's breaker state is
+ * simply not reported rather than guessed at.
+ */
+function recordModelHealth(
+  endpoint: RendererEndpoint,
+  capability: ToolCapabilityState,
+  transport: ToolTransport,
+  breaker: BreakerSnapshotView | undefined,
+): void {
+  if (transport === "none") return;
+  const record = buildHealthRecord({
+    endpointId: endpoint.id,
+    model: endpoint.model ?? endpoint.id,
+    locality: endpoint.locality,
+    transport,
+    capability,
+    ...(breaker ? { breaker } : {}),
+    contextWindow: endpoint.contextWindow ?? DEFAULT_CONTEXT_WINDOW,
+    // The desktop pane never PROBES a local endpoint's real window (unlike the CLI) — a
+    // configured number is only ever DECLARED, never measured, so that is the honest label
+    // for one; the bare fallback is the same "unmeasured" signal the CLI's probe failure uses.
+    contextWindowSource: endpoint.contextWindow ? "declared" : "default",
+    nowIso: new Date().toISOString(),
+  });
+  void globalThis.window?.prometheus?.modelHealth?.record(record).catch(() => {});
+}
+
+/** The breaker snapshot carried by a failed turn's error, when it has one — `undefined` for
+ *  anything that isn't an `AiTurnError` (e.g. an abort, or a pre-request throw). */
+function breakerOf(err: unknown): BreakerSnapshotView | undefined {
+  return err instanceof AiTurnError ? err.breaker : undefined;
+}
+
+/**
  * Adapt the renderer's chat transport to core's `LLMClient`.
  *
  * Core hands us a `Thread` of `{role, content}` and expects `LlmTurn`s back. The mapping is
@@ -243,8 +301,10 @@ export function createRendererLlmClient(opts: RendererLlmOptions): LLMClient {
   // the pane would show a confident answer with nothing on disk.
   let capability: ToolCapabilityState = opts.capability ?? initialCapability();
 
-  return {
-    async *turn(thread: Thread, _tuning: AgentTuning, tools: ToolDef[]): AsyncIterable<LlmTurn> {
+  // Named, so a tools-shaped rejection can re-enter the SAME turn on the weaker transport
+  // instead of leaving the user's message unanswered — see the catch below.
+  const client: LLMClient = {
+    async *turn(thread: Thread, tuning: AgentTuning, tools: ToolDef[]): AsyncIterable<LlmTurn> {
       const transport = negotiateTransport({
         toolCount: tools.length,
         // `RendererEndpoint` carries no capability flag, and the pane's previous behaviour
@@ -267,6 +327,9 @@ export function createRendererLlmClient(opts: RendererLlmOptions): LLMClient {
         transport,
         opts.endpoint.contextWindow,
         capability.textSyntaxCalls > 0,
+        opts.endpoint.locality,
+        opts.effort,
+        tuning.permissionMode === "plan",
       );
 
       // Deltas arrive through callbacks while `runTurn` is awaited, so they are queued and
@@ -290,18 +353,59 @@ export function createRendererLlmClient(opts: RendererLlmOptions): LLMClient {
       // cannot tell "reclassified" apart from "never arrived" (see the safety net below).
       let deliveredText = "";
 
-      const result = await runTurn(opts.endpoint, outgoing, {
-        ...(transport === "native" && tools.length > 0 ? { tools: tools.map(toOpenAiTool) } : {}),
-        neverSendToCloud: opts.neverSendToCloud,
-        signal: opts.signal,
-        ...(opts.effort ? { effort: opts.effort } : {}),
-        onText: (d) => {
-          deliveredText += d;
-          take(scanner.push(d));
-        },
-        onReasoning: (d) => pending.push({ kind: "reasoning", text: d }),
-        onStatus: (t) => pending.push({ kind: "status", text: t }),
-      });
+      let result: Awaited<ReturnType<typeof runTurn>>;
+      try {
+        result = await runTurn(opts.endpoint, outgoing, {
+          ...(transport === "native" && tools.length > 0 ? { tools: tools.map(toOpenAiTool) } : {}),
+          neverSendToCloud: opts.neverSendToCloud,
+          signal: opts.signal,
+          ...(opts.effort ? { effort: opts.effort } : {}),
+          onText: (d) => {
+            deliveredText += d;
+            take(scanner.push(d));
+          },
+          onReasoning: (d) => pending.push({ kind: "reasoning", text: d }),
+          onStatus: (t) => pending.push({ kind: "status", text: t }),
+        });
+      } catch (err) {
+        // A turn that FAILS must still update Model Health — without this catch, ANY rejected
+        // turn skipped `recordModelHealth` entirely (it lived only after this await, on the
+        // success path), so a down endpoint's breaker trip never reached Settings ▸ Model
+        // Health, which kept showing the endpoint as fully healthy/closed for the whole outage.
+        // `AiTurnError` carries main's breaker snapshot when the failure came from an actual
+        // request attempt (see ai-client.ts); any other throw (e.g. an abort) has none to report.
+        recordModelHealth(opts.endpoint, capability, transport, breakerOf(err));
+        /**
+         * The endpoint refused the request BECAUSE it carried tools.
+         *
+         * `looksLikeToolsRejection` has existed in `agent/protocol/negotiate.ts` since the text
+         * protocol did, `negotiateTransport` already reads `nativeRejected`, and the whole
+         * fallback was wired end to end in the agentic CLI — but nothing on this surface ever
+         * SET the flag, so `observeTurn` was called with `rejectedForTools` permanently absent.
+         * A tool-incapable endpoint therefore failed every turn, forever, with a working
+         * fallback one field away.
+         *
+         * Retry the SAME turn rather than reporting the failure: stopping here is what ate the
+         * user's message. Bounded by construction — the retry re-enters with `nativeRejected`
+         * set, so `negotiateTransport` returns "text" and this branch cannot be reached again.
+         */
+        if (transport === "native" && err instanceof AiTurnError && err.toolsRejected) {
+          capability = observeTurn(capability, {
+            transport,
+            nativeCalls: 0,
+            textCalls: 0,
+            rejectedForTools: true,
+          });
+          opts.onCapability?.(capability);
+          yield {
+            kind: "status",
+            text: `${opts.endpoint.model ?? opts.endpoint.id} rejected native tool calls — retrying in text protocol`,
+          };
+          yield* client.turn(thread, tuning, tools);
+          return;
+        }
+        throw err;
+      }
       take(scanner.end());
       /**
        * SAFETY NET — found live, by an e2e test driving a real chat turn against a stub model
@@ -329,6 +433,13 @@ export function createRendererLlmClient(opts: RendererLlmOptions): LLMClient {
       }
       for (const ev of pending) yield ev;
 
+      if (result.paused) {
+        // main's own idle watchdog fired — a PAUSE, not a completion. `result.text`'s tail was
+        // already reconciled into the scanner above via the safety net, so nothing is lost;
+        // main doesn't report idleMs on this shape today, so this reports 0 rather than guess.
+        yield { kind: "paused", idleMs: 0 };
+        return;
+      }
       if (result.timing && opts.phases) {
         const split = splitTiming(result.timing);
         opts.phases.addModelMs(split.model);
@@ -355,12 +466,14 @@ export function createRendererLlmClient(opts: RendererLlmOptions): LLMClient {
         textCalls: usedText.length,
       });
       opts.onCapability?.(capability);
+      recordModelHealth(opts.endpoint, capability, transport, result.breaker);
 
       // No tool call ⇒ the model answered. `final` with no text: the text already streamed
       // as `text` deltas above, and repeating it here would duplicate it in the thread.
       if (result.toolCalls.length === 0 && usedText.length === 0) yield { kind: "final" };
     },
   };
+  return client;
 }
 
 /**
@@ -377,23 +490,50 @@ function withPreamble(
   transport: ToolTransport,
   contextWindow?: number,
   demonstrated?: boolean,
+  locality: "local" | "cloud" = "local",
+  effort?: EffortResolution,
+  readOnly = false,
 ): AiMsg[] {
   if (transport === "none" || tools.length === 0) return messages;
-  const mode = preambleModeFor(transport);
-  // The measured window sizes the budget — see the CLI's twin. Without it the budget is the one
-  // sized for an 8192 window, which drops every tool DESCRIPTION from the listing.
-  const opts = {
-    mode,
+  // Desktop has no separate turn-scope assembly point the way the CLI's `runMessageTurn` does —
+  // this `withPreamble` already rebuilds the outgoing system message fresh EVERY round, so both
+  // the once-per-turn contributors (tool-discipline, pre-write-recheck, effort-text) and the
+  // round-scope one (tool-catalog) are assembled together here, every round. Cheap: these are
+  // all pure string ops with no randomness, and correctness-safe since nothing here is volatile.
+  const ctx: PreambleCtx = {
+    surface: "desktop",
+    isSubAgent: false,
+    // Plan mode denies a mutation at CONFIRM time (permission-modes.ts) — it does not remove
+    // write_file/propose_edit from the tool catalog. Without this, a Plan-mode Desktop user got
+    // the FULL, write-oriented tool-discipline text ("call the tool, don't just describe it")
+    // and pre-write-recheck's checklist for tools that were about to be denied anyway — a
+    // materially more confusing model experience than the CLI's correctly-scoped read-only
+    // wording for the identical mode.
+    readOnly,
+    locality,
     ...(contextWindow ? { contextWindow } : {}),
-    ...(demonstrated ? { demonstrated } : {}),
+    transport,
+    ...(demonstrated ? { demonstratedToolSyntax: demonstrated } : {}),
+    // Without these, `effort-text` (the textual fallback for a model with no working
+    // request-parameter effort mechanism) was permanently dead code on Desktop: `_tuning` above
+    // is unused and `opts.effort` — the resolved `EffortResolution` the caller already computed
+    // via `@prometheus/core/ai-effort`'s `resolveEffort` — never reached this ctx at all.
+    ...(effort ? { effortTier: effort.requested, effortMechanism: effort.mechanism } : {}),
+    tools,
   };
+  const assembled = assemblePreamble(
+    [...CORE_TURN_CONTRIBUTORS, ...CORE_ROUND_CONTRIBUTORS],
+    ctx,
+    instructionBudget(contextWindow),
+  );
+  if (!assembled.personaAppend) return messages;
   const at = messages.findIndex((m) => m.role === "system");
   if (at === -1) {
-    const { text } = renderToolPreamble(tools, opts);
-    return [{ role: "system", content: text } as AiMsg, ...messages];
+    return [{ role: "system", content: assembled.personaAppend } as AiMsg, ...messages];
   }
-  const { prompt } = withToolPreamble(messages[at]?.content ?? "", tools, opts);
-  return messages.map((m, i) => (i === at ? { ...m, content: prompt } : m));
+  const base = (messages[at]?.content ?? "").trim();
+  const merged = base ? `${base}\n\n${assembled.personaAppend}` : assembled.personaAppend;
+  return messages.map((m, i) => (i === at ? { ...m, content: merged } : m));
 }
 
 /** Defensively parse a tool call's JSON-string arguments → an object. */
@@ -844,6 +984,10 @@ export interface CoreAgentSinks {
   onVerdict?(tool: string, verdict: string, riskScore?: number): void;
   /** the loop hit `maxRounds` with the model still wanting a tool — a pause, not a failure. */
   onCapped?(rounds: number): void;
+  /** the turn's planted canary token showed up in the model's own output (point 6b) — see
+   *  `@prometheus/core`'s `agent/canary.ts`. Optional: omitting it means core plants no token
+   *  at all, so a harness that hasn't wired an audit sink pays no cost. */
+  onCanaryTripped?(info: { textSnippet: string }): void;
   /** ask the human about a tool call the broker routed to `confirm`. */
   confirm(call: ToolCall): Promise<ConfirmResult>;
   /**
@@ -879,6 +1023,7 @@ export async function runCoreAgentTurn(
     runTool,
     confirm: sinks.confirm,
     ...(sinks.signal ? { signal: sinks.signal } : {}),
+    ...(sinks.onCanaryTripped ? { onCanaryTripped: sinks.onCanaryTripped } : {}),
   })) {
     switch (ev.kind) {
       case "text":
@@ -906,6 +1051,11 @@ export async function runCoreAgentTurn(
         break;
       case "capped":
         sinks.onCapped?.(ev.rounds);
+        break;
+      case "paused":
+        sinks.onStatus?.(
+          `⏸ paused after ${Math.round(ev.idleMs / 1000)}s of inactivity — send a message to resume`,
+        );
         break;
       case "done":
         if (streamed) sinks.onTurnComplete();

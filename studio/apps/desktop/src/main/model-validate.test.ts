@@ -38,6 +38,11 @@ const {
   validateModelServe,
   validateModelUnserve,
   validateModelRepoint,
+  validateModelFetchHf,
+  validateModelInstallHfCli,
+  validateModelConvert,
+  validateModelInstallConverter,
+  validateModelInstallTarget,
 } = await import("./model-validate.js");
 
 /** The shared discriminated outcome the validators return. */
@@ -205,7 +210,7 @@ test("validateModelServe REJECTS an unknown runner (fail-closed — never spawne
 });
 
 test("validateModelServe REJECTS a control-char id", () => {
-  assertInvalidArgs(validateModelServe({ id: "a b" }) as GuardResult<unknown>);
+  assertInvalidArgs(validateModelServe({ id: "a\x00b" }) as GuardResult<unknown>);
 });
 
 /* ── unserve / repoint ──────────────────────────────────────────────────────*/
@@ -229,5 +234,106 @@ test("validateModelRepoint accepts a tool + an http base url", () => {
 test("validateModelRepoint REJECTS a non-http base url (no file:// / data: smuggling)", () => {
   assertInvalidArgs(
     validateModelRepoint({ tool: "ide", baseUrl: "file:///etc/passwd" }) as GuardResult<unknown>,
+  );
+});
+
+/* ── /hug: fetch → convert → install-target ─────────────────────────────────*/
+
+test("validateModelFetchHf accepts a repo id; out/revision optional", () => {
+  const r = validateModelFetchHf({ repo: "acme/tiny-model" });
+  assert.equal(r.ok, true);
+  if (r.ok) {
+    assert.equal(r.value.repo, "acme/tiny-model");
+    assert.equal(r.value.out, undefined);
+  }
+});
+
+test("validateModelFetchHf accepts a local-path-shaped repo (spaces/parens allowed)", () => {
+  // the /hug source can be a local folder with a name MODEL_ID's tighter charset
+  // would reject (e.g. macOS's common "Name (v2)" pattern) — PATH is the right bound.
+  const r = validateModelFetchHf({ repo: "/Users/me/Models/Tiny (v2)" });
+  assert.equal(r.ok, true);
+});
+
+test("validateModelFetchHf REJECTS a missing repo", () => {
+  assertInvalidArgs(validateModelFetchHf({}) as GuardResult<unknown>);
+});
+
+test("validateModelFetchHf REJECTS a control-char repo", () => {
+  assertInvalidArgs(validateModelFetchHf({ repo: "a\nb" }) as GuardResult<unknown>);
+});
+
+test("validateModelInstallHfCli accepts an empty request", () => {
+  assert.deepEqual(validateModelInstallHfCli({}), { ok: true, value: {} });
+});
+
+test("validateModelConvert accepts src (+optional quant/id/out)", () => {
+  const r = validateModelConvert({
+    src: "/tmp/hf-src/acme__tiny",
+    quant: "q4_k_m",
+    id: "acme/tiny",
+  });
+  assert.equal(r.ok, true);
+  if (r.ok) {
+    assert.equal(r.value.src, "/tmp/hf-src/acme__tiny");
+    assert.equal(r.value.quant, "q4_k_m");
+    assert.equal(r.value.id, "acme/tiny");
+  }
+});
+
+test("validateModelConvert REJECTS a missing src", () => {
+  assertInvalidArgs(validateModelConvert({}) as GuardResult<unknown>);
+});
+
+test("validateModelConvert REJECTS a control-char src", () => {
+  assertInvalidArgs(validateModelConvert({ src: "/tmp/a\nb" }) as GuardResult<unknown>);
+});
+
+test("validateModelInstallConverter accepts an empty request", () => {
+  assert.deepEqual(validateModelInstallConverter({}), { ok: true, value: {} });
+});
+
+test("validateModelInstallTarget accepts llamacpp/lmstudio/ollama with gguf", () => {
+  const r = validateModelInstallTarget({
+    target: "llamacpp",
+    id: "acme/tiny",
+    gguf: "/tmp/models/acme-tiny.gguf",
+  });
+  assert.equal(r.ok, true);
+  if (r.ok) {
+    assert.equal(r.value.target, "llamacpp");
+    assert.equal(r.value.gguf, "/tmp/models/acme-tiny.gguf");
+  }
+});
+
+test("validateModelInstallTarget accepts vllm with src (not gguf)", () => {
+  const r = validateModelInstallTarget({
+    target: "vllm",
+    id: "acme/tiny",
+    src: "/tmp/hf-src/acme__tiny",
+  });
+  assert.equal(r.ok, true);
+  if (r.ok) assert.equal(r.value.src, "/tmp/hf-src/acme__tiny");
+});
+
+test("validateModelInstallTarget REJECTS vllm without src", () => {
+  assertInvalidArgs(
+    validateModelInstallTarget({ target: "vllm", id: "acme/tiny" }) as GuardResult<unknown>,
+  );
+});
+
+test("validateModelInstallTarget REJECTS a non-vllm target without gguf", () => {
+  assertInvalidArgs(
+    validateModelInstallTarget({ target: "ollama", id: "acme/tiny" }) as GuardResult<unknown>,
+  );
+});
+
+test("validateModelInstallTarget REJECTS an unknown target (fail-closed)", () => {
+  assertInvalidArgs(
+    validateModelInstallTarget({
+      target: "tensorrt",
+      id: "acme/tiny",
+      gguf: "/tmp/x.gguf",
+    }) as GuardResult<unknown>,
   );
 });

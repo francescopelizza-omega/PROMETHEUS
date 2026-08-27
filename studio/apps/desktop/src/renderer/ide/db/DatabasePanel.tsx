@@ -19,7 +19,7 @@ import type {
   IdeSqlSchemaResult,
   IdeSqlTable,
 } from "../../../shared/ipc-contract.js";
-import { streamChat } from "../ai/ai-client.js";
+import { StreamPausedError, streamChat } from "../ai/ai-client.js";
 import { useActiveEndpoint } from "../ai/endpoint-hook.js";
 import { useTabsStore } from "../state/stores.js";
 import { DataSourcePanel, type SourceStatus } from "./DataSourcePanel.js";
@@ -110,11 +110,20 @@ export function DatabasePanel(): ReactElement {
           { role: "user" as const, content: `Schema:\n${schemaText}\n\nQuestion: ${question}` },
         ];
         let acc = "";
-        for await (const chunk of streamChat(aiEndpoint, messages, { neverSendToCloud })) {
-          acc += chunk;
+        let paused = false;
+        try {
+          for await (const chunk of streamChat(aiEndpoint, messages, { neverSendToCloud })) {
+            acc += chunk;
+          }
+        } catch (e) {
+          if (!(e instanceof StreamPausedError)) throw e;
+          // A pause (idle watchdog), not a failure — whatever streamed before the model went
+          // quiet may already be a complete, usable query; `extractSql` below decides.
+          paused = true;
         }
         const sql = extractSql(acc);
         if (sql) setQuery(sql);
+        else if (paused) setError("the model went idle — paused before returning any SQL. Retry.");
         else setError("the model returned no SQL");
       } catch (e) {
         setError(e instanceof Error ? e.message : String(e));

@@ -1,3 +1,4 @@
+import { cliProfiles } from "@prometheus/core";
 /**
  * commands/sidecar-cmd.ts — shared scaffolding for the §2 sidecar-backed verbs
  * (env / model / repo / metadata) that drive the Python helpers (C7) the GUI's
@@ -99,8 +100,33 @@ export function flagSet(ctx: CliContext, key: string): boolean {
   return ctx.args.flags[key] !== undefined;
 }
 
-/** `--yes` / `--force` mean "I've seen the plan — execute it" (else preview). */
+/**
+ * Is this invocation a PREVIEW because the user asked for one?
+ *
+ * Exported so the gates that do NOT funnel through `wantsExecute` consult the same predicate.
+ * Two of them OR a typed confirm past it — `model rm <id> --confirm <id>` and
+ * `sessions delete <id> --confirm <id>` — and a one-line fix inside `wantsExecute` would have
+ * left both executing under `--dry-run`. Measured: `sessions delete <id> --confirm <id>
+ * --dry-run` really removed the session. Each caller keeps its OWN confirm rules; all that is
+ * shared is the question "did they ask for a preview".
+ */
+export function isPreviewRun(ctx: CliContext): boolean {
+  return ctx.args.dryRun === true;
+}
+
+/**
+ * `--yes` / `--force` mean "I've seen the plan — execute it" (else preview).
+ *
+ * `--dry-run` OUTRANKS both. It is a declared global boolean, documented in `--help` and
+ * forwarded to the engine for every registry-routed verb, so a user who types it is asking
+ * to see the plan — and used to get the mutation instead: `--dry-run --yes env delete <name>`
+ * really removed the environment and reported `executed: true`. Preview is expressed by NOT
+ * passing the sidecar's `--confirm` plan→run toggle, i.e. through this one predicate, so
+ * every confirm-gated verb (env, model, secure, the generic sidecar router) is covered by
+ * the same decision rather than by a second preview path that can drift from it.
+ */
 export function wantsExecute(ctx: CliContext): boolean {
+  if (isPreviewRun(ctx)) return false;
   return ctx.args.yes === true || ctx.args.force === true;
 }
 
@@ -113,7 +139,8 @@ export function wantsExecute(ctx: CliContext): boolean {
 export function forceBlocked(ctx: CliContext, command: string): CommandOutcome | undefined {
   // Must be EXACTLY "1" (the documented value) — a bare presence check would let PROM_ALLOW_FORCE=0
   // or =false (intended to DISABLE the override) fail OPEN and allow the forced nemesis-block bypass.
-  if (ctx.args.force && ctx.args.profile === "ci" && process.env.PROM_ALLOW_FORCE !== "1") {
+  // Through the shared predicate now: this site was hardened and its two twins were not.
+  if (ctx.args.force && ctx.args.profile === "ci" && !cliProfiles.forceOverrideAllowed()) {
     const reason =
       `--force is blocked under the 'ci' profile. Set PROM_ALLOW_FORCE=1 to override ` +
       "(there is no human to type the confirmation).";
@@ -138,12 +165,25 @@ export function execArgv(ctx: CliContext, base: string[], useConfirm = true): st
   return out;
 }
 
-/** A usage error for a missing required positional (exit 2 — never a silent 0). */
+/**
+ * A usage error for a missing required positional — exit 1, never a silent 0.
+ *
+ * ONE, not two. `context.ts`'s CLI-084 table is the single reference: `1` is "generic command
+ * failure (bad args, not-found, …)" and `2` is a fail-closed SECURITY/ENGINE block, "load-bearing
+ * for CI (`$? -eq 2` detects a security block)". This helper hard-coded 2, so a plain typo was
+ * indistinguishable from a nemesis BLOCK — while the SAME mistake caught one layer earlier by
+ * core's command-registry validation (`commands.ts`: `invalid arguments for "<id>"`) came back as
+ * 1 through `outcomeFromError`. Measured: `prometheus --json info` exited 2 and
+ * `prometheus --json where` exited 1, for the identical class of user error.
+ *
+ * The table's own words settle which one moved: "a command hand-rolling its own error→code
+ * mapping is a divergence to fix".
+ */
 export function usageError(command: string, usage: string): CommandOutcome {
   return {
     text: `prometheus ${command}: missing argument.\n  ${c.dim("usage:")} prometheus ${command} ${usage}`,
     json: { ok: false, error: "missing-argument", command, usage },
-    exitCode: 2,
+    exitCode: 1,
   };
 }
 
@@ -259,9 +299,16 @@ export async function runRead(
 ): Promise<CommandOutcome> {
   const { command, script, argv, deps, render } = opts;
   const env = await deps.runSidecar(script, argv);
-  if (ctx.json) return { json: env, exitCode: env.ok === false ? 2 : 0 };
   if (env.ok === false) {
-    return { text: c.red(`${command} failed: ${env.error ?? "unknown error"}`), exitCode: 2 };
+    return ctx.json
+      ? { json: env, exitCode: 2 }
+      : { text: c.red(`${command} failed: ${env.error ?? "unknown error"}`), exitCode: 2 };
   }
-  return render(env);
+  // `render()` runs for BOTH surfaces (not just text): some renderers (model card/browse)
+  // apply their own filtering/derived fields (--limit, --free, a computed url, ...) and set
+  // their own `json` to match — returning the raw envelope under `--json` unconditionally
+  // used to make those options a text-only illusion. Renderers that don't set `json` fall
+  // back to the raw envelope, exactly as before.
+  const outcome = render(env);
+  return ctx.json ? { json: outcome.json ?? env, exitCode: outcome.exitCode ?? 0 } : outcome;
 }

@@ -229,3 +229,42 @@ test("without a raw result it falls back to the flattened stdout/stderr", () => 
   assert.equal(out?.ok, false);
   assert.deepEqual(out?.data, { exitCode: 2 });
 });
+
+test("cancel() CLEARS busy, so the chat tab can accept another message", async () => {
+  /**
+   * `cancel()` used to delete the controller entry as well as aborting it. `finalize` is what
+   * clears `busy`, and it is guarded by `this.abort.get(sid) !== ac` so a superseded run cannot
+   * reap a newer one's state — with the entry gone that guard failed for the very run being
+   * cancelled, so `finalize` returned before `setBusy(sid, false)` and `busy` stayed true
+   * forever. The composer, the Send button and `send()` itself all key off that flag, so ◼ Stop
+   * permanently disabled the tab it was meant to interrupt.
+   */
+  const sid = openSession("rc-cancel-busy");
+  const waitForAbort: StartParams["run"] = (_m, deps) =>
+    new Promise<AgentLoopOutcome>((res) => {
+      if (deps.signal.aborted) return res({ status: "done" });
+      deps.signal.addEventListener("abort", () => res({ status: "done" }), { once: true });
+    });
+
+  const p = agentRuns.start(sid, { messages: [], deps: makeDeps(), run: waitForAbort });
+  await tick();
+  assert.equal(useAiSessionStore.getState().sessions[sid]?.busy, true, "precondition: running");
+
+  agentRuns.cancel(sid);
+  await Promise.all([p, tick()]);
+
+  assert.equal(
+    useAiSessionStore.getState().sessions[sid]?.busy,
+    false,
+    "busy stayed set after cancel — the tab can never accept another message",
+  );
+  assert.equal(agentRuns.isRunning(sid), false);
+
+  // and the tab really is reusable: a second run starts and settles normally
+  await agentRuns.start(sid, {
+    messages: [{ role: "user", content: "again" }],
+    deps: makeDeps(),
+    run: async () => ({ status: "done" }) as AgentLoopOutcome,
+  });
+  assert.equal(useAiSessionStore.getState().sessions[sid]?.busy, false);
+});

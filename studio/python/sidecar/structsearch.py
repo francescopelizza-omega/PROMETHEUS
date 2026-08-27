@@ -129,16 +129,30 @@ def _iter_py_files(path: str) -> List[str]:
     return out
 
 
-def _matches_in_file(pattern: ast.AST, file: str) -> List[Dict[str, Any]]:
+def _matches_in_file(
+    pattern: ast.AST, file: str, unread: Optional[List[Dict[str, Any]]] = None
+) -> List[Dict[str, Any]]:
+    """Matches in one file. Files that could not be READ or PARSED are appended to ``unread``.
+
+    Skipping them is right — one unparseable file must never abort the walk — but skipping them
+    SILENTLY is what made the result a lie: a genuine no-match and "2 of your 3 files were never
+    searched" both came back as ``{"count": 0, "matches": []}``. That is the same defect
+    ``_resolve_path`` below already documents for a missing path, one level further down.
+    """
     try:
         with open(file, "r", encoding="utf-8") as fh:
             src = fh.read()
-    except (OSError, UnicodeDecodeError):
+    except (OSError, UnicodeDecodeError) as exc:
+        if unread is not None:
+            unread.append({"file": file, "reason": f"{type(exc).__name__}: {exc}"})
         return []
     try:
         tree = ast.parse(src)
-    except SyntaxError:
-        return []  # non-Python / invalid → skip, never abort the walk
+    except SyntaxError as exc:
+        # non-Python / invalid → skip, never abort the walk — but SAY so.
+        if unread is not None:
+            unread.append({"file": file, "reason": f"SyntaxError: {exc.msg} (line {exc.lineno})"})
+        return []
     lines = src.splitlines()
     ptype = type(pattern)
     out: List[Dict[str, Any]] = []
@@ -164,12 +178,15 @@ def _matches_in_file(pattern: ast.AST, file: str) -> List[Dict[str, Any]]:
     return out
 
 
-def _run_match(pattern_tmpl: str, path: str) -> Tuple[List[Dict[str, Any]], int]:
+def _run_match(
+    pattern_tmpl: str, path: str
+) -> Tuple[List[Dict[str, Any]], int, List[Dict[str, Any]]]:
     pattern = _pattern_node(pattern_tmpl)
     matches: List[Dict[str, Any]] = []
+    unread: List[Dict[str, Any]] = []
     for file in _iter_py_files(path):
-        matches.extend(_matches_in_file(pattern, file))
-    return matches, len(matches)
+        matches.extend(_matches_in_file(pattern, file, unread))
+    return matches, len(matches), unread
 
 
 def _apply_rewrite(rewrite_tmpl: str, bindings: Dict[str, str]) -> str:
@@ -189,6 +206,16 @@ def _resolve_path(argv: Sequence[str]) -> str:
     path = env.opt_value(argv, "--path")
     if not path:
         raise ValueError("missing --path")
+    # FAIL CLOSED on a path that is not there.
+    #
+    # `_iter_py_files` returns [] for a missing path — `os.path.isfile` is False and `os.walk`
+    # yields nothing — so the verb answered `{"count": 0, "matches": [], "ok": true}`: a SUCCESS
+    # that is byte-identical to "I searched and this symbol does not exist". Measured: the same
+    # pattern against a real file returns 32 matches and against `/tmp/no-such-file.py` returns
+    # 0 with ok:true. A caller (the agent, the Structural Search panel) then concludes the symbol
+    # is absent when what actually happened is that the path was wrong.
+    if not os.path.exists(path):
+        raise ValueError(f"path does not exist: {path}")
     return path
 
 
@@ -206,8 +233,10 @@ def _resolve_tmpl(argv: Sequence[str], name: str) -> str:
 def _match_verb(argv: Sequence[str]) -> int:
     path = _resolve_path(argv)
     pattern = _resolve_tmpl(argv, "--pattern")
-    matches, count = _run_match(pattern, path)
-    return env.emit("match", matches=matches, count=count)
+    matches, count, unread = _run_match(pattern, path)
+    # `unreadable` rides the envelope ALWAYS (empty list when everything parsed), so a caller
+    # can distinguish "no matches" from "not everything was searched" without guessing.
+    return env.emit("match", matches=matches, count=count, unreadable=unread)
 
 
 def _replace_verb(argv: Sequence[str]) -> int:
@@ -216,7 +245,7 @@ def _replace_verb(argv: Sequence[str]) -> int:
     rewrite = _resolve_tmpl(argv, "--rewrite")
     confirm = env.has_flag(argv, "--confirm")
 
-    matches, count = _run_match(pattern, path)
+    matches, count, unread = _run_match(pattern, path)
     # group per-file, build non-overlapping edits applied RIGHT-TO-LEFT (descending) so an
     # earlier edit never shifts a later span.
     by_file: Dict[str, List[Dict[str, Any]]] = {}
@@ -232,23 +261,70 @@ def _replace_verb(argv: Sequence[str]) -> int:
     plan = [{"file": f, "edits": sorted(edits, key=lambda e: -e["line"])} for f, edits in sorted(by_file.items())]
 
     written = 0
+    skipped: List[Dict[str, Any]] = []
     if confirm:
-        # actual write: replace each old snippet with new, right-to-left, per file (text-based;
-        # only touched under --confirm, mirroring metadata.py's confirm gate).
+        # Actual write: apply each edit AT ITS MATCHED LINE, right-to-left per file (only touched
+        # under --confirm, mirroring metadata.py's confirm gate).
+        #
+        # This used to be `text.replace(edit["old"], edit["new"], 1)`, which always hits the FIRST
+        # occurrence of that snippet anywhere in the file and ignores `line` entirely — so the
+        # right-to-left ordering the comment above promises was inert, because line numbers never
+        # reached the write. When the same snippet text also appeared earlier in a comment, a
+        # docstring or a string literal, the codemod rewrote THAT and left the real call site
+        # untouched, while the envelope reported `written: 1` against a plan naming the correct
+        # line. A destructive on-disk edit to the wrong place, reported as a success.
         for entry in plan:
             try:
                 with open(entry["file"], "r", encoding="utf-8") as fh:
                     text = fh.read()
+                changed = False
                 for edit in entry["edits"]:
-                    if edit["old"] and edit["old"] in text:
-                        text = text.replace(edit["old"], edit["new"], 1)
-                with open(entry["file"], "w", encoding="utf-8") as fh:
-                    fh.write(text)
-                written += 1
+                    old_text = edit["old"]
+                    if not old_text:
+                        continue
+                    idx = _offset_of_line(text, edit["line"])
+                    if idx is None:
+                        skipped.append({"file": entry["file"], "line": edit["line"],
+                                        "reason": "line no longer exists"})
+                        continue
+                    found = text.find(old_text, idx)
+                    # The match must START on the line the AST reported. Anything else means the
+                    # file moved under us, and guessing is exactly what caused the corruption.
+                    line_end = _offset_of_line(text, edit["line"] + 1)
+                    if found == -1 or (line_end is not None and found >= line_end):
+                        skipped.append({"file": entry["file"], "line": edit["line"],
+                                        "reason": "snippet not found at its matched line"})
+                        continue
+                    text = text[:found] + edit["new"] + text[found + len(old_text):]
+                    changed = True
+                if changed:
+                    with open(entry["file"], "w", encoding="utf-8") as fh:
+                        fh.write(text)
+                    written += 1
             except OSError:
                 continue
 
-    return env.emit("replace", plan=plan, count=count, written=written, confirmed=confirm)
+    return env.emit("replace", plan=plan, count=count, written=written,
+                    confirmed=confirm, skipped=skipped, unreadable=unread)
+
+
+def _offset_of_line(text: str, line: int) -> Optional[int]:
+    """Character offset where 1-based `line` starts, or None when the file has fewer lines.
+
+    Recomputed per edit rather than cached: edits are applied right-to-left, so earlier offsets
+    stay valid, but two edits on the SAME line would shift each other.
+    """
+    if line <= 1:
+        return 0 if line == 1 else None
+    pos = 0
+    seen = 1
+    while seen < line:
+        nl = text.find("\n", pos)
+        if nl == -1:
+            return None
+        pos = nl + 1
+        seen += 1
+    return pos
 
 
 HANDLERS = {

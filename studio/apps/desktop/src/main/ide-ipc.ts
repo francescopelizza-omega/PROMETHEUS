@@ -42,9 +42,11 @@ import {
   safeFetch,
 } from "@prometheus/engine-bridge";
 
-import { agent as coreAgent, settings as coreSettings } from "@prometheus/core";
+import { agent as coreAgent, rules as coreRules, settings as coreSettings } from "@prometheus/core";
 import { isHostDispatchTool } from "@prometheus/core/agent-system";
+import { isPathAllowed, pathArgsOf, scopedAbsolute } from "@prometheus/core/agent-system-host";
 import {
+  appendCanaryAudit,
   prometheusHome,
   readGrants,
   runBrowserTool,
@@ -135,6 +137,8 @@ import {
   type SystemTelemetry,
 } from "../shared/ipc-contract.js";
 import type {
+  AgentCanaryTripRequest,
+  AgentCanaryTripResult,
   AgentEngineToolRequest,
   AgentGrant,
   AgentGrantsResult,
@@ -142,6 +146,7 @@ import type {
   AgentHookRunResult,
   AgentSystemToolRequest,
   AgentSystemToolResult,
+  IdeSteeringGlobalResult,
 } from "../shared/ipc-contract.js";
 import {
   type FileSearchQuery,
@@ -226,6 +231,7 @@ import type { DapHost, DapLaunchOptions, DapLaunchPlan } from "./ide/dap-host.js
 import { type ExecRunner, defaultExecRunner } from "./ide/exec-host.js";
 
 import { screenCommand } from "./ide/exec-screen.js";
+import { assertExecuteAllowed } from "./ide/execute-guards.js";
 import {
   type FsWatchHost,
   fsCreateFile,
@@ -248,6 +254,9 @@ import {
   assertInsideWorkingSet,
   assertNotSensitivePath,
   clearOutsideApprovals,
+  getWorkingSetRoots,
+  grantWorkingSetRoot,
+  isGrantedRoot,
   isInsideWorkingSet,
   setWorkingSetRoots,
   uriToFsPath,
@@ -496,6 +505,49 @@ async function detectBinsOnPath(bins: readonly string[]): Promise<Record<string,
  * renderer. Returns a disposer that removes the handlers AND detaches the host
  * listeners (so a re-register in tests / a window reload never double-binds).
  */
+/**
+ * Elevated-privilege clamp for the operator's A0–A7 level (the desktop half of the CLI's sudo
+ * gate).
+ *
+ * The CLI stops for a red acknowledgement before opening a session as root, and the readline and
+ * headless hosts now clamp too. The desktop had NO notion of elevation at all: launched with
+ * `sudo`, it restored whatever level the operator had persisted and auto-approved against it as
+ * the superuser, where a single auto-approved `run_command` or `write_file` reaches the whole
+ * machine rather than the workspace.
+ *
+ * The clamp lives in MAIN rather than the renderer on purpose. The renderer is the least-trusted
+ * surface in our own app (C5) and it supplies `authLevel` on every request, so a warning painted
+ * in the UI would be advisory; enforcing it here means no renderer — ours, or one that has been
+ * compromised — can hand the system-tool path a full-autonomy level while running as root.
+ *
+ * 5 is the same ceiling the CLI's decline path applies: everything short of the full-autonomy
+ * tiers still works, so an elevated session is usable, just never silent.
+ */
+/**
+ * Apply the security POSTURE's auto-approve rule to the operator's level.
+ *
+ * `Settings.autoApprove` is set by the Security-strict profile — whose stated posture is
+ * "gate --strict, NO auto-approve" — and was read by nothing at all, so selecting that profile
+ * tightened the gate and the force ban and left auto-approval exactly as it was. Level 0
+ * ("paranoid — ask before EVERY action, even reading a file") is what "no auto-approve" means
+ * on the ladder. Every other `autoApprove` in the codebase is the unrelated per-grant
+ * `AgentToolGrant.autoApprove`, which the ladder drives and which never consults settings.
+ */
+export function clampAuthLevelForPosture(
+  level: number,
+  posture: { autoApprove?: boolean } = getSecurityPosture(),
+): number {
+  return posture.autoApprove === false ? 0 : level;
+}
+
+export function clampAuthLevelForElevation(level: number): number {
+  const elevated =
+    process.env.SUDO_USER !== undefined ||
+    process.env.SUDO_UID !== undefined ||
+    (typeof process.getuid === "function" && process.getuid() === 0);
+  return elevated ? Math.min(level, 5) : level;
+}
+
 export function registerIdeIpcHandlers(wiring: IdeIpcWiring): () => void {
   const { lsp, dap, pty, git, fsWatch, prGateway } = wiring;
   const history = wiring.localHistory; // APP-063: Local History (optional; fail-soft)
@@ -626,6 +678,33 @@ export function registerIdeIpcHandlers(wiring: IdeIpcWiring): () => void {
       return { ok: false, error: errString(e) };
     }
   });
+  /**
+   * The GLOBAL (`~/.prometheus`) steering tier. Main owns the home path — see the channel's
+   * doc in the contract for why this is not a `fsRead` with a `~` in it. The renderer still
+   * reads the PROJECT files itself (it is the one that knows the workspace root); this supplies
+   * the half of `DEFAULT_PRECEDENCE` that the desktop pane had no way to reach at all.
+   *
+   * A file whose content is a remote URL is a fetch directive, not guidance, and is dropped
+   * here rather than handed over — same posture as the CLI's steering loader and the pane's own
+   * project-file filter.
+   */
+  ipcMain.handle(IPC.ideSteeringGlobal, async (): Promise<IdeSteeringGlobalResult> => {
+    try {
+      const home = prometheusHome();
+      const sources: IdeSteeringGlobalResult["sources"] = [];
+      for (const cand of coreRules.steeringCandidates(home, home, join)) {
+        if (cand.scope !== "global") continue;
+        const r = await fsRead(cand.path).catch(() => undefined);
+        const text = r?.text;
+        if (typeof text !== "string" || !text.trim()) continue;
+        if (coreRules.isRemoteInstruction(text)) continue;
+        sources.push({ kind: cand.kind, path: cand.path, content: text });
+      }
+      return { ok: true, sources };
+    } catch (e) {
+      return { ok: false, sources: [], error: errString(e) };
+    }
+  });
   // handoff §3: the working-set declaration + the per-path out-of-scope approval. These
   // are the ONLY two ways the main-process scope guard's answer can change.
   ipcMain.handle(IPC.ideSetWorkingSet, (_e, arg: unknown): IdeOkResult => {
@@ -644,8 +723,13 @@ export function registerIdeIpcHandlers(wiring: IdeIpcWiring): () => void {
           `[path-guard] refused ${refused.length} working-set root(s) not granted by a folder the user opened: ${refused.join(", ")}`,
         );
       }
+      // A PARTIAL acceptance is still a narrowing the caller did not ask for — report which
+      // roots were dropped rather than answering a bare `ok:true` and leaving the renderer to
+      // believe its whole declaration took effect.
       return accepted > 0 || refused.length === 0
-        ? { ok: true }
+        ? refused.length > 0
+          ? { ok: true, refused }
+          : { ok: true }
         : {
             ok: false,
             error: `none of the declared roots are inside a folder you opened: ${refused.join(", ")}`,
@@ -698,11 +782,29 @@ export function registerIdeIpcHandlers(wiring: IdeIpcWiring): () => void {
   ipcMain.handle(IPC.ideFsTree, async (_e, arg: unknown): Promise<IdeTreeNode[]> => {
     const v = validateFsTree(arg);
     if (!v.ok) return [];
-    return fsTree(uriToFsPath(v.value.dir));
+    /**
+     * The sensitive-path guard every sibling handler applies — and this one did NOT.
+     *
+     * `ide:fs.tree` listed `~/.ssh`, `~/.aws` and the rest straight back to the renderer, so the
+     * one handler whose whole job is enumerating a directory was the one with no denylist. The
+     * comment on `ideFsWalk` below claimed its root was "path-guarded exactly like fsTree",
+     * which was true only in the sense that neither was guarded here.
+     *
+     * The contract is `IdeTreeNode[]` with no error channel, so a refusal is an EMPTY tree —
+     * the same answer this handler already gives for invalid input. Nothing leaks either way.
+     */
+    let dir: string;
+    try {
+      dir = assertNotSensitivePath(uriToFsPath(v.value.dir));
+    } catch {
+      return [];
+    }
+    return fsTree(dir);
   });
 
   // APP-065: walk the whole repo → a flat file list (ignore-pruned, no symlinks). Root is
-  // path-guarded exactly like fsTree so a symlinked/sensitive target can't escape.
+  // path-guarded with the same `assertNotSensitivePath` as fsTree above, so a symlinked or
+  // sensitive target cannot escape.
   ipcMain.handle(IPC.ideFsWalk, async (_e, arg: unknown): Promise<IdeFsWalkResult> => {
     const a = (arg ?? {}) as { root?: unknown };
     if (typeof a.root !== "string" || !a.root) return { ok: false, error: "root is required" };
@@ -1337,7 +1439,20 @@ export function registerIdeIpcHandlers(wiring: IdeIpcWiring): () => void {
   ipcMain.handle(IPC.ideWorktreeCreate, async (_e, arg: unknown): Promise<IdeWorktreeOpResult> => {
     const v = validateGitWorktreeCreate(arg);
     if (!v.ok) return { ok: false, message: v.error.message };
-    return createWorktreeChecked(v.value.root, v.value.branch, v.value.path);
+    const created = await createWorktreeChecked(v.value.root, v.value.branch, v.value.path);
+    /**
+     * A worktree INHERITS its parent repo's grant — and only that.
+     *
+     * Switching to a worktree left the guard pinned to the old root, so every save in the
+     * worktree on screen was refused. The grant is derived, never new: it is recorded only when
+     * the repo the worktree was cut FROM is itself already granted, so this creates no authority
+     * that did not already exist. A worktree of an ungranted repo stays ungranted, exactly as
+     * before.
+     */
+    if (created.ok && created.path && isGrantedRoot(v.value.root)) {
+      grantWorkingSetRoot(created.path);
+    }
+    return created;
   });
   ipcMain.handle(IPC.ideWorktreeRemove, async (_e, arg: unknown): Promise<IdeWorktreeOpResult> => {
     const v = validateGitWorktreeRemove(arg);
@@ -1536,6 +1651,37 @@ export function registerIdeIpcHandlers(wiring: IdeIpcWiring): () => void {
           ...(out.verdict ? { verdict: out.verdict as AgentSystemToolResult["verdict"] } : {}),
         };
       }
+      /**
+       * FAIL-CLOSED WORKING-SET SCOPE CHECK — the CLI has one, this host did not.
+       *
+       * `runSystemTool` takes `roots` but its READ tools never consult them: the only path guard
+       * inside it is `guardSecretPath`, which matches credential FILENAMES (`.env`, `*.pem`,
+       * `.ssh/*`). Everything else on the disk was reachable. The CLI enforces scope one layer
+       * above, in `agent-runtime`'s dispatcher (`pathArgsOf` + `isPathAllowed`); this handler
+       * called `runSystemTool` directly, so the same agent had no scope at all here.
+       *
+       * Proven through this very handler with the working set declared as `/tmp/r10ws`:
+       *   read_file /etc/passwd      → ok:true, full contents
+       *   read_file ~/.zsh_history   → ok:true, the user's real shell history
+       * Tool output is folded into the model's thread, and the thread may go to a cloud
+       * endpoint — so this was personal data leaving the workspace the user chose.
+       *
+       * Same helpers, same order as the CLI: `scopedAbsolute` expands `~` BEFORE resolving (or
+       * `~/.ssh/id_rsa` tests as `<cwd>/~/.ssh/id_rsa`, which does not exist, so the walk falls
+       * back to `<cwd>` and ALLOWS it while the tool opens the real home file). A path the human
+       * approved through the out-of-scope seam stays exempt.
+       */
+      {
+        const scopeRoots = getWorkingSetRoots();
+        const roots = scopeRoots.length > 0 ? [...scopeRoots] : [cwd];
+        for (const p of pathArgsOf(req.args ?? {})) {
+          const abs = scopedAbsolute(p, cwd);
+          if (isInsideWorkingSet(abs)) continue;
+          if (!isPathAllowed(abs, roots)) {
+            return { ok: false, summary: `path outside the working set (denied): ${p}` };
+          }
+        }
+      }
       const out = await runSystemTool(req.name, req.args ?? {}, {
         cwd,
         roots: [cwd],
@@ -1550,7 +1696,11 @@ export function registerIdeIpcHandlers(wiring: IdeIpcWiring): () => void {
         // what `run_command`'s OS sandbox consults to decide whether this call may reach the
         // network, and it is what the exec audit records. Absent ⇒ core's safe default.
         ...(typeof req.authLevel === "number"
-          ? { authLevel: Math.max(0, Math.min(Math.trunc(req.authLevel), 7)) }
+          ? {
+              authLevel: clampAuthLevelForPosture(
+                clampAuthLevelForElevation(Math.max(0, Math.min(Math.trunc(req.authLevel), 7))),
+              ),
+            }
           : {}),
       });
       if (!out)
@@ -1684,6 +1834,25 @@ export function registerIdeIpcHandlers(wiring: IdeIpcWiring): () => void {
       { ...(cwd ? { cwd } : {}) },
     );
     return { ok: true, outcome };
+  });
+
+  /**
+   * `agent:canaryTrip` — point 6b. Core's loop (running IN the renderer, since it is
+   * C5-safe) detects the trip; it cannot write `canary-audit.jsonl` itself, so this channel
+   * exists purely to hand the detection off to the process that owns the disk. No gate, no
+   * scan, no branch on content — a trip is already the signal, and this handler's only job is
+   * to make sure it is not lost.
+   */
+  ipcMain.handle(IPC.agentCanaryTrip, async (_e, arg: unknown): Promise<AgentCanaryTripResult> => {
+    const req = arg as AgentCanaryTripRequest | null;
+    if (!req || typeof req.textSnippet !== "string") {
+      return { ok: false };
+    }
+    appendCanaryAudit(prometheusHome(), {
+      event: "canary-tripped",
+      textSnippet: req.textSnippet,
+    });
+    return { ok: true };
   });
 
   ipcMain.handle(IPC.agentEngineTool, async (_e, arg: unknown): Promise<AgentSystemToolResult> => {
@@ -1868,7 +2037,12 @@ export function registerIdeIpcHandlers(wiring: IdeIpcWiring): () => void {
     const v = validateGitRoot(arg);
     if (!v.ok) return { ok: false, roots: [], error: v.error.message };
     try {
-      const res = await runSidecar("testmgr", "discover", ["--path", v.value.root]);
+      // Discovery never executes project code, but the ROOT still reaches a spawned sidecar —
+      // the same normalize + sensitive-cwd denial every sibling path applies.
+      const res = await runSidecar("testmgr", "discover", [
+        "--path",
+        assertNotSensitivePath(v.value.root),
+      ]);
       const data = res.data as { tree?: unknown; root?: unknown; caseCount?: unknown };
       return {
         ok: true,
@@ -1907,10 +2081,32 @@ export function registerIdeIpcHandlers(wiring: IdeIpcWiring): () => void {
     const v = validateCoverageRun(arg);
     if (!v.ok) return { ok: false, error: v.error.message };
     try {
+      /**
+       * Coverage RUNS the project's test suite — the same arbitrary-code execution `ide:test.run`
+       * guards, and it had none of those guards.
+       *
+       * `coverage run -m pytest` imports the workspace's conftest.py, its plugins and every test
+       * module, so a repo whose gate verdict is block/error — or that was never scanned at all —
+       * still had its code executed by MAIN. The observable asymmetry: press "Run tests" on an
+       * untrusted workspace and it is refused with "run gate refused: …"; press "Run coverage"
+       * and the identical suite runs. The 90% CPU/RAM launch guard was skipped too, and the root
+       * reached the sidecar without the sensitive-path check every sibling execute path applies.
+       *
+       * Same three guards, same order, same refusal wording as the twin above, so the two cannot
+       * report a refusal differently.
+       */
+      const guard = await assertExecuteAllowed(v.value.root, "coverage run", {
+        assertNotSensitivePath,
+        runGate: (r) => runGate({ workspaceRoot: r }, { engineConfig: config }),
+        readTele,
+        errString,
+      });
+      if (!guard.ok) return { ok: false, error: guard.error };
+      const root = guard.root;
       const idArgs = v.value.ids.flatMap((id) => ["--id", id]);
       const res = await runSidecar("coverage", "run", [
         "--path",
-        v.value.root,
+        root,
         "--framework",
         v.value.framework,
         ...idArgs,
@@ -1939,26 +2135,18 @@ export function registerIdeIpcHandlers(wiring: IdeIpcWiring): () => void {
     if (!v.ok) return { ok: false, error: v.error.message };
     if (!testSpawn) return { ok: false, error: "test runner unavailable (no spawn wired)" };
     try {
-      const root = assertNotSensitivePath(v.value.root); // normalize + deny sensitive cwd
       // APP-040: running target code EXECUTES project code — it must cross the SAME
       // fail-closed run-gate + telemetry launch-guard as ide:run.start, not just the
-      // discovery never-execute path. Refusals name their stage.
-      const verdict = await runGate({ workspaceRoot: root }, { engineConfig: config });
-      if (!verdict.mayLaunch) return { ok: false, error: `run gate refused: ${verdict.reason}` };
-      try {
-        const tele = await readTele();
-        if (!tele.guard.allow) {
-          return {
-            ok: false,
-            error: `resource guard refused: ${tele.guard.reason ?? "over threshold"}`,
-          };
-        }
-      } catch (e) {
-        return {
-          ok: false,
-          error: `telemetry unavailable (${errString(e)}) — test run held (fail-closed)`,
-        };
-      }
+      // discovery never-execute path. Refusals name their stage. Shared with coverage.run,
+      // which had NONE of these until the two were made one implementation.
+      const guard = await assertExecuteAllowed(v.value.root, "test run", {
+        assertNotSensitivePath,
+        runGate: (r) => runGate({ workspaceRoot: r }, { engineConfig: config }),
+        readTele,
+        errString,
+      });
+      if (!guard.ok) return { ok: false, error: guard.error };
+      const root = guard.root;
       return await runTestVerb(testSpawn, { ...v.value, root }, broadcastTest, {
         kills: testKills,
       });
@@ -2118,6 +2306,16 @@ export function registerIdeIpcHandlers(wiring: IdeIpcWiring): () => void {
         unit: typeof env.unit === "string" ? env.unit : "us",
         sawTasks: env.sawTasks === true,
         ...(typeof env.note === "string" ? { note: env.note } : {}),
+        /**
+         * The TARGET's own crash, forwarded.
+         *
+         * The sidecar reports it (`profile.py` sets `runError: "RuntimeError: boom"`) and this
+         * mapper dropped it, so profiling a script that raises on its first line returned
+         * `ok:true` with a flame graph built entirely from runpy/import overhead — 963µs of
+         * machinery and none of the user's code. The panel showed a normal-looking chart and no
+         * error, so the user believed they had profiled something that never ran.
+         */
+        ...(typeof env.runError === "string" && env.runError ? { runError: env.runError } : {}),
       };
     } catch (e) {
       return { ok: false, error: errString(e) };
@@ -2239,7 +2437,18 @@ export function registerIdeIpcHandlers(wiring: IdeIpcWiring): () => void {
     },
   );
 
-  /* ── repo-map (APP-053): repomap.py ranked symbol map for @codebase grounding */
+  /**
+   * repo-map (APP-053): repomap.py ranked symbol map for @codebase grounding.
+   *
+   * KNOWN GAP (point 7, prompt-injection defense plan): unlike the shared TS `walkRepo`
+   * (`@prometheus/core`'s `token-economy/repo-map.ts`, used by codebase-overview and covered by
+   * `system-tools.ts`'s untrusted-file-data framing), this path shells out to a Python sidecar
+   * and its output — extracted symbol NAMES, not raw file content — is injected into the model's
+   * context unframed and unscanned. Narrow (names only, not bodies/comments/strings), but real: a
+   * maliciously-named identifier could carry an injected phrase into `@codebase` grounding.
+   * Deferred rather than fixed here because it requires touching `python/sidecar/repomap.py`, a
+   * different subsystem/language than the rest of this effort.
+   */
   ipcMain.handle(IPC.ideRepoMap, async (_e, arg: unknown): Promise<IdeRepoMapResult> => {
     const v = validateRepoMap(arg);
     if (!v.ok) return { ok: false, files: [], error: v.error.message };
@@ -2404,6 +2613,7 @@ export function registerIdeIpcHandlers(wiring: IdeIpcWiring): () => void {
   return () => {
     for (const channel of [
       IPC.ideFsRead,
+      IPC.ideSteeringGlobal,
       IPC.ideSetWorkingSet,
       IPC.ideApproveOutside,
       IPC.ideFsWrite,
@@ -2511,6 +2721,7 @@ export function registerIdeIpcHandlers(wiring: IdeIpcWiring): () => void {
       IPC.ideHistoryRevert,
       IPC.ideFsWalk,
       IPC.agentHookRun,
+      IPC.agentCanaryTrip,
     ]) {
       ipcMain.removeHandler(channel);
     }

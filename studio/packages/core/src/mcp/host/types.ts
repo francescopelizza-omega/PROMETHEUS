@@ -57,4 +57,21 @@ export interface McpServerConfig {
   gate?: HostGateVerdict; // last nemesis verdict (§2.2/§3)
   capabilities?: { tools: McpToolDescriptor[]; resources: boolean; prompts: boolean };
   health: McpServerHealth;
+  /**
+   * Hash of the tool descriptor set as of the last clean `connect()` — the gate only re-scans
+   * the launch command, never what the server LATER claims its tools do, so this is what
+   * `connect()` compares a fresh `tools/list` against to catch a "rug pull" (a server silently
+   * redefining a description or an annotation after the user already approved it). Undefined
+   * until the first successful connect after an add/re-add establishes it.
+   */
+  toolsPinnedHash?: string;
+  /**
+   * WHY `health` is `"blocked"` — `"gate"` (the add-time nemesis verdict on the launch command)
+   * or `"tool-drift"` (a later `connect()` caught the pinned tool descriptors changing). Without
+   * this, both causes threw the identical "blocked by nemesis" message, which sent an operator
+   * debugging a rug-pull block looking at the wrong thing (the launch command, which never
+   * changed) instead of the tool descriptors, which did. Cleared on every (re-)add alongside
+   * `toolsPinnedHash`, same as it.
+   */
+  blockedReason?: "gate" | "tool-drift";
 }

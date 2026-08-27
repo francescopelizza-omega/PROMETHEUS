@@ -52,6 +52,24 @@ function refRejection(ref: string): string | null {
   if (isRemoteRef(ref)) return "remote references are never fetched";
   if (ref.startsWith("-")) return "option-shaped reference";
   if (ref.startsWith("/") || /^[A-Za-z]:[\\/]/.test(ref)) return "absolute paths are not allowed";
+  /**
+   * `~` is an absolute path wearing a disguise.
+   *
+   * The list above rejected `/abs`, `C:\abs` and any `..` segment, but not a leading `~/` — and
+   * `read_file` expands `~` for real. So a cloned repo shipping
+   * `.prometheus/command/summarize.md` containing `Summarize @~/Documents/notes.md` read a file
+   * from the user's home directory and spliced it into the prompt, on `/summarize`.
+   *
+   * This gate is the only bound on that path: `expandCommand` calls `runSystemTool("read_file")`
+   * DIRECTLY, and the read tool does not consult the working-set roots — the fail-closed scope
+   * check lives in the agent-runtime dispatcher, which this path never goes through. The
+   * function's own docstring justified permitting project-scope refs on the grounds that "a read
+   * is bounded by the working set the caller already enforces for read_file"; no caller enforced
+   * it, which is what made this reachable.
+   */
+  if (ref === "~" || ref.startsWith("~/") || ref.startsWith("~\\")) {
+    return "`~` home paths are not allowed";
+  }
   if (ref.split(/[\\/]/).includes("..")) return "`..` cannot escape the workspace";
   if (ref.includes("\0")) return "embedded NUL";
   return null;

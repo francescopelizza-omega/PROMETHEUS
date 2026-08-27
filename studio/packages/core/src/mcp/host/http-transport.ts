@@ -175,7 +175,7 @@ export class StreamableHttpTransport implements McpClientTransport {
     if (res.status === 404)
       throw new McpTransportError("protocol", `MCP session expired (${method} → 404)`);
     if (!res.ok) throw new McpTransportError("http", `MCP ${method} → HTTP ${res.status}`);
-    const msg = await this.readResponse(res, id);
+    const msg = await this.withReadDeadline(res, () => this.readResponse(res, id));
     if (msg?.error) throw new McpTransportError("protocol", msg.error.message ?? "MCP error");
     return msg?.result;
   }
@@ -238,6 +238,51 @@ export class StreamableHttpTransport implements McpClientTransport {
       return this.post(next, body, hop + 1, origin);
     }
     return res;
+  }
+
+  /**
+   * Apply the transport's timeout to READING the response body, not just to receiving headers.
+   *
+   * `post`'s AbortController is cleared in its own `finally`, the moment `fetch` resolves — and
+   * for `text/event-stream` that is only the HEADERS. The body is read afterwards, by `readSse`,
+   * under no deadline whatsoever: a server that answers `tools/list` with an SSE content-type,
+   * writes a `notifications/progress` event, and then simply holds the stream open left
+   * `listTools()` awaiting forever. `timeoutMs` was configured, obeyed for the handshake, and
+   * silently absent for the part that actually stalls.
+   *
+   * Cancelling the body is what unwinds the pending `reader.read()`, so the loop exits instead
+   * of leaking a reader on a socket nobody is draining.
+   */
+  private async withReadDeadline<T>(res: Response, read: () => Promise<T>): Promise<T> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let timedOut = false;
+    const deadline = new Promise<never>((_resolve, reject) => {
+      timer = setTimeout(() => {
+        timedOut = true;
+        void res.body?.cancel().catch(() => {});
+        reject(
+          new McpTransportError("timeout", `MCP response body timed out after ${this.timeoutMs}ms`),
+        );
+      }, this.timeoutMs);
+      // never hold the process open on this timer alone
+      if (typeof (timer as { unref?: () => void }).unref === "function") {
+        (timer as { unref: () => void }).unref();
+      }
+    });
+    try {
+      return await Promise.race([read(), deadline]);
+    } catch (e) {
+      // a body cancelled BY the deadline surfaces as the timeout, not as a torn-stream error
+      if (timedOut && !(e instanceof McpTransportError)) {
+        throw new McpTransportError(
+          "timeout",
+          `MCP response body timed out after ${this.timeoutMs}ms`,
+        );
+      }
+      throw e;
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
   }
 
   /** Read a JSON or SSE response and return the JSON-RPC message whose `id` matches. */

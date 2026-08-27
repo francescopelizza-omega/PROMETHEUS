@@ -88,9 +88,12 @@ export async function dispatchInvoke(pick: CatalogRow, deps: InvokeDeps, args = 
       return;
     }
   }
-  // preview: the dry-run install renders the nemesis verdict + the plan, no mutation.
+  // preview: the dry-run install renders the nemesis verdict + the plan, no mutation. This MUST
+  // pass dryRun:true — without it (the previous bug), any catalog entry that passed nemesis
+  // cleanly (the common case) had this "preview" perform a REAL install before the user was
+  // ever asked to confirm, making the later "(not installed)" message on decline false.
   deps.write(c.dim(`previewing the nemesis-gated install of ${c.cyan(pick.name)}…`));
-  await deps.install(pick.name, extra);
+  await deps.install(pick.name, { ...extra, dryRun: true });
   const go = await deps.confirm(
     `install ${pick.name} now? (runs the nemesis gate before any change)`,
   );
@@ -111,8 +114,13 @@ export interface InvokeDeps {
   ask: (prompt: string) => Promise<string>;
   confirm: (prompt: string) => Promise<boolean>;
   /** run the canonical nemesis-gated install verb (preview unless yes). `args` = extra tokens the
-   *  overlay's argument prompt collected (CLI-059); forwarded verbatim to the gated install verb. */
-  install: (name: string, opts?: { yes?: boolean; args?: string }) => Promise<void>;
+   *  overlay's argument prompt collected (CLI-059); forwarded verbatim to the gated install verb.
+   *  `dryRun` MUST reach the engine as a real `--dry-run` flag — this is the ONLY thing that
+   *  makes the preview call in `dispatchInvoke` actually not mutate anything. */
+  install: (
+    name: string,
+    opts?: { yes?: boolean; dryRun?: boolean; args?: string },
+  ) => Promise<void>;
 }
 
 /** `/invoke [filter]` — pick a repo from the catalog + install it (nemesis-gated). The number-pick

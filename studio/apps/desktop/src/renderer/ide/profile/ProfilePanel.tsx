@@ -15,6 +15,7 @@
  */
 import { Button } from "@prometheus/ui";
 import { type ReactElement, useCallback, useEffect, useMemo, useState } from "react";
+import { profileNotice } from "./profile-notice.js";
 
 import type {
   IdeProfileMode,
@@ -127,8 +128,9 @@ export function ProfilePanel(): ReactElement {
       setRoot(flameSamplesToTree(samples));
       setZoomPath([]);
       setSelected(undefined);
-      if (res.note) setInfo(res.note);
-      else if (res.timedOut) setInfo("partial profile (wall-clock cap hit)");
+      // Composed, not either/or — see `profile-notice.ts`. The engine sets `note` on every
+      // successful run, so the old `else if` hid the truncation and the crash behind it.
+      setInfo(profileNotice(res));
     } finally {
       setBusy(false);
     }

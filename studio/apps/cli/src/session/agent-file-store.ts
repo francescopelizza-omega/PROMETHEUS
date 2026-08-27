@@ -1,16 +1,25 @@
 /**
  * session/agent-file-store.ts — discover `*.md` sub-agent personas on disk.
  *
- * The fs half of `@prometheus/core`'s `agent-files` (core stays pure). Two directories, and the
- * distinction between them is the security model, not a convenience:
+ * The fs half of `@prometheus/core`'s `agent-files` (core stays pure). Three directories, and
+ * the distinction between them is the security model, not a convenience:
  *
- *   ~/.prometheus/agents/*.md         USER scope — the human's own files, honoured.
- *   <repo>/.prometheus/agents/*.md    PROJECT scope — arrives with cloned code, clamped hard.
+ *   ~/.prometheus/agents/*.md           USER scope — the human's own files, honoured.
+ *   <repo>/.prometheus/agents/*.md      PROJECT scope — arrives with cloned code, clamped hard.
+ *   ~/.prometheus/agents/imported/*.md  IMPORTED scope — arrived from ANOTHER USER via persona
+ *     sharing (`session/persona-store.ts`'s import), clamped IDENTICALLY to PROJECT. It lives
+ *     under the user's OWN home (not a project) because sharing is a personal action — you
+ *     import a persona once and expect it everywhere, the way your own personas already work —
+ *     but it is physically SEPARATE from `agents/*.md` so it is never mistaken for (or loaded
+ *     as) the human's own, fully-trusted work. `readdirSync(join(home,"agents"))` already skips
+ *     this subdirectory on its own (the loop below only reads `*.md` files, never recurses), so
+ *     introducing it here changes nothing about how the existing USER-scope directory is read.
  *
  * The project directory is found by walking UP from the working directory, exactly as
  * `.prometheus.toml` is, which is precisely why it cannot be trusted: `cd` into a repository is
  * the whole of the attack. `loadAgentFile` does the clamping; this file only decides which
- * scope a path belongs to, and never lets a project file win a name.
+ * scope a path belongs to, and never lets a project OR imported file win a name over the user's
+ * own.
  *
  * Fail-soft throughout: an unreadable directory means no personas, never a broken session.
  */
@@ -70,16 +79,29 @@ export function discoverProjectAgentsDir(cwd: string, home = prometheusHome()): 
   return undefined;
 }
 
+/** `~/.prometheus/agents/imported/*.md` — personas imported from another user via sharing.
+ *  Always IMPORTED scope, regardless of what any individual file's frontmatter claims. */
+export function loadImportedAgentFiles(home = prometheusHome()): LoadedAgent[] {
+  return loadDir(join(home, "agents", "imported"), "imported");
+}
+
 /**
- * Every persona available to this session, USER scope first.
+ * Every persona available to this session, USER scope first, then PROJECT, then IMPORTED.
  *
- * A user file WINS a name collision. The project layer may add personas; it may not replace one
- * the human wrote, which would be the quietest possible way to change what a name means.
+ * A user file WINS every name collision. Project and imported may each add personas but never
+ * replace one an earlier, higher-priority layer already defined — the quietest possible way to
+ * change what a name means — so a name is claimed by exactly one layer, in this fixed order.
  */
 export function loadAgentFiles(cwd: string, home = prometheusHome()): LoadedAgent[] {
   const user = loadDir(join(home, "agents"), "user");
   const projectDir = discoverProjectAgentsDir(cwd, home);
   const project = projectDir ? loadDir(projectDir, "project") : [];
+  const imported = loadImportedAgentFiles(home);
+
   const taken = new Set(user.map((a) => a.name));
-  return [...user, ...project.filter((a) => !taken.has(a.name))];
+  const keptProject = project.filter((a) => !taken.has(a.name));
+  for (const a of keptProject) taken.add(a.name);
+  const keptImported = imported.filter((a) => !taken.has(a.name));
+
+  return [...user, ...keptProject, ...keptImported];
 }

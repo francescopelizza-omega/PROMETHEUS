@@ -24,10 +24,13 @@
 import { ipcRenderer } from "electron";
 
 import {
+  type AiProbeEndpointResult,
   type AiProbeModelsResult,
   type AiProgressEvent,
   type AiStreamRequest,
   type AiStreamResult,
+  type BudgetApi,
+  type BudgetStatusResult,
   type CatalogApi,
   type CatalogAppLifecycleRequest,
   type CatalogBrowseResult,
@@ -41,6 +44,8 @@ import {
   type CatalogScaffoldRequest,
   type CatalogToggleRequest,
   type CatalogUninstallRequest,
+  type CodebaseOverviewApi,
+  type CodebaseOverviewResult,
   type CudaInfoResult,
   type CudaInstallRequest,
   type CudaTorchRequest,
@@ -146,6 +151,7 @@ import {
   type IdeSqlQueryRequest,
   type IdeSqlQueryResult,
   type IdeSqlSchemaResult,
+  type IdeSteeringGlobalResult,
   type IdeStructSearchResult,
   type IdeTerminalMenuRequest,
   type IdeTerminalMenuResult,
@@ -171,15 +177,27 @@ import {
   type MetadataScrubResult,
   type MetadataTimestompResult,
   type ModelApi,
+  type ModelConvertRequest,
+  type ModelConvertResult,
   type ModelDownloadRequest,
   type ModelDownloadResult,
   type ModelEndpointsResult,
+  type ModelFetchHfRequest,
+  type ModelFetchHfResult,
   type ModelFitRequest,
   type ModelFitResult,
   type ModelHardwareResult,
+  type ModelHealthApi,
+  type ModelHealthListResult,
+  type ModelHealthRecordResult,
+  type ModelHealthRecordView,
   type ModelInfoResult,
+  type ModelInstallConverterResult,
+  type ModelInstallHfCliResult,
   type ModelInstallRunnerRequest,
   type ModelInstallRunnerResult,
+  type ModelInstallTargetRequest,
+  type ModelInstallTargetResult,
   type ModelMutationResult,
   type ModelProgressEvent,
   type ModelPullRequest,
@@ -194,6 +212,11 @@ import {
   type PathCompletionApi,
   type PathCompletionListResult,
   type PathCompletionRecordUseResult,
+  type PersonaApi,
+  type PersonaExportResult,
+  type PersonaImportResult,
+  type PersonaListResult,
+  type PersonaRemoveResult,
   type PkgInstallRequest,
   type PkgListResult,
   type PkgUpgradeRequest,
@@ -207,6 +230,11 @@ import {
   type RepoRemoveResult,
   type RepoRescanResult,
   type ScanResult,
+  type ScheduleApi,
+  type ScheduleListResult,
+  type ScheduleRemoveResult,
+  type ScheduleUpsertResult,
+  type ScheduledTaskView,
   type SecurityApi,
   type SecurityGateOptions,
   type SecurityGateResult,
@@ -252,6 +280,8 @@ import {
   type VersionResult,
 } from "../shared/ipc-contract.js";
 import type {
+  AgentCanaryTripRequest,
+  AgentCanaryTripResult,
   AgentEngineToolRequest,
   AgentGrant,
   AgentGrantsResult,
@@ -473,6 +503,50 @@ function createPathCompletionApi(): PathCompletionApi {
   };
 }
 
+function createModelHealthApi(): ModelHealthApi {
+  return {
+    list: (): Promise<ModelHealthListResult> => ipcRenderer.invoke(IPC.modelHealthList),
+    record: (record: ModelHealthRecordView): Promise<ModelHealthRecordResult> =>
+      ipcRenderer.invoke(IPC.modelHealthRecord, record),
+  };
+}
+
+function createBudgetApi(): BudgetApi {
+  return {
+    status: (): Promise<BudgetStatusResult> => ipcRenderer.invoke(IPC.budgetStatus),
+  };
+}
+
+function createCodebaseOverviewApi(): CodebaseOverviewApi {
+  return {
+    generate: (): Promise<CodebaseOverviewResult> => ipcRenderer.invoke(IPC.codebaseOverview),
+  };
+}
+
+function createScheduleApi(): ScheduleApi {
+  return {
+    list: (): Promise<ScheduleListResult> => ipcRenderer.invoke(IPC.scheduleList),
+    upsert: (task: ScheduledTaskView): Promise<ScheduleUpsertResult> =>
+      ipcRenderer.invoke(IPC.scheduleUpsert, task),
+    remove: (id: string): Promise<ScheduleRemoveResult> =>
+      ipcRenderer.invoke(IPC.scheduleRemove, { id }),
+  };
+}
+
+function createPersonaApi(): PersonaApi {
+  return {
+    list: (): Promise<PersonaListResult> => ipcRenderer.invoke(IPC.personaList),
+    export: (name: string): Promise<PersonaExportResult> =>
+      ipcRenderer.invoke(IPC.personaExport, { name }),
+    importText: (suggestedName: string, markdown: string): Promise<PersonaImportResult> =>
+      ipcRenderer.invoke(IPC.personaImportText, { suggestedName, markdown }),
+    importPath: (path: string): Promise<PersonaImportResult> =>
+      ipcRenderer.invoke(IPC.personaImportPath, { path }),
+    remove: (name: string): Promise<PersonaRemoveResult> =>
+      ipcRenderer.invoke(IPC.personaRemove, { name }),
+  };
+}
+
 function createExtApi(): ExtApi {
   return {
     list: (): Promise<ExtListResult> => ipcRenderer.invoke(IPC.extList),
@@ -514,6 +588,16 @@ function createModelApi(): ModelApi {
     endpoints: (): Promise<ModelEndpointsResult> => ipcRenderer.invoke(IPC.modelEndpoints),
     repoint: (req: ModelRepointRequest): Promise<ModelRepointResult> =>
       ipcRenderer.invoke(IPC.modelRepoint, req),
+    fetchHf: (req: ModelFetchHfRequest): Promise<ModelFetchHfResult> =>
+      ipcRenderer.invoke(IPC.modelFetchHf, req),
+    installHfCli: (): Promise<ModelInstallHfCliResult> =>
+      ipcRenderer.invoke(IPC.modelInstallHfCli, {}),
+    convert: (req: ModelConvertRequest): Promise<ModelConvertResult> =>
+      ipcRenderer.invoke(IPC.modelConvert, req),
+    installConverter: (): Promise<ModelInstallConverterResult> =>
+      ipcRenderer.invoke(IPC.modelInstallConverter, {}),
+    installTarget: (req: ModelInstallTargetRequest): Promise<ModelInstallTargetResult> =>
+      ipcRenderer.invoke(IPC.modelInstallTarget, req),
     onProgress: (listener: (event: ModelProgressEvent) => void): (() => void) => {
       const wrapped = (_evt: unknown, payload: ModelProgressEvent): void => listener(payload);
       ipcRenderer.on(IPC_EVENTS.modelProgress, wrapped);
@@ -632,6 +716,8 @@ function createIdeApi(): IdeApi {
   return {
     // ── fs ────────────────────────────────────────────────────────────────
     fsRead: (uri: string): Promise<IdeFsReadResult> => ipcRenderer.invoke(IPC.ideFsRead, { uri }),
+    steeringGlobal: (): Promise<IdeSteeringGlobalResult> =>
+      ipcRenderer.invoke(IPC.ideSteeringGlobal),
     setWorkingSet: (roots: readonly string[]): Promise<IdeOkResult> =>
       ipcRenderer.invoke(IPC.ideSetWorkingSet, { roots: [...roots] }),
     approveOutsideWorkingSet: (
@@ -996,6 +1082,9 @@ function createIdeApi(): IdeApi {
     // Lifecycle hooks: the renderer never spawns — it lists and proxies, MAIN runs.
     hookRun: (req: AgentHookRunRequest): Promise<AgentHookRunResult> =>
       ipcRenderer.invoke(IPC.agentHookRun, req),
+    // Point 6b: core detects a tripped canary token in the renderer; MAIN owns the audit disk.
+    canaryTrip: (req: AgentCanaryTripRequest): Promise<AgentCanaryTripResult> =>
+      ipcRenderer.invoke(IPC.agentCanaryTrip, req),
     systemTool: (req: AgentSystemToolRequest): Promise<AgentSystemToolResult> =>
       ipcRenderer.invoke(IPC.agentSystemTool, req),
     // ── the `prometheus_*` verbs: the product's own surface, run by the engine ──
@@ -1150,6 +1239,11 @@ export function createPrometheusApi(): PrometheusApi {
       // is above — a renderer `fetch` to `http://127.0.0.1:<port>/models` is refused in prod.
       probeModels: (baseUrl: string): Promise<AiProbeModelsResult> =>
         ipcRenderer.invoke(IPC.aiProbeModels, { baseUrl }),
+      // Measure ONE local model (real context window + the runner's capability array). Same
+      // MAIN detour and same CSP reason as `probeModels`; this is what lets the effort chip
+      // resolve a probe-backed capability instead of falling through to "not available".
+      probeEndpoint: (baseUrl: string, model: string): Promise<AiProbeEndpointResult> =>
+        ipcRenderer.invoke(IPC.aiProbeEndpoint, { baseUrl, model }),
     },
 
     // ── the FULL security surface (file 03 §5,§7) ────────────────────────────
@@ -1179,6 +1273,11 @@ export function createPrometheusApi(): PrometheusApi {
     settingsSync: createSettingsSyncApi(),
     settings: createSettingsApi(),
     pathCompletion: createPathCompletionApi(),
+    modelHealth: createModelHealthApi(),
+    schedule: createScheduleApi(),
+    persona: createPersonaApi(),
+    budget: createBudgetApi(),
+    codebaseOverview: createCodebaseOverviewApi(),
 
     // ── extension host (file 09 §5, APP-059) — install/activate/deactivate/list ──
     ext: createExtApi(),

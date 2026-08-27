@@ -36,8 +36,21 @@ const STRIP_EXACT = new Set([
 const STRIP_PREFIX = ["DYLD_"];
 
 /**
- * Build a curated env for a child process: the parent env minus the hijack-class
- * variables above, plus any explicit `extra` overrides (applied last).
+ * Build a curated env for a child process: the parent env minus the hijack-class variables
+ * above, plus any explicit `extra` overrides — which are filtered by the SAME denylist.
+ *
+ * `extra` used to be applied last with no filtering, which re-admitted exactly what the loop
+ * above had just stripped. That mattered because one caller's `extra` is not trusted: the
+ * desktop's `ide:kernel.start` passes the RENDERER's env straight through
+ * (ide-ipc → kernelHost.start → spawnKernelSidecar → `safeChildEnv(opts.env)`), and the renderer
+ * is the process these guards exist to survive (C5). A compromised renderer could set
+ * LD_PRELOAD, DYLD_INSERT_LIBRARIES, PYTHONPATH or PYTHONSTARTUP on a long-lived python3 that
+ * MAIN spawns, loading attacker-controlled code into it.
+ *
+ * Filtering here rather than at that one call site is deliberate: this function is the single
+ * place that knows the denylist, and a caller that has to remember to pre-filter is a caller
+ * that will eventually forget. A refused key is dropped silently — `extra` is a request, not a
+ * command, and every legitimate in-repo use (MPLBACKEND, PYTHONUNBUFFERED) is unaffected.
  */
 export function safeChildEnv(extra?: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   const out: NodeJS.ProcessEnv = {};
@@ -49,7 +62,11 @@ export function safeChildEnv(extra?: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   }
   if (extra) {
     for (const [k, v] of Object.entries(extra)) {
-      if (v !== undefined) out[k] = v;
+      if (v === undefined) continue;
+      // the SAME denylist the inherited env goes through — see the note above
+      if (STRIP_EXACT.has(k)) continue;
+      if (STRIP_PREFIX.some((p) => k.startsWith(p))) continue;
+      out[k] = v;
     }
   }
   return out;

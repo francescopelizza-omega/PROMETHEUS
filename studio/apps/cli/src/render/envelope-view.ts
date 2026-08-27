@@ -25,6 +25,15 @@ const META_KEYS = new Set(["command", "ok", "error", "_exit", "schema", "forced_
 const MAX_COLUMNS = 6;
 /** Rows shown before the "… and N more" footer. */
 const MAX_ROWS = 40;
+/**
+ * Widest a single table cell may render before it is clipped.
+ *
+ * `table()` sizes each column to its widest cell, so one long field takes the whole row with it:
+ * the catalog's `summary` runs to ~250 characters, which turned `plugin list` into a wall
+ * wrapping several times per row on any real terminal. Clipping is a display decision only —
+ * `--json` still carries the untouched value, and the clip marker says so at a glance.
+ */
+const MAX_CELL = 52;
 
 type Scalar = string | number | boolean | null;
 
@@ -37,6 +46,11 @@ function isPlainObject(v: unknown): v is Record<string, unknown> {
 }
 
 /** A scalar as a display cell: booleans become the ✓/· glyphs, null/"" become an em dash. */
+/** Clip a plain (un-colored) cell to `MAX_CELL` visible characters. */
+function clipCell(s: string): string {
+  return s.length <= MAX_CELL ? s : `${s.slice(0, MAX_CELL - 1)}…`;
+}
+
 function cell(v: unknown): string {
   if (v === true) return sym.ok();
   if (v === false) return sym.off();
@@ -44,10 +58,10 @@ function cell(v: unknown): string {
   if (Array.isArray(v)) {
     if (v.length === 0) return c.dim("—");
     const parts = v.filter(isScalar).map((x) => String(x));
-    return parts.length > 0 ? parts.join(", ") : c.dim(`${v.length} item(s)`);
+    return parts.length > 0 ? clipCell(parts.join(", ")) : c.dim(`${v.length} item(s)`);
   }
   if (isPlainObject(v)) return c.dim("{…}");
-  return String(v);
+  return clipCell(String(v));
 }
 
 /** Is this value renderable INSIDE a table cell (scalar, or an array of scalars)? */

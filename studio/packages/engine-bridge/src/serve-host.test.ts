@@ -264,3 +264,45 @@ test("serveStatePath honors PROMETHEUS_MODELS_DIR", () => {
     else process.env.PROMETHEUS_MODELS_DIR = prev;
   }
 });
+
+test("a REAL spawn that cannot launch returns ok:false instead of throwing uncaught", async () => {
+  /**
+   * `defaultSpawn` returned the child without subscribing to `error`, and an EventEmitter with no
+   * `error` listener rethrows as an UNCAUGHT exception. `start()` handles the failure correctly —
+   * no pid, so it returns a tidy `{ok:false}` — but the raw ENOENT still surfaced a tick later,
+   * past the point any caller could catch it. Every other spawn site in this package attaches the
+   * listener; this one did not, and nothing caught it because the production caller injects no
+   * spawn seam while every existing test in this file does.
+   *
+   * The default path is therefore exercised deliberately here — no `spawn` dep — with a command
+   * that cannot exist.
+   */
+  const uncaught: Error[] = [];
+  const onUncaught = (err: Error): void => void uncaught.push(err);
+  process.on("uncaughtException", onUncaught);
+  try {
+    const { file, cleanup } = tmpState();
+    // NO `spawn` dep — the point is to exercise the DEFAULT path the production caller uses.
+    const host = createServeHost({
+      stateFile: file,
+      probePort: async () => ({ free: true }),
+      isAlive: () => false,
+      portAnswering: async () => false,
+    });
+    const res = await host.start({
+      ...SPEC,
+      argv: ["prometheus-no-such-binary-9f3a2b", "--port", "8080"],
+    });
+    cleanup();
+    assert.equal(res.ok, false, "a spawn that cannot launch must not report success");
+    // give the failed child a tick to emit `error`, which is when the old code threw
+    await new Promise((r) => setTimeout(r, 50));
+  } finally {
+    process.off("uncaughtException", onUncaught);
+  }
+  assert.deepEqual(
+    uncaught.map((e) => e.message),
+    [],
+    "the spawn failure escaped as an uncaught exception instead of a returned error",
+  );
+});

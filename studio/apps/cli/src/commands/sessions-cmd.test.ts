@@ -12,7 +12,7 @@ import type { CliContext } from "../context.js";
 import type { ParsedArgs } from "../parse.js";
 import { setColorEnabled } from "../render.js";
 import { appendTurnEvents, listSessions, recordSession } from "../session/history-store.js";
-import { runSessions } from "./sessions-cmd.js";
+import { runSessions, shortSessionId } from "./sessions-cmd.js";
 
 setColorEnabled(false);
 
@@ -21,11 +21,12 @@ function ctxFor(
   positionals: string[] = [],
   flags: Record<string, string | true> = {},
   json = false,
+  unmatchedSub?: string,
 ): CliContext {
   return {
     client: undefined as unknown as CliContext["client"],
     json,
-    args: { command, positionals, flags, json } as unknown as ParsedArgs,
+    args: { command, positionals, flags, json, unmatchedSub } as unknown as ParsedArgs,
   };
 }
 
@@ -56,6 +57,19 @@ test("sessions list: table + --json array", () => {
     const j = runSessions(ctxFor(["sessions", "list"], [], {}, true), { home });
     assert.equal((j.json as { ok: boolean }).ok, true);
     assert.equal((j.json as { sessions: unknown[] }).sessions.length, 2);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("prometheus sessions <typo>: reports unknown verb, never silently defaults to list", () => {
+  // regression: command[1] is undefined for a TWO_WORD mismatch (parse.ts sets `unmatchedSub`
+  // instead), so a typo used to silently fall through to the "list" branch.
+  const home = seedHome();
+  try {
+    const out = runSessions(ctxFor(["sessions"], [], {}, true, "lst"), { home });
+    assert.equal(out.exitCode, 1);
+    assert.equal((out.json as { error: string }).error, "unknown-verb");
   } finally {
     rmSync(home, { recursive: true, force: true });
   }
@@ -121,8 +135,49 @@ test("sessions --json delete without a confirm exits 2 (fail-closed envelope)", 
   }
 });
 
-test("sessions: unknown verb → exit 2 listing valid verbs", () => {
+test("sessions: unknown verb → exit 1 listing valid verbs", () => {
   const out = runSessions(ctxFor(["sessions", "bogus"]), { home: "/tmp/nope" });
-  assert.equal(out.exitCode, 2);
+  assert.equal(out.exitCode, 1);
   assert.match(out.text ?? "", /list, search, fork, delete/);
+});
+
+test("sessions delete --confirm <id> --dry-run: previews, the session survives", () => {
+  // regression: this gate consults ONLY `--confirm`, so the preview guard inside `wantsExecute`
+  // never applied. Measured against the built binary: the session list went from 1 to 0 under
+  // `--dry-run`.
+  const home = seedHome();
+  try {
+    const ctx = {
+      client: undefined as unknown as CliContext["client"],
+      json: true,
+      args: {
+        command: ["sessions", "delete"],
+        positionals: ["aaa11111"],
+        flags: { confirm: "aaa11111" },
+        json: true,
+        dryRun: true,
+      } as unknown as ParsedArgs,
+    } as CliContext;
+    const out = runSessions(ctx, { home });
+    assert.equal(out.exitCode, 0);
+    assert.equal((out.json as { status?: string }).status, "preview");
+    assert.equal(listSessions(home).length, 2, "the preview deleted a session");
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("shortSessionId distinguishes headless sessions — `id.slice(0,8)` was the constant 'headless'", () => {
+  // regression: every headless id starts `headless-`, so the list showed the SAME token on every
+  // row — and the delete gate asked the user to type that token back as the confirmation, so the
+  // confirm carried no information about which session was about to go.
+  const a = shortSessionId("headless-mt8r29xw-3f2a91bc");
+  const b = shortSessionId("headless-mt8r29xx-77d0e415");
+  assert.notEqual(a, b, "two headless sessions still share a short id");
+  assert.notEqual(a, "headless");
+  assert.notEqual(b, "headless");
+  // an unprefixed id keeps its old behaviour
+  assert.equal(shortSessionId("abcdef0123456789"), "abcdef01");
+  // a short tail is not a useful discriminator — fall back to the head
+  assert.equal(shortSessionId("x-ab"), "x-ab");
 });

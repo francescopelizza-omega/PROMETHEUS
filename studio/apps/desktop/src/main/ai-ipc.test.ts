@@ -18,7 +18,10 @@ import {
   getSecurityPosture,
   localityOfUrl,
   parseSseChunk,
+  probeEndpointCapabilities,
+  probeRequestCount,
   probeServedModels,
+  resetProbeCache,
   runAiStream,
   setSecurityPosture,
 } from "./ai-ipc.js";
@@ -424,6 +427,228 @@ test("tools are only sent when there are some", async () => {
   assert.equal(bodies[2]?.tools, undefined, "a nameless tool must not reach the wire");
 });
 
+/* ── the inactivity-pause watchdog (root causes #1/#6, verification pass #1's finding #8) ────
+ *
+ * This file had ZERO coverage for the idle-timeout/pause/orphan-guard path before this — exactly
+ * what let a real bug (the pre-first-byte catch swallowing a pause/cancel as a hard failure) and
+ * a missing `userSignal` ship undetected in an earlier round of this same work. A real-elapsed-
+ * time × 1000 compressed clock lets these use a fully realistic, floor-respecting `idleTimeoutMs`
+ * (30s) while actually firing in milliseconds of test time.
+ */
+
+function compressedClock(speedup: number) {
+  const start = Date.now();
+  return {
+    now: () => start + (Date.now() - start) * speedup,
+    setTimeoutFn: (cb: () => void, ms: number) => setTimeout(cb, ms / speedup),
+    clearTimeoutFn: (h: ReturnType<typeof setTimeout>) => clearTimeout(h),
+  };
+}
+
+/** A stream that never produces a chunk — UNLESS aborted, mirroring how a real `fetch()`
+ *  rejects a pending read the instant its request signal aborts. */
+function hangingFetch(): typeof fetch {
+  return (async (_url: unknown, init?: { signal?: AbortSignal }) => {
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        init?.signal?.addEventListener("abort", () => {
+          controller.error(new DOMException("aborted", "AbortError"));
+        });
+      },
+      pull() {
+        return new Promise<void>(() => {
+          /* never enqueue, never close on its own */
+        });
+      },
+    });
+    return { ok: true, status: 200, body } as unknown as Response;
+  }) as unknown as typeof fetch;
+}
+
+test("runAiStream: a connection whose body never produces a byte PAUSES (paused:true), not an indefinite hang", async () => {
+  const clock = compressedClock(1000); // a real "30s" idle window fires in ~30ms of test time
+  const started = Date.now();
+  const r = await runAiStream(
+    req({ idleTimeoutMs: 30_000 }),
+    undefined,
+    hangingFetch(),
+    undefined,
+    {
+      sleep: async () => {},
+      idleWatchdogNow: clock.now,
+      idleWatchdogSetTimeout: clock.setTimeoutFn,
+      idleWatchdogClearTimeout: clock.clearTimeoutFn,
+    },
+  );
+  const elapsed = Date.now() - started;
+  assert.ok(
+    elapsed < 2000,
+    `expected a bounded pause well under 2s of real time, took ${elapsed}ms`,
+  );
+  assert.equal(r.ok, true, "a pause is not a failure");
+  assert.equal(r.paused, true);
+  assert.equal(r.text, "");
+});
+
+test("runAiStream: text streamed BEFORE going silent is kept when the turn pauses", async () => {
+  const clock = compressedClock(1000);
+  const sse = [
+    'data: {"choices":[{"delta":{"content":"par"}}]}\n',
+    'data: {"choices":[{"delta":{"content":"tial"}}]}\n',
+  ];
+  let call = 0;
+  const doFetch = (async (_url: unknown, init?: { signal?: AbortSignal }) => {
+    call += 1;
+    // first attempt streams two chunks, then hangs forever (never [DONE]) until aborted.
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        const enc = new TextEncoder();
+        for (const f of sse) controller.enqueue(enc.encode(f));
+        init?.signal?.addEventListener("abort", () => {
+          controller.error(new DOMException("aborted", "AbortError"));
+        });
+      },
+      pull() {
+        return new Promise<void>(() => {
+          /* never enqueue further, never close */
+        });
+      },
+    });
+    return { ok: true, status: 200, body } as unknown as Response;
+  }) as unknown as typeof fetch;
+  const r = await runAiStream(req({ idleTimeoutMs: 30_000 }), undefined, doFetch, undefined, {
+    sleep: async () => {},
+    idleWatchdogNow: clock.now,
+    idleWatchdogSetTimeout: clock.setTimeoutFn,
+    idleWatchdogClearTimeout: clock.clearTimeoutFn,
+  });
+  assert.equal(call, 1, "an idle pause must not be retried as if it were a transient failure");
+  assert.equal(r.paused, true);
+  assert.equal(r.text, "partial", "text streamed before the pause must not be discarded");
+});
+
+test("runAiStream: a COMPLETE tool call streamed before the pause is not thrown away", async () => {
+  // `text` was preserved on the idle-pause return and `toolCalls` was hardcoded `[]` right
+  // beside it, so a turn that had already streamed a whole native call reported the prose and
+  // silently dropped the call — while the pause line told the user no work was lost.
+  const clock = compressedClock(1000);
+  const frames = [
+    'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c1","function":{"name":"read_file","arguments":"{\\"path\\":\\"/tmp/x\\"}"}}]}}]}\n',
+  ];
+  const doFetch = (async (_url: unknown, init?: { signal?: AbortSignal }) => {
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        const enc = new TextEncoder();
+        for (const f of frames) controller.enqueue(enc.encode(f));
+        init?.signal?.addEventListener("abort", () => {
+          controller.error(new DOMException("aborted", "AbortError"));
+        });
+      },
+      pull() {
+        return new Promise<void>(() => {});
+      },
+    });
+    return { ok: true, status: 200, body } as unknown as Response;
+  }) as unknown as typeof fetch;
+  const r = await runAiStream(req({ idleTimeoutMs: 30_000 }), undefined, doFetch, undefined, {
+    sleep: async () => {},
+    idleWatchdogNow: clock.now,
+    idleWatchdogSetTimeout: clock.setTimeoutFn,
+    idleWatchdogClearTimeout: clock.clearTimeoutFn,
+  });
+  assert.equal(r.paused, true);
+  assert.deepEqual(
+    r.toolCalls.map((t) => t.name),
+    ["read_file"],
+    "a fully-formed tool call was dropped by the pause return",
+  );
+});
+
+test("runAiStream: a tool call cut MID-ARGUMENTS by the pause is dropped, not half-run", async () => {
+  // The other half of the same fix. Truncated arguments parse to `{}` downstream, and running
+  // `write_file` with no arguments at all is a worse outcome than not running it.
+  const clock = compressedClock(1000);
+  const frames = [
+    'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c1","function":{"name":"write_file","arguments":"{\\"path\\":\\"/tm"}}]}}]}\n',
+  ];
+  const doFetch = (async (_url: unknown, init?: { signal?: AbortSignal }) => {
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        const enc = new TextEncoder();
+        for (const f of frames) controller.enqueue(enc.encode(f));
+        init?.signal?.addEventListener("abort", () => {
+          controller.error(new DOMException("aborted", "AbortError"));
+        });
+      },
+      pull() {
+        return new Promise<void>(() => {});
+      },
+    });
+    return { ok: true, status: 200, body } as unknown as Response;
+  }) as unknown as typeof fetch;
+  const r = await runAiStream(req({ idleTimeoutMs: 30_000 }), undefined, doFetch, undefined, {
+    sleep: async () => {},
+    idleWatchdogNow: clock.now,
+    idleWatchdogSetTimeout: clock.setTimeoutFn,
+    idleWatchdogClearTimeout: clock.clearTimeoutFn,
+  });
+  assert.equal(r.paused, true);
+  assert.deepEqual(r.toolCalls, []);
+});
+
+test("runAiStream: a tools-shaped refusal is REPORTED so the renderer can fall back", async () => {
+  // `looksLikeToolsRejection` has existed since the text protocol did and the desktop never
+  // received the fact — only main can decide it (the status and body never cross the bridge),
+  // so a tool-incapable endpoint failed every turn forever with the fallback one field away.
+  const refuse = (async () =>
+    ({
+      ok: false,
+      status: 400,
+      statusText: "Bad Request",
+      headers: { get: () => null },
+      text: async () => '{"error":{"message":"registry.ollama.ai does not support tools"}}',
+    }) as unknown as Response) as unknown as typeof fetch;
+  const r = await runAiStream(
+    req({
+      tools: [
+        { type: "function", function: { name: "read_file", description: "d", parameters: {} } },
+      ],
+    }),
+    undefined,
+    refuse,
+    undefined,
+    { sleep: async () => {}, retries: 0 },
+  );
+  assert.equal(r.ok, false);
+  assert.equal(r.toolsRejected, true);
+});
+
+test("runAiStream: an unrelated 400 does NOT demote the endpoint", async () => {
+  // The other half: a context overflow or a bad key has nothing to do with tool support, and
+  // demoting on one would strand a capable model on the weaker transport for the session.
+  const refuse = (async () =>
+    ({
+      ok: false,
+      status: 400,
+      statusText: "Bad Request",
+      headers: { get: () => null },
+      text: async () => '{"error":{"message":"context length exceeded"}}',
+    }) as unknown as Response) as unknown as typeof fetch;
+  const r = await runAiStream(
+    req({
+      tools: [
+        { type: "function", function: { name: "read_file", description: "d", parameters: {} } },
+      ],
+    }),
+    undefined,
+    refuse,
+    undefined,
+    { sleep: async () => {}, retries: 0 },
+  );
+  assert.equal(r.ok, false);
+  assert.equal(r.toolsRejected, undefined);
+});
+
 /* ── the exit unload (§9c) ───────────────────────────────────────────────────*/
 
 test("freeLocalModels unloads exactly the LOCAL models a run pinned", async () => {
@@ -659,4 +884,229 @@ test("a LOCAL endpoint is untouched — no key is looked up and none is needed",
     return sseResponse(["data: [DONE]\n"]);
   }) as never);
   assert.equal(seen?.authorization, undefined);
+});
+
+/* ── ai:probeEndpoint — MEASURE a local model instead of guessing at it ──────*/
+
+test("probeEndpointCapabilities: returns the runner's window AND its capability array", async () => {
+  // The capability array is the whole point: `ai/effort/rules.ts` resolves `/think` through
+  // rules that match a PROBED capability ahead of any model-name guess, and Studio had no path
+  // to this data at all — so every local model fell through to `UNKNOWN_CAPABILITY` and the
+  // effort chip reported "not available", including for models that advertise `thinking`.
+  const doFetch = (async (url: string) => ({
+    ok: url.endsWith("/api/show"),
+    json: async () => ({
+      model_info: { "qwen3moe.context_length": 262144 },
+      capabilities: ["completion", "vision", "tools", "thinking"],
+      modified_at: "2026-07-24T05:25:11Z",
+    }),
+  })) as unknown as typeof fetch;
+  const r = await probeEndpointCapabilities("http://127.0.0.1:11434/v1", "qwen3.6:latest", doFetch);
+  assert.equal(r.ok, true);
+  assert.equal(r.source, "ollama");
+  assert.equal(r.contextWindow, 262144);
+  assert.deepEqual(r.capabilities, ["completion", "vision", "tools", "thinking"]);
+  assert.equal(r.revision, "2026-07-24T05:25:11Z");
+});
+
+test("probeEndpointCapabilities: a failed probe says `default` — never a fake 8192 measurement", async () => {
+  // `source:"default"` is the difference between "this model has an 8k window" and "I could
+  // not measure it". A caller that cannot tell those apart will present the floor as a fact.
+  const dead = (async () => {
+    throw new Error("ECONNREFUSED");
+  }) as unknown as typeof fetch;
+  const r = await probeEndpointCapabilities("http://127.0.0.1:1/v1", "m", dead);
+  assert.equal(r.source, "default");
+  assert.equal(r.capabilities, undefined);
+});
+
+test("probeEndpointCapabilities: an unrecognised payload is a failure, not a guess", async () => {
+  const doFetch = (async () => ({
+    ok: true,
+    json: async () => ({ surprise: true }),
+  })) as unknown as typeof fetch;
+  const r = await probeEndpointCapabilities("http://127.0.0.1:11434/v1", "m", doFetch);
+  assert.equal(r.source, "default");
+});
+
+/* ── inline <think> must not arrive as the answer (P4) ──────────────────────*/
+
+/** One SSE content delta. */
+function contentDelta(t: string): string {
+  return `data: ${JSON.stringify({ choices: [{ delta: { content: t } }] })}\n\n`;
+}
+
+test("an R1-style model's inline thinking is split out of the AUTHORITATIVE text", async () => {
+  // `text` is what the invoke returns and what the agent loop acts on — hiding the thinking
+  // only in the presentational feed would leave it in the answer. The tag is resolved from the
+  // model NAME (`deepseek-r1` carries `reasoningTag: "think"` in the capability table).
+  const events: AiProgressEvent[] = [];
+  // `isDestroyed` is not optional: `emit` guards on it, and a stub without it makes every
+  // send throw and the whole turn return `ok:false` with empty text.
+  const sender = {
+    isDestroyed: () => false,
+    send: (_c: string, e: AiProgressEvent) => events.push(e),
+  } as never;
+  const doFetch = (async () =>
+    sseResponse([
+      contentDelta("<thi"),
+      contentDelta("nk>weighing it up</think>"),
+      contentDelta("The answer is 4."),
+      "data: [DONE]\n\n",
+    ])) as unknown as typeof fetch;
+
+  const res = await runAiStream(
+    {
+      runId: "r1",
+      endpoint: { id: "local", baseUrl: "http://127.0.0.1:11434/v1", model: "deepseek-r1:8b" },
+      messages: [{ role: "user", content: "2+2" }],
+    } as unknown as AiStreamRequest,
+    sender,
+    doFetch,
+  );
+
+  assert.equal(res.text, "The answer is 4.", "the deliberation leaked into the answer");
+  const thinking = events
+    .filter((e) => e.kind === "reasoning")
+    .map((e) => e.text)
+    .join("");
+  assert.equal(thinking, "weighing it up");
+});
+
+test("a model with NO reasoning tag streams byte-identically — the no-regression case", async () => {
+  const doFetch = (async () =>
+    sseResponse([
+      contentDelta("plain <think>not special</think> answer"),
+      "data: [DONE]\n\n",
+    ])) as unknown as typeof fetch;
+  const res = await runAiStream(
+    {
+      runId: "r2",
+      endpoint: { id: "local", baseUrl: "http://127.0.0.1:11434/v1", model: "gemma4:12b" },
+      messages: [{ role: "user", content: "hi" }],
+    } as unknown as AiStreamRequest,
+    undefined,
+    doFetch,
+  );
+  assert.equal(res.text, "plain <think>not special</think> answer");
+});
+
+test("an UNTERMINATED thought never becomes the answer", async () => {
+  const doFetch = (async () =>
+    sseResponse([
+      contentDelta("<think>I was cut off"),
+      "data: [DONE]\n\n",
+    ])) as unknown as typeof fetch;
+  const res = await runAiStream(
+    {
+      runId: "r3",
+      endpoint: { id: "local", baseUrl: "http://127.0.0.1:11434/v1", model: "deepseek-r1:8b" },
+      messages: [{ role: "user", content: "x" }],
+    } as unknown as AiStreamRequest,
+    undefined,
+    doFetch,
+  );
+  assert.equal(res.text, "");
+});
+
+/* ── V0: the probe cache (four hook consumers, one request) ─────────────────*/
+
+test("repeat probes for the same model make ONE request — four panes, one POST", () => {
+  // AgentPane, two EditorPane surfaces and DatabasePanel each call `useActiveEndpoint` with
+  // their own hook state, so every model switch used to fire four identical `/api/show` POSTs.
+  // The CLI never had this problem because its probe owns a cache; main had none.
+  resetProbeCache();
+  let calls = 0;
+  const doFetch = (async () => {
+    calls += 1;
+    return {
+      ok: true,
+      json: async () => ({
+        model_info: { "qwen3moe.context_length": 262144 },
+        capabilities: ["completion", "tools", "thinking"],
+        modified_at: "t",
+      }),
+    };
+  }) as unknown as typeof fetch;
+
+  return Promise.all(
+    Array.from({ length: 4 }, () =>
+      probeEndpointCapabilities("http://127.0.0.1:11434/v1", "qwen3.6:latest", doFetch),
+    ),
+  ).then((results) => {
+    for (const r of results) assert.equal(r.contextWindow, 262144);
+    assert.equal(probeRequestCount(), 1, "four callers must share one probe");
+    assert.ok(calls <= 1, "and one fetch");
+  });
+});
+
+test("the cache is keyed on the MODEL — one daemon serves many", async () => {
+  resetProbeCache();
+  const doFetch = (async (_u: string, init?: { body?: string }) => {
+    const model = JSON.parse(init?.body ?? "{}").model as string;
+    return {
+      ok: true,
+      json: async () => ({
+        model_info: { "x.context_length": model === "gemma4:12b" ? 8192 : 262144 },
+        modified_at: "t",
+      }),
+    };
+  }) as unknown as typeof fetch;
+  const a = await probeEndpointCapabilities("http://127.0.0.1:11434/v1", "qwen3.6:latest", doFetch);
+  const b = await probeEndpointCapabilities("http://127.0.0.1:11434/v1", "gemma4:12b", doFetch);
+  assert.equal(a.contextWindow, 262144);
+  assert.equal(b.contextWindow, 8192, "the second model got the first model's answer");
+});
+
+test("a FAILURE is not cached — a runner that was still booting must be re-askable", async () => {
+  resetProbeCache();
+  let payload: unknown = { nothing: "useful" };
+  const doFetch = (async () => ({
+    ok: true,
+    json: async () => payload,
+  })) as unknown as typeof fetch;
+  const first = await probeEndpointCapabilities("http://127.0.0.1:11434/v1", "m", doFetch);
+  assert.equal(first.source, "default");
+  payload = { model_info: { "x.context_length": 32768 }, modified_at: "t" };
+  const second = await probeEndpointCapabilities("http://127.0.0.1:11434/v1", "m", doFetch);
+  assert.equal(second.contextWindow, 32768, "a cached failure would have pinned this");
+  assert.equal(probeRequestCount(), 2);
+});
+
+test("a 200 that is NOT an SSE stream still yields the answer, not silence", async () => {
+  /**
+   * Plenty of OpenAI-compatible servers, proxies and gateways ignore `stream: true` and reply
+   * with an ordinary JSON completion. The reader looks only for `data:` lines, finds none, and
+   * the turn ends with no text, no usage and no error — a completely silent reply,
+   * indistinguishable to the user from the model declining to answer.
+   *
+   * Core's shared client was fixed the same way in an earlier round; this transport is the
+   * desktop's OWN copy and had the identical hole. Verified through the real `ai:stream` handler
+   * against a live node:http server before and after.
+   */
+  const rec = recorder();
+  const body = JSON.stringify({
+    choices: [{ index: 0, message: { role: "assistant", content: "The answer is 42." } }],
+    usage: { prompt_tokens: 11, completion_tokens: 5, total_tokens: 16 },
+  });
+  const r = await runAiStream(
+    req(),
+    rec.sender as never,
+    async () =>
+      new Response(body, { status: 200, headers: { "content-type": "application/json" } }),
+  );
+  assert.equal(r.ok, true, `a non-SSE 200 was treated as a failure: ${r.error}`);
+  assert.equal(r.text, "The answer is 42.", "the answer was silently discarded");
+  assert.equal(r.usage?.inputTokens, 11, "usage from a non-streamed reply was dropped too");
+  assert.equal(r.usage?.outputTokens, 5);
+
+  // …and a 200 whose body carries nothing readable is an ERROR, not silence.
+  const empty = await runAiStream(
+    req(),
+    rec.sender as never,
+    async () =>
+      new Response("{}", { status: 200, headers: { "content-type": "application/json" } }),
+  );
+  assert.equal(empty.ok, false);
+  assert.match(empty.error ?? "", /no readable content/);
 });

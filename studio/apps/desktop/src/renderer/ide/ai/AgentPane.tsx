@@ -40,7 +40,15 @@ import {
   serializeSession,
   truncateAfter,
 } from "@prometheus/core/agent-session";
-import { describeEffort } from "@prometheus/core/ai-effort";
+import {
+  EFFORT_TIERS,
+  type EffortTier,
+  type TraitCell,
+  describeEffort,
+  isEffortTier,
+  moveTraitFocus,
+  traitRail,
+} from "@prometheus/core/ai-effort";
 import * as rules from "@prometheus/core/rules";
 import {
   type ActivityId,
@@ -81,10 +89,12 @@ import { commandPaletteRows } from "../../commands/registry.js";
 import { useAuthorisationStore } from "../../stores/authorisation.js";
 import { useSecurityStore } from "../../stores/features.js";
 
+import { DEFAULT_COMPACT_IDLE_TIMEOUT_MS } from "@prometheus/core/agent-idle-watchdog";
 import { AuthPill } from "../../shell/AuthPill.js";
 import { getActiveEditorSelection } from "../EditorPane.js";
 import { NOTEBOOK_EDIT_TOOL_NAME, runNotebookTool } from "../notebook/notebook-tool.js";
 import { useCodeIndexStore } from "../state/code-index-store.js";
+
 import { type IndexedSymbol, searchSymbols, shortlistFiles } from "../state/code-index.js";
 import { fuzzyRank } from "../state/fuzzy.js";
 import { useAiSessionStore, useTabsStore } from "../state/stores.js";
@@ -110,7 +120,7 @@ async function notebookCardResult(
   };
 }
 import { expandCommandFile, matchCommandFileInvocation } from "./command-files.js";
-import { EFFORT_SHORT, effortFor, useEffortStore } from "./effort-store.js";
+import { effortFor, useEffortStore } from "./effort-store.js";
 import { useActiveEndpoint } from "./endpoint-hook.js";
 import {
   type CatalogModelLite,
@@ -119,6 +129,7 @@ import {
   formatContextWindow,
 } from "./endpoints.js";
 import { Markdown } from "./markdown.js";
+import { createMemoryBlock } from "./memory-block.js";
 import {
   type ActiveMention,
   type MentionChip,
@@ -133,9 +144,11 @@ import {
   replaceMention,
   sliceSymbolRegion,
 } from "./mention.js";
+import { type RevertStepResult, revertOutcome } from "./revert-outcome.js";
 import { agentRuns } from "./run-controller.js";
 import { isSafeSessionId, liveToSession, sessionToLive } from "./session-map.js";
 import { activeSlashQuery, clampSlashIndex, filterSlashCommands } from "./slash.js";
+import { loadSteeringSources } from "./steering-load.js";
 
 /**
  * The heights the composer's floating layers are CLAMPED against (§9.2).
@@ -390,6 +403,7 @@ export function AgentPane({
   const takeCheckpoint = useAiSessionStore((s) => s.takeCheckpoint);
   const getCheckpoint = useAiSessionStore((s) => s.getCheckpoint);
   const revertToTurn = useAiSessionStore((s) => s.revertToTurn);
+  const setStatus = useAiSessionStore((s) => s.setStatus);
   const newSession = useAiSessionStore((s) => s.newSession);
   const closeSession = useAiSessionStore((s) => s.closeSession);
   const selectSession = useAiSessionStore((s) => s.selectSession);
@@ -464,8 +478,154 @@ export function AgentPane({
     return () => window.removeEventListener("prometheus:seed-agent-prompt", onSeed);
   }, []);
   const effortTier = useEffortStore((s) => s.tier);
-  const cycleEffort = useEffortStore((s) => s.cycle);
-  const effortResolution = useMemo(() => effortFor(effortTier, active), [effortTier, active]);
+  const setEffortTier = useEffortStore((s) => s.setTier);
+  const effortForce = useEffortStore((s) => s.force);
+  const hydrateEffort = useEffortStore((s) => s.hydrate);
+  /**
+   * Adopt the persisted `ai.effort` / `ai.effortForce` settings, once per mount.
+   *
+   * Both keys were added to the schema with NO reader — validated on write and ignored on
+   * read, so a user who set a starting tier in Settings got it silently dropped. (The settings
+   * IPC also gates on `findNodeBySchemaKey`, so until they were registered in `SETTINGS_TREE`
+   * they could not even be written.) The tier only lands when the user has made no explicit
+   * choice on this machine; see `hydrate`.
+   */
+  useEffect(() => {
+    let alive = true;
+    void (async () => {
+      const api = window.prometheus?.settings;
+      if (!api) return;
+      const [tier, force] = await Promise.all([
+        api.get("ai.effort").catch(() => undefined),
+        api.get("ai.effortForce").catch(() => undefined),
+      ]);
+      if (!alive) return;
+      hydrateEffort(
+        isEffortTier(tier?.value) ? tier.value : undefined,
+        typeof force?.value === "boolean" ? force.value : undefined,
+      );
+    })();
+    return () => {
+      alive = false;
+    };
+  }, [hydrateEffort]);
+  const effortResolution = useMemo(
+    () => effortFor(effortTier, active, { force: effortForce }),
+    [effortTier, active, effortForce],
+  );
+  /**
+   * The model's traits beside the composer: what it can DO (the runner's own capability
+   * words) and then the one setting the user can move.
+   *
+   * Order and grid shape come from core (`ai/effort/traits.ts`) — the SAME functions the CLI's
+   * composer strip uses — so the two surfaces cannot drift into presenting the same facts
+   * differently. `pills` is the inline rendering; `grid` is non-null only past the point where
+   * one line stops fitting the ~330px rail.
+   */
+  const railCells = useMemo(
+    () =>
+      traitRail({
+        capabilities: active?.probedCapabilities,
+        // Studio has no tools switch — it always sends the set — so the cell is an indicator
+        // here and core says so out loud rather than offering a control that does nothing.
+        toolsEnabled: true,
+        toolsSwitchable: false,
+        // The APPLIED tier, not the requested one — `max` on a three-level model is served as
+        // `high`, and showing the request would be the same misreport the CLI badge was fixed
+        // for. With no endpoint bound yet there is nothing to resolve against, so the local
+        // setting is reported as-is rather than the dial vanishing from the rail.
+        effort:
+          effortResolution === undefined
+            ? { tier: effortTier, available: true }
+            : {
+                tier: effortResolution.applied ?? effortTier,
+                available: effortResolution.applied !== null,
+              },
+      }),
+    [active, effortResolution, effortTier],
+  );
+
+  /** ⌘T (⌃T off macOS) focus over the rail; null = the rail is a readout. */
+  const [traitFocus, setTraitFocus] = useState<number | null>(null);
+  /** the tier thinking was last ON at, so `think` off→on is a round trip and not a demotion. */
+  const lastThinkingTier = useRef<EffortTier>(effortTier === "off" ? "medium" : effortTier);
+  useEffect(() => {
+    if (effortTier !== "off") lastThinkingTier.current = effortTier;
+  }, [effortTier]);
+
+  const adjustTrait = useCallback(
+    (cell: TraitCell, delta: 1 | -1) => {
+      if (cell.id === "thinking") {
+        setEffortTier(delta > 0 ? lastThinkingTier.current : "off");
+        return;
+      }
+      if (cell.id === "effort") {
+        const cur = EFFORT_TIERS.indexOf(effortTier);
+        const next = Math.max(0, Math.min(EFFORT_TIERS.length - 1, (cur < 0 ? 2 : cur) + delta));
+        setEffortTier(EFFORT_TIERS[next] as EffortTier);
+      }
+    },
+    [effortTier, setEffortTier],
+  );
+
+  /**
+   * The rail's keyboard mode. ⌘T opens it, ←/→ walk it, ↑/↓ throw the focused switch, Esc
+   * leaves — the same contract as the terminal's ⌃T, so the gesture transfers between surfaces.
+   *
+   * Bound at the window because the rail itself is not focusable: the user is typing in the
+   * composer when they reach for the chord, and stealing DOM focus to a chip row would cost
+   * them their caret. While the mode is open the arrows are captured, which is why it has to be
+   * explicitly left rather than lingering.
+   */
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent): void => {
+      const chord = (e.metaKey || e.ctrlKey) && !e.altKey && e.key.toLowerCase() === "t";
+      if (chord) {
+        e.preventDefault();
+        setTraitFocus((prev) =>
+          prev !== null
+            ? null
+            : railCells.length === 0
+              ? null
+              : Math.max(
+                  0,
+                  railCells.findIndex((c) => c.actionable),
+                ),
+        );
+        return;
+      }
+      if (traitFocus === null) return;
+      if (e.key === "Escape") {
+        e.preventDefault();
+        setTraitFocus(null);
+        return;
+      }
+      if (e.key === "ArrowLeft" || e.key === "ArrowRight") {
+        e.preventDefault();
+        setTraitFocus((i) => moveTraitFocus(railCells, i ?? 0, e.key === "ArrowLeft" ? -1 : 1));
+        return;
+      }
+      if (e.key === "ArrowUp" || e.key === "ArrowDown") {
+        e.preventDefault();
+        const cell = railCells[traitFocus];
+        if (cell?.actionable) adjustTrait(cell, e.key === "ArrowUp" ? 1 : -1);
+      }
+    };
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+  }, [railCells, traitFocus, adjustTrait]);
+
+  /**
+   * The dial's tooltip — the one place the DEGRADATION sentence fits.
+   *
+   * An emulated tier still shows its tier on the rail: no parameter went out, but a graded
+   * instruction did, so the dial genuinely is at that setting. The tooltip is where "by prompt,
+   * not by parameter" gets said in full.
+   */
+  const effortTitle = effortResolution?.degraded
+    ? `effort ${effortTier} — ${effortResolution.degraded.message}`
+    : `Reasoning effort (applied: ${describeEffort(effortResolution)})`;
+
   // §3: the last settled run's phase totals for THIS tab. Read from the module-level
   // controller (not local state) so switching tabs shows each tab's own attribution.
   const [runPhases, setRunPhases] = useState<LatencyPhases | undefined>(undefined);
@@ -527,14 +687,10 @@ export function AgentPane({
     void (async () => {
       const api = ide();
       if (!api) return;
-      const sources: rules.RuleSource[] = [];
-      for (const kind of ["agents", "claude"] as const) {
-        const file = kind === "agents" ? "AGENTS.md" : "CLAUDE.md";
-        const r = await api.fsRead(`file://${root}/${file}`).catch(() => undefined);
-        if (r?.ok && typeof r.text === "string" && r.text.trim()) {
-          sources.push({ scope: "project", kind, path: file, content: r.text });
-        }
-      }
+      const sources = await loadSteeringSources({
+        readProjectFile: async (name) => (await api.fsRead(`file://${root}/${name}`))?.text,
+        readGlobal: async () => (await api.steeringGlobal()).sources,
+      });
       if (!alive) return;
       const assembled = sources.length > 0 ? rules.assembleRules(sources) : { text: "", order: [] };
       projectRulesRef.current = assembled.text;
@@ -551,25 +707,31 @@ export function AgentPane({
   // dep — but reached through `memory_read` over the `agent:systemTool` IPC channel (core owns
   // the fs; the renderer is sandboxed) rather than `fsRead`. `data.count === 0` (nothing ever
   // recorded for this project) is treated the same as "no rules": nothing is injected.
-  const memoryBlockRef = useRef<string>("");
+  /**
+   * The block is REFRESHED after every turn, not read once per workspace.
+   *
+   * It used to be loaded once into a ref, so a fact the agent recorded with `memory_write`
+   * mid-session stayed invisible for the rest of that session — the model would re-ask something
+   * it had just been told to remember, and only an app restart or a workspace switch brought it
+   * back. The rule lives in `memory-block.ts` because `.tsx` cannot be unit-tested, which is
+   * exactly why this survived.
+   */
+  const memoryBlockRef = useRef(
+    createMemoryBlock({
+      read: async () => {
+        const api = ide();
+        const root = workspaceRootRef.current;
+        if (!api || !root) return undefined;
+        return await api.systemTool({ name: "memory_read", args: {}, cwd: root });
+      },
+    }),
+  );
+  const workspaceRootRef = useRef<string | undefined>(workspaceRoot);
   useEffect(() => {
-    let alive = true;
-    const root = workspaceRoot;
-    memoryBlockRef.current = "";
-    if (!root) return;
-    void (async () => {
-      const api = ide();
-      if (!api) return;
-      const r = await api
-        .systemTool({ name: "memory_read", args: {}, cwd: root })
-        .catch(() => undefined);
-      if (!alive || !r?.ok) return;
-      if (r.data?.count === 0) return;
-      memoryBlockRef.current = r.summary;
-    })();
-    return () => {
-      alive = false;
-    };
+    workspaceRootRef.current = workspaceRoot;
+    memoryBlockRef.current.clear();
+    if (!workspaceRoot) return;
+    void memoryBlockRef.current.refresh();
   }, [workspaceRoot]);
 
   // index the workspace files for the @-mention picker (one walk per root).
@@ -1074,7 +1236,7 @@ export function AgentPane({
     // prepend the workspace AGENTS.md/CLAUDE.md rules (if any), then durable memory (if any),
     // to the system prompt — same order as the CLI (steering, then memory).
     const projectRules = projectRulesRef.current;
-    const memoryBlock = memoryBlockRef.current;
+    const memoryBlock = memoryBlockRef.current.current();
     const systemContent = [AGENT_PANE_SYSTEM, projectRules, memoryBlock]
       .filter((s) => s.trim() !== "")
       .join("\n\n");
@@ -1118,6 +1280,8 @@ export function AgentPane({
         hookRun: (req) =>
           ide()?.hookRun(req) ??
           Promise.resolve({ ok: false, error: "the editor bridge is unavailable" }),
+        // Point 6b: MAIN owns the canary audit disk; the renderer only forwards the trip.
+        canaryTrip: (req) => ide()?.canaryTrip(req) ?? Promise.resolve({ ok: false }),
       },
       // The MCP surface is a separate main-side module with its own manager, so it is a
       // separate seam: the pane reads the descriptors per turn and calls one tool at a time.
@@ -1133,13 +1297,15 @@ export function AgentPane({
       // tier against THIS endpoint's real capability and forward the patch to every turn.
       // A model with no reasoning control resolves to `applied: null` and nothing is sent.
       ...(() => {
-        const e = effortFor(effortTier, active);
+        const e = effortFor(effortTier, active, { force: effortForce });
         return e ? { effort: e } : {};
       })(),
       onText: (d) => appendStreaming(sid, d),
       onTurnComplete: () => {
         commitStreaming(sid);
         void persistSession(sid); // APP-052: archive the transcript as it grows
+        // Pick up anything the turn recorded with `memory_write` — see `memoryBlockRef`.
+        void memoryBlockRef.current.refresh();
       },
       onToolNote: (note) => pushTurn(sid, { role: "assistant", content: `🔧 ${note}` }),
       // APP-055/056: usage folds into the module controller (survives unmount).
@@ -1172,7 +1338,13 @@ export function AgentPane({
             },
             { role: "user", content: older.map((t) => `${t.role}: ${t.content}`).join("\n\n") },
           ],
-          { neverSendToCloud },
+          // A background helper the user's real turn is waiting behind, not the user's own
+          // work — bounded to a SHORTER idle window than the main turn's (10 min default) for
+          // exactly that reason, matching the CLI's `makeSummarizer` (same constant, same
+          // rationale — see its own doc comment). Before this, a cold-loading/wedged model
+          // stalled the summarizer silently for up to 10x longer than the CLI's own budget for
+          // this exact role, since `runChatTurn` otherwise falls back to the full-turn default.
+          { neverSendToCloud, idleTimeoutMs: DEFAULT_COMPACT_IDLE_TIMEOUT_MS },
         );
         return out.text;
       });
@@ -1240,19 +1412,51 @@ export function AgentPane({
       const root = useTabsStore.getState().workspaceRoot || ".";
       const cur = await snapshotWorkspace(root);
       const plan = restorePlan(cp, Object.keys(cur.files));
-      // fs FIRST, settle, THEN truncate — else a failed write shows a reverted chat over
-      // an unreverted disk (revert-ordering, Fable-5 refinement).
+      /**
+       * fs FIRST, settle, THEN truncate — else a failed write shows a reverted chat over an
+       * unreverted disk (revert-ordering, Fable-5 refinement).
+       *
+       * The ordering was right and nothing read the result it was ordered for: both calls ended
+       * in `.catch(() => undefined)`, which swallows a throw, and the resolved `{ok:false}` was
+       * never inspected — so the chat rolled back unconditionally. The outcomes are collected
+       * now and `revertOutcome` decides whether truncating is honest.
+       */
+      const steps: RevertStepResult[] = [];
       for (const [rel, content] of Object.entries(plan.write)) {
-        await api.fsWrite(`file://${root}/${rel}`, content).catch(() => undefined);
+        const res = await api.fsWrite(`file://${root}/${rel}`, content).catch((e: unknown) => ({
+          ok: false,
+          error: e instanceof Error ? e.message : String(e),
+        }));
+        steps.push({
+          path: rel,
+          kind: "write",
+          ok: res?.ok === true,
+          ...(res?.error ? { error: res.error } : {}),
+        });
       }
       for (const rel of plan.delete) {
-        await api.fsDelete(`file://${root}/${rel}`).catch(() => undefined);
+        const res = await api.fsDelete(`file://${root}/${rel}`).catch((e: unknown) => ({
+          ok: false,
+          error: e instanceof Error ? e.message : String(e),
+        }));
+        steps.push({
+          path: rel,
+          kind: "delete",
+          ok: res?.ok === true,
+          ...(res?.error ? { error: res.error } : {}),
+        });
       }
       agentRuns.cancel(sid); // APP-056: abort run + drop paused/proposed for this tab
       setBusy(sid, false);
+      const outcome = revertOutcome(steps);
+      if (!outcome.truncate) {
+        // Keep the transcript: it is the only remaining record of what is still on disk.
+        setStatus(sid, outcome.notice);
+        return;
+      }
       revertToTurn(sid, turnIndex);
     },
-    [activeId, getCheckpoint, revertToTurn, setBusy],
+    [activeId, getCheckpoint, revertToTurn, setBusy, setStatus],
   );
 
   const stopActive = useCallback(() => {
@@ -2644,32 +2848,120 @@ export function AgentPane({
               </div>,
               document.body,
             )}
-          <button
-            type="button"
-            onClick={() => cycleEffort()}
-            title={
-              effortResolution?.degraded
-                ? `effort ${effortTier} — ${effortResolution.degraded.message}`
-                : `Reasoning effort — click to change (applied: ${describeEffort(effortResolution)})`
-            }
-            style={composerChip()}
-          >
-            effort:{" "}
-            <span
-              style={{
-                // honesty (§2.5): a tier the model cannot honour is warn-tinted and reads
-                // "n/a" — never a confident label for something that was never sent.
-                color: effortResolution?.degraded ? "var(--warn)" : "var(--accent)",
-              }}
-            >
-              {effortResolution?.degraded ? "n/a" : EFFORT_SHORT[effortTier]}
-            </span>
-          </button>
           <span style={{ flex: 1 }} />
           <AuthPill compact />
         </div>
+        {/* One row, fixed slots: a capability the model LACKS keeps its place, dimmed, because
+            absence is information the old present-only grid could not report — and a row whose
+            cells never move is one the ⌘T arrows can walk. The dial is always last. */}
+        <TraitRail
+          cells={railCells}
+          focus={traitFocus}
+          effortTitle={effortTitle}
+          onFocus={setTraitFocus}
+          onAdjust={adjustTrait}
+        />
       </div>
     </div>
+  );
+}
+
+/**
+ * The trait rail: one row of fixed slots, then the dial.
+ *
+ * Green = live this turn, amber = switched off, dim = the model does not have it at all. The
+ * three states are what the old strip could not say: it listed what was present and was silent
+ * about everything else, so "this model cannot see" and "you turned vision off" looked identical
+ * (both absent) and neither was distinguishable from a rendering bug.
+ *
+ * ⌘T focuses a cell; ←/→ walk, ↑/↓ throw the switch, Esc leaves. Clicking a cell does the same
+ * thing as focusing it, so the rail is usable without ever learning the chord.
+ */
+function TraitRail({
+  cells,
+  focus,
+  effortTitle,
+  onFocus,
+  onAdjust,
+}: {
+  cells: readonly TraitCell[];
+  focus: number | null;
+  effortTitle: string;
+  onFocus: (i: number | null) => void;
+  onAdjust: (cell: TraitCell, delta: 1 | -1) => void;
+}): JSX.Element | null {
+  if (cells.length === 0) return null;
+  const focused = focus === null ? null : cells[focus];
+  return (
+    <div style={{ marginTop: 6 }}>
+      <div style={{ display: "flex", gap: 4, alignItems: "center", flexWrap: "wrap" }}>
+        {cells.map((cell, i) => (
+          <TraitCellChip
+            key={cell.id}
+            cell={cell}
+            focused={focus === i}
+            {...(cell.id === "effort" ? { title: effortTitle } : {})}
+            onSelect={() => onFocus(focus === i ? null : i)}
+            onAdjust={(delta) => onAdjust(cell, delta)}
+          />
+        ))}
+      </div>
+      {focused ? (
+        <div style={{ marginTop: 4, fontSize: 11, color: "var(--text-muted)" }}>
+          {focused.actionable
+            ? focused.id === "effort"
+              ? "↑/↓ raise/lower effort · ←/→ move · esc done"
+              : "↑ on · ↓ off · ←/→ move · esc done"
+            : `${focused.label}: ${focused.reason ?? "no switch here"} · esc done`}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+/** One rail cell. An indicator renders as a chip; an actionable one as a button. */
+function TraitCellChip({
+  cell,
+  focused,
+  title,
+  onSelect,
+  onAdjust,
+}: {
+  cell: TraitCell;
+  focused: boolean;
+  /** overrides the generated tooltip — the dial carries the degradation sentence. */
+  title?: string;
+  onSelect: () => void;
+  onAdjust: (delta: 1 | -1) => void;
+}): JSX.Element {
+  const color =
+    cell.state === "on" ? "var(--ok)" : cell.state === "off" ? "var(--warn)" : "var(--text-muted)";
+  return (
+    <button
+      type="button"
+      onClick={() => (cell.actionable ? onAdjust(cell.state === "on" ? -1 : 1) : onSelect())}
+      title={
+        title ??
+        (cell.actionable
+          ? `${cell.label} — ${cell.state === "on" ? "on" : "off"}; click to toggle, ⌘T for the keyboard rail`
+          : `${cell.label} — ${cell.reason ?? "no switch here"}`)
+      }
+      style={{
+        ...composerChip(),
+        justifyContent: "center",
+        fontFamily: "var(--font-mono)",
+        cursor: cell.actionable ? "pointer" : "default",
+        color,
+        // the focus ring is a BORDER, not a hue: the three state colors already own hue here,
+        // and a fourth would make the selection compete with the thing it is selecting.
+        outline: focused ? "1px solid var(--accent)" : "none",
+        outlineOffset: 1,
+        textOverflow: "ellipsis",
+        whiteSpace: "nowrap",
+      }}
+    >
+      {cell.label}
+    </button>
   );
 }
 

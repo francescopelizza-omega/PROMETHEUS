@@ -14,6 +14,8 @@ import { homedir } from "node:os";
 
 import { mcpHost } from "@prometheus/core";
 import * as agentProtocol from "@prometheus/core/agent-protocol";
+import { createCliSecretsStore, prometheusHome } from "@prometheus/core/agent-system-host";
+import { appendMcpAudit } from "@prometheus/core/mcp-node";
 import type { EngineConfig } from "@prometheus/engine-bridge";
 import { ipcMain } from "electron";
 
@@ -73,15 +75,32 @@ export interface McpIpcOptions {
   storePath: string;
   /** engine config for the nemesis gate (defaults to {} — same as the IDE run-gate). */
   engineConfig?: EngineConfig;
+  /** PROMETHEUS_HOME for the tool-drift audit trail (shared with the CLI's, default prometheusHome()). */
+  home?: string;
 }
 
 /** Register the `mcp:*` handlers over one manager; returns a disposer. */
 export function registerMcpIpcHandlers(opts: McpIpcOptions): () => void {
+  const home = opts.home ?? prometheusHome();
   const store = new DiskConfigStore(opts.storePath);
   const manager = new mcpHost.McpHostManager({
     store,
     gate: createMcpGate(opts.engineConfig ?? {}),
-    transport: createMcpTransportFactory(),
+    /**
+     * Resolve a remote server's bearer token from the SAME keychain the CLI writes it to.
+     *
+     * `prometheus mcp add --auth-secret` stores the token in the OS keychain and writes only a
+     * REF into the config. `StreamableHttpTransport` attaches the header only when both the ref
+     * and a resolver are present, and the desktop passed no resolver — so no Authorization
+     * header was ever sent, the remote 401'd, health flipped to "error" and no tools appeared,
+     * while the identical connector worked from the terminal. Nothing in the UI hinted that auth
+     * had been dropped. The CLI's secrets backend was already moved into core precisely so the
+     * desktop could read the same keychain; this is the wiring that was missing.
+     */
+    transport: createMcpTransportFactory({
+      resolveAuth: (ref: string) => createCliSecretsStore().get(mcpHost.MCP_AUTH_SERVICE, ref),
+    }),
+    onToolDrift: (info) => appendMcpAudit(home, { event: "tool-drift", ...info }),
   });
 
   const view = (cfg: McpServerConfig): McpConnectorView => toView(cfg, manager.isConnected(cfg.id));
@@ -105,6 +124,23 @@ export function registerMcpIpcHandlers(opts: McpIpcOptions): () => void {
       return { ok: false, error: "id, label and transport are required" };
     }
     const t = req.transport;
+    /**
+     * REFUSE a transport kind that is neither `stdio` nor `http`.
+     *
+     * The config builder below is a two-way ternary — `kind === "stdio" ? … : {kind:"http", …}` —
+     * so ANY other kind fell into the http branch and was persisted AS http. Worse, the SSRF /
+     * header validation right underneath is gated on `t.kind === "http"`, which an unknown kind
+     * is not, so it never ran. Measured: `{kind:"websocket", url:"ws://example.com/mcp"}` was
+     * accepted `ok:true`, written to disk as `{"kind":"http","url":"ws://example.com/mcp"}` with
+     * `verdict: allow`, and never validated at all. Mislabelling the kind was a way past the
+     * check, not just a cosmetic bug.
+     */
+    if (t.kind !== "stdio" && t.kind !== "http") {
+      return {
+        ok: false,
+        error: `unsupported transport kind "${String((t as { kind?: unknown }).kind)}" — expected "stdio" or "http"`,
+      };
+    }
     if (t.kind === "stdio" && !t.command) return { ok: false, error: "stdio needs a command" };
     if (t.kind === "http") {
       // APP-095: fail-closed SSRF/header validation BEFORE the config is persisted or any
@@ -280,7 +316,15 @@ export function registerMcpIpcHandlers(opts: McpIpcOptions): () => void {
       };
     } catch (e) {
       // Fail-closed and NAMED: a dead transport must not read like a tool that returned nothing.
-      return { ok: false, summary: `${req.tool} on ${req.serverId} failed: ${errString(e)}` };
+      // Routed through mcpOutcome (not hand-built) for the SAME reason the CLI's mcp-session.ts
+      // does: a throw here can be a local transport failure OR a server-authored JSON-RPC
+      // protocol-level error string — there is no way to tell them apart at this catch site, so
+      // both get the same untrusted-data frame + pattern scan as every other call result.
+      const out = agentProtocol.mcpOutcome(req.serverId, req.tool, {
+        content: errString(e),
+        isError: true,
+      });
+      return { ok: out.ok, summary: out.summary };
     }
   });
 

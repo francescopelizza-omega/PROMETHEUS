@@ -10,12 +10,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import type { agent } from "@prometheus/core";
+import { type agent, ai } from "@prometheus/core";
 
 import { setColorEnabled } from "../render.js";
 import { resolveKeymap } from "../tui/keys.js";
 import { stringWidth } from "../tui/width.js";
 import { contextBreakdown } from "./agent-runtime.js";
+import type { ModelCandidate } from "./model-candidates.js";
+import { MAX_SUBAGENTS } from "./orchestrator.js";
 import {
   SLASH_REGISTRY,
   type SlashCtx,
@@ -227,6 +229,49 @@ test("no duplicate primary command names", () => {
     assert.ok(!seen.has(cmd.name), `duplicate command /${cmd.name}`);
     seen.add(cmd.name);
   }
+});
+
+/**
+ * Regression: /demos declared "orchestrate" as an alias, but a LATER, unrelated command in this
+ * same array had "orchestrate" as its own PRIMARY name — BY_NAME's build loop has no
+ * duplicate-key guard, so the later registration silently won and findSlash("orchestrate") never
+ * actually reached /demos, contradicting /demos's own declared alias table. This test generalizes
+ * past that one instance: no alias may collide with ANY other command's primary name or alias.
+ */
+test("no alias collides with another command's primary name or a different command's alias", () => {
+  const owner = new Map<string, string>();
+  for (const cmd of SLASH_REGISTRY) owner.set(cmd.name, cmd.name);
+  for (const cmd of SLASH_REGISTRY) {
+    for (const alias of cmd.aliases ?? []) {
+      const existing = owner.get(alias);
+      assert.ok(
+        !existing || existing === cmd.name,
+        `alias "${alias}" declared on /${cmd.name} collides with /${existing} — one silently shadows the other`,
+      );
+      owner.set(alias, cmd.name);
+    }
+  }
+});
+
+test("findSlash('orchestrate') resolves to the standalone macro, not /demos (alias collision fix)", () => {
+  assert.equal(findSlash("orchestrate")?.name, "orchestrate");
+  assert.equal(findSlash("swarm")?.name, "demos");
+  assert.equal(findSlash("fleet")?.name, "demos");
+  assert.ok(!findSlash("demos")?.aliases?.includes("orchestrate"));
+});
+
+test("/mention: a bare invocation shows a usage hint, never leaks the '<path>' placeholder to the agent", async () => {
+  const { ctx, calls } = fakeCtx();
+  const cmd = findSlash("mention");
+  assert.ok(cmd, "/mention must be registered");
+  await cmd.run("", ctx);
+  assert.equal(calls.prompts.length, 0, "must not send a bogus prompt to the agent");
+  assert.match(calls.writes.join("\n"), /usage: \/mention <file>/);
+
+  await cmd.run("src/auth.ts", ctx);
+  assert.equal(calls.prompts.length, 1);
+  assert.match(calls.prompts[0] ?? "", /Read the file src\/auth\.ts/);
+  assert.doesNotMatch(calls.prompts[0] ?? "", /<path>/);
 });
 
 test("/savetokens renders the token-economy toolkit + Gemini Nano", async () => {
@@ -523,6 +568,51 @@ test("verb passthrough → runVerb with the right tokens", async () => {
   assert.deepEqual(calls.verbs[2], ["model", "pull", "meta/llama"]);
 });
 
+/**
+ * Regression: a quoted value used to reach the verb WORSE than an unquoted one — the plain
+ * `.split(/\s+/)` truncated a bare `/gate-target my target` to just "my", and quoting it made
+ * the literal `"`/`'` characters part of the first/last token instead of being stripped, since
+ * nothing in this path is a real shell. `toks()` now honors "..."/'...' quoting.
+ */
+test("verb passthrough: a quoted value reaches the verb as ONE token, not truncated or quote-corrupted", async () => {
+  const { ctx, calls } = fakeCtx();
+  await findSlash("gate-target")?.run('"my target with spaces"', ctx);
+  assert.deepEqual(calls.verbs[0], ["gate", "my target with spaces"]);
+
+  await findSlash("quarantine")?.run("restore abc123 --dir '/Users/me/My Drive/quarantine'", ctx);
+  assert.deepEqual(calls.verbs[1], [
+    "secure",
+    "quarantine",
+    "restore",
+    "abc123",
+    "--dir",
+    "/Users/me/My Drive/quarantine",
+  ]);
+
+  // unquoted multi-word input is unchanged (still one token per word — quoting is opt-in, not
+  // magic reassembly of unmarked input).
+  await findSlash("gate-target")?.run("my target with spaces", ctx);
+  assert.deepEqual(calls.verbs[2], ["gate", "my", "target", "with", "spaces"]);
+
+  // an unterminated quote degrades leniently (no throw, no shell to reprompt) instead of
+  // corrupting adjacent tokens.
+  await findSlash("gate-target")?.run('"unterminated', ctx);
+  assert.deepEqual(calls.verbs[3], ["gate", "unterminated"]);
+});
+
+test("/worktree create: a quoted path with a space is no longer truncated at the first word", async () => {
+  const { ctx, calls } = fakeCtx();
+  await findSlash("worktree")?.run('create mybranch "/Users/name/My Documents/proj"', ctx);
+  assert.deepEqual(calls.gitArgv.at(-1), [
+    "-C",
+    "/tmp/proj",
+    "worktree",
+    "add",
+    "/Users/name/My Documents/proj",
+    "mybranch",
+  ]);
+});
+
 test("macro → sendToAgent with a templated prompt", async () => {
   const { ctx, calls } = fakeCtx();
   await findSlash("commit")?.run("", ctx);
@@ -547,6 +637,199 @@ test("/agents sets the subagent count", async () => {
   const { ctx } = fakeCtx();
   await findSlash("agents")?.run("5", ctx);
   assert.equal(ctx.agents.count(), 5);
+});
+
+/** A candidate + fake `modelPicker` (mirrors the real session-bridge/host `select` contract). */
+function fakeModelCandidate(id: string, label: string, current = false): ModelCandidate {
+  return {
+    id,
+    label,
+    detail: "local · ollama",
+    current,
+    model: { provider: "ollama", modelId: label },
+    endpoint: {
+      id,
+      baseUrl: "http://localhost:11434/v1",
+      locality: "local",
+      contextWindow: 8192,
+      supportsTools: true,
+      model: label,
+    },
+  };
+}
+function fakeModelPicker(candidates: ModelCandidate[]): {
+  picker: NonNullable<SlashCtx["modelPicker"]>;
+  selected: string[];
+} {
+  const selected: string[] = [];
+  return {
+    picker: {
+      candidates: () => candidates,
+      select: (id) => {
+        const picked = candidates.find((c) => c.id === id);
+        if (!picked) return { ok: false, reason: `no model matching "${id}"` };
+        selected.push(id);
+        return { ok: true, label: picked.label };
+      },
+    },
+    selected,
+  };
+}
+
+test("/model (alias /worker) with NO picker wired: says so — never silently forwards to runVerb", async () => {
+  const { ctx, calls } = fakeCtx();
+  await findSlash("model")?.run("qwen3", ctx);
+  assert.equal(
+    calls.verbs.length,
+    0,
+    "must never route through the model-hub verb tree — that was the bug",
+  );
+  assert.match(calls.writes.join("\n"), /model switching isn't available/);
+});
+
+test("/model <id>: resolves against the picker and switches — the confirmed CLI-1xx bug fix", async () => {
+  const { ctx, calls } = fakeCtx();
+  const { picker, selected } = fakeModelPicker([
+    fakeModelCandidate("local:ollama:qwen3:8b", "qwen3:8b"),
+  ]);
+  await findSlash("model")?.run("qwen3:8b", { ...ctx, modelPicker: picker });
+  assert.deepEqual(selected, ["local:ollama:qwen3:8b"]);
+  assert.equal(calls.verbs.length, 0);
+  assert.match(calls.writes.join("\n"), /✓ model → qwen3:8b/);
+});
+
+test("/model: an unrecognized argument reports a clear error, never 'unknown model verb'", async () => {
+  const { ctx, calls } = fakeCtx();
+  const { picker } = fakeModelPicker([]);
+  await findSlash("model")?.run("gpt-99", { ...ctx, modelPicker: picker });
+  assert.match(calls.writes.join("\n"), /no model matching "gpt-99"/);
+  assert.doesNotMatch(calls.writes.join("\n"), /unknown model verb/);
+});
+
+test("/model (bare): the numbered baseline picker resolves the number the user typed", async () => {
+  const { ctx } = fakeCtx();
+  const { picker, selected } = fakeModelPicker([
+    fakeModelCandidate("a", "model-a"),
+    fakeModelCandidate("b", "model-b", true),
+  ]);
+  await findSlash("model")?.run("", { ...ctx, modelPicker: picker, ask: async () => "1" });
+  assert.deepEqual(selected, ["a"]);
+});
+
+test("/model (bare): a blank answer cancels cleanly, does not select anything", async () => {
+  const { ctx, calls } = fakeCtx();
+  const { picker, selected } = fakeModelPicker([fakeModelCandidate("a", "model-a")]);
+  await findSlash("model")?.run("", { ...ctx, modelPicker: picker, ask: async () => "" });
+  assert.deepEqual(selected, []);
+  assert.match(calls.writes.join("\n"), /cancelled/);
+});
+
+test("/model AWAITS an async select — the ✓ line means switched AND measured", async () => {
+  // The real hosts measure the newly chosen endpoint before returning (`ai/endpoint-probe.ts`):
+  // `modelCandidates` mints an endpoint with the 8192 floor and no `probedCapabilities`, so a
+  // `/model` that reported success before the probe landed left the very next `/think`
+  // answering for the model the user had just LEFT. Pinned here because the picker contract
+  // deliberately still accepts a synchronous double, so nothing else would catch a regression
+  // to `const r = picker.select(...)`.
+  const { ctx, calls } = fakeCtx();
+  const order: string[] = [];
+  let resolveSelect: (() => void) | null = null;
+  const gate = new Promise<void>((r) => {
+    resolveSelect = r;
+  });
+  const picker: NonNullable<SlashCtx["modelPicker"]> = {
+    candidates: () => [fakeModelCandidate("local:ollama:qwen3.6", "qwen3.6:latest")],
+    select: async (id) => {
+      await gate;
+      order.push(`selected:${id}`);
+      return { ok: true, label: "qwen3.6:latest" };
+    },
+  };
+  const run = findSlash("model")?.run("qwen3.6:latest", { ...ctx, modelPicker: picker });
+  // Nothing may be reported while the switch is still in flight.
+  await Promise.resolve();
+  assert.equal(calls.writes.length, 0, "the ✓ was written before the switch completed");
+  resolveSelect?.();
+  await run;
+  order.push("reported");
+  assert.deepEqual(order, ["selected:local:ollama:qwen3.6", "reported"]);
+  assert.match(calls.writes.join("\n"), /✓ model → qwen3\.6:latest/);
+});
+
+test("/model: a synchronous picker double still works — the contract is a union, not a Promise", async () => {
+  const { ctx, calls } = fakeCtx();
+  const { picker, selected } = fakeModelPicker([fakeModelCandidate("a", "model-a")]);
+  await findSlash("model")?.run("model-a", { ...ctx, modelPicker: picker });
+  assert.deepEqual(selected, ["a"]);
+  assert.match(calls.writes.join("\n"), /✓ model → model-a/);
+});
+
+/* ── /think: three states, not two ──────────────────────────────────────────*/
+
+/** A `SlashCtx` whose `effortResolution` answers with a fixed resolution. */
+function thinkCtx(res: ai.EffortResolution | undefined) {
+  const { ctx, calls } = fakeCtx();
+  return { ctx: { ...ctx, effortResolution: () => res } as SlashCtx, calls };
+}
+
+test("/think on a model with no knob says EMULATED — not 'not available'", () => {
+  // The regression this pins: `resolveEffort` used to return `applied: null` here, so `/think`
+  // printed "not available" while `agent/protocol/contributors/effort-text.ts` injected a
+  // graded instruction on every single turn. True of the request parameter, false of the
+  // outcome — and the outcome is the thing the user asked about.
+  const res = ai.resolveEffort("high", {
+    mechanism: "none",
+    supported: [],
+    note: "Gemma 2/3 have no reasoning mode (Gemma 4 does)",
+  });
+  const { ctx, calls } = thinkCtx(res);
+  findSlash("think")?.run("high", ctx);
+  const out = calls.writes.join("\n");
+  assert.match(out, /think → high/, "the tier IS in force, so it must be reported");
+  assert.match(out, /emulated/);
+  assert.match(out, /no reasoning mode/, "the model's own sentence must survive");
+  assert.match(out, /step-by-step prompting/, "…and say HOW the tier is being honoured");
+  assert.doesNotMatch(out, /not available/);
+});
+
+test("/think still says 'not available' where genuinely nothing is in force", () => {
+  // `always-on`: the model reasons at a fixed depth and there is no dial to move. This is the
+  // case the phrase is now reserved for, and it must not be lost in the rewording.
+  const res = ai.resolveEffort("high", {
+    mechanism: "always-on",
+    supported: [],
+    note: "DeepSeek R1 always reasons; depth is not adjustable",
+  });
+  const { ctx, calls } = thinkCtx(res);
+  findSlash("think")?.run("high", ctx);
+  const out = calls.writes.join("\n");
+  assert.match(out, /not available/);
+  assert.match(out, /always reasons/);
+  assert.doesNotMatch(out, /emulated/);
+});
+
+test("/think on a working knob reports the tier plainly, with no caveat", () => {
+  const { cap } = ai.resolveCapability({
+    modelId: "qwen3.6:latest",
+    runtime: "ollama",
+    probedCapabilities: ["completion", "tools", "thinking"],
+  });
+  const { ctx, calls } = thinkCtx(ai.resolveEffort("high", cap));
+  findSlash("think")?.run("high", ctx);
+  const out = calls.writes.join("\n");
+  assert.match(out, /think → high/);
+  assert.doesNotMatch(out, /emulated/);
+  assert.doesNotMatch(out, /not available/);
+});
+
+test("/think stores the tier even when the model cannot use it as a parameter", () => {
+  // Switching to a model that CAN honour it must find the tier already set.
+  const { ctx, calls } = thinkCtx(ai.resolveEffort("max", { mechanism: "none", supported: [] }));
+  findSlash("think")?.run("max", ctx);
+  assert.deepEqual(
+    calls.tunes.map((t) => t.effort),
+    ["max"],
+  );
 });
 
 test("renderCommands lists the count + groups; renderHelp mentions /faq", () => {
@@ -873,4 +1156,401 @@ test("/hooks test: renders exit code, stdout, stderr, and a no-match line honest
     await findSlash("hooks")?.run("test PreToolUse run_command", ctx);
     assert.match(calls.writes.join("\n"), /no hook matches/);
   }
+});
+
+/* ── /cd, /context window, /restore + /compress aliases ────────────────────── */
+
+test("/recall resolves 'restore' and 'resume' to the SAME command", () => {
+  assert.equal(findSlash("restore")?.name, "recall");
+  assert.equal(findSlash("resume")?.name, "recall");
+});
+
+test("/condense resolves 'compact' and 'compress' to the SAME command", () => {
+  assert.equal(findSlash("compact")?.name, "condense");
+  assert.equal(findSlash("compress")?.name, "condense");
+});
+
+test("/cd: a valid target rotates the session via changeProjectDirectory", async () => {
+  const { ctx, calls } = fakeCtx();
+  ctx.changeProjectDirectory = (dir: string) => ({
+    ok: true,
+    movedTo: dir,
+    newSessionId: "abc1234567-def1234567-abc1234567-def1234567-abc1234567",
+    rotated: true,
+  });
+  await findSlash("cd")?.run("/other/project", ctx);
+  const out = strip(calls.writes.join("\n"));
+  assert.match(out, /moved to \/other\/project/);
+  assert.match(out, /abc1234567/); // the fresh session id is echoed
+  assert.match(out, /model\/tuning kept/);
+});
+
+test("/cd: a no-op move (target === current cwd) reports it plainly, without claiming a fresh session", async () => {
+  const { ctx, calls } = fakeCtx();
+  ctx.changeProjectDirectory = (dir: string) => ({
+    ok: true,
+    movedTo: dir,
+    newSessionId: "same-session-id-unchanged",
+    rotated: false,
+  });
+  await findSlash("cd")?.run("/same/place", ctx);
+  const out = strip(calls.writes.join("\n"));
+  assert.match(out, /already in \/same\/place/);
+  assert.doesNotMatch(out, /fresh session/);
+});
+
+test("/cd: a rejected target reports the error and does NOT fall back to a plain cwd change", async () => {
+  const { ctx, calls } = fakeCtx();
+  ctx.changeProjectDirectory = () => ({ ok: false, error: "no such directory: /nope" });
+  await findSlash("cd")?.run("/nope", ctx);
+  assert.match(strip(calls.writes.join("\n")), /no such directory: \/nope/);
+  assert.deepEqual(calls.setCwds, []); // the fake ctx's setCwd was never called
+});
+
+test("/cd: on a surface with no rotation wired, degrades to a plain cwd change", async () => {
+  const { ctx, calls } = fakeCtx();
+  assert.equal(ctx.changeProjectDirectory, undefined);
+  await findSlash("cd")?.run("/other", ctx);
+  assert.deepEqual(calls.setCwds, ["/other"]);
+  assert.match(strip(calls.writes.join("\n")), /context kept/);
+});
+
+test("/context window: no surface support → an honest 'not available' line", async () => {
+  const { ctx, calls } = fakeCtx();
+  await findSlash("context")?.run("window", ctx);
+  assert.match(calls.writes.join("\n"), /no context-window setting/);
+});
+
+test("/context window <size>: sets directly via a plain count, k-suffix, or preset number", async () => {
+  const { ctx } = fakeCtx();
+  let stored = 250_000;
+  ctx.contextWindowTokens = {
+    get: () => stored,
+    set: (n: number) => {
+      stored = n;
+    },
+  };
+  await findSlash("context")?.run("window 400000", ctx);
+  assert.equal(stored, 400_000);
+  await findSlash("context")?.run("window 600k", ctx);
+  assert.equal(stored, 600_000);
+  await findSlash("context")?.run("window 1", ctx); // preset #1 = 100k, not the literal "1"
+  assert.equal(stored, 100_000);
+});
+
+test("/context window <garbage>: refuses without changing the stored value", async () => {
+  const { ctx, calls } = fakeCtx();
+  let stored = 250_000;
+  ctx.contextWindowTokens = {
+    get: () => stored,
+    set: (n: number) => {
+      stored = n;
+    },
+  };
+  await findSlash("context")?.run("window not-a-size", ctx);
+  assert.equal(stored, 250_000);
+  assert.match(strip(calls.writes.join("\n")), /can't parse/);
+});
+
+test("/context window (no arg): lists every preset, marks the current one, then applies the pick", async () => {
+  const { ctx, calls } = fakeCtx();
+  let stored = 250_000;
+  ctx.contextWindowTokens = {
+    get: () => stored,
+    set: (n: number) => {
+      stored = n;
+    },
+  };
+  ctx.ask = async () => "3"; // 3rd preset
+  await findSlash("context")?.run("window", ctx);
+  const out = strip(calls.writes.join("\n"));
+  assert.match(out, /250,000.*← current/);
+  assert.equal(stored, 400_000); // CONTEXT_WINDOW_PRESETS[2]
+});
+
+test("/context window (no arg), cancel on blank input: does not change the stored value", async () => {
+  const { ctx, calls } = fakeCtx();
+  let stored = 250_000;
+  ctx.contextWindowTokens = {
+    get: () => stored,
+    set: (n: number) => {
+      stored = n;
+    },
+  };
+  ctx.ask = async () => "  ";
+  await findSlash("context")?.run("window", ctx);
+  assert.equal(stored, 250_000);
+  assert.match(strip(calls.writes.join("\n")), /cancelled/);
+});
+
+test("bare /context (no subcommand) is unaffected by contextWindowTokens being absent", async () => {
+  const { ctx, calls } = fakeCtx();
+  await findSlash("context")?.run("", ctx);
+  assert.doesNotMatch(calls.writes.join("\n"), /auto-compact ceiling/);
+});
+
+test("bare /context appends the auto-compact ceiling line when the surface supports it", async () => {
+  const { ctx, calls } = fakeCtx();
+  ctx.contextWindowTokens = { get: () => 250_000, set: () => {} };
+  await findSlash("context")?.run("", ctx);
+  assert.match(strip(calls.writes.join("\n")), /auto-compact ceiling: 250,000 tokens/);
+});
+
+/* ── /timeout: the inactivity-pause threshold (idle-watchdog) ─────────────────────────── */
+
+test("/timeout: no surface support → an honest 'not available' line", async () => {
+  const { ctx, calls } = fakeCtx();
+  await findSlash("timeout")?.run("", ctx);
+  assert.match(calls.writes.join("\n"), /no inactivity-timeout setting/);
+});
+
+test("/timeout <minutes>: sets directly via a plain number, or a duration with a unit", async () => {
+  const { ctx } = fakeCtx();
+  let storedMs = 10 * 60_000;
+  ctx.idleTimeoutSetting = {
+    get: () => storedMs,
+    set: (ms: number) => {
+      storedMs = ms;
+    },
+  };
+  await findSlash("timeout")?.run("15", ctx);
+  assert.equal(storedMs, 15 * 60_000);
+  await findSlash("timeout")?.run("90s", ctx);
+  assert.equal(storedMs, 90_000);
+  // MAX_IDLE_TIMEOUT_MS is 60 minutes, so "2h" would be out of range — use a valid duration.
+  await findSlash("timeout")?.run("45m", ctx);
+  assert.equal(storedMs, 45 * 60_000);
+  // "3" is ambiguous between preset index #3 (5 min) and a literal 3-minute duration — the
+  // preset-index reading must win (mirrors /context window's own precedent), so this is what
+  // actually proves the index check runs FIRST rather than merely happening to agree with it.
+  await findSlash("timeout")?.run("3", ctx);
+  assert.equal(storedMs, 5 * 60_000);
+});
+
+test("/timeout <garbage>: refuses without changing the stored value", async () => {
+  const { ctx, calls } = fakeCtx();
+  let storedMs = 10 * 60_000;
+  ctx.idleTimeoutSetting = {
+    get: () => storedMs,
+    set: (ms: number) => {
+      storedMs = ms;
+    },
+  };
+  await findSlash("timeout")?.run("not-a-duration", ctx);
+  assert.equal(storedMs, 10 * 60_000);
+  assert.match(strip(calls.writes.join("\n")), /can't parse/);
+});
+
+test("/timeout: a value below the 30s floor is refused, not silently clamped and accepted", async () => {
+  const { ctx, calls } = fakeCtx();
+  let storedMs = 10 * 60_000;
+  ctx.idleTimeoutSetting = {
+    get: () => storedMs,
+    set: (ms: number) => {
+      storedMs = ms;
+    },
+  };
+  await findSlash("timeout")?.run("5s", ctx);
+  assert.equal(
+    storedMs,
+    10 * 60_000,
+    "an out-of-range duration must not silently change the setting",
+  );
+  assert.match(strip(calls.writes.join("\n")), /can't parse/);
+});
+
+test("/timeout (no arg): lists every preset, marks the current one, then applies the pick", async () => {
+  const { ctx, calls } = fakeCtx();
+  let storedMs = 10 * 60_000;
+  ctx.idleTimeoutSetting = {
+    get: () => storedMs,
+    set: (ms: number) => {
+      storedMs = ms;
+    },
+  };
+  ctx.ask = async () => "2"; // 2nd preset
+  await findSlash("timeout")?.run("", ctx);
+  const out = strip(calls.writes.join("\n"));
+  assert.match(out, /10 min.*← current/);
+  assert.equal(storedMs, 2 * 60_000); // IDLE_TIMEOUT_PRESETS_MIN[1]
+});
+
+test("/timeout (no arg), cancel on blank input: does not change the stored value", async () => {
+  const { ctx, calls } = fakeCtx();
+  let storedMs = 10 * 60_000;
+  ctx.idleTimeoutSetting = {
+    get: () => storedMs,
+    set: (ms: number) => {
+      storedMs = ms;
+    },
+  };
+  ctx.ask = async () => "  ";
+  await findSlash("timeout")?.run("", ctx);
+  assert.equal(storedMs, 10 * 60_000);
+  assert.match(strip(calls.writes.join("\n")), /cancelled/);
+});
+
+function queuedAsk(answers: string[]): () => Promise<string> {
+  let i = 0;
+  return async () => answers[i++] ?? "";
+}
+
+test("/hug: a blank source cancels before any prompt for target/quant", async () => {
+  const { ctx, calls } = fakeCtx();
+  ctx.ask = queuedAsk([""]);
+  await findSlash("hug")?.run("", ctx);
+  assert.match(strip(calls.writes.join("\n")), /cancelled/);
+  assert.deepEqual(calls.verbs, []);
+});
+
+test("/hug: inline source + Enter-through-defaults + confirm → ollama/q4_k_m", async () => {
+  const { ctx, calls } = fakeCtx();
+  ctx.ask = queuedAsk(["", ""]); // target: Enter (ollama), quant: Enter (q4_k_m)
+  ctx.confirm = async () => true;
+  await findSlash("hug")?.run("acme/tiny", ctx);
+  assert.deepEqual(calls.verbs, [
+    ["model", "hug", "acme/tiny", "--target", "ollama", "--quant", "q4_k_m", "--yes"],
+  ]);
+});
+
+test("/hug: picking target 2 and quant 3 by number selects llamacpp / q6_k", async () => {
+  const { ctx, calls } = fakeCtx();
+  ctx.ask = queuedAsk(["2", "3"]);
+  ctx.confirm = async () => true;
+  await findSlash("hug")?.run("acme/tiny", ctx);
+  assert.deepEqual(calls.verbs, [
+    ["model", "hug", "acme/tiny", "--target", "llamacpp", "--quant", "q6_k", "--yes"],
+  ]);
+});
+
+test("/hug: declining the final confirm runs nothing", async () => {
+  const { ctx, calls } = fakeCtx();
+  ctx.ask = queuedAsk(["", ""]);
+  ctx.confirm = async () => false;
+  await findSlash("hug")?.run("acme/tiny", ctx);
+  assert.match(strip(calls.writes.join("\n")), /cancelled/);
+  assert.deepEqual(calls.verbs, []);
+});
+
+test("/hug: an out-of-range target number cancels before the quant prompt", async () => {
+  const { ctx, calls } = fakeCtx();
+  let askCount = 0;
+  ctx.ask = async () => {
+    askCount++;
+    return "9"; // no 9th target
+  };
+  await findSlash("hug")?.run("acme/tiny", ctx);
+  assert.equal(askCount, 1, "must not reach the quant prompt");
+  assert.deepEqual(calls.verbs, []);
+  assert.match(strip(calls.writes.join("\n")), /isn't one of the listed numbers/);
+});
+
+test("/hug: an out-of-range quant number cancels (the identically-shaped guard below target)", async () => {
+  const { ctx, calls } = fakeCtx();
+  ctx.ask = queuedAsk(["1", "9"]); // target: Enter-equivalent "1" (ollama), quant: out of range
+  await findSlash("hug")?.run("acme/tiny", ctx);
+  assert.deepEqual(calls.verbs, []);
+  assert.match(strip(calls.writes.join("\n")), /isn't one of the listed numbers/);
+});
+
+test("/hug: a blank rest prompts for the source, and the ASKED value is actually used", async () => {
+  const { ctx, calls } = fakeCtx();
+  ctx.ask = queuedAsk(["acme/asked-tiny", "", ""]); // source, target default, quant default
+  ctx.confirm = async () => true;
+  await findSlash("hug")?.run("", ctx);
+  assert.deepEqual(calls.verbs, [
+    ["model", "hug", "acme/asked-tiny", "--target", "ollama", "--quant", "q4_k_m", "--yes"],
+  ]);
+});
+
+test("/hug: the confirm prompt always shows the chosen quant, even for target ollama", async () => {
+  // Regression test: the confirm text used to hide the quant whenever target was
+  // "ollama", but for a LOCAL source the quant genuinely is applied (only Ollama's
+  // zero-download HF-repo passthrough makes it moot) — so it must never be hidden.
+  const { ctx, calls } = fakeCtx();
+  let confirmPrompt = "";
+  ctx.ask = queuedAsk(["1", "4"]); // target: ollama (default), quant: 4) q8_0
+  ctx.confirm = async (prompt) => {
+    confirmPrompt = prompt;
+    return true;
+  };
+  await findSlash("hug")?.run("/home/me/models/my-local-model", ctx);
+  assert.match(confirmPrompt, /ollama/);
+  assert.match(confirmPrompt, /q8_0/);
+});
+
+test("/hug: the target/quant menus are numbered with a marked default", async () => {
+  const { ctx, calls } = fakeCtx();
+  ctx.ask = queuedAsk(["", ""]);
+  ctx.confirm = async () => true;
+  await findSlash("hug")?.run("acme/tiny", ctx);
+  const out = strip(calls.writes.join("\n"));
+  assert.match(out, /1\) ollama {2}\(default\)/);
+  assert.match(out, /4\) lmstudio/);
+  assert.match(out, /1\) q4_k_m {2}\(default/);
+});
+
+test("/traits opens the rail where there is one, and says so where there is not", async () => {
+  const cmd = findSlash("traits");
+  assert.ok(cmd, "/traits must be registered");
+  assert.equal(findSlash("rail")?.name, "traits");
+  assert.equal(findSlash("dim")?.name, "traits");
+
+  // the readline host wires no rail: the command must NAME the equivalent one-shot commands
+  // rather than silently doing nothing, which is the report the whole rail exists to answer.
+  const bare = fakeCtx();
+  await cmd.run("", bare.ctx);
+  assert.match(bare.calls.writes.join("\n"), /no trait rail on this surface/);
+  assert.match(bare.calls.writes.join("\n"), /\/tools on\|off/);
+
+  // wired: it focuses the rail and prints nothing (the chrome IS the feedback).
+  const wired = fakeCtx();
+  let focused = 0;
+  await cmd.run("", {
+    ...wired.ctx,
+    focusTraitRail: () => {
+      focused += 1;
+      return true;
+    },
+  });
+  assert.equal(focused, 1);
+  assert.deepEqual(wired.calls.writes, []);
+});
+
+test("/traits reports honestly when the surface HAS a rail but cannot focus it", async () => {
+  // A terminal too short for the rail, or a model that was never probed: the app returns false
+  // rather than opening a focus ring over nothing.
+  const { ctx, calls } = fakeCtx();
+  const cmd = findSlash("traits");
+  assert.ok(cmd);
+  await cmd.run("", { ...ctx, focusTraitRail: () => false });
+  assert.match(calls.writes.join("\n"), /no trait rail on this surface/);
+});
+
+test("/agents cannot confirm a fan-out larger than the delegation budget allows", async () => {
+  /**
+   * It accepted 1–16 and answered `✓ subagents → 16`, while `spawnCapFor` clamps to
+   * MAX_SUBAGENTS (8). Half the advertised range confirmed a number the budget could never
+   * reach, and the 9th spawn came back "this turn has already spawned 8 sub-agents (limit 8)"
+   * for a setting the user had been told was accepted.
+   */
+  const cmd = findSlash("agents");
+  assert.ok(cmd, "/agents must be registered");
+
+  const over = fakeCtx();
+  await cmd.run(String(MAX_SUBAGENTS + 8), over.ctx);
+  const said = over.calls.writes.join("\n");
+  assert.match(said, new RegExp(`subagents → ${MAX_SUBAGENTS}\\b`), "it must confirm the REAL cap");
+  assert.match(said, /caps a turn at/, "…and say why the number changed");
+
+  // a value inside the cap is confirmed plainly
+  const ok = fakeCtx();
+  await cmd.run("3", ok.ctx);
+  assert.match(ok.calls.writes.join("\n"), /subagents → 3/);
+  assert.doesNotMatch(ok.calls.writes.join("\n"), /caps a turn at/);
+
+  // the bare form advertises the real range, not 1–16
+  const bare = fakeCtx();
+  await cmd.run("", bare.ctx);
+  assert.match(bare.calls.writes.join("\n"), new RegExp(`1–${MAX_SUBAGENTS}`));
 });

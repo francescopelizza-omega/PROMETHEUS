@@ -28,4 +28,9 @@ export type ToWebview =
   | { type: "busy"; busy: boolean };
 
 /** webview → extension host. */
-export type FromWebview = { type: "ready" } | { type: "send"; text: string } | { type: "reset" };
+export type FromWebview =
+  | { type: "ready" }
+  | { type: "send"; text: string }
+  | { type: "reset" }
+  /** the user clicked Cancel while a turn is running. */
+  | { type: "cancel" };

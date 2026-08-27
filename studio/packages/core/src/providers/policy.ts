@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { readFileSync, statSync } from "node:fs";
 /**
  * providers/policy.ts — the C11 provider promotion policy.
  *
@@ -252,13 +252,45 @@ function parseConfigText(text: string): Provider[] {
  * path when they have one; this is only the fallback.
  */
 export const DEFAULT_PROVIDERS_CONFIG = (() => {
+  /**
+   * Walk UP looking for `config/providers.config.json`, rather than counting a fixed number of
+   * `..` hops.
+   *
+   * A fixed count cannot be right for both trees, and the comment above says why: this value is
+   * INLINED INTO THE BUNDLE. From `packages/core/(src|dist)/providers`, four hops land on
+   * `studio/` — correct. But esbuild rewrites `import.meta.url` to the OUTPUT file, so in the
+   * published CLI the same four hops start at `apps/cli/dist` and land one level ABOVE studio,
+   * on a `config/providers.config.json` that does not exist. `prometheus provider list` answered
+   * "provider config unavailable: ENOENT" with the file sitting right there in `studio/config/`.
+   *
+   * Searching upward is right for every layout at once — source tree, published bundle, and the
+   * Electron asar — because it asks where the file IS instead of asserting where the caller is.
+   * The last candidate is kept as the reported path so a genuine absence still names one place.
+   */
+  const candidates: string[] = [];
   try {
-    const here = dirname(fileURLToPath(import.meta.url));
-    return resolve(here, "..", "..", "..", "..", "config", "providers.config.json");
+    let dir = dirname(fileURLToPath(import.meta.url));
+    for (let i = 0; i < 8; i++) {
+      candidates.push(resolve(dir, "config", "providers.config.json"));
+      const up = dirname(dir);
+      if (up === dir) break; // filesystem root
+      dir = up;
+    }
   } catch {
-    // no import.meta (bundled to CJS / SEA) — stay relative to the process, not to a home dir
-    return resolve(process.cwd(), "studio", "config", "providers.config.json");
+    /* no import.meta (bundled to CJS / SEA) — fall through to the cwd candidates below */
   }
+  // stay relative to the PROCESS, never to a home dir: an absolute developer path here would
+  // ship the author's username to every user.
+  candidates.push(resolve(process.cwd(), "studio", "config", "providers.config.json"));
+  candidates.push(resolve(process.cwd(), "config", "providers.config.json"));
+  for (const c of candidates) {
+    try {
+      if (statSync(c).isFile()) return c;
+    } catch {
+      /* not here — try the next candidate */
+    }
+  }
+  return candidates[candidates.length - 1] as string;
 })();
 
 /** Async-load + parse the provider config from disk (C11). */

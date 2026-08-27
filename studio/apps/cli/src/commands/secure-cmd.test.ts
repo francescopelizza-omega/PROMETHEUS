@@ -97,6 +97,21 @@ function fakeDeps(over: Partial<SecureDeps> = {}): { deps: SecureDeps; calls: st
 
 const ctxFor = (argv: string[]) => makeContext(parseArgs(argv));
 
+/**
+ * Regression: a mistyped secure action used to be silently reinterpreted as a live nemesis SCAN
+ * TARGET (falling into positionals, sub() defaulting to "scan") instead of the "unknown secure
+ * verb" message already written below — a typo like "trussed" triggered a REAL gate() call
+ * against the literal string "trussed". Fixed via parse.ts's `unmatchedSub`.
+ */
+test("a mistyped secure action reports 'unknown secure verb', never runs a scan against the typo", async () => {
+  const { deps, calls } = fakeDeps();
+  const out = await runSecureCommand(ctxFor(["secure", "trussed"]), deps);
+  assert.equal(out.exitCode, 1);
+  assert.match(out.text ?? "", /unknown secure verb/);
+  assert.match(out.text ?? "", /trussed/);
+  assert.deepEqual(calls, []);
+});
+
 test("secure trust list: READ renders the ledger (exit 0)", async () => {
   const { deps, calls } = fakeDeps();
   const out = await runSecureCommand(ctxFor(["secure", "trust", "list"]), deps);
@@ -161,10 +176,10 @@ test("secure db update --yes: EXECUTES updateFeeds", async () => {
   assert.deepEqual(calls, ["updateFeeds"]);
 });
 
-test("secure disinfect requires --out (usage error, exit 2, no call)", async () => {
+test("secure disinfect requires --out (usage error, exit 1, no call)", async () => {
   const { deps, calls } = fakeDeps();
   const out = await runSecureCommand(ctxFor(["secure", "disinfect", "/tmp/x"]), deps);
-  assert.equal(out.exitCode, 2);
+  assert.equal(out.exitCode, 1);
   assert.deepEqual(calls, []);
 });
 

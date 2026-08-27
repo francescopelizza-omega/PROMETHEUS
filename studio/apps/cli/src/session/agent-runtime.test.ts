@@ -28,9 +28,11 @@ const { defaultTuning } = agent;
 
 import {
   type BudgetGuard,
+  type CheckpointHook,
   type EditRecord,
   type FetchImpl,
   type SessionCtx,
+  applyEditIntentsLocal,
   autoCompactPolicy,
   checkBudgetGate,
   checkMeteredConsent,
@@ -39,6 +41,7 @@ import {
   effectiveTools,
   extractiveSummary,
   makeLlmClient,
+  makeSummarizer,
   makeToolRunner,
   measuredSessionUsage,
   rebuildThread,
@@ -1028,7 +1031,12 @@ test("runMessageTurn: an added dir does NOT grant exec — destructive stays gat
   assert.ok(res.events.some((e) => e.kind === "blocked"));
 });
 
-test("runMessageTurn: the outgoing system message equals tuning.systemPrompt (CLI-017)", async () => {
+test("runMessageTurn: the outgoing system message STARTS WITH tuning.systemPrompt, unreplaced (CLI-017)", async () => {
+  // The preamble dispatch pipeline APPENDS behavioral contributors (tool-discipline, the
+  // pre-write-recheck checklist) to the persona string — it must never replace or reorder ahead
+  // of it. This used to assert byte-exact equality (a stricter claim than the real invariant),
+  // which is no longer true by design now that the pipeline actually reaches the CLI's real
+  // system message — see `agent/protocol/contributors/index.ts`'s `CORE_TURN_CONTRIBUTORS`.
   const { client } = fakeEngine(() => ({ ok: true }));
   const { ctx } = fakeCtx(client, {
     endpoint: EDIT_ENDPOINT,
@@ -1046,7 +1054,57 @@ test("runMessageTurn: the outgoing system message equals tuning.systemPrompt (CL
   };
   await runMessageTurn(undefined, "hi", { ctx, llm, now: fixedNow, newId: fixedId });
   assert.equal(captured?.messages[0]?.role, "system");
-  assert.equal(captured?.messages[0]?.content, "OVERRIDE PROMPT");
+  const content = captured?.messages[0]?.content ?? "";
+  assert.ok(content.startsWith("OVERRIDE PROMPT"), "the persona string must lead, not be replaced");
+  assert.ok(content.includes("To DO anything to the system you MUST call the matching tool"));
+  assert.ok(content.includes("Before calling write_file or propose_edit"));
+});
+
+test("runMessageTurn: effort-as-text reaches the system message when the mechanism is unresolved", async () => {
+  // EDIT_ENDPOINT's baseUrl ("http://x") resolves to no known runtime/model rule, so
+  // resolveCapability falls to UNKNOWN_CAPABILITY (mechanism:"none") — exactly the case
+  // effort-text.ts's contributor exists for.
+  const { client } = fakeEngine(() => ({ ok: true }));
+  const { ctx } = fakeCtx(client, {
+    endpoint: EDIT_ENDPOINT,
+    tuning: { ...defaultTuning({ provider: "local", modelId: "m" }), effort: "high" },
+  });
+  let captured: { messages: { role: string; content: string }[] } | undefined;
+  const llm: LLMClient = {
+    async *turn(thread) {
+      captured = thread as typeof captured;
+      yield { kind: "final" };
+    },
+  };
+  await runMessageTurn(undefined, "hi", { ctx, llm, now: fixedNow, newId: fixedId });
+  const content = captured?.messages[0]?.content ?? "";
+  assert.ok(content.includes("consider edge cases, check your own reasoning"));
+});
+
+test("runMessageTurn: effort-as-text is ABSENT when the real mechanism already handles the tier", async () => {
+  // An Ollama endpoint whose probe reported a "thinking" capability resolves to a real
+  // request-parameter mechanism (ollama-openai-shim-thinking) — the textual fallback must stay
+  // silent, or the model would get the same instruction twice, in two different registers.
+  const { client } = fakeEngine(() => ({ ok: true }));
+  const { ctx } = fakeCtx(client, {
+    endpoint: {
+      ...EDIT_ENDPOINT,
+      baseUrl: "http://127.0.0.1:11434/v1",
+      model: "qwen3.6:latest",
+      probedCapabilities: ["completion", "tools", "thinking"],
+    },
+    tuning: { ...defaultTuning({ provider: "local", modelId: "m" }), effort: "high" },
+  });
+  let captured: { messages: { role: string; content: string }[] } | undefined;
+  const llm: LLMClient = {
+    async *turn(thread) {
+      captured = thread as typeof captured;
+      yield { kind: "final" };
+    },
+  };
+  await runMessageTurn(undefined, "hi", { ctx, llm, now: fixedNow, newId: fixedId });
+  const content = captured?.messages[0]?.content ?? "";
+  assert.ok(!content.includes("consider edge cases, check your own reasoning"));
 });
 
 /* ── CLI-018: agent tool arm/disarm ────────────────────────────────────────── */
@@ -1200,6 +1258,59 @@ test("checkpoint: an edit snapshots the pre-image; restoreCheckpoint reverts byt
   assert.ok(cp && cp.files[file] === "hello world\n", "pre-image captured under the turn label");
   restoreCheckpoint(cp!, { roots: [dir] });
   assert.equal(readFileSync(file, "utf8"), "hello world\n"); // byte-identical revert
+});
+
+/**
+ * Regression: /apply (applyEditIntentsLocal) wrote real files to disk through the SAME
+ * applyLocalEdit engine as propose_edit, but silently discarded the pre-image `record` it
+ * computed — no checkpoint was ever captured for an /apply-made change, so /checkpoints never
+ * listed it and /revert couldn't undo it. Passing a real CheckpointHook must now record it,
+ * exactly as the tool-runner's propose_edit path already does.
+ */
+test("applyEditIntentsLocal: with a CheckpointHook, records a real checkpoint /revert can undo", async () => {
+  const { mkdtempSync, writeFileSync, readFileSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const dir = mkdtempSync(join(tmpdir(), "prom-applyckpt-"));
+  const file = join(dir, "notes.txt");
+  writeFileSync(file, "before\n");
+  const intents = agent.extractEditIntents(
+    ["notes.txt", "<<<<<<< SEARCH", "before", "=======", "after", ">>>>>>> REPLACE"].join("\n"),
+  );
+  assert.equal(intents.length, 1, "fixture: one edit intent extracted");
+  const store = new agent.CheckpointStore(50);
+  const checkpoint: CheckpointHook = {
+    store,
+    turnId: "apply-t1",
+    sessionId: "s",
+    turnNumber: 1,
+    now: () => "2026-06-26T10:00:00Z",
+  };
+
+  const outcomes = applyEditIntentsLocal(intents, [dir], dir, checkpoint);
+
+  assert.equal(outcomes[0]?.ok, true);
+  assert.equal(readFileSync(file, "utf8"), "after\n");
+  const cp = store.get("apply-t1");
+  assert.ok(cp && cp.files[file] === "before\n", "the /apply edit's pre-image was captured");
+  const { restored } = restoreCheckpoint(cp!, { roots: [dir] });
+  assert.equal(restored.length, 1);
+  assert.equal(readFileSync(file, "utf8"), "before\n"); // /revert genuinely undoes the /apply edit
+});
+
+test("applyEditIntentsLocal: with NO CheckpointHook (the old call shape), still applies but records nothing", async () => {
+  const { mkdtempSync, writeFileSync, readFileSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const dir = mkdtempSync(join(tmpdir(), "prom-applyckpt-none-"));
+  const file = join(dir, "notes.txt");
+  writeFileSync(file, "before\n");
+  const intents = agent.extractEditIntents(
+    ["notes.txt", "<<<<<<< SEARCH", "before", "=======", "after", ">>>>>>> REPLACE"].join("\n"),
+  );
+  const outcomes = applyEditIntentsLocal(intents, [dir], dir);
+  assert.equal(outcomes[0]?.ok, true);
+  assert.equal(readFileSync(file, "utf8"), "after\n"); // backward-compatible: still optional
 });
 
 test("checkpoint: multi-file turn is atomic (first-touch) + deletes turn-created files", async () => {
@@ -1757,6 +1868,39 @@ test("toolTurn (the tool-capable transport) also carries the effort tier", async
   assert.equal(f.body().keep_alive, "30m");
 });
 
+test("makeLlmClient: endpoint.probedCapabilities reaches resolveCapability with no explicit override", async () => {
+  // Regression guard: the context-window probe now also returns Ollama's `capabilities` array,
+  // and that used to go nowhere — `resolveCapability`'s probe-driven rules require
+  // `ctx.probedCapabilities`, which no production call site ever set, so every model (however
+  // capable) resolved to UNKNOWN_CAPABILITY. This proves a probed "thinking" capability, carried
+  // on the endpoint with NO explicit `deps.effortCapability` override, now reaches the wire.
+  const f = capturingFetch(DONE_SSE);
+  const llm = makeLlmClient(
+    {
+      ...OLLAMA_ENDPOINT,
+      model: "qwen3.6:latest",
+      probedCapabilities: ["completion", "tools", "thinking"],
+    },
+    { fetch: f.fetch as never },
+  );
+  await collect(llm.turn(thread("hi"), fakeTuning({ effort: "high" }), []));
+  assert.equal(f.body().reasoning_effort, "high");
+});
+
+test("makeLlmClient: with NO probedCapabilities, an unrecognized model still gets no effort field", async () => {
+  // The safe default this fix must not disturb: absent probe data, `resolveCapability` falls
+  // through to UNKNOWN_CAPABILITY (mechanism:"none") rather than guessing — sending an
+  // unsupported field is a 400 on some endpoints, so silence is the correct default, not a bug.
+  const f = capturingFetch(DONE_SSE);
+  const llm = makeLlmClient(
+    { ...OLLAMA_ENDPOINT, model: "qwen3.6:latest" },
+    { fetch: f.fetch as never },
+  );
+  await collect(llm.turn(thread("hi"), fakeTuning({ effort: "high" }), []));
+  assert.equal("reasoning_effort" in f.body(), false);
+  assert.equal("think" in f.body(), false);
+});
+
 test("makeLlmClient: gpt-oss puts `Reasoning:` in the system prompt, not the body", async () => {
   const f = capturingFetch(DONE_SSE);
   const llm = makeLlmClient(
@@ -2090,6 +2234,47 @@ test("a dead endpoint trips the circuit breaker — later turns fail FAST, never
   assert.match(text, /circuit open/, "the user should be told the endpoint is being skipped");
 });
 
+test("REGRESSION: with no onModelHealth, a turn NEVER touches the real ~/.prometheus (no leaked writes)", async () => {
+  // model-health.json is written by recordEndpointHealth, whose default `home` parameter is
+  // the REAL prometheusHome() (~/.prometheus, or $PROMETHEUS_HOME). Every other per-turn side
+  // effect on this client (onUsage, onCapability) is an optional injected callback that a test
+  // simply omits to get a no-op — model health must be no different. This test does not (and
+  // must not need to) touch the filesystem at all to prove it: if `makeLlmClient` ever called
+  // `recordEndpointHealth` directly again instead of going through `deps.onModelHealth`, this
+  // test would still pass fine while quietly writing to the real machine running it — which is
+  // exactly the bug this guards against, so the actual proof is structural: `onModelHealth` is
+  // the ONLY seam capable of persisting anything, and it is never provided below — a turn that
+  // completes cleanly with no such seam proves nothing else on this path can reach disk.
+  const llm = makeLlmClient(
+    { ...OLLAMA_ENDPOINT, supportsTools: true },
+    { fetch: capturingFetch(DONE_SSE).fetch as never },
+  );
+  const turns = await collect(
+    llm.turn(thread("hi"), fakeTuning(), [fakeTool("read_file", () => ["read"])]),
+  );
+  assert.ok(
+    turns.some((t) => t.kind === "final"),
+    "the turn should still complete normally",
+  );
+});
+
+test("onModelHealth is fed a real record after a native turn, when a host provides it", async () => {
+  const records: unknown[] = [];
+  const llm = makeLlmClient(
+    { ...OLLAMA_ENDPOINT, id: "local:onmodelhealth-test", supportsTools: true },
+    {
+      fetch: capturingFetch(DONE_SSE).fetch as never,
+      onModelHealth: (r) => records.push(r),
+    },
+  );
+  await collect(llm.turn(thread("hi"), fakeTuning(), [fakeTool("read_file", () => ["read"])]));
+  assert.equal(records.length, 1, "a completed turn should produce exactly one health record");
+  const r = records[0] as { endpointId: string; transport: string; breakerState: string };
+  assert.equal(r.endpointId, "local:onmodelhealth-test");
+  assert.equal(r.transport, "native");
+  assert.equal(r.breakerState, "closed");
+});
+
 /* ------------------------------------------------------------------------- *
  * Cloud auth + accounting on the NATIVE tool transport
  * ------------------------------------------------------------------------- */
@@ -2247,6 +2432,31 @@ test("a tool turn with no usage frame still records an ESTIMATE", async () => {
   assert.equal(records.length, 1);
   assert.equal(records[0]?.estimated, true);
   assert.ok((records[0]?.promptTokens ?? 0) > 0);
+});
+
+test("a tool turn's COMPLETION tokens are estimated too, not recorded as zero", async () => {
+  // The caller passed a literal "" as the received text, so a native turn with no SSE `usage`
+  // frame — every local runner that omits `stream_options.include_usage`, i.e. the default —
+  // recorded `completionTokens: 0` while the SAME bytes on the tool-less path were estimated
+  // and counted. The expensive turns were the free ones on the budget report.
+  const records: AccountingRecord[] = [];
+  const prose = "x".repeat(400);
+  const sse = `data: ${JSON.stringify({ choices: [{ delta: { content: prose } }] })}\ndata: [DONE]\n`;
+  const llm = makeLlmClient(
+    { ...OLLAMA_ENDPOINT, supportsTools: true },
+    {
+      fetch: capturingFetch(sse).fetch as never,
+      onUsage: (r) => records.push(r),
+      now: () => "2026-08-10T00:00:00.000Z",
+    },
+  );
+  await collect(llm.turn(thread("hi"), fakeTuning(), [fakeTool("read_file", () => ["read"])]));
+  assert.equal(records.length, 1);
+  assert.equal(records[0]?.estimated, true);
+  assert.ok(
+    (records[0]?.completionTokens ?? 0) > 50,
+    `400 characters of prose recorded as ${records[0]?.completionTokens} completion tokens`,
+  );
 });
 
 test("a turn that produced NOTHING usable is fed back, not silently ended", async () => {
@@ -3115,4 +3325,865 @@ test("`prompt-caching: false` stops `cache_control` reaching the wire", async ()
   );
   // …and the turn is otherwise intact: the messages still went.
   assert.match(body, /"model":"claude-x"/);
+});
+
+/* ── inactivity-pause (idle-watchdog): the transport PAUSES, not aborts-and-discards ────── */
+
+/** A response body that enqueues each of `chunks` after its own real delay (ms), then either
+ *  closes (if `thenHang` is false) or never closes at all (simulating true silence forever). */
+/**
+ * A response body that enqueues each of `chunks` after its own real delay (ms), then either
+ * closes (if `thenHang` is false) or waits forever for REAL activity (if `thenHang` is true) —
+ * matching a real fetch stream's behavior: a pending read only ever settles on genuine data,
+ * or on the request's OWN AbortSignal firing (never on a fixed timeout of its own).
+ */
+function delayedStream(
+  chunks: string[],
+  gapMs: number,
+  thenHang: boolean,
+  signal?: AbortSignal,
+  onDrained?: () => void,
+): ReadableStream<Uint8Array> {
+  const encoder = new TextEncoder();
+  let i = 0;
+  const abortRejection = (): Promise<never> =>
+    new Promise((_, reject) => {
+      const onAbort = () => {
+        const err = new Error("The operation was aborted");
+        err.name = "AbortError";
+        reject(err);
+      };
+      if (signal?.aborted) onAbort();
+      else signal?.addEventListener("abort", onAbort, { once: true });
+    });
+  return new ReadableStream<Uint8Array>({
+    async pull(controller) {
+      if (i < chunks.length) {
+        await Promise.race([new Promise((r) => setTimeout(r, gapMs)), abortRejection()]);
+        controller.enqueue(encoder.encode(chunks[i] as string));
+        i++;
+        return;
+      }
+      if (thenHang) {
+        // The chunks are gone and the silence starts HERE. `onDrained` lets a test arm the idle
+        // watchdog at exactly this point instead of at stream start — see `deferredClock`.
+        onDrained?.();
+        // true silence forever, UNTIL the caller's own idle watchdog aborts its signal — a real
+        // fetch stream's pending read rejects exactly this way, it never times out on its own.
+        await abortRejection();
+        return;
+      }
+      controller.close();
+    },
+  });
+}
+
+function delayedFetch(chunks: string[], gapMs: number, thenHang: boolean, onDrained?: () => void) {
+  return async (_url: string, init?: { signal?: AbortSignal }) => ({
+    ok: true,
+    status: 200,
+    statusText: "OK",
+    body: delayedStream(chunks, gapMs, thenHang, init?.signal, onDrained),
+    async text() {
+      return "";
+    },
+  });
+}
+
+const TOOL_ENDPOINT = { ...OLLAMA_ENDPOINT, supportsTools: true };
+
+/**
+ * A TIME-COMPRESSED clock for the idle watchdog: `now()` reports elapsed real time scaled UP by
+ * `speedup`, and `setTimeoutFn` divides the requested delay by the same factor before handing it
+ * to the REAL `setTimeout`. This lets a test request a fully realistic, floor-respecting
+ * `idleTimeoutMs` (≥ `MIN_IDLE_TIMEOUT_MS`, so `clampIdleTimeoutMs` never silently rewrites it —
+ * the exact bug this helper exists to avoid re-introducing) while the watchdog actually fires in
+ * milliseconds of real test time. Production never injects this — see `toolTurn`'s doc comment.
+ */
+function compressedClock(speedup: number) {
+  const start = Date.now();
+  return {
+    now: () => start + (Date.now() - start) * speedup,
+    setTimeoutFn: (cb: () => void, ms: number) => setTimeout(cb, ms / speedup),
+    clearTimeoutFn: (h: ReturnType<typeof setTimeout>) => clearTimeout(h),
+  };
+}
+
+/**
+ * `compressedClock`, but the watchdog's timers do not START until `release()` is called.
+ *
+ * WHY: at speedup 1000 a realistic 30s idle window fires after 30ms of REAL time, and the
+ * watchdog is armed when the stream OPENS — before any chunk has been delivered. In the full
+ * suite (6300 tests, one child process per file at CPU-count concurrency) 30ms is not always
+ * enough, so the pause fired first, nothing was ever parsed, and the two "survives the pause"
+ * tests failed with `actual: undefined` — intermittently, in roughly 1 full-suite run in 4.
+ *
+ * THE PRODUCT IS NOT AT FAULT, and that was established by measurement before this helper was
+ * allowed to exist: sweeping the delivery gap across the watchdog boundary (0–100ms, 78 runs,
+ * compiled `makeLlmClient`) every call that was actually delivered survived the pause — 42 of
+ * 42, zero drops. The 36 misses were runs where the watchdog aborted the stream before the
+ * chunk was ever pulled, where there is no call to keep and discarding nothing is correct.
+ * So the flake is in the test's PREMISE ("deliver the complete call, THEN hang"), which
+ * `release` as `delayedFetch`'s `onDrained` now guarantees by arming the watchdog at the moment
+ * the stream actually goes silent. The race is removed rather than widened — a bigger timeout
+ * would only have made it rarer, and a green-but-racy test would have masked the real defect
+ * had there been one.
+ */
+function deferredClock(speedup: number) {
+  const base = compressedClock(speedup);
+  type Queued = { cb: () => void; ms: number; cancelled?: boolean };
+  const queued: Queued[] = [];
+  let released = false;
+  const release = () => {
+    if (released) return;
+    released = true;
+    for (const q of queued) if (!q.cancelled) base.setTimeoutFn(q.cb, q.ms);
+    queued.length = 0;
+  };
+  return {
+    now: base.now,
+    release,
+    setTimeoutFn: (cb: () => void, ms: number) => {
+      if (released) return base.setTimeoutFn(cb, ms);
+      const rec: Queued = { cb, ms };
+      queued.push(rec);
+      return rec as unknown as ReturnType<typeof setTimeout>;
+    },
+    clearTimeoutFn: (h: ReturnType<typeof setTimeout>) => {
+      const rec = h as unknown as Queued;
+      if (rec && typeof rec === "object" && "cb" in rec) {
+        rec.cancelled = true;
+        return;
+      }
+      base.clearTimeoutFn(h);
+    },
+  };
+}
+
+test("makeLlmClient: a stream that goes silent forever PAUSES (not final, not a thrown error) within the idle window", async () => {
+  const fetch = delayedFetch([], 0, true); // zero chunks, hangs forever
+  const clock = compressedClock(1000); // a real "30s" idle window fires in ~30ms of test time
+  const llm = makeLlmClient(TOOL_ENDPOINT, {
+    fetch: fetch as never,
+    idleTimeoutMs: 30_000,
+    idleWatchdogNow: clock.now,
+    idleWatchdogSetTimeout: clock.setTimeoutFn,
+    idleWatchdogClearTimeout: clock.clearTimeoutFn,
+  });
+  const started = Date.now();
+  const turns = await collect(llm.turn(thread("hi"), fakeTuning(), [fakeTool("noop", () => [])]));
+  const elapsed = Date.now() - started;
+  assert.ok(
+    elapsed < 2000,
+    `expected a bounded pause well under 2s of real time, took ${elapsed}ms`,
+  );
+  assert.ok(
+    turns.some((t) => (t as { kind: string }).kind === "paused"),
+    "expected a paused turn",
+  );
+  assert.ok(!turns.some((t) => (t as { kind: string }).kind === "final"));
+});
+
+/**
+ * Regression: verification pass #2's CRITICAL finding — the idle-pause catch block used to set
+ * `pausedByIdle`/return without ever draining the `calls` map, so a tool call the model had
+ * ALREADY fully parsed (name + complete, valid JSON arguments) before going silent vanished
+ * without ever becoming a `tool_call` LlmTurn — contradicting the turn's own status line
+ * ("pausing this turn (no work lost)") and the feature's stated invariant. A single SSE frame
+ * carries a COMPLETE call (not fragments split across chunks, which the OTHER tests here already
+ * cover for the non-paused case) so the call is fully formed the instant it arrives, then the
+ * stream hangs forever — exactly the "model decided, then the engine wedged" pattern.
+ */
+test("toolTurn (native): a tool call that fully parsed before the model went silent is NOT discarded on pause", async () => {
+  const sse = [
+    'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_abc","function":{"name":"read_file","arguments":"{\\"path\\":\\"a.ts\\"}"}}]}}]}\n',
+  ];
+  const clock = deferredClock(1000);
+  // deliver the complete call, THEN hang — the watchdog only starts once the silence begins,
+  // so the test's premise cannot lose a race against its own 30ms-of-real-time idle window.
+  const fetch = delayedFetch(sse, 0, true, clock.release);
+  const llm = makeLlmClient(TOOL_ENDPOINT, {
+    fetch: fetch as never,
+    idleTimeoutMs: 30_000,
+    idleWatchdogNow: clock.now,
+    idleWatchdogSetTimeout: clock.setTimeoutFn,
+    idleWatchdogClearTimeout: clock.clearTimeoutFn,
+  });
+  const turns = await collect(
+    llm.turn(thread("read a.ts"), fakeTuning(), [fakeTool("read_file", () => ["read"])]),
+  );
+  const call = turns.find((t) => (t as { kind: string }).kind === "tool_call") as
+    | { call: { name: string; args: unknown } }
+    | undefined;
+  assert.ok(call, "the fully-parsed tool call must survive the pause, not be silently discarded");
+  assert.equal(call?.call.name, "read_file");
+  assert.deepEqual(call?.call.args, { path: "a.ts" });
+  assert.ok(
+    turns.some((t) => (t as { kind: string }).kind === "paused"),
+    "expected a paused turn too — the flush must not replace the pause report",
+  );
+});
+
+test("makeLlmClient: the TEXT transport does not discard a tool call that fully parsed before the model went silent (regression: same CRITICAL finding, the text-protocol path)", async () => {
+  const sse = [
+    'data: {"choices":[{"delta":{"content":"<tool_call>{\\"name\\":\\"read_file\\",\\"arguments\\":{\\"path\\":\\"a.ts\\"}}</tool_call>"}}]}\n',
+  ];
+  const clock = deferredClock(1000);
+  // deliver the complete call, THEN hang — the watchdog only starts once the silence begins,
+  // so the test's premise cannot lose a race against its own 30ms-of-real-time idle window.
+  const fetch = delayedFetch(sse, 0, true, clock.release);
+  // OLLAMA_ENDPOINT's supportsTools:false routes straight to the text transport — no native
+  // attempt/rejection round needed to get there.
+  const llm = makeLlmClient(OLLAMA_ENDPOINT, {
+    fetch: fetch as never,
+    idleTimeoutMs: 30_000,
+    idleWatchdogNow: clock.now,
+    idleWatchdogSetTimeout: clock.setTimeoutFn,
+    idleWatchdogClearTimeout: clock.clearTimeoutFn,
+  });
+  const turns = await collect(
+    llm.turn(thread("read a.ts"), fakeTuning(), [fakeTool("read_file", () => ["read"])]),
+  );
+  const call = turns.find((t) => (t as { kind: string }).kind === "tool_call") as
+    | { call: { name: string; args: unknown } }
+    | undefined;
+  assert.ok(call, "the fully-parsed tool call must survive the pause, not be silently discarded");
+  assert.equal(call?.call.name, "read_file");
+  assert.deepEqual(call?.call.args, { path: "a.ts" });
+  assert.ok(
+    turns.some((t) => (t as { kind: string }).kind === "paused"),
+    "expected a paused turn too — the flush must not replace the pause report",
+  );
+});
+
+test("makeLlmClient: chunks delivered before going silent are kept, and idleMs reflects time since the LAST chunk", async () => {
+  const sse = [
+    'data: {"choices":[{"delta":{"content":"he"}}]}\n',
+    'data: {"choices":[{"delta":{"content":"llo"}}]}\n',
+  ];
+  // two chunks 20ms apart, then silence — the 30s idle window is measured from the LAST chunk,
+  // not from turn start, so total elapsed is deliberately LONGER than the window alone would
+  // suggest — proving the pause is activity-based, not a stale total-time clock.
+  const fetch = delayedFetch(sse, 20, true);
+  const clock = compressedClock(1000);
+  const llm = makeLlmClient(TOOL_ENDPOINT, {
+    fetch: fetch as never,
+    idleTimeoutMs: 30_000,
+    idleWatchdogNow: clock.now,
+    idleWatchdogSetTimeout: clock.setTimeoutFn,
+    idleWatchdogClearTimeout: clock.clearTimeoutFn,
+  });
+  const startedAt = Date.now();
+  const turns = await collect(llm.turn(thread("hi"), fakeTuning(), [fakeTool("noop", () => [])]));
+  const totalCompressed = (Date.now() - startedAt) * 1000;
+  const text = turns
+    .filter((t) => (t as { kind: string }).kind === "text")
+    .map((t) => (t as { text: string }).text)
+    .join("");
+  assert.equal(text, "hello", "chunks delivered before the pause must not be discarded");
+  const paused = turns.find((t) => (t as { kind: string }).kind === "paused") as
+    | { idleMs: number }
+    | undefined;
+  assert.ok(paused, "expected a paused turn");
+  /**
+   * The property is that `idleMs` measures the TRAILING SILENCE, excluding the two 20ms
+   * chunk-delivery gaps — i.e. the clock is activity-based, not total-elapsed.
+   *
+   * Measured against the run's OWN elapsed time rather than a fixed 40_000 ceiling. On the 1000x
+   * compressed clock every millisecond of real timer-scheduling slack counts as a full second,
+   * so the old absolute bound left only ~10ms of real headroom above the nominal 30_000 window
+   * and failed intermittently in the full suite (observed: 45_000, i.e. the watchdog fired 15ms
+   * late). A from-turn-start clock would report essentially the whole elapsed time; an
+   * activity-based one cannot, however loaded the machine is.
+   */
+  assert.ok(
+    paused.idleMs >= 30_000,
+    `idleMs (${paused.idleMs}) is below the idle window — the watchdog fired early`,
+  );
+  assert.ok(
+    paused.idleMs < totalCompressed - 25_000,
+    `idleMs (${paused.idleMs}) vs total elapsed (${totalCompressed}): the delivery phase must be excluded`,
+  );
+});
+
+test("makeLlmClient: chunks spaced closer than the idle window keep a turn alive past a flat total-time ceiling", async () => {
+  // 8 chunks, 15ms apart, well under the 30s idle window — total REAL span (~120ms) comfortably
+  // exceeds what an old flat "abort after N ms total" ceiling would have allowed if N were, say,
+  // 100ms — and the compressed clock proves this holds even measured against a REALISTIC
+  // (30s-floor-respecting) idle threshold, not just a tiny test-only number.
+  const sse = Array.from(
+    { length: 8 },
+    (_, i) => `data: {"choices":[{"delta":{"content":"${i}"}}]}\n`,
+  );
+  const fetch = delayedFetch(sse, 15, false); // closes cleanly after the last chunk
+  const clock = compressedClock(1000);
+  const llm = makeLlmClient(TOOL_ENDPOINT, {
+    fetch: fetch as never,
+    idleTimeoutMs: 30_000,
+    idleWatchdogNow: clock.now,
+    idleWatchdogSetTimeout: clock.setTimeoutFn,
+    idleWatchdogClearTimeout: clock.clearTimeoutFn,
+  });
+  const turns = await collect(llm.turn(thread("hi"), fakeTuning(), [fakeTool("noop", () => [])]));
+  assert.ok(
+    !turns.some((t) => (t as { kind: string }).kind === "paused"),
+    "a genuinely active stream must never be paused just because it ran long",
+  );
+  const text = turns
+    .filter((t) => (t as { kind: string }).kind === "text")
+    .map((t) => (t as { text: string }).text)
+    .join("");
+  assert.equal(text, "01234567");
+});
+
+test("makeLlmClient: orphan guard — a pause on endpoint X warns the NEXT call to X, not to a different endpoint", async () => {
+  const endpointA = { ...TOOL_ENDPOINT, id: "local:orphan-test-a" };
+  const endpointB = { ...TOOL_ENDPOINT, id: "local:orphan-test-b" };
+  // First call to A pauses (silent forever, compressed 30s idle window).
+  const firstFetch = delayedFetch([], 0, true);
+  const firstClock = compressedClock(1000);
+  const firstLlm = makeLlmClient(endpointA, {
+    fetch: firstFetch as never,
+    idleTimeoutMs: 30_000,
+    idleWatchdogNow: firstClock.now,
+    idleWatchdogSetTimeout: firstClock.setTimeoutFn,
+    idleWatchdogClearTimeout: firstClock.clearTimeoutFn,
+  });
+  await collect(firstLlm.turn(thread("hi"), fakeTuning(), [fakeTool("noop", () => [])]));
+
+  // Second call to the SAME endpoint id should carry the orphan-guard warning status. No
+  // compressed clock needed here — this call must NOT itself pause, it just needs to complete.
+  const secondFetch = delayedFetch(["data: [DONE]\n"], 0, false);
+  const secondLlm = makeLlmClient(endpointA, { fetch: secondFetch as never });
+  const secondTurns = await collect(
+    secondLlm.turn(thread("hi"), fakeTuning(), [fakeTool("noop", () => [])]),
+  );
+  const statuses = secondTurns
+    .filter((t) => (t as { kind: string }).kind === "status")
+    .map((t) => (t as { text: string }).text);
+  assert.ok(
+    statuses.some((s) => s.includes("may still be finishing a generation")),
+    "expected the orphan-guard warning on a call to the SAME endpoint right after its pause",
+  );
+
+  // A call to a DIFFERENT endpoint id must not see the warning.
+  const thirdFetch = delayedFetch(["data: [DONE]\n"], 0, false);
+  const thirdLlm = makeLlmClient(endpointB, { fetch: thirdFetch as never });
+  const thirdTurns = await collect(
+    thirdLlm.turn(thread("hi"), fakeTuning(), [fakeTool("noop", () => [])]),
+  );
+  const thirdStatuses = thirdTurns
+    .filter((t) => (t as { kind: string }).kind === "status")
+    .map((t) => (t as { text: string }).text);
+  assert.ok(
+    !thirdStatuses.some((s) => s.includes("may still be finishing a generation")),
+    "a different endpoint must not inherit another endpoint's orphan warning",
+  );
+});
+
+/*
+ * The text/no-tools ("none") transport is the ONLY one of the four transports this repo runs
+ * (native tool-calling, this one, VS Code, and `makeSummarizer`'s background call) that had NO
+ * inactivity protection at all before this fix — `negotiateTransport` always resolves an empty
+ * `tools` array to "none", so `makeSummarizer`'s inner `llm.turn(thread, tuning, [])` call (see
+ * `makeSummarizer` above) exercises EXACTLY this path. A prior "fix" that threaded `idleTimeoutMs`
+ * into `makeSummarizer` was consequently dead code in practice: the underlying `stream()` call in
+ * `@prometheus/core`'s `ai/client.ts` had no watchdog of its own to honour it. These tests drive
+ * `makeLlmClient(...).turn(..., [])` directly — the identical call shape `makeSummarizer` makes —
+ * rather than `makeSummarizer` itself, which has no clock-injection seam of its own and would
+ * otherwise force a real 30s+ wait per test.
+ */
+test("makeLlmClient: the TEXT/no-tools transport (empty tools — makeSummarizer's exact call shape) also PAUSES on inactivity, not hangs forever", async () => {
+  const fetch = delayedFetch([], 0, true); // zero chunks, hangs forever
+  const clock = compressedClock(1000); // a real "30s" idle window fires in ~30ms of test time
+  const llm = makeLlmClient(OLLAMA_ENDPOINT, {
+    fetch: fetch as never,
+    idleTimeoutMs: 30_000,
+    idleWatchdogNow: clock.now,
+    idleWatchdogSetTimeout: clock.setTimeoutFn,
+    idleWatchdogClearTimeout: clock.clearTimeoutFn,
+  });
+  const started = Date.now();
+  const turns = await collect(llm.turn(thread("hi"), fakeTuning(), []));
+  const elapsed = Date.now() - started;
+  assert.ok(
+    elapsed < 2000,
+    `expected a bounded pause well under 2s of real time, took ${elapsed}ms`,
+  );
+  assert.ok(
+    turns.some((t) => (t as { kind: string }).kind === "paused"),
+    "expected a paused turn on the text/none transport, not an indefinite hang",
+  );
+  assert.ok(!turns.some((t) => (t as { kind: string }).kind === "final"));
+});
+
+test("makeLlmClient: the TEXT/no-tools transport keeps prose received BEFORE going silent, and idleMs reflects only the silence since", async () => {
+  const sse = [
+    'data: {"choices":[{"delta":{"content":"par"}}]}\n',
+    'data: {"choices":[{"delta":{"content":"tial"}}]}\n',
+  ];
+  const fetch = delayedFetch(sse, 20, true);
+  const clock = compressedClock(1000);
+  const llm = makeLlmClient(OLLAMA_ENDPOINT, {
+    fetch: fetch as never,
+    idleTimeoutMs: 30_000,
+    idleWatchdogNow: clock.now,
+    idleWatchdogSetTimeout: clock.setTimeoutFn,
+    idleWatchdogClearTimeout: clock.clearTimeoutFn,
+  });
+  const turns = await collect(llm.turn(thread("hi"), fakeTuning(), []));
+  const text = turns
+    .filter((t) => (t as { kind: string }).kind === "text")
+    .map((t) => (t as { text: string }).text)
+    .join("");
+  assert.equal(text, "partial", "text received before the pause must not be discarded");
+  const paused = turns.find((t) => (t as { kind: string }).kind === "paused") as
+    | { idleMs: number }
+    | undefined;
+  assert.ok(paused, "expected a paused turn");
+  assert.ok(
+    paused.idleMs < 40_000,
+    `idleMs (${paused.idleMs}) should reflect recent silence only, not total elapsed time`,
+  );
+});
+
+test("makeSummarizer: a real endpoint whose response goes silent forever falls back to the offline summary instead of hanging (regression: this used to be the ONE transport with no idle protection)", async () => {
+  const fetch = delayedFetch([], 0, true); // zero chunks, hangs forever
+  const clock = compressedClock(1000);
+  const statuses: string[] = [];
+  // makeSummarizer has no clock-injection seam of its own (production never needs one — see the
+  // header comment above); a compressed-clock `LLMClient` built directly via `makeLlmClient` and
+  // handed in as `deps.llm` exercises the exact same `stream()`/watchdog code the real
+  // `ctx.endpoint` branch would construct, without forcing a real 30s+ wait.
+  const llm = makeLlmClient(OLLAMA_ENDPOINT, {
+    fetch: fetch as never,
+    idleTimeoutMs: 30_000,
+    idleWatchdogNow: clock.now,
+    idleWatchdogSetTimeout: clock.setTimeoutFn,
+    idleWatchdogClearTimeout: clock.clearTimeoutFn,
+  });
+  const { ctx } = fakeCtx(fakeEngine(() => ({})).client, { endpoint: OLLAMA_ENDPOINT });
+  const { summarize, offline } = makeSummarizer(ctx, {
+    llm,
+    onStatus: (t) => statuses.push(t),
+  });
+  assert.equal(offline, false, "a configured endpoint must not report offline up-front");
+  const started = Date.now();
+  const result = await summarize([
+    { id: "t0", turnNumber: 1, prompt: "hi", events: [], createdAt: fixedNow() },
+  ]);
+  const elapsed = Date.now() - started;
+  assert.ok(
+    elapsed < 2000,
+    `expected a bounded fallback well under 2s of real time, took ${elapsed}ms`,
+  );
+  assert.ok(result.includes("(summary)"), "expected the deterministic extractive fallback");
+  assert.ok(
+    statuses.some((s) => s.includes("went idle") && s.includes("using an offline summary")),
+    `expected a visible idle-pause status, got: ${JSON.stringify(statuses)}`,
+  );
+});
+
+/* ── V4: inline <think> must not reach the transcript on the TEXT path ──────*/
+
+/** SSE frames for a stream whose content is split at `at`. */
+function sseOf(parts: readonly string[]): string {
+  return `${parts
+    .map((p) => `data: ${JSON.stringify({ choices: [{ delta: { content: p } }] })}`)
+    .join("\n")}\ndata: [DONE]\n`;
+}
+
+test("text transport: R1-style inline thinking is routed to `reasoning`, not to the answer", async () => {
+  // P4 wired the NATIVE path and the desktop's main-process stream and called that "both
+  // transports". It was not: THIS path serves every no-tools chat AND every model demoted from
+  // native — and a demoted small local model is exactly the population that emits inline
+  // `<think>`. The tag is split across deltas on purpose; that is what a stream really does.
+  const f = capturingFetch(sseOf(["<thi", "nk>weighing it up</think>", "The answer is 4."]));
+  const llm = makeLlmClient(OLLAMA_ENDPOINT, {
+    fetch: f.fetch as never,
+    effortCapability: { mechanism: "always-on", supported: [], reasoningTag: "think" },
+  });
+  const turns = await collect(llm.turn(thread("2+2"), fakeTuning({}), []));
+  const text = turns
+    .filter((t) => t.kind === "text")
+    .map((t) => (t as { text: string }).text)
+    .join("");
+  const reasoning = turns
+    .filter((t) => t.kind === "reasoning")
+    .map((t) => (t as { text: string }).text)
+    .join("");
+  assert.equal(text, "The answer is 4.", "the deliberation leaked into the answer");
+  assert.equal(reasoning, "weighing it up");
+});
+
+test("text transport: a model with NO reasoning tag streams byte-identically", async () => {
+  // The no-regression half: the splitter is a strict pass-through when the capability names
+  // no tag, so every other model's transcript is unchanged.
+  const f = capturingFetch(sseOf(["plain <think>not special</think> answer"]));
+  const llm = makeLlmClient(OLLAMA_ENDPOINT, {
+    fetch: f.fetch as never,
+    effortCapability: { mechanism: "none", supported: [] },
+  });
+  const turns = await collect(llm.turn(thread("hi"), fakeTuning({}), []));
+  const text = turns
+    .filter((t) => t.kind === "text")
+    .map((t) => (t as { text: string }).text)
+    .join("");
+  assert.equal(text, "plain <think>not special</think> answer");
+});
+
+test("text transport: an UNTERMINATED thought never becomes the answer", async () => {
+  const f = capturingFetch(sseOf(["<think>I was cut off"]));
+  const llm = makeLlmClient(OLLAMA_ENDPOINT, {
+    fetch: f.fetch as never,
+    effortCapability: { mechanism: "always-on", supported: [], reasoningTag: "think" },
+  });
+  const turns = await collect(llm.turn(thread("x"), fakeTuning({}), []));
+  const text = turns
+    .filter((t) => t.kind === "text")
+    .map((t) => (t as { text: string }).text)
+    .join("");
+  assert.equal(text, "");
+  assert.match(
+    turns
+      .filter((t) => t.kind === "reasoning")
+      .map((t) => (t as { text: string }).text)
+      .join(""),
+    /cut off/,
+  );
+});
+
+test("a FAILED request ends the turn — it is not fed back as 'you replied with nothing usable'", async () => {
+  // `shownText` grows only through the scanner pump, so the `model error: …` line the catch
+  // yields left every condition of the empty-turn check true. The model was then told it had
+  // replied with nothing usable — about a reply it was never asked for — and the loop
+  // re-requested the same dead endpoint every round to the cap.
+  const dead = (async () => {
+    throw new TypeError("fetch failed");
+  }) as never;
+  const llm = makeLlmClient(OLLAMA_ENDPOINT, { fetch: dead });
+  const turns = await collect(
+    llm.turn(thread("hi"), fakeTuning(), [fakeTool("read_file", () => ["read"])]),
+  );
+  const synthetic = turns.filter(
+    (t) => t.kind === "tool_call" && t.call.name === agent.protocol.PROTOCOL_FEEDBACK_TOOL,
+  );
+  assert.deepEqual(synthetic, [], "a dead endpoint was reported to the model as a bad reply");
+  assert.ok(
+    turns.some((t) => t.kind === "final"),
+    "a failed request must END the turn, not leave the loop re-requesting",
+  );
+  const text = turns
+    .filter((t) => t.kind === "text")
+    .map((t) => (t.kind === "text" ? t.text : ""))
+    .join("");
+  assert.match(text, /model error/, "the failure must still be reported to the user");
+});
+
+test("CLI-004: the path guard covers the SYSTEM tools, not just engine verbs", async () => {
+  /**
+   * The guard used to sit ~120 lines below the system-tool dispatch, which returns for every
+   * tool core recognises. So it only ever ran for `prometheus_*` verbs: with a session scoped
+   * to one repo the model could still read any file on the machine, list any directory, point
+   * a git tool at another repository, and hand `run_command` a cwd outside the working set.
+   * Three comments in two modules asserted the opposite.
+   *
+   * The old test for this exercised a fake ENGINE tool, which is exactly why the hole was
+   * invisible: it proved the arm that was already guarded.
+   */
+  const { mkdtempSync, writeFileSync, realpathSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const inside = realpathSync.native(mkdtempSync(join(tmpdir(), "prom-ws-in-")));
+  const outside = realpathSync.native(mkdtempSync(join(tmpdir(), "prom-ws-out-")));
+  writeFileSync(join(inside, "ok.txt"), "in-scope\n");
+  writeFileSync(join(outside, "private-notes.txt"), "secrets\n");
+
+  const { client } = fakeEngine(() => ({ ok: true }));
+  const run = makeToolRunner(client, { roots: [inside], cwd: inside });
+
+  // in-scope reads keep working — relative AND absolute
+  assert.equal(
+    (
+      await run(
+        fakeTool("read_file", () => []),
+        { path: "ok.txt" },
+      )
+    ).ok,
+    true,
+  );
+  assert.equal(
+    (
+      await run(
+        fakeTool("read_file", () => []),
+        { path: join(inside, "ok.txt") },
+      )
+    ).ok,
+    true,
+  );
+
+  // every out-of-scope shape is refused, by the SAME guard
+  for (const [name, args] of [
+    ["read_file", { path: join(outside, "private-notes.txt") }],
+    ["list_dir", { path: outside }],
+    ["git_status", { cwd: outside }],
+    ["run_command", { command: "pwd", cwd: outside }],
+  ] as const) {
+    const res = await run(
+      fakeTool(name, () => []),
+      { ...args },
+    );
+    assert.equal(res.ok, false, `${name} was allowed outside the working set`);
+    assert.match(res.summary, /outside the working set/, `${name} refused for the wrong reason`);
+  }
+
+  // a human-approved out-of-scope write is still honoured — that exemption is the point of
+  // `approvedWrites`, and re-denying it here would break writes the user said yes to.
+  const target = join(outside, "approved.txt");
+  const approved = makeToolRunner(client, {
+    roots: [inside],
+    cwd: inside,
+    approvedWrites: new Set([target]),
+  });
+  const ok = await approved(
+    fakeTool("write_file", () => []),
+    { path: target, content: "yes\n" },
+  );
+  assert.equal(ok.ok, true, "an approved out-of-scope write must still apply");
+});
+
+test("restoreCheckpoint REPORTS a path the scope guard refused, instead of swallowing it", async () => {
+  /**
+   * A `write_file` outside the working set is reachable — the confirm seam asks and the human
+   * can approve it — and its pre-image is captured like any other. `/revert` then skipped it
+   * here (correctly: a checkpoint must never become an arbitrary-write primitive) and said
+   * NOTHING, while the caller deleted the checkpoint on the strength of a successful-looking
+   * return. The original bytes of a file the user explicitly approved a write to were destroyed
+   * by the command whose whole purpose is to bring them back.
+   */
+  const { mkdtempSync, writeFileSync, readFileSync, realpathSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const inside = realpathSync.native(mkdtempSync(join(tmpdir(), "prom-cp-in-")));
+  const outside = realpathSync.native(mkdtempSync(join(tmpdir(), "prom-cp-out-")));
+  const inFile = join(inside, "a.txt");
+  const outFile = join(outside, "notes.md");
+  writeFileSync(inFile, "CLOBBERED\n");
+  writeFileSync(outFile, "CLOBBERED\n");
+
+  const cp = {
+    id: "cp1",
+    sessionId: "s1",
+    createdAt: new Date(0).toISOString(),
+    files: { [inFile]: "original in\n", [outFile]: "original out\n" },
+  } as never;
+
+  const res = restoreCheckpoint(cp, { roots: [inside] });
+  assert.deepEqual(res.restored, [inFile]);
+  assert.deepEqual(res.skipped, [outFile], "the refused path must be reported to the caller");
+  assert.equal(readFileSync(inFile, "utf8"), "original in\n");
+  assert.equal(readFileSync(outFile, "utf8"), "CLOBBERED\n", "still not reverted — by design");
+
+  // with the path in scope there is nothing to skip, and the caller may drop the checkpoint
+  const res2 = restoreCheckpoint(cp, { roots: [inside, outside] });
+  assert.deepEqual(res2.skipped, []);
+  assert.equal(readFileSync(outFile, "utf8"), "original out\n");
+});
+
+/* ── the native tool transport: what the wire actually hands over ───────────*/
+
+test("two tool calls delivered ONE PER CHUNK are not merged into one broken call", async () => {
+  /**
+   * The accumulator keyed on `tc.index` alone. `index` groups the FRAGMENTS of one streamed
+   * call (OpenAI, Anthropic), but a provider that hands a call over WHOLE numbers it by its
+   * position inside the chunk it arrived in — so one call per chunk means `index: 0` for every
+   * call. Both landed in the same slot: the later name won and the two argument objects were
+   * concatenated into `{"path":"a.txt"}{"path":"."}`, which does not parse.
+   *
+   * Reproduced end to end against a live HTTP server through `LLMClient.turn()`: the turn
+   * emitted a single `malformed_tool_call` whose `wrote` was that concatenation. Two real
+   * actions the user asked for were destroyed, and the model was blamed for its own output.
+   */
+  const chunk = (name: string, args: unknown) =>
+    `data: ${JSON.stringify({ candidates: [{ content: { parts: [{ functionCall: { name, args } }] } }] })}\n`;
+  const sse = `${chunk("read_file", { path: "a.txt" })}${chunk("list_dir", { path: "." })}data: ${JSON.stringify({ candidates: [{ finishReason: "STOP" }] })}\n`;
+  const fakeFetch = async () => ({
+    ok: true,
+    status: 200,
+    statusText: "OK",
+    body: streamFromString(sse),
+    async text() {
+      return "";
+    },
+  });
+  const llm = makeLlmClient(
+    {
+      id: "cloud:gemini:test",
+      baseUrl: "https://generativelanguage.googleapis.com",
+      locality: "cloud",
+      contextWindow: 100_000,
+      supportsTools: true,
+      model: "gemini-x",
+    },
+    { fetch: fakeFetch as never, resolveKey: () => "k" },
+  );
+
+  const turns = await collect(
+    llm.turn(thread("do two things"), fakeTuning(), [
+      { name: "read_file", description: "d", schema: { type: "object", properties: {} } },
+      { name: "list_dir", description: "d", schema: { type: "object", properties: {} } },
+    ] as never),
+  );
+  const calls = turns
+    .filter((t) => t.kind === "tool_call")
+    .map((t) => (t as { call: { name: string; args: unknown } }).call);
+
+  assert.deepEqual(
+    calls.map((c) => c.name),
+    ["read_file", "list_dir"],
+    "the two calls were merged or reordered",
+  );
+  assert.deepEqual(calls[0]?.args, { path: "a.txt" });
+  assert.deepEqual(calls[1]?.args, { path: "." });
+});
+
+test("Anthropic usage split across message_start and message_delta is MERGED, not overwritten", async () => {
+  /**
+   * Anthropic reports a turn's usage across two frames: `message_start` carries `input_tokens`
+   * plus the prompt-cache counters, `message_delta` later carries `output_tokens` with
+   * `input_tokens: 0`. The native transport assigned each frame in turn, so the last one won and
+   * every agentic Anthropic turn was recorded as `promptTokens: 0` — /cost, the session usage
+   * report, the budget gate and the USD cap all under-counted by the whole input side, and both
+   * cache counters vanished. Reproduced against a live server: 12345 in, recorded as 0.
+   */
+  const sse =
+    'event: message_start\ndata: {"type":"message_start","message":{"usage":{"input_tokens":12345,"output_tokens":1,"cache_read_input_tokens":9000,"cache_creation_input_tokens":500}}}\n' +
+    'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hello"}}\n' +
+    'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":77}}\n' +
+    'event: message_stop\ndata: {"type":"message_stop"}\n';
+  const fakeFetch = async () => ({
+    ok: true,
+    status: 200,
+    statusText: "OK",
+    body: streamFromString(sse),
+    async text() {
+      return "";
+    },
+  });
+  const recs: AccountingRecord[] = [];
+  const llm = makeLlmClient(
+    {
+      id: "cloud:anthropic:test",
+      baseUrl: "https://api.anthropic.com",
+      locality: "cloud",
+      contextWindow: 200_000,
+      supportsTools: true,
+      model: "claude-x",
+    },
+    { fetch: fakeFetch as never, resolveKey: () => "k", onUsage: (r) => recs.push(r) },
+  );
+
+  await collect(
+    llm.turn(thread("hi"), fakeTuning(), [
+      { name: "read_file", description: "d", schema: { type: "object", properties: {} } },
+    ] as never),
+  );
+  assert.equal(recs.length, 1);
+  assert.equal(recs[0]?.promptTokens, 12345, "the input side was dropped");
+  assert.equal(recs[0]?.completionTokens, 77);
+  assert.equal(recs[0]?.estimated, false);
+  assert.equal(recs[0]?.cacheRead, 9000);
+  assert.equal(recs[0]?.cacheCreate, 500);
+});
+
+test("a final SSE frame with no terminating newline is still delivered", async () => {
+  /**
+   * The line loop `break`s the moment the reader is exhausted, leaving whatever is in the buffer
+   * unparsed. A server that closes without a final newline therefore lost its LAST frame — which
+   * can carry the closing sentence of the answer or the tail of a tool call's arguments. The
+   * reply was truncated with nothing to say so. Core's own `client.ts` already flushed with
+   * `parseSseChunk(`${buf}\n`)`; this transport did not.
+   */
+  const sse =
+    'data: {"choices":[{"delta":{"content":"first "}}]}\n' +
+    'data: {"choices":[{"delta":{"content":"LAST-SENTENCE"}}]}'; // ← no trailing newline
+  const fakeFetch = async () => ({
+    ok: true,
+    status: 200,
+    statusText: "OK",
+    body: streamFromString(sse),
+    async text() {
+      return "";
+    },
+  });
+  const llm = makeLlmClient(
+    {
+      id: "local:test",
+      baseUrl: "http://127.0.0.1:1",
+      locality: "local",
+      contextWindow: 8192,
+      supportsTools: true,
+    },
+    { fetch: fakeFetch as never },
+  );
+  const turns = await collect(
+    llm.turn(thread("hi"), fakeTuning(), [
+      { name: "read_file", description: "d", schema: { type: "object", properties: {} } },
+    ] as never),
+  );
+  const text = turns
+    .filter((t) => t.kind === "text")
+    .map((t) => (t as { text: string }).text)
+    .join("");
+  assert.match(text, /LAST-SENTENCE/, "the final unterminated frame was dropped");
+});
+
+test("propose_edit REFUSES a binary file instead of rewriting every byte of it", async () => {
+  /**
+   * `readFileSync(abs, "utf8")` does not throw on binary — it substitutes U+FFFD for every
+   * invalid sequence — so the read "succeeded", the splice ran against the lossy string, and
+   * `atomicWrite` put that back as the file. Measured through the real tool runner: a 1032-byte
+   * PNG became 2058 bytes of replacement characters and the tool reported
+   * `ok: true, "edited logo.png (1 hunk(s))"`. The pre-image recorded for `/revert` was the same
+   * lossy text, so the corruption could not be undone either.
+   *
+   * The identical mistake was already fixed once, in `delete_file`'s pre-image capture. This is
+   * the shared `readTextExact` so the two cannot drift apart again.
+   */
+  const { createHash } = await import("node:crypto");
+  const { mkdtempSync, readFileSync, writeFileSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+
+  const dir = mkdtempSync(join(tmpdir(), "prom-edit-bin-"));
+  const png = join(dir, "logo.png");
+  writeFileSync(
+    png,
+    Buffer.concat([
+      Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+      Buffer.from(Array.from({ length: 256 }, (_, i) => i)),
+    ]),
+  );
+  const md5 = (p: string): string => createHash("md5").update(readFileSync(p)).digest("hex");
+  const before = md5(png);
+
+  const run = makeToolRunner({ cwd: dir, roots: [dir] } as never);
+  const out = await run({ name: "propose_edit" } as never, {
+    path: png,
+    hunks: [{ old: "PNG", new: "JPG" }],
+  });
+  assert.equal(out.ok, false, "a binary file was edited as text");
+  assert.match(out.summary, /not a UTF-8 text file/);
+  assert.equal(md5(png), before, "the file was rewritten anyway");
+
+  // self-validating: an ordinary text edit through the same runner still works, so this is a
+  // targeted refusal and not a propose_edit that now refuses everything.
+  const txt = join(dir, "notes.txt");
+  writeFileSync(txt, "hello PNG world\n");
+  const ok = await run({ name: "propose_edit" } as never, {
+    path: txt,
+    hunks: [{ old: "PNG", new: "JPG" }],
+  });
+  assert.equal(ok.ok, true, `an ordinary edit was refused: ${ok.summary}`);
+  assert.equal(readFileSync(txt, "utf8"), "hello JPG world\n");
 });

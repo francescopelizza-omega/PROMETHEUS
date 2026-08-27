@@ -49,6 +49,16 @@ Reads auto-approve at `prometheus.authLevel` 1; anything carrying `destructiveHi
 (`write_file`, `propose_edit`, `apply_patch`, `delete_file`, `move_file`) reaches a human at
 every level, including 0. That is core's annotation broker, not a rule this package invents.
 
+### Cancelling a turn
+
+`prometheus.cancel` (Command Palette) and the sidebar's Cancel button (shown only while a turn
+is running) both call the same `ChatSession.cancel()`, which trips an `AbortController` minted
+fresh per turn. Core's `runAgentTurn` checks it before every round and before every tool call
+(`packages/core/src/agent/loop.ts`'s `AgentTurnDeps.signal`) — the same mechanism the CLI's ESC
+and the desktop's stop button already use — so a cancel takes effect at the next check point
+rather than needing a kill signal to a child process (this host has no `run_command` tool to
+kill in the first place).
+
 ### Why the webview UI is hand-written
 
 `apps/desktop`'s `AgentPane.tsx` is ~2700 lines of React bound to `@prometheus/ui`, Monaco, the
@@ -69,6 +79,13 @@ pnpm run test:vscode    # downloads a throwaway VS Code and runs the integration
 pnpm run package        # → prometheus-vscode-0.1.0.vsix
 ```
 
+`src/session.ts` has no `vscode` import of its own, so its logic (currently: mid-turn
+cancellation) also has a fast, plain `node:test` companion that needs no VS Code download:
+
+```sh
+node --import ./src/test/register.mjs --test src/session.test.ts
+```
+
 `test:vscode` needs no VS Code installed: `@vscode/test-electron` downloads its own pinned build
 into `.vscode-test/` (cached after the first run) and never touches your real VS Code profile.
 
@@ -84,7 +101,6 @@ into `.vscode-test/` (cached after the first run) and never touches your real VS
   `question`, and the `prometheus_*` engine verbs.** Each needs a process host, a fail-closed
   network proxy, or the engine. A tool that is advertised but cannot execute teaches the model
   to keep proposing it, so they are not in the allow-list at all.
-- **Mid-turn cancellation.** The `prometheus.cancel` command says so rather than pretending.
 - **`remember: "session"` grants.** The confirm result carries the field, but core reads it in
   `withRememberedGrants`, which is not wired here — so the dialog offers only Allow/Deny rather
   than an affordance that would not stick.

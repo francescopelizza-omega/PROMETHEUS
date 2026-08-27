@@ -262,9 +262,9 @@ export function detectConflicts(bindings: readonly KeyBinding[]): KeyConflict[] 
       // binding sharing keys otherwise reported the SAME collision twice (once per outer index)
       // with two different `when` values. The first index (global) wins its command set.
       if (commands.size > 1) {
-        const cmdKey = [...commands].sort().join(" ");
+        const cmdKey = [...commands].sort().join("\x00");
         const dup = conflicts.some(
-          (k) => k.keys === norm && [...k.commands].sort().join(" ") === cmdKey,
+          (k) => k.keys === norm && [...k.commands].sort().join("\x00") === cmdKey,
         );
         if (!dup)
           conflicts.push({ keys: norm, ...(when ? { when } : {}), commands: [...commands] });
@@ -408,7 +408,7 @@ function canonBinding(x: KeyBinding): KeyBinding {
 export function exportKeymap(km: Keymap): string {
   const bindings = km.bindings
     .map(canonBinding)
-    .sort((a, b) => `${a.command} ${a.keys}`.localeCompare(`${b.command} ${b.keys}`));
+    .sort((a, b) => `${a.command}\x00${a.keys}`.localeCompare(`${b.command}\x00${b.keys}`));
   const obj = {
     version: KEYMAP_EXPORT_VERSION,
     id: km.id,

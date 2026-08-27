@@ -292,7 +292,10 @@ if [ "$WITH_APP" -eq 1 ]; then
   run sh -c 'cd "$0/studio" && pnpm install && pnpm run package' "$SRC"
   if [ "$(uname -s)" = "Darwin" ] && [ "$DRY_RUN" -eq 0 ]; then
     for d in mac-arm64 mac-x64 mac mac-universal; do
-      app=$SRC/studio/apps/desktop/release/$d/Prometheus Studio.app
+      # QUOTED: the path contains a space, and `app=X Y` in POSIX sh assigns X to `app` and then
+      # tries to RUN Y — so this aborted the whole installer with "Studio.app: not found" under
+      # `set -e`, on exactly the platform the branch exists for.
+      app="$SRC/studio/apps/desktop/release/$d/Prometheus Studio.app"
       if [ -d "$app" ]; then
         step "installing the app into ~/Applications"
         run mkdir -p "$HOME/Applications"

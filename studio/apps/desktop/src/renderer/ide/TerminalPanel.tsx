@@ -27,6 +27,8 @@ import type { IdeEvent, IdeTerminalEnv, IdeTerminalMenuItem } from "../../shared
 import { ResizeHandle, useResizable } from "../shell/Resizable.js";
 import { useTheme } from "../shell/ThemeProvider.js";
 import { Terminal } from "./Terminal.js";
+import { pickActiveVenv } from "./state/active-venv.js";
+import { useGitStore } from "./state/stores.js";
 import {
   type FloatingState,
   initialFloatingState,
@@ -175,6 +177,21 @@ export function TerminalPanel({ cwd }: { cwd: string }): ReactElement {
         }))
         .filter((e) => e.name && e.path);
       envsRef.current = envs;
+      /**
+       * Publish the workspace's ACTIVE env so a new terminal inherits it.
+       *
+       * pty-host's header calls this "THE LOAD-BEARING BEHAVIOUR" of §6.1 — a new terminal comes
+       * up as `(.venv) $` so `python` and `pip install` hit the project env without a manual
+       * activate — and the whole path existed except for a writer: `setVenv` had ZERO callers
+       * app-wide, so `useGitStore(s => s.venv)` was permanently null and `Terminal.tsx`'s only
+       * fallback for a session with no explicit venv resolved to nothing. The default ★ Project
+       * shell profile has no `envRef`, so it depends on exactly this fallback.
+       *
+       * The active env is the one that lives INSIDE the workspace, preferring a conventional
+       * `.venv`; an env registered elsewhere on the machine is not this project's and must not be
+       * force-activated in its terminals.
+       */
+      useGitStore.getState().setVenv(pickActiveVenv(cwd, envs));
       const items = await api.terminal
         ?.menu({ workspaceRoot: cwd, envs })
         .then((r) => (r.ok && r.items.length ? r.items : undefined))

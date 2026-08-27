@@ -24,7 +24,7 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
@@ -853,5 +853,32 @@ test("LIVE(linux): the network is refused below A5", { skip: !liveLinux }, async
     assert.notEqual(r.exitCode, 0, "curl must not reach the network below A5");
   } finally {
     f.cleanup();
+  }
+});
+
+test("the persistence deny-list covers Prometheus's OWN state and agent hook configs", () => {
+  /**
+   * The list already denied every OTHER agent's persistence surface — shell rc files, macOS
+   * LaunchAgents — but not the one belonging to the tool doing the sandboxing.
+   * `~/.prometheus` holds the REMEMBERED GRANTS: a confined command that can write it grants
+   * itself standing permission for every later session, a cleaner persistence primitive than
+   * editing `.zshrc`. `~/.claude/settings.json` carries a `hooks` block that runs a shell
+   * command on the next session start — arbitrary code execution on a delay.
+   */
+  const home = homedir();
+  const plan = planExecSandbox({ writableRoots: [home], authLevel: 3 });
+  const rendered = JSON.stringify(plan);
+  for (const p of [
+    ".prometheus",
+    ".config/prometheus",
+    ".claude/settings.json",
+    // the pre-existing entries must not have been disturbed
+    ".ssh",
+    ".zshrc",
+  ]) {
+    assert.ok(
+      rendered.includes(`${home}/${p}`),
+      `~/${p} must appear in the sandbox plan's deny set when home is writable`,
+    );
   }
 });

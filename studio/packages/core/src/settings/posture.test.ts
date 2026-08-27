@@ -1,3 +1,5 @@
+import assert from "node:assert/strict";
+import { test } from "node:test";
 /**
  * posture.test.ts — the four security settings, and the promise they have to keep.
  *
@@ -10,8 +12,7 @@
  * tightening only ever goes one way: a session-level control may add a restriction and can never
  * remove one the policy imposed.
  */
-import assert from "node:assert/strict";
-import { test } from "node:test";
+import { BUILTIN_PROFILES } from "./profiles.js";
 
 import {
   cloudAllowed,
@@ -237,4 +238,24 @@ test('a repo cannot widen network to "allow" even against the shipped DEFAULT', 
   const { layer, refused } = sanitizeWorkspaceLayer({ defaultNetwork: "allow" }, DEFAULT_SETTINGS);
   assert.equal("defaultNetwork" in layer, false);
   assert.deepEqual(refused, ["defaultNetwork"]);
+});
+
+test("the Security-strict profile's no-auto-approve setting reaches the posture", () => {
+  /**
+   * `Settings.autoApprove` was declared, defaulted, validated and SET by the Security-strict
+   * profile — whose stated posture is "gate --strict, NO auto-approve" — and then read by
+   * nothing. `securityPosture` translated four of the five security keys and silently dropped
+   * this one, so selecting that profile tightened the gate and the force ban while leaving
+   * auto-approval exactly as it was. Every other `autoApprove` in the codebase is the unrelated
+   * per-grant `AgentToolGrant.autoApprove`, driven by the ladder and never consulting settings.
+   */
+  assert.equal(securityPosture({ autoApprove: false } as never).autoApprove, false);
+  // absent or true ⇒ the ladder behaves as before; this is opt-in tightening, not a new default
+  assert.equal(securityPosture({} as never).autoApprove, true);
+  assert.equal(securityPosture(undefined).autoApprove, true);
+  assert.equal(securityPosture({ autoApprove: true } as never).autoApprove, true);
+
+  // and the profile itself really does carry it, or the translation has nothing to translate
+  const strict = BUILTIN_PROFILES.find((p) => p.id === "security-strict");
+  assert.equal(strict?.settings.autoApprove, false);
 });

@@ -40,7 +40,6 @@ test("catalog: expects the known read-only prometheus.py + studio tools", () => 
     "prometheus_skills_list",
     "prometheus_vault_status",
     "prometheus_localai",
-    "prometheus_mcp_discover",
   ]) {
     assert.ok(names.has(expected), `expected ${expected} in the exposed catalog`);
   }

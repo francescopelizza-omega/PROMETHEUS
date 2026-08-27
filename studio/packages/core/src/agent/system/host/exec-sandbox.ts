@@ -252,6 +252,26 @@ const DENY_HOME_RELATIVE: readonly string[] = Object.freeze([
   // `ossrhPassword`), directly inside the granted `~/.gradle`. Gradle reads this file and does
   // not write it, so denying writes costs a build nothing.
   ".gradle/gradle.properties",
+  /**
+   * Prometheus's OWN state, and the hook configs that are code execution by another name.
+   *
+   * The list already denies every other agent's persistence surface — shell rc files, macOS
+   * LaunchAgents — but not the one belonging to the tool doing the sandboxing. `~/.prometheus`
+   * holds the REMEMBERED GRANTS: a confined command that can write it grants itself standing
+   * permission for every later session, which is a cleaner persistence primitive than editing
+   * `.zshrc` and was the only one left open. `~/.claude/settings.json` and its siblings carry a
+   * `hooks` block that runs a shell command on the next session start, so writing that file is
+   * arbitrary code execution on a delay.
+   *
+   * Nothing legitimate is lost: the agent's own writes to these paths happen in the HOST
+   * process, never inside the exec sandbox.
+   */
+  ".prometheus",
+  ".config/prometheus",
+  ".claude/settings.json",
+  ".claude/settings.local.json",
+  ".codex/config.toml",
+  ".gemini/settings.json",
   ".zshrc",
   ".zprofile",
   ".zshenv",

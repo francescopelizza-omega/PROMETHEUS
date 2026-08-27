@@ -24,6 +24,8 @@ import decimal
 import json
 import math
 import re
+import contextlib
+import os
 import sqlite3
 import threading
 import time
@@ -90,12 +92,25 @@ def _dialect(driver: str) -> str:
 
 
 def _sqlite_path(conn: str) -> str:
-    """`sqlite:///abs/or/rel` → the path; `:memory:` when empty."""
-    rest = conn.split("://", 1)[1] if "://" in conn else conn
-    rest = rest.lstrip("/")  # sqlite:///foo → foo ; sqlite:////abs → abs (leading slash kept below)
-    if conn.count("/") >= 4 and "://" in conn:
-        rest = "/" + rest  # sqlite:////abs/path → /abs/path
-    return rest or ":memory:"
+    """`sqlite:///rel/path` → relative; `sqlite:////abs/path` → absolute; `:memory:` when empty.
+
+    Absolute-vs-relative is decided by the AUTHORITY slashes only — three means relative, four
+    means absolute — never by counting slashes in the whole URL. The previous test was
+    `conn.count("/") >= 4`, which counts every separator in the path as well, so any relative
+    path containing a subdirectory reached four and was silently promoted: `sqlite:///data/app.db`
+    became `/data/app.db`. sqlite3 then either failed with a confusing "unable to open database
+    file", or — where that directory happened to exist — CREATED an empty database at the
+    filesystem root, so queries returned "no such table" against a database the user never named
+    while their real `./data/app.db` sat untouched. Single-segment relatives like
+    `sqlite:///app.db` happened to work, which is what kept it hidden.
+    """
+    if "://" not in conn:
+        return conn or ":memory:"
+    rest = conn.split("://", 1)[1]
+    # after the scheme, `/path` is relative and `//path` is absolute
+    if rest.startswith("//"):
+        return rest[1:] or ":memory:"          # sqlite:////abs/path → /abs/path
+    return rest.lstrip("/") or ":memory:"      # sqlite:///rel/path  → rel/path
 
 
 class _Conn:
@@ -112,12 +127,54 @@ class _Conn:
             pass
 
 
+def _assert_sqlite_target(path: str) -> None:
+    """Refuse a sqlite path that is not already a database file.
+
+    `sqlite3.connect()` CREATES the file when it is missing, and it is lazy — nothing touches the
+    bytes until a statement runs — so `sql.connect` answered `{"ok": true, "dialect": "sqlite",
+    "server_version": "3.53.4"}` for a path that did not exist, and left a 0-byte database behind.
+    Every later query then reports "no such table" against a database the user never made, while
+    their real one sits untouched. That is the same silent-phantom-database failure
+    `_sqlite_path`'s own docstring describes for the relative-path bug — reached here by a typo
+    instead.
+
+    `:memory:` is a real, deliberate target and is always allowed.
+    """
+    if not path or path == ":memory:":
+        return
+    if os.path.isdir(path):
+        raise ValueError(f"not a database file (it is a directory): {path}")
+    if not os.path.exists(path):
+        raise ValueError(
+            f"no such database: {path} — connecting would have created an empty one. "
+            "Check the path, or create the database first."
+        )
+
+
+def _assert_really_a_database(raw: "sqlite3.Connection", path: str) -> None:
+    """Force sqlite to read the file header, so a NON-database is refused at connect time.
+
+    Connecting is lazy, so pointing at an ordinary text file also answered `ok: true` — a
+    "successful connection" to something that is not a database at all. Measured on a file
+    containing one line of prose. One cheap pragma settles it.
+    """
+    try:
+        raw.execute("PRAGMA schema_version").fetchone()
+    except sqlite3.DatabaseError as exc:
+        with contextlib.suppress(Exception):
+            raw.close()
+        raise ValueError(f"not a database: {path} ({exc})") from exc
+
+
 def _open(conn: str, timeout_s: float) -> _Conn:
     parsed = _parse_conn(conn)
     dialect = _dialect(parsed.get("driver", ""))
     if dialect == "sqlite":
-        raw = sqlite3.connect(_sqlite_path(conn), timeout=timeout_s)
-        return _Conn(raw, "sqlite", sqlite3.sqlite_version, parsed.get("database") or _sqlite_path(conn))
+        path = _sqlite_path(conn)
+        _assert_sqlite_target(path)
+        raw = sqlite3.connect(path, timeout=timeout_s)
+        _assert_really_a_database(raw, path)
+        return _Conn(raw, "sqlite", sqlite3.sqlite_version, parsed.get("database") or path)
     if dialect == "postgres":
         drv, _pkg = _import_first([("psycopg2", "psycopg2"), ("psycopg", "psycopg")], "postgres", "psycopg2")
         raw = drv.connect(conn, options=f"-c statement_timeout={int(timeout_s * 1000)}")

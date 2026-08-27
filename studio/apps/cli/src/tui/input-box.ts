@@ -19,6 +19,9 @@ const BL = "╰";
 const BR = "╯";
 const H = "─";
 const V = "│";
+/** The tee joints for the trait panel's separator rule (`├────┤`). */
+const ML = "├";
+const MR = "┤";
 
 /** Optional painters (default identity → plain strings for tests). */
 export interface ComposerPaint {
@@ -50,6 +53,27 @@ export interface ComposerOpts {
    * Dropped silently when the box is too narrow to hold it without crowding the corners.
    */
   badge?: string;
+  /**
+   * The TWO-ROW trait panel — what the badge becomes once a model has more facts than one
+   * border can hold (see `status.ts`'s `capabilityPanel`).
+   *
+   * Rendered as a compartment inside the box, under a `├───┤` rule:
+   *
+   *   │ › your prompt                                   │
+   *   ├─────────────────────────────────────────────────┤
+   *   │ completion      vision          audio           │
+   *   │ tools           thinking        effort: high    │
+   *   ╰─────────────────────────────────────────────────╯
+   *
+   * Inside the box rather than below it because these facts describe the thing the box is
+   * about to talk to. Below, they would sit in the status bar's territory and be read as
+   * session chrome; here they are unmistakably a property of THIS composer's model.
+   *
+   * Rows must already be plain (unpainted) and no wider than the inner width — `status.ts`
+   * returns null rather than a clipped grid, so a row that arrives here always fits.
+   * `badge` is ignored when this is present: they are two renderings of the same facts.
+   */
+  panel?: readonly string[];
 }
 
 /** Minimum dashes kept on each side of an inlaid badge so it never crowds a corner. */
@@ -85,6 +109,9 @@ export interface ComposerLayout {
   cursorCol: number;
   /** total line count (== lines.length) — the app needs it for the redraw math. */
   height: number;
+  /** index (within `lines`) of the panel compartment's FIRST row; absent when no panel is
+   *  rendered. The trait rail is that first row — the click mapper needs to know where it is. */
+  panelRow?: number;
 }
 
 const id = (s: string): string => s;
@@ -218,14 +245,35 @@ export function layoutComposer(
     const g = isFirst ? pp(gutter) : gutter;
     lines.push(`${pb(V)} ${g}${body} ${pb(V)}`);
   });
-  lines.push(`${pb(BL)}${inlayBadge(outer - 2, opts.badge, pbadge, pb)}${pb(BR)}`);
+  // The trait panel, when present, is its own compartment: a `├──┤` rule, then the two grid
+  // rows, then the ordinary bottom border with NO inlaid badge (the panel already says it).
+  const panel = opts.panel ?? [];
+  if (panel.length > 0) {
+    lines.push(`${pb(ML)}${pb(H.repeat(outer - 2))}${pb(MR)}`);
+    for (const r of panel) {
+      lines.push(`${pb(V)} ${pbadge(padToWidth(clipToWidth(r, textW + 2), textW + 2))} ${pb(V)}`);
+    }
+    lines.push(`${pb(BL)}${pb(H.repeat(outer - 2))}${pb(BR)}`);
+  } else {
+    lines.push(`${pb(BL)}${inlayBadge(outer - 2, opts.badge, pbadge, pb)}${pb(BR)}`);
+  }
 
   // cursor: row 0 is the top border; body rows follow. col 0 is the left border.
   // layout: V(1) + space(1) + gutter(2) + text → text starts at column 4.
   const visRow = caretRow - top;
   const cursorRow = 1 + Math.max(0, Math.min(visRow, view.length - 1));
   const cursorCol = 4 + caretCol;
-  return { lines, cursorRow, cursorCol, height: lines.length };
+  // Where the panel compartment starts within `lines`: top border + the visible body rows + the
+  // `├──┤` rule. Reported rather than recomputed by the caller, because the caller does not know
+  // how many body rows the vertical scroll actually kept.
+  const panelRow = panel.length > 0 ? 1 + view.length + 1 : undefined;
+  return {
+    lines,
+    cursorRow,
+    cursorCol,
+    height: lines.length,
+    ...(panelRow === undefined ? {} : { panelRow }),
+  };
 }
 
 /**

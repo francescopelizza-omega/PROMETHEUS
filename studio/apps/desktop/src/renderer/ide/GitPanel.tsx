@@ -30,7 +30,7 @@ import { EDITOR_THEME } from "./EditorPane.js";
 import { MergeView } from "./MergeView.js";
 import { WorktreesPanel } from "./WorktreesPanel.js";
 import type { RendererEndpoint } from "./ai/ai-client.js";
-import { streamChat } from "./ai/ai-client.js";
+import { StreamPausedError, streamChat } from "./ai/ai-client.js";
 import { familyHasLigatures, resolveFontStack } from "./fonts/registry.js";
 import { useFontStore } from "./fonts/store.js";
 import { loadMonaco } from "./monaco-loader.js";
@@ -792,6 +792,9 @@ export function GitPanel({ root }: { root: string }): ReactElement {
   const [message, setMessage] = useState("");
   const [genBusy, setGenBusy] = useState(false);
   const [genError, setGenError] = useState<string | null>(null);
+  // Distinct from genError: the idle watchdog paused generation, not a failure — whatever
+  // streamed into `message` above is real and usable, so this is a notice, not a red banner.
+  const [genPaused, setGenPaused] = useState(false);
   // bumped on every refresh/stage so the open diff REFETCHES after a stage/unstage
   // (otherwise the diff pane keeps the pre-stage state for the still-selected file).
   const [diffNonce, setDiffNonce] = useState(0);
@@ -982,7 +985,13 @@ export function GitPanel({ root }: { root: string }): ReactElement {
         setGenError(r.error ?? "resolve failed");
         return;
       }
-      await api.gitStage(root, [file]);
+      // …and the stage that COMMITS the resolution must be checked too — a resolve that
+      // silently failed to stage leaves the file looking resolved while the index disagrees.
+      const staged = await api.gitStage(root, [file]).catch(() => null);
+      if (staged && staged.ok === false) {
+        setGenError(staged.error ?? "could not stage the resolved file");
+        return;
+      }
       await refresh();
     },
     [root, refresh],
@@ -1146,8 +1155,20 @@ export function GitPanel({ root }: { root: string }): ReactElement {
     async (path: string, currentlyStaged: boolean) => {
       const api = ide();
       if (!api) return;
-      if (currentlyStaged) await api.gitUnstage(root, [path]);
-      else await api.gitStage(root, [path]);
+      /**
+       * SURFACE the result. This awaited the call and threw the answer away, so a git refusal
+       * ("pathspec … did not match any files") produced no error, no toast and no change — the
+       * row simply stayed where it was and the click looked like it had done nothing. Every
+       * other consumer of gitStage checks `.ok` (MergeView, changelist-commit); these two were
+       * the ones that did not.
+       */
+      const r = currentlyStaged
+        ? await api.gitUnstage(root, [path]).catch(() => null)
+        : await api.gitStage(root, [path]).catch(() => null);
+      if (r && r.ok === false) {
+        setGenError(r.error ?? (currentlyStaged ? "unstage failed" : "stage failed"));
+        return;
+      }
       await refresh();
     },
     [root, refresh],
@@ -1190,8 +1211,17 @@ export function GitPanel({ root }: { root: string }): ReactElement {
       setCommitBusy(true);
       setGenError(null);
       const res = await commitChangelistFiles(api, { root, message, targets, originalStaged });
-      if (res.ok) setMessage("");
-      else setGenError(res.error ?? "changelist commit failed");
+      if (res.ok) {
+        setMessage("");
+        // A file whose partial (per-hunk) staging could not be replayed was restored by path,
+        // which stages the WHOLE file. The index no longer says what the user set it to say, so
+        // it has to be said out loud rather than discovered in the next commit.
+        if (res.flattened?.length) {
+          setGenError(
+            `committed — but these files could not keep their partial staging and are now fully staged: ${res.flattened.join(", ")}`,
+          );
+        }
+      } else setGenError(res.error ?? "changelist commit failed");
       setCommitBusy(false);
       await refresh();
     },
@@ -1230,6 +1260,7 @@ export function GitPanel({ root }: { root: string }): ReactElement {
       locality: isLocal ? "local" : "cloud",
     };
     setGenError(null);
+    setGenPaused(false);
     setGenBusy(true);
     try {
       let acc = "";
@@ -1248,7 +1279,8 @@ export function GitPanel({ root }: { root: string }): ReactElement {
         setMessage(acc);
       }
     } catch (e) {
-      setGenError(e instanceof Error ? e.message : "commit-message generation failed");
+      if (e instanceof StreamPausedError) setGenPaused(true);
+      else setGenError(e instanceof Error ? e.message : "commit-message generation failed");
     } finally {
       setGenBusy(false);
     }
@@ -1719,6 +1751,11 @@ export function GitPanel({ root }: { root: string }): ReactElement {
             {genError && (
               <p style={{ margin: "4px 0 0", color: "var(--danger)", fontSize: "0.72rem" }}>
                 {genError}
+              </p>
+            )}
+            {genPaused && (
+              <p style={{ margin: "4px 0 0", color: "var(--warning)", fontSize: "0.72rem" }}>
+                ⏸ the model went idle — paused, nothing lost. Edit the draft above, or retry.
               </p>
             )}
           </div>

@@ -29,9 +29,9 @@ const CATALOG = {
 
 function deps(
   over: Partial<InvokeDeps> & { answers?: string[] } = {},
-): InvokeDeps & { out: string[]; installs: Array<[string, boolean]> } {
+): InvokeDeps & { out: string[]; installs: Array<[string, boolean, boolean]> } {
   const out: string[] = [];
-  const installs: Array<[string, boolean]> = [];
+  const installs: Array<[string, boolean, boolean]> = [];
   const answers = over.answers ?? [];
   let i = 0;
   return {
@@ -40,7 +40,7 @@ function deps(
     ask: async () => answers[i++] ?? "",
     confirm: async () => true,
     install: async (name, opts) => {
-      installs.push([name, opts?.yes === true]);
+      installs.push([name, opts?.yes === true, opts?.dryRun === true]);
     },
     out,
     installs,
@@ -59,13 +59,18 @@ test("/invoke renders the catalog with present/absent marks", async () => {
   assert.equal(d.installs.length, 0);
 });
 
+/**
+ * Regression: the preview call used to carry NO dryRun flag at all, so for any catalog entry
+ * that passed nemesis cleanly (the common case), that "preview" performed a REAL install before
+ * the user was ever asked to confirm — making a later decline's "(not installed)" message false.
+ */
 test("/invoke installs the picked repo via the gated verb (preview then execute)", async () => {
   const d = deps({ answers: ["1"] }); // pick alpha (absent), confirm true throughout
   await runInvoke("", d);
-  // install called twice: preview (yes=false) then execute (yes=true)
+  // install called twice: preview (yes=false, dryRun=true) then execute (yes=true, dryRun=false)
   assert.deepEqual(d.installs, [
-    ["alpha-tool", false],
-    ["alpha-tool", true],
+    ["alpha-tool", false, true],
+    ["alpha-tool", true, false],
   ]);
 });
 

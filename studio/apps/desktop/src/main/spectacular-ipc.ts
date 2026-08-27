@@ -13,7 +13,7 @@
  * agent here. No scoring, no allowlist, no verdict upgrade (the SPINE / C5).
  */
 
-import { dialog, ipcMain } from "electron";
+import { BrowserWindow, dialog, ipcMain } from "electron";
 
 import { createPrometheusEngine } from "@prometheus/engine-bridge";
 
@@ -30,6 +30,7 @@ import {
   type SpectacularModelsConfig,
   type SpectacularTutorial,
 } from "../shared/ipc-contract.js";
+import { guardOwnRepo } from "./cwd-guard.js";
 import { grantWorkingSetRoot } from "./ide/path-guard.js";
 import { cleanId, cleanPathToken, isSafeToken } from "./spectacular-validate.js";
 
@@ -214,7 +215,7 @@ export function registerSpectacularIpcHandlers(): () => void {
   });
 
   // ── native folder picker (models-root chooser) ─────────────────────────────
-  ipcMain.handle(IPC.folderOpen, async (_evt, arg: unknown): Promise<FolderOpenResult> => {
+  ipcMain.handle(IPC.folderOpen, async (evt, arg: unknown): Promise<FolderOpenResult> => {
     const t = (arg as { title?: unknown } | undefined)?.title;
     const title = typeof t === "string" ? t : "Select a folder";
     try {
@@ -222,7 +223,26 @@ export function registerSpectacularIpcHandlers(): () => void {
         title,
         properties: ["openDirectory", "createDirectory"],
       });
-      const path = res.canceled || res.filePaths.length === 0 ? null : (res.filePaths[0] ?? null);
+      const picked = res.canceled || res.filePaths.length === 0 ? null : (res.filePaths[0] ?? null);
+      // Prometheus Studio must never open a workspace inside Prometheus's OWN repo (see
+      // cwd-guard.ts's own header for why) — redirected to the user's home directory instead,
+      // exactly like the CLI's own equivalent guard. A NATIVE dialog (not just a returned
+      // field) makes this unmissable regardless of whatever the renderer does immediately
+      // after — `openFolder` navigates away from Home the instant this promise resolves, so a
+      // renderer-only notice could easily never actually be seen.
+      const guard = picked ? guardOwnRepo(picked) : undefined;
+      const path = guard ? guard.cwd : picked;
+      if (guard?.redirected) {
+        const win = BrowserWindow.fromWebContents(evt.sender);
+        const opts = {
+          type: "warning" as const,
+          title: "Can't open Prometheus's own repository",
+          message: "Prometheus refuses to open a workspace inside its own source repository.",
+          detail: `Chosen: ${guard.requestedCwd}\nOpened instead: ${path}`,
+          buttons: ["OK"],
+        };
+        await (win ? dialog.showMessageBox(win, opts) : dialog.showMessageBox(opts));
+      }
       /**
        * A directory the HUMAN just chose in the OS picker — the only thing that may widen the
        * agent's write scope.
@@ -233,7 +253,12 @@ export function registerSpectacularIpcHandlers(): () => void {
        * the current workspace, and refuses anything outside them.
        */
       if (path) grantWorkingSetRoot(path);
-      return { ok: true, path, canceled: res.canceled };
+      return {
+        ok: true,
+        path,
+        canceled: res.canceled,
+        ...(guard?.redirected ? { redirectedFromOwnRepo: guard.requestedCwd } : {}),
+      };
     } catch {
       return { ok: false, path: null, canceled: true };
     }

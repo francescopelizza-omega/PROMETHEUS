@@ -25,6 +25,25 @@ export function expandHome(p: string): string {
   return p;
 }
 
+/**
+ * The absolute path a scope check must test — `~` expanded FIRST, then resolved against `cwd`.
+ *
+ * The working-set guards computed this as `isAbsolute(p) ? p : resolve(cwd, p)`, with no
+ * expansion. `isAbsolute("~/x")` is false, so `~/.ssh/id_rsa` became `<cwd>/~/.ssh/id_rsa` — a
+ * path that does not exist, whose nearest existing ancestor is `<cwd>` itself, which IS a root.
+ * `isPathAllowed` therefore returned TRUE. `read_file` then expanded the very same `~` for real
+ * and opened the home file: guard and tool disagreed about what the string meant, and the
+ * disagreement was the escape. Verified end-to-end before this existed — a canary in `~` came
+ * back through `read_file` with roots restricted to the repo.
+ *
+ * Anything checking a path against the working set must go through here, so the string the guard
+ * judges is the string the filesystem will see.
+ */
+export function scopedAbsolute(raw: string, cwd: string): string {
+  const expanded = expandHome(raw.trim());
+  return isAbsolute(expanded) ? expanded : resolve(cwd, expanded);
+}
+
 /** Canonicalize for a case-correct, symlink/`..`-resolved compare (or "" on failure). */
 function canonical(p: string): string {
   try {
@@ -138,7 +157,37 @@ export function isPathAllowed(candidate: string, roots: string[]): boolean {
  * see the argument it needs to check. A path argument the guard does not know the name of
  * is a path argument that is not guarded.
  */
-const PATH_KEYS = new Set(["path", "file", "dir", "directory", "target", "cwd"]);
+/**
+ * Argument names that hold a filesystem path.
+ *
+ * `from`/`to` were missing, and `move_file` is the only tool that uses them — so it was outside
+ * BOTH checks this extractor feeds: the working-set scope test and the credential-file refusal.
+ * That turned a rename into a credential-guard bypass: `read_file .env` is refused, but
+ * `move_file {from:".env", to:"notes.txt"}` then `read_file notes.txt` returned the file
+ * verbatim. Reproduced end to end — `AWS_SECRET=abc` reached the model in full, because
+ * `redactSecrets` (the second mechanism) only masks values long enough to look like secrets and
+ * a 3-character one sails through. The refusal is mechanism ONE for exactly that reason.
+ *
+ * Names are listed generously: a synonym that no tool uses today costs nothing, and the whole
+ * point of guarding at this extractor is that a tool which gains a path argument is covered
+ * without anyone remembering to add it.
+ */
+const PATH_KEYS = new Set([
+  "path",
+  "file",
+  "dir",
+  "directory",
+  "target",
+  "cwd",
+  "from",
+  "to",
+  "src",
+  "source",
+  "dest",
+  "destination",
+  "oldPath",
+  "newPath",
+]);
 const PATH_ARRAY_KEYS = new Set(["paths", "files"]);
 
 /** Collect the filesystem-path arguments from a validated tool-arg object. */

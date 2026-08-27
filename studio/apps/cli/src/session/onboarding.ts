@@ -258,6 +258,24 @@ export async function runSetup(deps: SetupDeps): Promise<{ endpoint?: AiEndpoint
   const backends = await detectBackends({ client: deps.client, fetchFn: deps.fetchFn });
 
   if (backends.localEndpoint) {
+    // More than one model already downloaded (one runner serving several, or several runners
+    // up at once) → let the user pick instead of silently always adopting the first — the
+    // previous behavior had no way to reach anything but `liveRunners[0].models[0]`, ever.
+    const served = backends.liveRunners.flatMap((r) =>
+      r.models.map((model) => ({ runner: r, model })),
+    );
+    if (served.length > 1) {
+      write(`${c.green("✓")} ${served.length} local models already downloaded:`);
+      served.forEach((s, i) => {
+        write(`  ${c.cyan(String(i + 1))}  ${c.bold(s.model)} ${c.dim(`(${s.runner.name})`)}`);
+      });
+      const pick = Number((await ask(`Pick 1–${served.length} (Enter for #1)`)).trim());
+      const chosen =
+        Number.isInteger(pick) && pick >= 1 && pick <= served.length ? served[pick - 1] : served[0];
+      const ep = buildLocalEndpoint({ ...chosen!.runner, models: [chosen!.model] });
+      write(c.dim(`  using ${ep.model} via ${chosen!.runner.name} at ${ep.baseUrl}`));
+      return { endpoint: ep };
+    }
     write(`${c.green("✓")} local model ready: ${c.bold(backends.localEndpoint.model ?? "?")}`);
     write(c.dim(`  via ${backends.localRunner?.name} at ${backends.localEndpoint.baseUrl}`));
     return { endpoint: backends.localEndpoint };
@@ -355,6 +373,12 @@ async function setupLocal(
       } catch (err) {
         write(c.red(`installer failed: ${err instanceof Error ? err.message : String(err)}`));
       }
+    } else {
+      write(
+        c.dim(
+          `skipped. Install Ollama yourself, then run \`ollama pull ${tag}\` and restart prometheus.`,
+        ),
+      );
     }
     return {};
   }

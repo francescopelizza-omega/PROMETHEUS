@@ -19,8 +19,15 @@
  * `@prometheus/core/ai-effort` is a PURE subpath (types + math, zero IO) — safe here.
  */
 
+import {
+  IdleWatchdog,
+  WATCHDOG_FIRST_TICK_MS,
+  WATCHDOG_STREAM_TICK_MS,
+  raceTicks,
+} from "@prometheus/core/agent-idle-watchdog";
 import { applyEffort, applyEffortToMessages } from "@prometheus/core/ai-effort";
 import type { EffortResolution } from "@prometheus/core/ai-effort";
+import { mergeWireUsage } from "@prometheus/core/ai-usage";
 
 /**
  * handoff §3: per-turn phase timings, measured (not estimated). `load` is everything
@@ -72,6 +79,22 @@ export interface RendererEndpoint {
    * catalogue (`endpoints.ts` `contextWindow`), it just never travelled this far.
    */
   contextWindow?: number;
+  /**
+   * The runner's own capability array (`["completion","tools","thinking","vision",…]`), from
+   * Ollama's `/api/show` via `ai:probeEndpoint`.
+   *
+   * This is the field that makes the effort chip mean something on a local model.
+   * `ai/effort/rules.ts` resolves a `/think` tier through rules that match on a PROBED
+   * capability first and a model name only as a fallback — deliberately, because model ids are
+   * unstable and version-scoped (Gemma 2/3 cannot think, Gemma 4 can). Studio never carried the
+   * probe result this far, so `effortFor()` had nothing to hand those rules, every local model
+   * fell through to `UNKNOWN_CAPABILITY`, and the chip said "not available" for models that
+   * report `thinking` outright.
+   *
+   * `undefined` ⇒ never probed (a cloud endpoint, or the probe has not landed yet) — which the
+   * effort layer treats as "unknown", NOT as "cannot".
+   */
+  probedCapabilities?: readonly string[];
 }
 
 /* ── pure SSE parsing (mirrors @prometheus/core/ai/client — kept identical) ──── */
@@ -171,16 +194,9 @@ export function reasoningFromPayload(payload: string): string {
 
 /* ── the streaming client ────────────────────────────────────────────────────*/
 
-/**
- * Progress watchdog windows, byte-identical to the CLI (`agent-runtime.ts:787-789`).
- *
- * A large local model can take 30–90s to produce its FIRST byte (cold prefill, weights
- * reload). Without a heartbeat the user cannot tell a slow MODEL from a hung WRAPPER, and
- * without a hard ceiling a wedged runner hangs the pane forever — the GUI had neither.
- */
-export const FIRST_TOKEN_TICK_MS = 8_000;
-export const STREAM_IDLE_TICK_MS = 15_000;
-export const HARD_TIMEOUT_MS = 180_000;
+// Progress watchdog + inactivity-pause windows now live in
+// `@prometheus/core/agent-idle-watchdog`, SHARED with the CLI and desktop main — this file no
+// longer defines its own copies.
 
 /** What the watchdog needs to narrate and to stop. */
 interface WatchdogCtl {
@@ -188,10 +204,12 @@ interface WatchdogCtl {
   label: string;
   /** ms clock the request started at (for the elapsed counter). */
   startedAt: number;
-  /** true once the run has been cancelled (user abort or hard timeout). */
+  /** true once the run has been cancelled (user abort or idle pause). */
   aborted: () => boolean;
   /** a human-facing progress line; absent → the watchdog only enforces the timeout. */
   onStatus?: (text: string) => void;
+  /** called on every real chunk — resets the caller's idle countdown. */
+  onActivity?: () => void;
 }
 
 /**
@@ -214,23 +232,24 @@ async function* ssePayloads(
   try {
     for (;;) {
       if (ctl.aborted()) break;
-      let timer: ReturnType<typeof setTimeout> | undefined;
-      const tick = new Promise<"TICK">((r) => {
-        timer = setTimeout(() => r("TICK"), firstByte ? STREAM_IDLE_TICK_MS : FIRST_TOKEN_TICK_MS);
-      });
-      const raced = await Promise.race([pendingRead, tick]);
-      if (timer) clearTimeout(timer);
-      if (raced === "TICK") {
-        const s = Math.round((Date.now() - ctl.startedAt) / 1000);
-        ctl.onStatus?.(
-          firstByte
+      const ticker = raceTicks(
+        pendingRead,
+        firstByte ? WATCHDOG_STREAM_TICK_MS : WATCHDOG_FIRST_TICK_MS,
+        () => {
+          const s = Math.round((Date.now() - ctl.startedAt) / 1000);
+          return firstByte
             ? `▼ ${ctl.label} still generating… (${s}s)`
-            : `⏳ waiting for ${ctl.label} — no output yet (${s}s). A large local model can take 30–90s to start.`,
-        );
-        continue; // pendingRead is STILL pending — re-race it, never re-read
+            : `⏳ waiting for ${ctl.label} — no output yet (${s}s). A large local model can take 30–90s to start.`;
+        },
+      );
+      let step = await ticker.next();
+      while (!step.done) {
+        ctl.onStatus?.(step.value);
+        step = await ticker.next();
       }
-      const { value, done } = raced;
+      const { value, done } = step.value;
       if (done) break;
+      ctl.onActivity?.();
       firstByte = true;
       buf += decoder.decode(value, { stream: true });
       const { payloads, rest } = parseSseChunk(buf);
@@ -252,25 +271,47 @@ async function* ssePayloads(
   }
 }
 
+/** Test-only clock injection for the idle watchdog — see `IdleWatchdogOptions`'s identical
+ *  fields. A real 30s-floor watchdog cannot be exercised with a fast real-timer test, and
+ *  production never sets these. */
+export interface IdleClockOpts {
+  idleWatchdogNow?: () => number;
+  idleWatchdogSetTimeout?: (cb: () => void, ms: number) => ReturnType<typeof setTimeout>;
+  idleWatchdogClearTimeout?: (handle: ReturnType<typeof setTimeout>) => void;
+}
+
 /**
- * Chain the caller's AbortSignal to our own controller and arm the hard timeout.
+ * Chain the caller's AbortSignal to our own controller and arm the idle watchdog.
  *
- * We need our OWN controller because the hard timeout has to cancel the in-flight fetch,
- * not merely stop consuming it. Returns the controller plus a `dispose` that MUST run in a
- * `finally` — an un-cleared 180s timer keeps the process (and node:test) alive.
+ * We need our OWN controller because an idle pause has to cancel the in-flight fetch, not
+ * merely stop consuming it. Returns the controller plus the watchdog (so the caller can
+ * `touch()` it on real activity) plus a `dispose` that MUST run in a `finally` — an un-cleared
+ * timer keeps the process (and node:test) alive.
  */
-function armRun(signal?: AbortSignal): { ac: AbortController; dispose: () => void } {
+function armRun(
+  signal?: AbortSignal,
+  idleTimeoutMs?: number,
+  clock?: IdleClockOpts,
+): { ac: AbortController; watchdog: IdleWatchdog; dispose: () => void } {
   const ac = new AbortController();
   const onAbort = (): void => ac.abort();
   if (signal) {
     if (signal.aborted) ac.abort();
     else signal.addEventListener("abort", onAbort, { once: true });
   }
-  const hardTimer = setTimeout(() => ac.abort(), HARD_TIMEOUT_MS);
+  const watchdog = new IdleWatchdog({
+    idleTimeoutMs,
+    onIdle: () => ac.abort(),
+    ...(clock?.idleWatchdogNow ? { now: clock.idleWatchdogNow } : {}),
+    ...(clock?.idleWatchdogSetTimeout ? { setTimeoutFn: clock.idleWatchdogSetTimeout } : {}),
+    ...(clock?.idleWatchdogClearTimeout ? { clearTimeoutFn: clock.idleWatchdogClearTimeout } : {}),
+  });
+  watchdog.arm();
   return {
     ac,
+    watchdog,
     dispose: () => {
-      clearTimeout(hardTimer);
+      watchdog.dispose();
       signal?.removeEventListener("abort", onAbort);
     },
   };
@@ -281,6 +322,47 @@ export class CloudPolicyError extends Error {
   constructor(endpointId: string) {
     super(`cloud endpoint "${endpointId}" refused: workspace "never send to cloud" is on`);
     this.name = "CloudPolicyError";
+  }
+}
+
+/**
+ * Thrown when main's `ai:stream` reply has `ok: false` — i.e. the request actually reached (or
+ * attempted to reach) the endpoint and failed. Carries main's breaker snapshot along with the
+ * failure, since main is the only process holding the real `CircuitBreaker` instance: without
+ * this, a failing turn's breaker state (which main DOES compute and attach to the reply) had no
+ * way to reach the caller at all — the error was a bare string, the snapshot silently dropped.
+ */
+export class AiTurnError extends Error {
+  readonly breaker?: BreakerSnapshotView;
+  /**
+   * The endpoint refused this request BECAUSE it carried tools (main's verdict — see
+   * `AiStreamResult.toolsRejected`; the status and body it needs never cross the bridge).
+   *
+   * A caller that sees this must NOT treat the turn as a dead end: demote the endpoint to the
+   * text protocol and retry the SAME turn, which is what the agentic CLI has always done and
+   * what the desktop, having never received the fact, never could.
+   */
+  readonly toolsRejected?: boolean;
+  constructor(message: string, breaker?: BreakerSnapshotView, toolsRejected?: boolean) {
+    super(message);
+    this.name = "AiTurnError";
+    if (breaker) this.breaker = breaker;
+    if (toolsRejected) this.toolsRejected = true;
+  }
+}
+
+/**
+ * Thrown by `streamChat()` when the INACTIVITY watchdog ended the turn — a PAUSE, not a
+ * completion or a failure. `runChatTurn()` already surfaces this correctly via
+ * `ChatTurnResult.paused` (its 5 production callers are richer state machines that inspect the
+ * whole result); `streamChat()`'s plain `AsyncGenerator<string,…>` contract has no field to carry
+ * that on, so before this it silently ended like any other finished turn — a caller had no way to
+ * tell "the model paused, nothing was lost, try again" from "the model actually answered nothing".
+ */
+export class StreamPausedError extends Error {
+  constructor() {
+    super("model went idle — turn paused (no work lost)");
+    this.name = "StreamPausedError";
   }
 }
 
@@ -325,6 +407,8 @@ async function streamViaMain(
     onText?: (delta: string) => void;
     onReasoning?: (delta: string) => void;
     onStatus?: (text: string) => void;
+    /** the inactivity-pause threshold for THIS request. Undefined ⇒ the 10-minute default. */
+    idleTimeoutMs?: number;
   },
 ): Promise<ChatTurnResult> {
   const ai = globalThis.window?.prometheus?.ai;
@@ -357,18 +441,25 @@ async function streamViaMain(
       ...(opts.tools && opts.tools.length > 0 ? { tools: opts.tools } : {}),
       ...(opts.effort ? { effort: opts.effort } : {}),
       ...(opts.neverSendToCloud ? { neverSendToCloud: true } : {}),
+      ...(opts.idleTimeoutMs !== undefined ? { idleTimeoutMs: opts.idleTimeoutMs } : {}),
     });
     if (!r.ok) {
       // The cloud-policy refusal keeps its own type so callers can special-case it; main is
       // the enforcer, this just re-labels its answer.
       if (r.error?.includes("never send to cloud")) throw new CloudPolicyError(endpoint.id);
-      throw new Error(r.error ?? `AI endpoint ${endpoint.id} failed`);
+      throw new AiTurnError(
+        r.error ?? `AI endpoint ${endpoint.id} failed`,
+        r.breaker,
+        r.toolsRejected,
+      );
     }
     return {
       text: r.text,
       toolCalls: r.toolCalls.map((t) => ({ id: t.id, name: t.name, arguments: t.arguments })),
       ...(r.usage ? { usage: r.usage } : {}),
       ...(r.timing ? { timing: r.timing } : {}),
+      ...(r.breaker ? { breaker: r.breaker } : {}),
+      ...(r.paused ? { paused: true } : {}),
     };
   } finally {
     off();
@@ -402,11 +493,13 @@ export async function* streamChat(
      */
     effort?: EffortResolution;
     /**
-     * Heartbeat while the model is quiet (see FIRST_TOKEN_TICK_MS). Without it a cold
-     * local model looks identical to a hung wrapper for a minute and a half.
+     * Heartbeat while the model is quiet (see `@prometheus/core/agent-idle-watchdog`).
+     * Without it a cold local model looks identical to a hung wrapper.
      */
     onStatus?: (text: string) => void;
-  } = {},
+    /** the inactivity-pause threshold for THIS request. Undefined ⇒ the 10-minute default. */
+    idleTimeoutMs?: number;
+  } & IdleClockOpts = {},
 ): AsyncGenerator<string, void, unknown> {
   if (opts.neverSendToCloud && endpoint.locality === "cloud") {
     throw new CloudPolicyError(endpoint.id);
@@ -420,16 +513,22 @@ export async function* streamChat(
     let notify: (() => void) | undefined;
     let finished = false;
     let failed: unknown;
+    let result: ChatTurnResult | undefined;
     const turn = streamViaMain(endpoint, messages, {
       ...(opts.neverSendToCloud ? { neverSendToCloud: true } : {}),
       ...(opts.signal ? { signal: opts.signal } : {}),
       ...(opts.effort ? { effort: opts.effort } : {}),
       ...(opts.onStatus ? { onStatus: opts.onStatus } : {}),
+      ...(opts.idleTimeoutMs !== undefined ? { idleTimeoutMs: opts.idleTimeoutMs } : {}),
       onText: (d) => {
         queue.push(d);
         notify?.();
       },
     })
+      .then((r) => {
+        result = r;
+        return r;
+      })
       .catch((e: unknown) => {
         failed = e;
         return undefined;
@@ -448,6 +547,9 @@ export async function* streamChat(
     }
     await turn;
     if (failed) throw failed;
+    // A PAUSE, not a completion — see `StreamPausedError`'s own doc comment. Whatever text
+    // already streamed above (via `onText`/the queue) is already in the caller's hands.
+    if (result?.paused) throw new StreamPausedError();
     return;
   }
   const doFetch = opts.doFetch;
@@ -463,7 +565,7 @@ export async function* streamChat(
     },
     opts.effort,
   );
-  const { ac, dispose } = armRun(opts.signal);
+  const { ac, watchdog, dispose } = armRun(opts.signal, opts.idleTimeoutMs, opts);
   try {
     const res = await doFetch(chatCompletionsUrl(endpoint.baseUrl), {
       method: "POST",
@@ -479,12 +581,28 @@ export async function* streamChat(
       label: model,
       startedAt: Date.now(),
       aborted: () => ac.signal.aborted,
+      onActivity: () => watchdog.touch(),
       ...(opts.onStatus ? { onStatus: opts.onStatus } : {}),
     });
-    for await (const p of frames) {
-      const delta = deltaFromPayload(p);
-      if (delta) yield delta;
+    // Our OWN idle watchdog (not the caller's signal) ended the stream — a PAUSE, not a
+    // completion — mirroring `runChatTurn`'s identical check.
+    const isIdlePause = (): boolean =>
+      ac.signal.aborted && !opts.signal?.aborted && watchdog.didFire();
+    try {
+      for await (const p of frames) {
+        const delta = deltaFromPayload(p);
+        if (delta) yield delta;
+      }
+    } catch (err) {
+      // `ssePayloads`'s `ctl.aborted()` check only catches an abort landing BETWEEN reads — an
+      // abort that lands while a `reader.read()` is already pending (the realistic case: the
+      // idle window has been counting down the WHOLE time a read sat unanswered) instead
+      // REJECTS that read, so this throws here rather than the loop exiting cleanly. Every
+      // delta streamed before the pause was already yielded above regardless of which path it
+      // took to get here.
+      if (!isIdlePause()) throw err;
     }
+    if (isIdlePause()) throw new StreamPausedError();
   } finally {
     dispose();
   }
@@ -571,6 +689,16 @@ export function finalizeToolCalls(acc: ToolCallAccumulator): ToolCall[] {
     .filter((t) => t.name.length > 0);
 }
 
+/** Snapshot of the circuit breaker main-process's request layer keeps for this endpoint —
+ *  main is the only process that holds the real instance (the renderer's own model-request
+ *  code path is the direct-fetch escape hatch, only ever used by tests), so this rides back
+ *  on the response instead of the renderer trying to query one of its own. */
+export interface BreakerSnapshotView {
+  state: "closed" | "open" | "half-open";
+  failures: number;
+  openedAt: number | null;
+}
+
 /** The result of one agent turn: the assistant text + any tool calls it requested. */
 export interface ChatTurnResult {
   text: string;
@@ -579,6 +707,11 @@ export interface ChatTurnResult {
   usage?: TokenUsage;
   /** handoff §3: the measured phase boundaries for this turn (feeds the latency card). */
   timing?: TurnTiming;
+  /** absent only when this turn ran through the direct-fetch escape hatch (tests). */
+  breaker?: BreakerSnapshotView;
+  /** true iff this turn ended because the INACTIVITY watchdog fired — a PAUSE, not a
+   *  completion. `text`/`toolCalls` carry whatever had already streamed before the pause. */
+  paused?: boolean;
 }
 
 /**
@@ -608,11 +741,13 @@ export async function runChatTurn(
      * turn for the whole thinking phase and the run reads as hung.
      */
     onReasoning?: (delta: string) => void;
-    /** heartbeat while the model is quiet (see FIRST_TOKEN_TICK_MS). */
+    /** heartbeat while the model is quiet (see `@prometheus/core/agent-idle-watchdog`). */
     onStatus?: (text: string) => void;
     /** the resolved reasoning effort for this endpoint (see streamChat). */
     effort?: EffortResolution;
-  } = {},
+    /** the inactivity-pause threshold for THIS request. Undefined ⇒ the 10-minute default. */
+    idleTimeoutMs?: number;
+  } & IdleClockOpts = {},
 ): Promise<ChatTurnResult> {
   if (opts.neverSendToCloud && endpoint.locality === "cloud") {
     throw new CloudPolicyError(endpoint.id);
@@ -628,6 +763,7 @@ export async function runChatTurn(
       ...(opts.onText ? { onText: opts.onText } : {}),
       ...(opts.onReasoning ? { onReasoning: opts.onReasoning } : {}),
       ...(opts.onStatus ? { onStatus: opts.onStatus } : {}),
+      ...(opts.idleTimeoutMs !== undefined ? { idleTimeoutMs: opts.idleTimeoutMs } : {}),
     });
   }
   const doFetch = opts.doFetch;
@@ -657,7 +793,7 @@ export async function runChatTurn(
   // §3 latency attribution — measured at the real boundaries, never estimated.
   const requestAt = Date.now();
   let firstTokenAt: number | undefined;
-  const { ac, dispose } = armRun(opts.signal);
+  const { ac, watchdog, dispose } = armRun(opts.signal, opts.idleTimeoutMs, opts);
   const res = await doFetch(chatCompletionsUrl(endpoint.baseUrl), {
     method: "POST",
     headers: { "content-type": "application/json", accept: "text/event-stream" },
@@ -695,8 +831,12 @@ export async function runChatTurn(
     }
     accumulateToolCalls(acc, p);
     const u = usageFromPayload(p); // the include_usage chunk has empty choices — safe
-    if (u) usage = u;
+    if (u) usage = mergeWireUsage(usage, u);
   };
+  // Our OWN idle watchdog (not the caller's signal) ended the stream — a PAUSE, not a
+  // completion.
+  const isIdlePause = (): boolean =>
+    ac.signal.aborted && !opts.signal?.aborted && watchdog.didFire();
   const result = (): ChatTurnResult => ({
     text,
     toolCalls: finalizeToolCalls(acc),
@@ -707,6 +847,8 @@ export async function runChatTurn(
       ...(firstTokenAt !== undefined ? { firstTokenAt } : {}),
       lastByteAt: Date.now(),
     },
+    // `text`/`toolCalls` above already reflect everything streamed before the pause.
+    ...(isIdlePause() ? { paused: true } : {}),
   });
   try {
     // ssePayloads stops AT `[DONE]` and yields everything before it, so a provider that
@@ -716,9 +858,19 @@ export async function runChatTurn(
       label: model,
       startedAt: requestAt,
       aborted: () => ac.signal.aborted,
+      onActivity: () => watchdog.touch(),
       ...(opts.onStatus ? { onStatus: opts.onStatus } : {}),
     });
-    for await (const p of frames) consume(p);
+    try {
+      for await (const p of frames) consume(p);
+    } catch (err) {
+      // `ssePayloads`'s `ctl.aborted()` check only catches an abort landing BETWEEN reads — an
+      // abort landing while a `reader.read()` is already pending (the realistic case for an
+      // idle pause: the read had been unanswered for the whole idle window) instead REJECTS
+      // that read, so this throws here rather than the loop exiting cleanly. `text`/`toolCalls`
+      // accumulated before the pause are unaffected either way.
+      if (!isIdlePause()) throw err;
+    }
   } finally {
     dispose();
   }

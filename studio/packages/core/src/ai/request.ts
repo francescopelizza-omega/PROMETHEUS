@@ -158,7 +158,18 @@ export async function fetchModelWithRetry<R extends ModelResponseLike>(
           : {}),
       },
     );
-  return opts.breaker ? opts.breaker.exec(run) : run();
+  return opts.breaker
+    ? opts.breaker.exec(run, {
+        /**
+         * A turn the USER stopped says nothing about the endpoint's health. Without this, five
+         * ESC cancels in a row opened the breaker and the next ordinary message was refused
+         * with "circuit open — fail-fast" for 30 seconds. The idle watchdog's own abort is a
+         * DIFFERENT signal and still counts, so an endpoint that has genuinely gone silent
+         * still trips the breaker as before.
+         */
+        isEndpointFailure: () => opts.userSignal?.aborted !== true,
+      })
+    : run();
 }
 
 /** Read an error body defensively — it is only ever used for the message. */

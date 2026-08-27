@@ -1,13 +1,21 @@
 /**
  * MetadataPanel.tsx — the file-metadata control surface (file 0C — privacy protection).
  *
- * Pick a file → read its metadata → see it grouped + privacy-flagged → erase all metadata
- * (typed-confirm), edit a field, or normalize timestamps. Drives the MAIN process over
- * window.prometheus.metadata.* + window.prometheus.fileOpen (C5: the renderer never
- * touches the fs or spawns the sidecar; mutations are plan-only without the confirm).
+ * Pick a file → read its metadata → see it grouped + privacy-flagged → erase ALL of it behind a
+ * two-step confirm. Drives the MAIN process over window.prometheus.metadata.* +
+ * window.prometheus.fileOpen (C5: the renderer never touches the fs or spawns the sidecar).
  * Pure view-model (metadata-panel-view.ts) + @prometheus/ui atoms. Token colors only.
  *
  * For the user's OWN files + privacy only — the destructive erase ALWAYS confirms.
+ *
+ * WHAT THIS PANEL DOES NOT DO. This header used to advertise "erase all metadata
+ * (typed-confirm), edit a field, or normalize timestamps", and none of the three was accurate:
+ * the bridge interface below declares only `inspect` and `scrub`, there is no field-edit control
+ * and no timestamp control anywhere in the file, and the erase dialog confirms with a BUTTON,
+ * not a typed phrase. A header describing capabilities the component does not have is worse than
+ * no header — it is what a reader checks instead of the code. Per-field edit and timestamp
+ * normalisation would need new sidecar verbs and new IPC; they are not hidden here, they are
+ * absent.
  */
 import { Button, EmptyState, Panel, StatusPill } from "@prometheus/ui";
 import { type CSSProperties, type ReactElement, useCallback, useRef, useState } from "react";

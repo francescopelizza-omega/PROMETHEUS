@@ -157,3 +157,29 @@ test("resolveFormatter honors byExt override + disabled; shouldFormatOnSave gate
   assert.equal(shouldFormatOnSave("a.ts", { onSave: false, afterAiEdit: true }), false);
   assert.equal(shouldFormatOnSave("a.unknown", policy), false, "no formatter → no format");
 });
+
+test("an `@` inside a !`cmd` injection is part of the COMMAND, not a file ref", () => {
+  /**
+   * `FILE_REF_RE` scanned the whole body, so `!`npm view react@latest version`` reported BOTH a
+   * shell injection and a fileRef `latest`. Both CLI hosts and the desktop pane resolve reads
+   * first and `text.split("@latest").join(marker)` — which rewrites the inside of the run token,
+   * so the later `text.split("!`npm view react@latest version`")` matches nothing. In user scope
+   * that means the human is prompted, approves, the command RUNS through the gate, and its
+   * output is thrown away; in project scope the refusal marker lands nowhere at all.
+   */
+  const body = "Check: !`npm view react@latest version`\nDiff: !`git diff @{u}`\nRead @notes.md";
+  const out = parseCommandFile("deps.md", body);
+  assert.equal(out.ok, true);
+  if (!out.ok) return;
+
+  assert.deepEqual(out.file.fileRefs, ["notes.md"], "a ref inside a command leaked out as a read");
+  assert.deepEqual(out.file.shellInjections, ["npm view react@latest version", "git diff @{u}"]);
+
+  // self-validating: the same body WITHOUT the backticks still yields the refs, so a scan that
+  // simply stopped finding anything would fail here rather than pass silently.
+  const bare = parseCommandFile("deps.md", "npm view react@latest version");
+  assert.deepEqual((bare.ok && bare.file.fileRefs) || [], ["latest"]);
+
+  // masking must not shift anything else in the body
+  assert.equal(out.file.template, body);
+});

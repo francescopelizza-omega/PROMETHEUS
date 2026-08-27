@@ -72,6 +72,51 @@ export interface RawEngineResult {
 // ANSI SGR escape codes (the engine emits color even under --no-color in some paths).
 const ANSI = /\x1b\[[0-9;]*m/g;
 
+/** stdout → the non-empty, ANSI-stripped display lines. */
+function rawLines(stdout: string): string[] {
+  return stdout
+    .split("\n")
+    .map((l) => l.replace(ANSI, "").trimEnd())
+    .filter((l) => l.trim().length > 0);
+}
+
+/**
+ * The display lines out of a `{command, action, lines:[…]}` JSON envelope, or null when stdout
+ * is not one.
+ *
+ * These reads are invoked WITH `--json` (see `fullArgv`), and the engine has since grown real
+ * envelopes for several of them — `models list`, `apps list` and `inventory` all answer with a
+ * JSON object now, while `worldsim list` still answers with a table. Splitting stdout blindly
+ * turned the first three into ONE line holding the entire serialized envelope, which is exactly
+ * what Studio's catalog panes then rendered: a wall of JSON where the catalog should be.
+ *
+ * Reading the envelope's own `lines` array fixes those without touching the ones that stayed
+ * human, and means the next read to grow an envelope keeps working instead of breaking the day
+ * it lands. Anything that is not an object with a string array at `lines` falls through.
+ */
+function parseEnvelope(stdout: string): Record<string, unknown> | null {
+  const text = stdout.trim();
+  if (!text.startsWith("{")) return null;
+  try {
+    const parsed: unknown = JSON.parse(text);
+    return typeof parsed === "object" && parsed !== null
+      ? (parsed as Record<string, unknown>)
+      : null;
+  } catch {
+    return null; // human text that merely begins with a brace
+  }
+}
+
+function envelopeLines(stdout: string): string[] | null {
+  const parsed = parseEnvelope(stdout);
+  if (!parsed) return null;
+  const { lines } = parsed as { lines?: unknown };
+  if (!Array.isArray(lines) || !lines.every((l) => typeof l === "string")) return null;
+  return (lines as string[])
+    .map((l) => l.replace(ANSI, "").trimEnd())
+    .filter((l) => l.trim().length > 0);
+}
+
 /**
  * Run a HUMAN-TABLE engine command LIVE and return its stdout lines. The args are
  * passed verbatim (shell:false). FAIL-CLOSED on any transport failure (missing engine,
@@ -163,13 +208,29 @@ export function rawEngine(
       // The engine returns non-zero for some read paths (e.g. audit with findings);
       // for these human-table READS we treat any produced stdout as a successful read
       // and only fail-close when there is genuinely no output AND a non-zero exit.
-      const lines = stdout
-        .split("\n")
-        .map((l) => l.replace(ANSI, "").trimEnd())
-        .filter((l) => l.trim().length > 0);
+      const lines = envelopeLines(stdout) ?? rawLines(stdout);
       if (lines.length === 0 && code !== 0) {
         const tail = (stderr.trim() || `exit ${code}`).slice(-300);
         done(fail(`${command} exit ${code}: ${tail}`));
+        return;
+      }
+      /**
+       * The engine's OWN verdict wins when it gave one.
+       *
+       * "Any stdout at all means the read worked" is right for a human table, and wrong the
+       * moment the engine answers with a JSON envelope that says `ok:false`. `models pull` with
+       * no argument prints `{"ok":false,"error":"usage: models pull <model-id|ollama-tag>",
+       * "_exit":2}` and exits 2 — and this returned `ok:true`, exit 0, with the engine's error
+       * buried as a STRING inside `lines`. A script branching on `.ok` was told a failed command
+       * had succeeded, and the user saw a usage message under a success envelope.
+       */
+      const env = parseEnvelope(stdout);
+      if (env && env.ok === false) {
+        const why =
+          typeof env.error === "string" && env.error.trim()
+            ? env.error
+            : `${command} failed (exit ${typeof env._exit === "number" ? env._exit : code})`;
+        done({ ok: false, command, action, lines, engine: prometheusPy, error: why, raw: stdout });
         return;
       }
       done({ ok: true, command, action, lines, engine: prometheusPy, raw: stdout });

@@ -24,6 +24,7 @@ export {
   PROFILE_ACTIVE_KEY,
   getCliProfile,
   profileForbidsForce,
+  forceOverrideAllowed,
   listProfiles,
 } from "./seeds.js";
 export type { DiscoverProjectOpts } from "./paths.js";

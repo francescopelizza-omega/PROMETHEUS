@@ -44,12 +44,17 @@ import {
 import {
   IPC,
   IPC_EVENTS,
+  type ModelConvertResult,
   type ModelDownloadResult,
   type ModelEndpointsResult,
+  type ModelFetchHfResult,
   type ModelFitResult,
   type ModelHardwareResult,
   type ModelInfoResult,
+  type ModelInstallConverterResult,
+  type ModelInstallHfCliResult,
   type ModelInstallRunnerResult,
+  type ModelInstallTargetResult,
   type ModelMutationResult,
   type ModelProgressEvent,
   type ModelPullResult,
@@ -59,11 +64,16 @@ import {
   type ModelServeRow,
 } from "../shared/ipc-contract.js";
 import {
+  validateModelConvert,
   validateModelDownload,
+  validateModelFetchHf,
   validateModelFit,
   validateModelHardware,
   validateModelInfo,
+  validateModelInstallConverter,
+  validateModelInstallHfCli,
   validateModelInstallRunner,
+  validateModelInstallTarget,
   validateModelLibrary,
   validateModelPull,
   validateModelRemove,
@@ -539,6 +549,156 @@ export function registerModelIpcHandlers(wiring: ModelIpcWiring): () => void {
     }
   });
 
+  // ── model:fetchHf — the ACTUAL raw-weights fetch (HF's own `hf` downloader) ─
+  ipcMain.handle(
+    IPC.modelFetchHf,
+    async (evt: unknown, arg: unknown): Promise<ModelFetchHfResult> => {
+      const v = validateModelFetchHf(arg);
+      if (!v.ok) return { ok: false, error: v.error.message };
+      const a = v.value;
+      const sender = senderOf(evt);
+      const blocked = await launchBlockReason();
+      if (blocked) return { ok: false, error: blocked };
+      try {
+        const opts: Parameters<typeof client.fetchHf>[0] = { repo: a.repo };
+        if (a.out !== undefined) opts.out = a.out;
+        if (a.revision !== undefined) opts.revision = a.revision;
+        const r = await queueMutation(a.repo, () => client.fetchHf(opts));
+        if (sender && r.ok) {
+          const event: ModelProgressEvent = {
+            phase: "hug",
+            message: `fetched ${a.repo}`,
+            raw: r.path ?? "",
+          };
+          if (a.runId !== undefined) event.runId = a.runId;
+          sender.send(IPC_EVENTS.modelProgress, event);
+        }
+        const out: ModelFetchHfResult = { ok: r.ok };
+        if (r.repo !== undefined) out.repo = r.repo;
+        if (r.path !== undefined) out.path = r.path;
+        if (r.installable) out.installable = true;
+        if (r.error !== undefined) out.error = r.error;
+        return out;
+      } catch (e) {
+        return { ok: false, error: errString(e) };
+      }
+    },
+  );
+
+  // ── model:installHfCli — install HF's own `hf` CLI on the user's behalf ────
+  ipcMain.handle(
+    IPC.modelInstallHfCli,
+    async (_evt, arg: unknown): Promise<ModelInstallHfCliResult> => {
+      const v = validateModelInstallHfCli(arg);
+      if (!v.ok) return { ok: false, error: v.error.message };
+      const blocked = await launchBlockReason();
+      if (blocked) return { ok: false, error: blocked };
+      try {
+        const r = await queueMutation("__hfcli__", () => client.installHfCli());
+        const out: ModelInstallHfCliResult = { ok: r.ok, installed: r.installed };
+        if (r.manual) out.manual = true;
+        if (r.install !== undefined) out.install = r.install;
+        if (r.error !== undefined) out.error = r.error;
+        return out;
+      } catch (e) {
+        return { ok: false, error: errString(e) };
+      }
+    },
+  );
+
+  // ── model:convert — HF dir → GGUF (+ quantize), ALWAYS via llama.cpp's tools ─
+  ipcMain.handle(
+    IPC.modelConvert,
+    async (evt: unknown, arg: unknown): Promise<ModelConvertResult> => {
+      const v = validateModelConvert(arg);
+      if (!v.ok) return { ok: false, error: v.error.message };
+      const a = v.value;
+      const sender = senderOf(evt);
+      const blocked = await launchBlockReason();
+      if (blocked) return { ok: false, error: blocked };
+      try {
+        const opts: Parameters<typeof client.convert>[0] = { src: a.src };
+        if (a.quant !== undefined) opts.quant = a.quant;
+        if (a.id !== undefined) opts.id = a.id;
+        if (a.out !== undefined) opts.out = a.out;
+        const r = await queueMutation(a.id ?? a.src, () => client.convert(opts));
+        if (sender) {
+          const event: ModelProgressEvent = {
+            phase: "hug",
+            message: r.ok ? `converted → ${r.path ?? ""}` : (r.error ?? "conversion failed"),
+            raw: r.path ?? "",
+          };
+          if (a.runId !== undefined) event.runId = a.runId;
+          sender.send(IPC_EVENTS.modelProgress, event);
+        }
+        const out: ModelConvertResult = { ok: r.ok };
+        if (r.id !== undefined) out.id = r.id;
+        if (r.path !== undefined) out.path = r.path;
+        if (r.canonicalPath !== undefined) out.canonicalPath = r.canonicalPath;
+        if (r.quant !== undefined) out.quant = r.quant;
+        if (r.sizeBytes !== undefined) out.sizeBytes = r.sizeBytes;
+        if (r.sizeGb !== undefined) out.sizeGb = r.sizeGb;
+        if (r.installable) out.installable = true;
+        if (r.lowDisk) out.lowDisk = true;
+        if (r.hint !== undefined) out.hint = r.hint;
+        if (r.error !== undefined) out.error = r.error;
+        return out;
+      } catch (e) {
+        return { ok: false, error: errString(e) };
+      }
+    },
+  );
+
+  // ── model:installConverter — fetch llama.cpp's OWN converter, once ─────────
+  ipcMain.handle(
+    IPC.modelInstallConverter,
+    async (_evt, arg: unknown): Promise<ModelInstallConverterResult> => {
+      const v = validateModelInstallConverter(arg);
+      if (!v.ok) return { ok: false, error: v.error.message };
+      const blocked = await launchBlockReason();
+      if (blocked) return { ok: false, error: blocked };
+      try {
+        const r = await queueMutation("__converter__", () => client.installConverter());
+        const out: ModelInstallConverterResult = { ok: r.ok, installed: r.installed };
+        if (r.path !== undefined) out.path = r.path;
+        if (r.manual) out.manual = true;
+        if (r.install !== undefined) out.install = r.install;
+        if (r.error !== undefined) out.error = r.error;
+        return out;
+      } catch (e) {
+        return { ok: false, error: errString(e) };
+      }
+    },
+  );
+
+  // ── model:installTarget — wire a converted/GGUF model into ONE runtime ─────
+  ipcMain.handle(
+    IPC.modelInstallTarget,
+    async (_evt, arg: unknown): Promise<ModelInstallTargetResult> => {
+      const v = validateModelInstallTarget(arg);
+      if (!v.ok) return { ok: false, error: v.error.message };
+      const a = v.value;
+      try {
+        const opts: Parameters<typeof client.installTarget>[0] = { target: a.target, id: a.id };
+        if (a.gguf !== undefined) opts.gguf = a.gguf;
+        if (a.src !== undefined) opts.src = a.src;
+        if (a.quant !== undefined) opts.quant = a.quant;
+        const r = await queueMutation(a.id, () => client.installTarget(opts));
+        const out: ModelInstallTargetResult = { ok: r.ok };
+        if (r.target !== undefined) out.target = r.target;
+        if (r.id !== undefined) out.id = r.id;
+        if (r.path !== undefined) out.path = r.path;
+        if (r.endpoint !== undefined) out.endpoint = r.endpoint;
+        if (r.method !== undefined) out.method = r.method;
+        if (r.note !== undefined) out.note = r.note;
+        if (r.error !== undefined) out.error = r.error;
+        return out;
+      } catch (e) {
+        return { ok: false, error: errString(e) };
+      }
+    },
+  );
+
   // ── disposer ─────────────────────────────────────────────────────────────
   return () => {
     serve.off("status", onServeStatus as (...a: unknown[]) => void);
@@ -549,6 +709,9 @@ export function registerModelIpcHandlers(wiring: ModelIpcWiring): () => void {
       IPC.modelFit,
       IPC.modelDownload,
       IPC.modelPull,
+      // was previously missing from this list (a pre-existing asymmetry — the handler
+      // above registers it, so the disposer must remove it too, fixed in passing).
+      IPC.modelInstallRunner,
       IPC.modelLibrary,
       IPC.modelRemove,
       IPC.modelServe,
@@ -556,6 +719,11 @@ export function registerModelIpcHandlers(wiring: ModelIpcWiring): () => void {
       IPC.modelServing,
       IPC.modelEndpoints,
       IPC.modelRepoint,
+      IPC.modelFetchHf,
+      IPC.modelInstallHfCli,
+      IPC.modelConvert,
+      IPC.modelInstallConverter,
+      IPC.modelInstallTarget,
     ]) {
       ipcMain.removeHandler(channel);
     }

@@ -279,7 +279,32 @@ export function BottomPanel({
           {collapsed ? "▴" : "▾"}
         </button>
       </div>
-      {!collapsed && <div style={{ flex: 1, minHeight: 0, overflow: "auto" }}>{children}</div>}
+      {/*
+        Collapsing HIDES the body; it must not unmount it.
+
+        This was `{!collapsed && <div>{children}</div>}`, which tore the whole subtree down. On
+        the editor route those children are the TerminalPanel, so every `<Terminal>` cleanup ran
+        and called `ptyKill`, and the host killed the shell — with its child processes. Collapsing
+        the panel to get some vertical room therefore KILLED a running `npm run dev` or build, and
+        expanding again spawned fresh empty shells with no scrollback. The comment at the mount
+        site promised the opposite ("TerminalPanel stays MOUNTED so the pty survives"), which held
+        for tab switches but not for this control — the one control whose whole purpose is that
+        the panel is coming back.
+
+        A display toggle keeps the ptys alive and costs nothing: the hidden subtree renders once
+        and then sits idle.
+      */}
+      <div
+        style={{
+          flex: 1,
+          minHeight: 0,
+          overflow: "auto",
+          ...(collapsed ? { display: "none" } : {}),
+        }}
+        {...(collapsed ? { "aria-hidden": true, inert: true } : {})}
+      >
+        {children}
+      </div>
     </section>
   );
 }

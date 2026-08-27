@@ -91,6 +91,30 @@ export interface WireTool {
 }
 
 /** What one parsed stream event contributed. */
+/**
+ * One tool call, or one fragment of one, as it came off the wire.
+ *
+ * `index` groups fragments belonging to the SAME call — that is how OpenAI and Anthropic stream
+ * a call whose JSON arguments arrive in pieces.
+ *
+ * `complete` says the fragment is the WHOLE call, so it must never be merged into anything.
+ * Gemini delivers each `functionCall` part entire, and its index is the part's position within
+ * the chunk it arrived in — which is 0 for every call when the server sends one call per chunk.
+ * Without this flag the reader keyed purely on `index` and two different calls landed in the
+ * same accumulator slot: the second name overwrote the first and the two argument objects were
+ * concatenated into `{"path":"a.txt"}{"path":"."}`, which does not parse. Both calls were
+ * destroyed and the model was told its own output was malformed. Reproduced end to end against
+ * the real `LLMClient.turn()` with a live HTTP server.
+ */
+export interface WireToolCallFragment {
+  index: number;
+  id?: string;
+  name?: string;
+  argsFragment?: string;
+  /** the fragment IS the entire call — never merge it with another (Gemini). */
+  complete?: boolean;
+}
+
 export interface WireEvent {
   /** incremental assistant text, if any. */
   delta?: string;
@@ -98,12 +122,21 @@ export interface WireEvent {
    * an incremental tool call. `index` groups fragments belonging to the same call; `id` and
    * `name` arrive once (on the opening frame) and `argsFragment` accumulates.
    */
-  toolCall?: {
-    index: number;
-    id?: string;
-    name?: string;
-    argsFragment?: string;
-  };
+  toolCall?: WireToolCallFragment;
+  /**
+   * EVERY tool call carried by this frame, when a provider batches more than one into it.
+   *
+   * `toolCall` is a single object, and both parsers used to take exactly one entry per frame —
+   * OpenAI read `tool_calls[0]`, Gemini took the first `functionCall` part — so a server that
+   * batches parallel calls into ONE frame lost all but the first. Gemini delivers parallel
+   * function calls as several `functionCall` parts inside one candidate, so this was a real loss
+   * there: the agent ran 1 of N requested actions, and because the thread sent back also held
+   * only the survivor, the model had no way to notice the others had vanished.
+   *
+   * `toolCall` stays populated with the FIRST entry so existing readers keep working; a reader
+   * that wants them all reads this instead. Present whenever the frame carried any call.
+   */
+  toolCalls?: ReadonlyArray<WireToolCallFragment>;
   /** token usage, if this frame carried it. */
   usage?: {
     inputTokens: number;
@@ -150,6 +183,15 @@ export interface WireFormat {
   body(messages: readonly WireMessage[], opts: WireBodyOptions): Record<string, unknown>;
   /** interpret one SSE `data:` payload. */
   parse(payload: string): WireEvent;
+  /**
+   * Interpret a WHOLE non-streamed response body.
+   *
+   * Plenty of OpenAI-compatible servers, proxies and gateways ignore `stream: true` and answer
+   * 200 with an ordinary JSON completion. The reader below looks only for `data:` lines, found
+   * none, and the turn ended with no text, no usage and no error — a completely silent answer,
+   * indistinguishable from the model declining. Reproduced against a real HTTP server.
+   */
+  parseWhole(body: string): WireEvent;
 }
 
 /* ── helpers ───────────────────────────────────────────────────────────────*/
@@ -342,6 +384,33 @@ export const OPENAI_WIRE: WireFormat = {
       ...(opts.maxTokens !== undefined ? { max_tokens: opts.maxTokens } : {}),
     };
   },
+  parseWhole(body) {
+    const o = parseJson(body);
+    if (!o) return {};
+    if (isRecord(o.error)) return { error: errorMessage(o) };
+    const out: WireEvent = {};
+    const choices = o.choices;
+    if (Array.isArray(choices) && choices.length > 0) {
+      const first = choices[0];
+      const message = isRecord(first) ? first.message : undefined;
+      // `message.content` is the non-streamed shape; `text` is the older completions one.
+      const text = isRecord(message)
+        ? typeof message.content === "string"
+          ? message.content
+          : ""
+        : isRecord(first) && typeof first.text === "string"
+          ? first.text
+          : "";
+      if (text) out.delta = text;
+    }
+    const usage = o.usage;
+    if (isRecord(usage)) {
+      const inTok = num(usage.prompt_tokens) ?? 0;
+      const outTok = num(usage.completion_tokens) ?? 0;
+      out.usage = { inputTokens: inTok, outputTokens: outTok, totalTokens: inTok + outTok };
+    }
+    return out;
+  },
   parse(payload) {
     if (payload === "[DONE]") return { done: true };
     const o = parseJson(payload);
@@ -364,16 +433,23 @@ export const OPENAI_WIRE: WireFormat = {
       // is what keeps them apart; it is not optional bookkeeping.
       const tc = first.delta?.tool_calls;
       if (Array.isArray(tc) && tc.length > 0) {
-        const f = tc[0];
-        if (isRecord(f)) {
+        // EVERY entry, not just tc[0]: a server may batch a turn's parallel calls into one frame.
+        const parsed: NonNullable<WireEvent["toolCalls"]>[number][] = [];
+        for (let k = 0; k < tc.length; k++) {
+          const f = tc[k];
+          if (!isRecord(f)) continue;
           const fn = isRecord(f.function) ? f.function : undefined;
           const frag = fn && typeof fn.arguments === "string" ? fn.arguments : undefined;
-          out.toolCall = {
-            index: num(f.index) ?? 0,
+          parsed.push({
+            index: num(f.index) ?? k,
             ...(typeof f.id === "string" && f.id ? { id: f.id } : {}),
             ...(fn && typeof fn.name === "string" && fn.name ? { name: fn.name } : {}),
             ...(frag !== undefined ? { argsFragment: frag } : {}),
-          };
+          });
+        }
+        if (parsed.length > 0) {
+          out.toolCalls = parsed;
+          out.toolCall = parsed[0];
         }
       }
     }
@@ -524,6 +600,36 @@ export const ANTHROPIC_WIRE: WireFormat = {
       ...(opts.temperature !== undefined ? { temperature: opts.temperature } : {}),
     };
   },
+  parseWhole(body) {
+    const o = parseJson(body);
+    if (!o) return {};
+    if (isRecord(o.error) || o.type === "error") return { error: errorMessage(o) };
+    const out: WireEvent = {};
+    const content = o.content;
+    if (Array.isArray(content)) {
+      const text = content
+        .map((b) => (isRecord(b) && typeof b.text === "string" ? b.text : ""))
+        .join("");
+      if (text) out.delta = text;
+    }
+    const usage = o.usage;
+    if (isRecord(usage)) {
+      const inTok = num(usage.input_tokens) ?? 0;
+      const outTok = num(usage.output_tokens) ?? 0;
+      out.usage = {
+        inputTokens: inTok,
+        outputTokens: outTok,
+        totalTokens: inTok + outTok,
+        ...(num(usage.cache_read_input_tokens) !== undefined
+          ? { cacheRead: num(usage.cache_read_input_tokens) as number }
+          : {}),
+        ...(num(usage.cache_creation_input_tokens) !== undefined
+          ? { cacheCreate: num(usage.cache_creation_input_tokens) as number }
+          : {}),
+      };
+    }
+    return out;
+  },
   parse(payload) {
     const o = parseJson(payload);
     if (!o) return {};
@@ -558,8 +664,16 @@ export const ANTHROPIC_WIRE: WireFormat = {
       const text = d.text;
       return typeof text === "string" && text ? { delta: text } : {};
     }
-    // Usage arrives twice: input counts on `message_start`, output counts on `message_delta`.
-    // Both are surfaced; the caller keeps the last, which is the complete one.
+    /**
+     * Usage arrives TWICE and neither frame is complete on its own: `message_start` carries
+     * input_tokens (+ the two cache counters), `message_delta` carries only output_tokens.
+     *
+     * The note here used to say the caller "keeps the last, which is the complete one". It is
+     * not: the last frame has `input_tokens: 0` and no cache fields, so a consumer that
+     * overwrites ends every Claude turn holding `{inputTokens: 0, outputTokens: N}`. Callers must
+     * MERGE the frames — `mergeWireUsage` in ai/usage.ts does it — which is why both are emitted
+     * rather than one synthesised total.
+     */
     const usageFrom = (u: unknown): WireEvent["usage"] | undefined => {
       if (!isRecord(u)) return undefined;
       const inTok = num(u.input_tokens);
@@ -704,6 +818,31 @@ export const GEMINI_WIRE: WireFormat = {
         : {}),
     };
   },
+  parseWhole(body) {
+    const o = parseJson(body);
+    if (!o) return {};
+    if (isRecord(o.error)) return { error: errorMessage(o) };
+    const out: WireEvent = {};
+    const candidates = o.candidates;
+    if (Array.isArray(candidates) && candidates.length > 0) {
+      const first = candidates[0];
+      const content = isRecord(first) ? first.content : undefined;
+      const parts = isRecord(content) ? content.parts : undefined;
+      if (Array.isArray(parts)) {
+        const text = parts
+          .map((p) => (isRecord(p) && typeof p.text === "string" ? p.text : ""))
+          .join("");
+        if (text) out.delta = text;
+      }
+    }
+    const meta = o.usageMetadata;
+    if (isRecord(meta)) {
+      const inTok = num(meta.promptTokenCount) ?? 0;
+      const outTok = num(meta.candidatesTokenCount) ?? 0;
+      out.usage = { inputTokens: inTok, outputTokens: outTok, totalTokens: inTok + outTok };
+    }
+    return out;
+  },
   parse(payload) {
     const o = parseJson(payload);
     if (!o) return {};
@@ -735,17 +874,28 @@ export const GEMINI_WIRE: WireFormat = {
         // in one part. So the "fragment" is the complete argument JSON, and the call needs a
         // synthetic id: Gemini issues none, and the loop pairs results by id everywhere else.
         // The name is that id, which is also exactly what `functionResponse` pairs on.
-        const callIdx = parts.findIndex((p) => isRecord(p) && isRecord(p.functionCall));
-        const call =
-          callIdx >= 0 ? (parts[callIdx] as { functionCall: Record<string, unknown> }) : undefined;
-        if (call) {
-          const name = typeof call.functionCall.name === "string" ? call.functionCall.name : "";
-          out.toolCall = {
-            index: callIdx,
+        // EVERY functionCall part, not just the first: Gemini delivers a turn's parallel calls
+        // as several parts inside one candidate, and taking `findIndex` discarded all but one.
+        const parsed: NonNullable<WireEvent["toolCalls"]>[number][] = [];
+        for (let k = 0; k < parts.length; k++) {
+          const part = parts[k];
+          if (!isRecord(part) || !isRecord(part.functionCall)) continue;
+          const fc = part.functionCall;
+          const name = typeof fc.name === "string" ? fc.name : "";
+          parsed.push({
+            index: k,
             id: name,
             name,
-            argsFragment: JSON.stringify(call.functionCall.args ?? {}),
-          };
+            argsFragment: JSON.stringify(fc.args ?? {}),
+            // Gemini hands over a call WHOLE, and `k` is only its position inside THIS chunk —
+            // 0 for every call when the server streams one per chunk. Saying so here is what
+            // stops the reader keying two different calls into one accumulator slot.
+            complete: true,
+          });
+        }
+        if (parsed.length > 0) {
+          out.toolCalls = parsed;
+          out.toolCall = parsed[0];
         }
       }
     }

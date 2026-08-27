@@ -267,7 +267,7 @@ test("appending never throws, even on an unwritable home", () => {
   // someone working — and then there is no audit at all.
   assertStrict.doesNotThrow(() =>
     appendExecAudit(
-      "/nonexistent/ /path",
+      "/nonexistent/\x00/path",
       execAuditEntry({
         command: "ls",
         tier: "read",

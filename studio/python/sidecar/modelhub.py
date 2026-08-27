@@ -10,15 +10,21 @@ engine-bridge nemesis runner. This sidecar never fetches and never decides "safe
 only inspects local hardware/files and reads the bundled catalog.
 
 Verbs:
-    hw.scan       REAL: total RAM, CPU cores, GPU + VRAM (nvidia-smi / macOS / sysctl)
-    model.list    REAL: enumerate a local models dir (gguf/safetensors/bin)
-    fit.score     REAL: model size + quant + hw.scan → fits|tight|no + recommended quant
-    model.search  reads config/open-models.json (bundled Tier-A open catalog)
-    fit           Cookbook fit-scoring (§4): ranked quants + recommended + reasons
-    download      stage → REAL nemesis gate → admit|quarantine (§5; the security spine)
-    serve         build a ServeProfile + fit-derived runner argv (§8; pure, no spawn)
-    endpoints     LIVE passthrough of `prometheus.py localai endpoints` (§6)
-    repoint       LIVE `localai show <tool>` → non-secret env diff (§6)
+    hw.scan           REAL: total RAM, CPU cores, GPU + VRAM (nvidia-smi / macOS / sysctl)
+    model.list        REAL: enumerate a local models dir (gguf/safetensors/bin)
+    fit.score         REAL: model size + quant + hw.scan → fits|tight|no + recommended quant
+    model.search      reads config/open-models.json (bundled Tier-A open catalog)
+    fit               Cookbook fit-scoring (§4): ranked quants + recommended + reasons
+    download          stage → REAL nemesis gate → admit|quarantine (§5; the security spine)
+    serve             build a ServeProfile + fit-derived runner argv (§8; pure, no spawn)
+    endpoints         LIVE passthrough of `prometheus.py localai endpoints` (§6)
+    repoint           LIVE `localai show <tool>` → non-secret env diff (§6)
+    disk.check        REAL: would installing N bytes drop free space below a floor% (/hug)
+    install-hf-cli    fetch HF's OWN `hf` downloader (pip install huggingface_hub[cli]) (/hug)
+    fetch-hf          REAL: raw HF repo → local dir, via `hf download` (never hand-rolled HTTP) (/hug)
+    install-converter fetch llama.cpp's OWN convert_hf_to_gguf.py (git clone, once) (/hug)
+    convert           REAL: HF dir → GGUF (+ quantize), always via llama.cpp's own tools (/hug)
+    install-target    wire a GGUF into ollama / llama.cpp / vllm / lmstudio — no duplicate bytes (/hug)
 
 Python 3 stdlib only. Target 3.9+ (dev host 3.14).
 """
@@ -31,6 +37,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -480,6 +487,20 @@ def _catalog_model(model_id: str) -> Optional[Dict[str, Any]]:
     return None
 
 
+def _known_local_model(model_id: str) -> bool:
+    """Is this id something already pulled into Ollama (which the Hub indexes, never owns)?
+
+    `_catalog_model` only sees the BUNDLED catalog, so gating `serve` on it alone would refuse a
+    model the user really has. Ollama rows carry both `ollama:<name>` and the bare `<name>`.
+    A down daemon yields no rows, which is the fail-closed direction for this check.
+    """
+    want = model_id[len("ollama:") :] if model_id.startswith("ollama:") else model_id
+    for row in _ollama_installed_models():
+        if str(row.get("id")) == model_id or str(row.get("name")) == want:
+            return True
+    return False
+
+
 def _resolve_hw_arg(argv: List[str]) -> Dict[str, Any]:
     """Resolve the hardware shape for fit/serve: --hw JSON wins, else a real scan."""
     hw_json = opt_value(argv, "--hw")
@@ -613,14 +634,36 @@ def v_download(argv: List[str]) -> int:
 # --- real local-model PULL via ollama (§5; the actual weight fetch) --------- #
 
 def _which(binary: str) -> Optional[str]:
-    """PATH lookup with test seams: MODELHUB_FORCE_NO_OLLAMA forces ollama absent;
-    MODELHUB_FAKE_OLLAMA forces it present — so v_pull is unit-testable as a subprocess
-    without a real install."""
+    """PATH lookup with test seams: MODELHUB_FORCE_NO_<X> forces the binary absent;
+    MODELHUB_FAKE_<X> forces it present — so subprocess-shaped verbs are unit-testable
+    without any of these tools actually being installed."""
     if binary == "ollama":
         if os.environ.get("MODELHUB_FORCE_NO_OLLAMA"):
             return None
         if os.environ.get("MODELHUB_FAKE_OLLAMA"):
             return "/fake/bin/ollama"
+    if binary == "git":
+        if os.environ.get("MODELHUB_FORCE_NO_GIT"):
+            return None
+        if os.environ.get("MODELHUB_FAKE_GIT"):
+            return "/fake/bin/git"
+    if binary in ("llama-quantize", "llama-server"):
+        if os.environ.get("MODELHUB_FORCE_NO_LLAMACPP_BIN"):
+            return None
+        if os.environ.get("MODELHUB_FAKE_LLAMACPP_BIN"):
+            return f"/fake/bin/{binary}"
+    if binary == "lms":
+        if os.environ.get("MODELHUB_FORCE_NO_LMS"):
+            return None
+        if os.environ.get("MODELHUB_FAKE_LMS"):
+            return "/fake/bin/lms"
+    if binary in ("hf", "huggingface-cli"):
+        if os.environ.get("MODELHUB_FORCE_NO_HF_CLI"):
+            return None
+        if os.environ.get("MODELHUB_FAKE_HF_CLI"):
+            return f"/fake/bin/{binary}"
+    if binary in ("pip", "pip3") and os.environ.get("MODELHUB_FORCE_NO_PIP"):
+        return None
     return shutil.which(binary)
 
 
@@ -941,6 +984,23 @@ def v_serve(argv: List[str]) -> int:
                     known=sorted(servemod.RUNNER_PORTS))
 
     m = _catalog_model(model_id)
+    if m is None and not gguf_path and not _known_local_model(model_id):
+        # A model we know NOTHING about has no parameter count, so `params_b` fell back to 0.0
+        # and `score_quant` dutifully reported that a zero-byte model FITS: `prometheus model
+        # serve zzz-not-a-model` returned `verdict:"FITS", runnable:true, weights_gb:0` and a
+        # complete runner argv for a model that does not exist — while `model info` on the very
+        # same id correctly refused. Any string was accepted, including path-shaped ones.
+        #
+        # Refused HERE rather than in a host, because all four hosts call this verb and a check
+        # in one of them would leave the others fabricating. The three legitimate ways to serve
+        # something outside the bundled catalog all still work: an explicit `--gguf <path>`, a
+        # model already pulled into Ollama, and of course any catalogued id.
+        return fail(
+            "serve",
+            f"unknown model id '{model_id}': not in the bundled catalog, not installed in "
+            "Ollama, and no --gguf path given",
+            hint="model search",
+        )
     params_b = fitmod.parse_params_b((m or {}).get("params_b")) or 0.0
     family = (m or {}).get("family")
     ctx_len = int(ctx_opt or (m or {}).get("context") or 8192)
@@ -1154,6 +1214,611 @@ def v_prune(argv: List[str]) -> int:
                 freed_bytes=freed, freed_gb=round(freed / 1024**3, 3))
 
 
+# --- disk-space guard (/hug) -------------------------------------------------- #
+#
+# Prometheus never installs a model that would leave the disk dangerously full. The
+# CALLER (CLI/desktop) decides what to do with a "low" verdict — delete other models,
+# wait for the user to free space manually, or fall back to a different disk — this
+# verb only answers the yes/no question honestly. Pure read; never deletes anything.
+
+_DISK_FLOOR_PCT_DEFAULT = 7.0
+
+
+def _disk_usage(path: Path) -> "tuple[int, int]":
+    """(total_bytes, free_bytes) for the filesystem holding ``path``. Walks up to the
+    nearest existing ancestor first, since the install destination may not exist yet."""
+    p = path
+    while not p.exists() and p != p.parent:
+        p = p.parent
+    usage = shutil.disk_usage(p)
+    return int(usage.total), int(usage.free)
+
+
+def v_disk_check(argv: List[str]) -> int:
+    """Would installing ``--need-bytes`` more data at ``--path`` leave less than
+    ``--floor-pct`` (default 7%) free? Returns a verdict, never blocks by itself."""
+    path_arg = opt_value(argv, "--path") or str(_default_models_dir())
+    need_raw = opt_value(argv, "--need-bytes", "0")
+    try:
+        need_bytes = int(need_raw) if need_raw is not None else 0
+    except ValueError:
+        return fail("disk.check", f"--need-bytes must be an integer (got '{need_raw}')")
+    floor_raw = opt_value(argv, "--floor-pct")
+    try:
+        floor_pct = float(floor_raw) if floor_raw is not None else _DISK_FLOOR_PCT_DEFAULT
+    except ValueError:
+        return fail("disk.check", f"--floor-pct must be a number (got '{floor_raw}')")
+    try:
+        total, free = _disk_usage(Path(path_arg).expanduser())
+    except OSError as exc:
+        return fail("disk.check", f"could not read disk usage for {path_arg}: {exc}")
+    if total <= 0:
+        return fail("disk.check", f"disk usage for {path_arg} reported zero total bytes")
+    free_after = free - need_bytes
+    free_after_pct = round((free_after / total) * 100, 2)
+    verdict = "ok" if free_after_pct >= floor_pct else "low"
+    return emit(
+        "disk.check", ok=True, path=path_arg, verdict=verdict,
+        total_bytes=total, free_bytes=free, need_bytes=need_bytes,
+        free_after_bytes=free_after, free_after_pct=free_after_pct, floor_pct=floor_pct,
+        message=(
+            f"{free_after_pct}% free after this install (floor {floor_pct}%) — OK"
+            if verdict == "ok" else
+            f"only {free_after_pct}% would be free after this install (floor {floor_pct}%) — "
+            "free up space, remove another model, or choose a different disk"
+        ),
+    )
+
+
+# --- fetch RAW HF weights (§ the actual byte fetch `download`'s plan defers) - #
+#
+# `download` (above) never fetches bytes itself — by design, it only stages → nemesis-
+# gates → admits bytes some upstream caller already fetched. For /hug's "arbitrary HF
+# repo → local raw weights, ready to convert" step, THIS is that upstream fetch — via
+# Hugging Face's OWN `hf`/`huggingface-cli` downloader, never a hand-rolled HTTP client.
+
+def _hf_cli() -> Optional[str]:
+    for name in ("hf", "huggingface-cli"):
+        found = _which(name)
+        if found:
+            return found
+    return None
+
+
+def v_install_hf_cli(argv: List[str]) -> int:
+    """`pip install huggingface_hub[cli]` (provides the `hf` CLI) — the one-time
+    "detect absence, offer install" step for the HF fetch tool, mirroring
+    install-runner/install-converter exactly."""
+    if _hf_cli():
+        return emit("install-hf-cli", ok=True, installed=True, note="the hf CLI is already available")
+    pip = _which("pip3") or _which("pip")
+    if not pip:
+        return emit(
+            "install-hf-cli", _exit=2, ok=False, manual=True,
+            error="pip is required to install huggingface_hub",
+            install="install Python/pip, then retry — or `pip install huggingface_hub[cli]` yourself",
+        )
+    _emit_install_progress("installing huggingface_hub (provides the `hf` CLI) …")
+    try:
+        code = _run_install([pip, "install", "--quiet", "-U", "huggingface_hub[cli]"])
+    except OSError as exc:
+        return fail("install-hf-cli", f"could not run pip install: {exc}")
+    # MODELHUB_FAKE_INSTALL_OK simulates the CLI appearing on PATH post-install — same
+    # seam install-runner already uses; a real install can't be flipped by a static
+    # test seam mid-process.
+    installed = _hf_cli() is not None or bool(os.environ.get("MODELHUB_FAKE_INSTALL_OK"))
+    if code != 0 or not installed:
+        return emit(
+            "install-hf-cli", _exit=2, ok=False,
+            error=(
+                f"pip install exited {code}" if code != 0
+                else "installed but the hf CLI is still not on PATH"
+            ),
+        )
+    return emit("install-hf-cli", ok=True, installed=True, note="huggingface_hub installed")
+
+
+def v_fetch_hf(argv: List[str]) -> int:
+    """The ACTUAL raw-weights fetch for an arbitrary HF repo, via HF's own `hf`/
+    `huggingface-cli` downloader — never a hand-rolled HTTP client. Downloads into
+    ``--out`` (defaults under the canonical models dir's own `.hf-src` cache)."""
+    repo = opt_value(argv, "--repo")
+    if not repo:
+        return fail("fetch-hf", "need --repo <org/repo>")
+    unsafe = _reject_unsafe_id(repo, "--repo", "fetch-hf")
+    if unsafe is not None:
+        return unsafe
+    out_arg = opt_value(argv, "--out")
+    slug = repo.replace("/", "__").lower() or "repo"
+    out_dir = (
+        Path(out_arg).expanduser().resolve()
+        if out_arg
+        else (_default_models_dir() / ".hf-src" / slug)
+    )
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    cli = _hf_cli()
+    if not cli:
+        return emit(
+            "fetch-hf", _exit=2, ok=False, installable=True,
+            error="no HF downloader (`hf`/`huggingface-cli`) is on PATH",
+            hint="run `model install-hf-cli` once, then retry",
+        )
+    cmd = [cli, "download", repo, "--local-dir", str(out_dir)]
+    revision = opt_value(argv, "--revision")
+    if revision:
+        cmd += ["--revision", revision]
+
+    def on_line(line: str) -> None:
+        _emit_convert_progress("fetch-hf", line.strip()[:140])
+
+    try:
+        code = _run_stream_labeled(cmd, on_line)
+    except OSError as exc:
+        return fail("fetch-hf", f"could not run {cli} download: {exc}")
+    if os.environ.get("MODELHUB_FAKE_CONVERT_LINES") is not None and not any(out_dir.iterdir()):
+        (out_dir / "config.json").write_text("{}")  # hermetic stub — no real fetch ran
+    if code != 0:
+        return emit("fetch-hf", _exit=2, ok=False, error=f"{Path(cli).name} download exited {code}")
+    return emit(
+        "fetch-hf", ok=True, repo=repo, path=str(out_dir),
+        note=f"fetched via {Path(cli).name} download — this directory feeds `model convert`'s --src",
+    )
+
+
+# --- shared install helpers (symlink-share, never duplicate bytes) ---------- #
+
+_UNSAFE_ID_CHARS_RE = re.compile(r"[\x00-\x1f\x7f]")  # control chars, incl. newline/CR
+
+
+def _reject_unsafe_id(value: str, flag: str, command: str) -> Optional[int]:
+    """``None`` if ``value`` is safe to use as a model/repo id downstream; else the int
+    exit code from a ``fail()`` envelope already emitted (the caller must ``return`` it
+    immediately). ``value`` ends up (a) written verbatim into a Modelfile, (b) turned
+    into filename/path components (including an LM Studio symlink target), and (c)
+    passed as a bare positional to `hf download` / `ollama create` — so this rejects,
+    in order: control characters (Modelfile-directive / filename injection via an
+    embedded newline), a leading ``-`` (argv-flag confusion in the downstream tool),
+    and any ``..`` path segment (path-traversal escape once the id becomes a path).
+    """
+    if not value:
+        return None
+    if _UNSAFE_ID_CHARS_RE.search(value):
+        return fail(command, f"{flag} contains control characters — refusing")
+    if value.startswith("-"):
+        return fail(command, f"{flag} looks like a flag ('{value}') — refusing")
+    if any(part == ".." for part in value.split("/")):
+        return fail(command, f"{flag} contains a '..' path segment — refusing")
+    return None
+
+
+def _lmstudio_models_dir() -> Path:
+    override = os.environ.get("LMSTUDIO_MODELS_DIR") or os.environ.get("MODELHUB_FORCE_LMSTUDIO_DIR")
+    if override:
+        return Path(override).expanduser()
+    return Path.home() / ".lmstudio" / "models"
+
+
+def _publisher_model_split(model_id: str) -> "tuple[str, str]":
+    """Always a SAFE, flat (publisher, name) pair — never more than two path segments,
+    regardless of how many '/'-separated parts ``model_id`` actually has (a caller-
+    supplied ``--id`` isn't guaranteed to be exactly "org/repo" shaped)."""
+    parts = [p for p in model_id.split("/") if p]  # drop empty segments (leading/trailing/doubled '/')
+    if not parts:
+        return "local", model_id or "model"
+    if len(parts) == 1:
+        return "local", parts[0]
+    return parts[0], "__".join(parts[1:])
+
+
+def _ensure_symlink(link_path: Path, target_path: Path) -> None:
+    """Point ``link_path`` at ``target_path``, replacing whatever is already there.
+    Never copies — the whole point is ONE physical file, many runtimes seeing it."""
+    link_path.parent.mkdir(parents=True, exist_ok=True)
+    if link_path.is_symlink() or link_path.exists():
+        try:
+            link_path.unlink()
+        except OSError:
+            pass
+    os.symlink(target_path, link_path)
+
+
+# --- conversion tooling: llama.cpp's OWN scripts, never reimplemented ------- #
+
+_LLAMACPP_REPO = "https://github.com/ggml-org/llama.cpp"
+
+
+def _tools_dir() -> Path:
+    return _default_models_dir().parent / "tools"
+
+
+def _llamacpp_dir() -> Path:
+    override = os.environ.get("LLAMACPP_DIR") or os.environ.get("MODELHUB_FORCE_LLAMACPP_DIR")
+    if override:
+        return Path(override).expanduser()
+    return _tools_dir() / "llama.cpp"
+
+
+def _convert_script() -> Optional[Path]:
+    d = _llamacpp_dir()
+    for name in ("convert_hf_to_gguf.py", "convert-hf-to-gguf.py"):
+        p = d / name
+        if p.is_file():
+            return p
+    return None
+
+
+def v_install_converter(argv: List[str]) -> int:
+    """Fetch llama.cpp's OWN convert_hf_to_gguf.py (+ its light python deps) via a
+    shallow git clone of the upstream repo — the same "detect absence, offer install,
+    verify" shape install-runner already uses for ollama. Never a Prometheus-authored
+    converter."""
+    if _convert_script() is not None:
+        return emit(
+            "install-converter", ok=True, installed=True,
+            path=str(_convert_script()), note="llama.cpp's converter is already available",
+        )
+    git = _which("git")
+    if not git:
+        return emit(
+            "install-converter", _exit=2, ok=False, manual=True,
+            error="git is required to fetch llama.cpp's conversion tooling",
+            install=f"install git, then retry — or clone {_LLAMACPP_REPO} yourself and set $LLAMACPP_DIR",
+        )
+    dest = _llamacpp_dir()
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    _emit_install_progress(f"cloning {_LLAMACPP_REPO} …")
+    try:
+        code = _run_install(["git", "clone", "--depth", "1", _LLAMACPP_REPO, str(dest)])
+    except OSError as exc:
+        return fail("install-converter", f"could not run git clone: {exc}")
+    # The fake-install-lines test seam doesn't actually create files — plant a stub
+    # script so a hermetic test can exercise the "now available" branch afterward.
+    if os.environ.get("MODELHUB_FAKE_INSTALL_LINES") is not None and _convert_script() is None:
+        dest.mkdir(parents=True, exist_ok=True)
+        (dest / "convert_hf_to_gguf.py").write_text("# fake test stub\n")
+    if code != 0 or _convert_script() is None:
+        return emit(
+            "install-converter", _exit=2, ok=False,
+            error=(
+                f"git clone exited {code}" if code != 0
+                else "clone finished but the converter script is missing"
+            ),
+        )
+    pip = _which("pip3") or _which("pip")
+    if pip:
+        _emit_install_progress("installing the converter's python dependencies …")
+        req = dest / "requirements" / "requirements-convert_hf_to_gguf.txt"
+        try:
+            _run_install([pip, "install", "--quiet", "-r", str(req)])
+        except OSError:
+            pass  # best-effort — v_convert fails informatively if a dep is truly missing
+    return emit(
+        "install-converter", ok=True, installed=True, path=str(_convert_script()),
+        note="llama.cpp's converter is ready",
+    )
+
+
+def _run_stream_labeled(cmd: List[str], on_line) -> int:
+    """Like _run_stream but for convert/quantize/ollama-create, which need their own
+    fake-subprocess test seam distinct from pull's (MODELHUB_FAKE_PULL_LINES)."""
+    fake = os.environ.get("MODELHUB_FAKE_CONVERT_LINES")
+    if fake is not None:
+        for line in fake.split("\n"):
+            on_line(line)
+        return int(os.environ.get("MODELHUB_FAKE_CONVERT_CODE", "0"))
+    proc = subprocess.Popen(
+        cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1,
+    )
+    if proc.stdout is not None:
+        for line in proc.stdout:
+            on_line(line.rstrip("\n"))
+    return proc.wait()
+
+
+def _emit_convert_progress(phase: str, status: str) -> None:
+    sys.stderr.write(
+        json.dumps({"event": "progress", "verb": "convert", "phase": phase, "status": status[:160]}) + "\n"
+    )
+    sys.stderr.flush()
+
+
+# quant strings that mean "leave it at full precision" — never fed to llama-quantize.
+_QUANT_NO_REQUANT = {"f32", "fp32", "f16", "fp16", "bf16", "auto"}
+
+# convert_hf_to_gguf.py's --outtype only accepts f32|f16|bf16|auto (plus q8_0, out of
+# scope here) — map our accepted aliases onto the value the script actually expects.
+_OUTTYPE_ALIASES = {"fp16": "f16", "fp32": "f32"}
+
+
+def v_convert(argv: List[str]) -> int:
+    """HF directory → GGUF (+ quantize), ALWAYS by shelling out to llama.cpp's own
+    tools — convert_hf_to_gguf.py for the conversion step, llama-quantize for the
+    quantization step. This sidecar never re-implements either one; it only
+    orchestrates them.
+
+    ``--out`` may point at a different disk than the default open_models dir (the
+    /hug disk-guard's "fall back to another disk" path) — when it does, a symlink is
+    left at the CANONICAL open_models location too, so every part of Prometheus that
+    looks there (model.list, remove, prune) still finds the file with no duplicate
+    download.
+    """
+    src = opt_value(argv, "--src")
+    if not src:
+        return fail("convert", "need --src <local HF-format model directory>")
+    src_dir = Path(src).expanduser()
+    if not src_dir.is_dir():
+        return fail("convert", f"--src is not a directory: {src_dir}")
+
+    quant = (opt_value(argv, "--quant") or "q4_k_m").lower()
+    out_arg = opt_value(argv, "--out")
+    # .resolve() (not just .expanduser()) so a RELATIVE --out is made absolute here —
+    # otherwise the canonical-store symlink built below from this path would embed a
+    # relative target, which the OS resolves against the SYMLINK's own parent dir (the
+    # canonical models dir), not this process's cwd, producing a dangling symlink.
+    out_dir = Path(out_arg).expanduser().resolve() if out_arg else _default_models_dir()
+    out_dir.mkdir(parents=True, exist_ok=True)
+    model_id = opt_value(argv, "--id") or src_dir.name
+    unsafe = _reject_unsafe_id(model_id, "--id", "convert")
+    if unsafe is not None:
+        return unsafe
+    slug = model_id.replace("/", "__").lower()
+
+    script = _convert_script()
+    if script is None:
+        return emit(
+            "convert", _exit=2, ok=False, installable=True,
+            error="llama.cpp's convert_hf_to_gguf.py is not available",
+            hint="run `model install-converter` once, then retry",
+        )
+
+    # Disk guard — BUILT IN, not optional per-caller plumbing: a conversion writes a
+    # full-precision GGUF (roughly the size of the source weights) before any
+    # quantization shrinks it, so this is exactly the moment disk pressure bites.
+    # Fails OPEN on a probe error (never blocks a legitimate conversion over a stat
+    # hiccup), same discipline as the CPU/RAM launch guard elsewhere in this codebase.
+    if "--skip-disk-check" not in argv:
+        need_bytes = 0
+        for f in src_dir.rglob("*"):
+            if f.is_file():
+                try:
+                    need_bytes += f.stat().st_size
+                except OSError:
+                    pass
+        floor_raw = opt_value(argv, "--floor-pct")
+        try:
+            floor_pct = float(floor_raw) if floor_raw is not None else _DISK_FLOOR_PCT_DEFAULT
+        except ValueError:
+            floor_pct = _DISK_FLOOR_PCT_DEFAULT
+        try:
+            total, free = _disk_usage(out_dir)
+            if total > 0:
+                free_after_pct = round(((free - need_bytes) / total) * 100, 2)
+                if free_after_pct < floor_pct:
+                    return emit(
+                        "convert", _exit=2, ok=False, low_disk=True,
+                        path=str(out_dir), need_bytes=need_bytes,
+                        free_after_pct=free_after_pct, floor_pct=floor_pct,
+                        error=(
+                            f"converting here would leave only {free_after_pct}% free "
+                            f"(floor {floor_pct}%)"
+                        ),
+                        hint=(
+                            "free up space, remove another model (`model remove`), or "
+                            "retry with --out <a different disk>"
+                        ),
+                    )
+        except OSError:
+            pass
+
+    # The INTERMEDIATE conversion's outtype: when no further quantization will run
+    # (quant is already a no-requant value), this IS the final output, so it must
+    # actually match what was requested — bf16/f32/fp32/auto, not silently always
+    # "f16". When a real quantization WILL follow, f16 is the standard, correct
+    # source precision for llama-quantize to work from regardless of the target
+    # quant, so it stays hardcoded in that case.
+    base_outtype = _OUTTYPE_ALIASES.get(quant, quant) if quant in _QUANT_NO_REQUANT else "f16"
+    f16_path = out_dir / f"{slug}-{base_outtype}.gguf"
+    _emit_convert_progress("convert", f"converting {src_dir.name} → GGUF ({base_outtype})…")
+    py = sys.executable or "python3"
+    cmd = [py, str(script), str(src_dir), "--outfile", str(f16_path), "--outtype", base_outtype]
+
+    def on_line(line: str) -> None:
+        _emit_convert_progress("convert", line.strip()[:140])
+
+    try:
+        code = _run_stream_labeled(cmd, on_line)
+    except OSError as exc:
+        return fail("convert", f"could not run convert_hf_to_gguf.py: {exc}")
+    if os.environ.get("MODELHUB_FAKE_CONVERT_LINES") is not None and not f16_path.exists():
+        f16_path.write_bytes(b"\x00" * 16)  # hermetic stub — no real conversion ran
+    if code != 0 or not f16_path.is_file():
+        return emit("convert", _exit=2, ok=False, error=f"conversion failed (exit {code})")
+
+    if quant in _QUANT_NO_REQUANT:
+        final_path = f16_path
+    else:
+        quantize_bin = _which("llama-quantize")
+        if not quantize_bin:
+            return emit(
+                "convert", _exit=2, ok=False, installable=True,
+                path=str(f16_path), quant="f16",
+                error="llama-quantize is not on PATH",
+                hint="install llama.cpp's compiled tools (e.g. `brew install llama.cpp`), then retry",
+                note="the f16 GGUF was produced and left in place — quantization alone failed",
+            )
+        final_path = out_dir / f"{slug}-{quant}.gguf"
+        _emit_convert_progress("quantize", f"quantizing → {quant.upper()}…")
+
+        def on_qline(line: str) -> None:
+            _emit_convert_progress("quantize", line.strip()[:140])
+
+        try:
+            qcode = _run_stream_labeled(
+                [quantize_bin, str(f16_path), str(final_path), quant.upper()], on_qline,
+            )
+        except OSError as exc:
+            return fail("convert", f"could not run llama-quantize: {exc}")
+        if os.environ.get("MODELHUB_FAKE_CONVERT_LINES") is not None and not final_path.exists():
+            final_path.write_bytes(b"\x00" * 16)
+        if qcode != 0 or not final_path.is_file():
+            return emit(
+                "convert", _exit=2, ok=False, path=str(f16_path), quant="f16",
+                error=f"quantization failed (exit {qcode})",
+                note="the f16 GGUF is intact at `path` — quantization alone failed",
+            )
+        if final_path != f16_path:
+            try:
+                f16_path.unlink()
+            except OSError:
+                pass
+
+    canonical_dir = _default_models_dir()
+    canonical_path = final_path
+    if out_dir.resolve() != canonical_dir.resolve():
+        canonical_path = canonical_dir / final_path.name
+        try:
+            _ensure_symlink(canonical_path, final_path)
+        except OSError as exc:
+            log(f"convert: could not create the canonical-store symlink: {exc}")
+            canonical_path = final_path
+
+    try:
+        size = final_path.stat().st_size
+    except OSError:
+        size = 0
+    return emit(
+        "convert", ok=True, id=model_id, path=str(final_path), canonical_path=str(canonical_path),
+        quant=quant, size_bytes=size, size_gb=round(size / 1024**3, 3),
+        note="converted via llama.cpp's own convert_hf_to_gguf.py / llama-quantize",
+    )
+
+
+def v_install_target(argv: List[str]) -> int:
+    """Wire an already-converted (or already-GGUF) model into ONE target runtime,
+    never duplicating the payload: llama.cpp/vLLM read the canonical file/directory
+    directly by path; Ollama ingests it into its own store (that internal copy is
+    Ollama's own architecture, outside Prometheus's control); LM Studio gets a
+    SYMLINK into its expected folder (or an `lms import` when the `lms` CLI is
+    present, which handles its manifest bookkeeping more reliably than a raw copy).
+    """
+    target = (opt_value(argv, "--target") or "").lower()
+    model_id = opt_value(argv, "--id")
+    if not model_id:
+        return fail("install-target", "need --id <model id>")
+    unsafe = _reject_unsafe_id(model_id, "--id", "install-target")
+    if unsafe is not None:
+        return unsafe
+    if target not in ("ollama", "llamacpp", "vllm", "lmstudio"):
+        return fail(
+            "install-target",
+            f"--target must be one of ollama|llamacpp|vllm|lmstudio (got '{target}')",
+        )
+
+    if target == "llamacpp":
+        gguf = opt_value(argv, "--gguf")
+        if not gguf or not Path(gguf).expanduser().is_file():
+            return fail("install-target", "need --gguf <path> pointing at an existing GGUF file")
+        return emit(
+            "install-target", ok=True, target="llamacpp", id=model_id,
+            path=str(Path(gguf).expanduser()),
+            note="no install step needed — `model serve --runner llamacpp` reads this file directly",
+        )
+
+    if target == "vllm":
+        src = opt_value(argv, "--src")
+        if not src or not Path(src).expanduser().is_dir():
+            return fail("install-target", "need --src <HF-format model directory> for the vllm target")
+        return emit(
+            "install-target", ok=True, target="vllm", id=model_id,
+            path=str(Path(src).expanduser()),
+            note=(
+                "no install step needed — `model serve --runner vllm` reads this directory "
+                "directly (vLLM does not need the GGUF conversion)"
+            ),
+        )
+
+    if target == "lmstudio":
+        gguf = opt_value(argv, "--gguf")
+        if not gguf or not Path(gguf).expanduser().is_file():
+            return fail("install-target", "need --gguf <path> pointing at an existing GGUF file")
+        gguf_path = Path(gguf).expanduser().resolve()
+        lms = _which("lms")
+        if lms:
+            _emit_install_progress(f"lms import {gguf_path.name} …")
+            try:
+                code = _run_install([lms, "import", str(gguf_path)])
+            except OSError as exc:
+                return fail("install-target", f"could not run lms import: {exc}")
+            if code != 0:
+                return emit(
+                    "install-target", _exit=2, ok=False, target="lmstudio", id=model_id,
+                    error=f"lms import exited {code}",
+                )
+            return emit(
+                "install-target", ok=True, target="lmstudio", id=model_id,
+                method="lms-import", path=str(gguf_path),
+                note="imported via LM Studio's own `lms` CLI — open LM Studio to serve it",
+            )
+        publisher, name = _publisher_model_split(model_id)
+        link_path = _lmstudio_models_dir() / publisher / name / gguf_path.name
+        try:
+            _ensure_symlink(link_path, gguf_path)
+        except OSError as exc:
+            return fail("install-target", f"could not create the LM Studio symlink: {exc}")
+        return emit(
+            "install-target", ok=True, target="lmstudio", id=model_id,
+            method="symlink", path=str(link_path), source=str(gguf_path),
+            note=(
+                "symlinked into LM Studio's model folder (no `lms` CLI found) — "
+                "open LM Studio and start the server to serve it"
+            ),
+        )
+
+    # target == "ollama"
+    gguf = opt_value(argv, "--gguf")
+    if not gguf or not Path(gguf).expanduser().is_file():
+        return fail("install-target", "need --gguf <path> pointing at an existing GGUF file")
+    gguf_path = Path(gguf).expanduser().resolve()
+    if not _which("ollama"):
+        return emit(
+            "install-target", _exit=2, ok=False, target="ollama", id=model_id, installable=True,
+            error="the ollama runner is not installed",
+            hint="run `model install-runner`, then retry",
+        )
+    if not _ensure_ollama_daemon():
+        return emit(
+            "install-target", _exit=2, ok=False, target="ollama", id=model_id,
+            error="the ollama background service isn't running and couldn't be started",
+        )
+    quant = opt_value(argv, "--quant")
+    with tempfile.TemporaryDirectory(prefix="prometheus-hug-modelfile-") as tmp:
+        modelfile = Path(tmp) / "Modelfile"
+        modelfile.write_text(f"FROM {gguf_path}\n")
+        cmd = ["ollama", "create", model_id]
+        if quant and quant.lower() not in _QUANT_NO_REQUANT:
+            cmd += ["--quantize", quant.upper()]
+        cmd += ["-f", str(modelfile)]
+
+        def on_line(line: str) -> None:
+            _emit_convert_progress("ollama-create", line.strip()[:140])
+
+        try:
+            code = _run_stream_labeled(cmd, on_line)
+        except OSError as exc:
+            return fail("install-target", f"could not run ollama create: {exc}", target="ollama")
+    if code != 0:
+        return emit(
+            "install-target", _exit=2, ok=False, target="ollama", id=model_id,
+            error=f"ollama create exited {code}",
+        )
+    return emit(
+        "install-target", ok=True, target="ollama", id=model_id,
+        endpoint="http://localhost:11434/v1",
+        note="created via `ollama create` from the already-downloaded GGUF — no re-download",
+    )
+
+
 HANDLERS = {
     # canonical (existing) verbs
     "hw.scan": v_hw_scan,
@@ -1170,6 +1835,13 @@ HANDLERS = {
     "prune": v_prune,
     "endpoints": v_endpoints,
     "repoint": v_repoint,
+    # /hug: download-agnostic disk guard + convert/install-into-a-runtime pipeline
+    "disk.check": v_disk_check,
+    "install-hf-cli": v_install_hf_cli,
+    "fetch-hf": v_fetch_hf,
+    "install-converter": v_install_converter,
+    "convert": v_convert,
+    "install-target": v_install_target,
     # file-05 §3 verb-name aliases (the spec names; map to the implementations above)
     "hardware": v_hw_scan,
     "search": v_model_search,

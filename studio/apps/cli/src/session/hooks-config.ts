@@ -1,15 +1,19 @@
 /**
  * session/hooks-config.ts — load the user's lifecycle HOOKS for a CLI session.
  *
- * Two layers, in the §7.1 precedence the desktop already uses:
+ * Two layers:
  *
  *   global     ~/.prometheus/config/settings.json          (`loadSettings`)
- *   workspace  <cwd>/.prometheus/settings.json             (highest — travels with the repo)
+ *   workspace  <cwd>/.prometheus/settings.json             (travels with the repo)
  *
- * ARRAYS REPLACE, they do not concatenate. That is §7.1's documented rule for arrays, and it is
- * the safer reading here too: a repo that ships `"hooks": []` is stating "no hooks in this
- * project", and a concatenating merge would silently keep running the user's global ones
- * anyway. A workspace file that simply omits the key inherits the global list untouched.
+ * This module only LOADS the two raw layers — it no longer decides which one wins. A workspace
+ * file is not the user's own input; it arrives with a cloned repo. Handing its `hooks` array
+ * straight to a HookRunner would let that repo run arbitrary shell the moment a session opens.
+ * `hooks-trust.ts`'s `resolveEffectiveHooks` is what turns these two raw arrays into something
+ * safe to execute: a workspace file that omits the key inherits the global list untouched, and
+ * one that sets it (even to `[]`, an explicit "none") may re-select from the user's own global
+ * hooks and/or introduce new ones — but a new one is NOVEL and must pass a nemesis scan and a
+ * one-time trust confirmation before it is ever handed to a runner.
  *
  * FAIL-SOFT throughout: an unreadable or malformed file contributes nothing, and a malformed
  * ROW inside an otherwise good file drops that row (core's `validateHooks`). A settings typo
@@ -51,21 +55,23 @@ export interface LoadHooksOptions {
   workspaceSettings?: Record<string, unknown>;
 }
 
-/** Which settings layer actually supplied the effective `hooks` array (§7.1: arrays replace, so
- *  the WHOLE effective list always comes from exactly one layer — never a blend of both). */
+/** Whether the effective hook set for a session is attributable to the workspace layer at all
+ *  (it set the `hooks` key, even to `[]`) or purely to the user's own global settings. Computed
+ *  from presence of the key, independent of how `resolveEffectiveHooks` later vets the entries. */
 export type HooksSource = "global" | "workspace";
 
 export interface LoadedHooks {
-  hooks: HookSpec[];
-  /** the layer the effective list came from — "workspace" only when that file actually SETS the
-   *  key (present, even as `[]`); "global" otherwise, including the zero-config default. */
-  source: HooksSource;
+  /** the global (user-authored, trusted) layer's hooks, unfiltered. */
+  globalHooks: HookSpec[];
+  /** the workspace layer's hooks, unfiltered — `undefined` when the workspace file never set
+   *  the `hooks` key at all (global applies untouched). NOT safe to hand to a HookRunner as-is:
+   *  pass both fields to `resolveEffectiveHooks` (hooks-trust.ts) first. */
+  workspaceHooks: HookSpec[] | undefined;
 }
 
 /**
- * Resolve the effective `hooks` list for a session, AND which layer it came from — the detail
- * `loadHooks` drops on the floor but `/hooks` (CLI-102) needs to tell a user "this one's from
- * your repo's .prometheus/settings.json, not the global one".
+ * Load the two raw `hooks` layers for a session. This performs no trust decision at all — see
+ * the module doc comment and `hooks-trust.ts`.
  */
 export function loadHooksDetailed(opts: LoadHooksOptions = {}): LoadedHooks {
   const global =
@@ -80,16 +86,9 @@ export function loadHooksDetailed(opts: LoadHooksOptions = {}): LoadedHooks {
   const workspace =
     opts.workspaceSettings ??
     (opts.cwd ? readJsonRecord(workspaceSettingsPath(opts.cwd)) : undefined);
-  // The workspace layer wins only when it actually SETS the key (present, even as []).
-  const workspaceWins = workspace !== undefined && Object.hasOwn(workspace, "hooks");
-  const raw = workspaceWins ? workspace.hooks : (global?.hooks ?? []);
-  return { hooks: agent.validateHooks(raw), source: workspaceWins ? "workspace" : "global" };
-}
-
-/**
- * Resolve the effective `hooks` list for a session. Empty when nothing is configured — which is
- * the zero-config default, and makes the loop's hook path a no-op with no runner ever built.
- */
-export function loadHooks(opts: LoadHooksOptions = {}): HookSpec[] {
-  return loadHooksDetailed(opts).hooks;
+  const globalHooks = agent.validateHooks(global?.hooks ?? []);
+  // The workspace layer only contributes when it actually SETS the key (present, even as []).
+  const workspaceSet = workspace !== undefined && Object.hasOwn(workspace, "hooks");
+  const workspaceHooks = workspaceSet ? agent.validateHooks(workspace.hooks) : undefined;
+  return { globalHooks, workspaceHooks };
 }

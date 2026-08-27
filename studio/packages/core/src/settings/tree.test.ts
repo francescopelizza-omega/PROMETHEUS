@@ -127,3 +127,30 @@ test("resetInLayer: pure — removes the key, leaves siblings, undefined layer �
   assert.deepEqual(layer, { a: 1, b: 2 }); // original untouched
   assert.deepEqual(resetInLayer(undefined, "a"), {});
 });
+
+test("every settings key a GUI page writes is registered in the tree", () => {
+  /**
+   * `settings-ipc.ts` gates get/set/reset on `findNodeBySchemaKey`, so a schema key absent from
+   * this tree cannot be read or written AT ALL — the handler answers `unknown settings key: …`.
+   *
+   * All four `budget.*` keys were missing, so every "Save" on the desktop's Budget & Spend page
+   * failed and no spend cap could be persisted from the UI; the only way to set one was to
+   * hand-edit settings.json. The `ai.effort` keys had already been found in exactly this state
+   * and registered, which is what makes this a checklist rather than a one-off: the page exists,
+   * the schema key exists, and the tree entry is the part that gets forgotten.
+   */
+  for (const key of [
+    "budget.sessionUsd",
+    "budget.dailyUsd",
+    "budget.warnAtPercent",
+    "budget.unpricedPolicy",
+    // the pair whose absence was fixed before these
+    "ai.effort",
+    "ai.effortForce",
+  ]) {
+    assert.ok(
+      findNodeBySchemaKey(key),
+      `"${key}" is not in SETTINGS_TREE — settings:set will refuse it as an unknown key`,
+    );
+  }
+});

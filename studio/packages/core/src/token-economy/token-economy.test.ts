@@ -17,7 +17,9 @@ import {
   isGitIgnored,
   parseGitignore,
   proposeToolkits,
+  renderCodebaseOverview,
   renderRepoMap,
+  summarizeCodebase,
   walkRepo,
 } from "./index.js";
 
@@ -188,6 +190,25 @@ test("gitignore: parse + match honors comments, negation, dir-only, anchoring, *
   assert.ok(!isGitIgnored(rules, "temp", "temp", false)); // dir-only does NOT match a file
 });
 
+test("gitignore: a pattern with a MIDDLE slash but no LEADING one still anchors (git's real rule, not just 'starts with /')", () => {
+  // The bug: a pattern like "apps/vscode-extension/.vscode-test/" (a slash in the middle, none
+  // at the front) used to be treated as NOT anchored, falling through to basename-only matching
+  // against a bare ".vscode-test" — which can never match a multi-segment relative path, so the
+  // directory was never actually ignored despite looking exactly like it should be.
+  const rules = parseGitignore("apps/vscode-extension/.vscode-test/\n");
+  assert.ok(
+    isGitIgnored(rules, "apps/vscode-extension/.vscode-test", ".vscode-test", true),
+    "a middle-slash pattern must anchor to the full relative path, exactly like a leading-slash one",
+  );
+  assert.ok(
+    !isGitIgnored(rules, "somewhere-else/.vscode-test", ".vscode-test", true),
+    "anchoring means the match is against the FULL path, not just the basename",
+  );
+  // A same-named directory living directly at the anchor's own path segment, but NOT nested
+  // under "apps/vscode-extension", must not be affected.
+  assert.ok(!isGitIgnored(rules, ".vscode-test", ".vscode-test", true));
+});
+
 test("walkRepo: honors the root .gitignore (CLI-053)", () => {
   const fs = fakeFs({
     ".gitignore": "*.log\nignored/\n",
@@ -223,4 +244,137 @@ test("DEFAULT_IGNORE_DIRS covers the usual noise (CLI-053)", () => {
   for (const d of ["node_modules", ".git", "dist", "__pycache__", "venv"]) {
     assert.ok(DEFAULT_IGNORE_DIRS.includes(d));
   }
+});
+
+/* ── "meet your codebase" (roadmap point 6) ─────────────────────────────────────────────── */
+
+test("summarizeCodebase: detects a stack from a root-level marker file", () => {
+  const map = walkRepo(
+    fakeFs({
+      "package.json": "{}",
+      "src/index.ts": "export function main() {}",
+    }),
+    "",
+  );
+  const o = summarizeCodebase(map);
+  assert.ok(o.detectedStacks.includes("Node.js / JavaScript"));
+  assert.equal(o.fileCount, 2);
+});
+
+test("summarizeCodebase: detects MULTIPLE stacks when several markers are present", () => {
+  const map = walkRepo(
+    fakeFs({
+      "package.json": "{}",
+      "tsconfig.json": "{}",
+      "pyproject.toml": "[tool.poetry]",
+      "app.py": "def main():\n    pass",
+    }),
+    "",
+  );
+  const o = summarizeCodebase(map);
+  assert.ok(o.detectedStacks.includes("Node.js / JavaScript"));
+  assert.ok(o.detectedStacks.includes("TypeScript"));
+  assert.ok(o.detectedStacks.includes("Python"));
+});
+
+test("summarizeCodebase: a SUFFIX marker (.csproj) is detected without an exact-name match", () => {
+  const map = walkRepo(fakeFs({ "MyApp.csproj": "<Project></Project>" }), "");
+  const o = summarizeCodebase(map);
+  assert.ok(o.detectedStacks.includes(".NET / C#"));
+});
+
+test("summarizeCodebase: no marker files at all yields an empty (not guessed) stack list", () => {
+  const map = walkRepo(fakeFs({ "notes.txt": "just some notes" }), "");
+  const o = summarizeCodebase(map);
+  assert.deepEqual(o.detectedStacks, []);
+});
+
+test("summarizeCodebase: finds a root-level README regardless of extension", () => {
+  const map = walkRepo(fakeFs({ "README.md": "# Hi", "src/a.ts": "export const a = 1;" }), "");
+  assert.equal(summarizeCodebase(map).readmePath, "README.md");
+});
+
+test("summarizeCodebase: a README nested in a subdirectory is NOT picked as the root readme", () => {
+  const map = walkRepo(fakeFs({ "docs/README.md": "# Nested" }), "");
+  assert.equal(summarizeCodebase(map).readmePath, undefined);
+});
+
+test("summarizeCodebase: topDirs buckets by TOP-LEVEL directory, root files under '(root)'", () => {
+  const map = walkRepo(
+    fakeFs({
+      "package.json": "{}",
+      "src/a.ts": "export const a = 1;",
+      "src/nested/b.ts": "export const b = 1;",
+      "test/a.test.ts": "export const t = 1;",
+    }),
+    "",
+  );
+  const byDir = Object.fromEntries(summarizeCodebase(map).topDirs.map((d) => [d.key, d.count]));
+  assert.equal(byDir["(root)"], 1);
+  assert.equal(byDir.src, 2);
+  assert.equal(byDir.test, 1);
+});
+
+test("summarizeCodebase: topExtensions counts by extension, extensionless files as '(none)'", () => {
+  const map = walkRepo(
+    fakeFs({
+      "a.ts": "export const a=1;",
+      "b.ts": "export const b=1;",
+      Makefile: "all:\n\techo hi",
+    }),
+    "",
+  );
+  const byExt = Object.fromEntries(
+    summarizeCodebase(map).topExtensions.map((e) => [e.key, e.count]),
+  );
+  assert.equal(byExt.ts, 2);
+  assert.equal(byExt["(none)"], 1);
+});
+
+test("summarizeCodebase: samples symbols from the files with the most of them, capped at 12", () => {
+  const map = walkRepo(
+    fakeFs({
+      "big.ts":
+        "export function a(){}\nexport function b(){}\nexport function c(){}\nexport function d(){}",
+      "small.ts": "export function onlyOne(){}",
+      "empty.txt": "no symbols here",
+    }),
+    "",
+  );
+  const o = summarizeCodebase(map);
+  assert.ok(o.sampleSymbols.length > 0);
+  assert.ok(o.sampleSymbols.length <= 12);
+  // the file with more exports is sampled first (its symbols appear before small.ts's lone one).
+  assert.ok(o.sampleSymbols.includes("a") || o.sampleSymbols.includes("b"));
+});
+
+test("summarizeCodebase: truncation is carried through honestly from the underlying walk", () => {
+  const files: Record<string, string> = {};
+  for (let i = 0; i < 10; i++) files[`f${i}.ts`] = `export const v${i} = ${i};`;
+  const map = walkRepo(fakeFs(files), "", { fileCap: 4 });
+  assert.equal(summarizeCodebase(map).truncated, true);
+});
+
+test("renderCodebaseOverview: a real, human-readable overview mentioning the stack, dirs, and readme", () => {
+  const map = walkRepo(
+    fakeFs({
+      "package.json": "{}",
+      "README.md": "# Hi",
+      "src/index.ts": "export function main() {}",
+    }),
+    "",
+  );
+  const text = renderCodebaseOverview(summarizeCodebase(map));
+  assert.match(text, /Node\.js \/ JavaScript/);
+  assert.match(text, /src\//);
+  assert.match(text, /README\.md/);
+  assert.match(text, /\d+ files?/);
+});
+
+test("renderCodebaseOverview: an empty repo renders cleanly, no stack/readme lines forced in", () => {
+  const map = walkRepo(fakeFs({}), "");
+  const text = renderCodebaseOverview(summarizeCodebase(map));
+  assert.match(text, /^0 files/);
+  assert.doesNotMatch(text, /Looks like:/);
+  assert.doesNotMatch(text, /Start here:/);
 });

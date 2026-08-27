@@ -10,3 +10,7 @@
 export * from "./types.js";
 export * from "./rules.js";
 export * from "./apply.js";
+export * from "./emulation.js";
+export * from "./traits.js";
+export * from "./rule-store.js";
+export * from "./reasoning-tag.js";

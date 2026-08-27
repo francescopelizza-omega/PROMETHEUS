@@ -28,11 +28,12 @@ function makeCtx(
   positionals: string[] = [],
   flags: Record<string, string | true> = {},
   json = false,
+  unmatchedSub?: string,
 ): CliContext {
   return {
     client: undefined as unknown as CliContext["client"],
     json,
-    args: { command, positionals, flags, json } as unknown as ParsedArgs,
+    args: { command, positionals, flags, json, unmatchedSub } as unknown as ParsedArgs,
   };
 }
 
@@ -66,6 +67,16 @@ function fakeDeps(opts: {
   };
   return { deps, calls };
 }
+
+test("a typo'd verb names the ACTUAL typo, not '(none)' — regression for unmatchedSub", async () => {
+  // command[1] is undefined for a TWO_WORD mismatch (parse.ts sets `unmatchedSub` instead),
+  // so this used to render "unknown verb (none)" instead of naming the typo.
+  const { deps, calls } = fakeDeps({});
+  const out = await runTest(makeCtx(["test"], [], {}, false, "dicover"), deps);
+  assert.equal(out.exitCode, 1);
+  assert.match(out.text ?? "", /unknown verb "dicover"/);
+  assert.equal(calls.length, 0);
+});
 
 test("run: 2 pass + 1 fail → table with counts, failure file:line, exit 1", async () => {
   const { deps } = fakeDeps({
@@ -184,10 +195,10 @@ test("discover: renders the tree + counts", async () => {
   assert.match(out.text ?? "", /test_a/);
 });
 
-test("unknown/absent verb → exit 2 listing valid verbs", async () => {
+test("unknown/absent verb → exit 1 listing valid verbs", async () => {
   const { deps } = fakeDeps({});
   const out = await runTest(makeCtx(["test"]), deps); // `prometheus test` / `prometheus test bogus`
-  assert.equal(out.exitCode, 2);
+  assert.equal(out.exitCode, 1);
   assert.match(out.text ?? "", /discover, run/);
 });
 

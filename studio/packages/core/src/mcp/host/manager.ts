@@ -3,19 +3,22 @@
  *
  *   addServer(cfg) ─▶ nemesis gate ─▶ persist (disabled; blocked if high/critical)
  *   connect(id)    ─▶ (refuse if blocked) spawn transport ─▶ initialize ─▶ tools/list
- *                     ─▶ cache caps ─▶ health="ready"
+ *                     ─▶ compare against the PINNED hash (block on drift) ─▶ cache caps
+ *                     ─▶ health="ready"
  *   callTool(id,n) ─▶ §4.3 policy gate (autoApprove + annotation) ─▶ dispatch
  *   disconnect/removeServer ─▶ mirror engine enable/disable/uninstall semantics
  *
- * The manager is PURE over three injected deps: a ConfigStore (persistence — the
- * desktop provides the disk-backed one), a NemesisGate (the engine runner), and a
- * TransportFactory (the SDK client). Tests use the in-memory store + a fake gate +
- * FakeTransport. Core never spawns or scans — it orchestrates the injected seams.
+ * The manager is PURE over its injected deps: a ConfigStore (persistence — the
+ * desktop provides the disk-backed one), a NemesisGate (the engine runner), a
+ * TransportFactory (the SDK client), and an optional drift observer. Tests use the
+ * in-memory store + a fake gate + FakeTransport. Core never spawns or scans (beyond the
+ * pure, in-process pattern check in `tool-pinning.ts`) — it orchestrates the injected seams.
  */
 import { type NemesisGate, gateServer, verdictBlocks } from "./gate.js";
 import { autoApprovable } from "./policy.js";
+import { hashToolDescriptors, scanToolDescriptors } from "./tool-pinning.js";
 import type { McpClientTransport, McpToolCallResult, TransportFactory } from "./transports.js";
-import type { McpServerConfig, McpServerHealth } from "./types.js";
+import type { McpServerConfig, McpServerHealth, McpToolDescriptor } from "./types.js";
 
 /** Persistence seam for server configs (disk-backed in desktop; in-memory in tests). */
 export interface ConfigStore {
@@ -46,6 +49,13 @@ export interface McpHostDeps {
   store: ConfigStore;
   gate: NemesisGate;
   transport: TransportFactory;
+  /**
+   * Called when `connect()` finds a server's tool descriptors changed since they were pinned —
+   * the "rug pull" signal. Optional: omitting it still blocks the server on drift, it just
+   * means nothing beyond the persisted `health`/`gate` state records why. A real host wires
+   * this to `appendMcpAudit` (`mcp-audit.ts`).
+   */
+  onToolDrift?: (info: { id: string; flaggedSignals: string[] }) => void;
 }
 
 export interface CallToolOptions {
@@ -82,35 +92,102 @@ export class McpHostManager {
       gate: verdict,
       enabled: blocked ? false : cfg.enabled,
       health: blocked ? "blocked" : "unknown",
+      // Every (re-)add is a fresh trust decision: the next successful connect establishes a
+      // NEW pin from whatever the server currently claims, rather than comparing against a
+      // pin from before this re-approval.
+      toolsPinnedHash: undefined,
+      blockedReason: blocked ? "gate" : undefined,
     };
     this.deps.store.upsert(stored);
     return stored;
   }
 
-  /** Connect a server: refuse if blocked; spawn transport, list tools, cache caps. */
+  /**
+   * Connect a server: refuse if blocked; spawn transport, list tools, cache caps.
+   *
+   * A server's tool descriptors are only ever gated (by content, via `tool-pinning.ts`) HERE —
+   * `addServer`'s nemesis gate scans the launch command, not what the server claims its tools
+   * do. The first successful connect after an add PINS the descriptor set's hash; every later
+   * connect compares the fresh `tools/list` against that pin and blocks on any mismatch, same
+   * as a bad launch command blocks at add time. This is deliberately NOT "only block if the
+   * new descriptors also scan dirty" — a server that changed itself after approval doesn't get
+   * to vouch for its own new definition.
+   */
   async connect(id: string): Promise<McpServerConfig> {
     const cfg = this.requireServer(id);
     if (cfg.health === "blocked") {
-      throw new Error(`MCP server "${id}" is blocked by nemesis; it cannot be connected`);
+      throw new Error(
+        cfg.blockedReason === "tool-drift"
+          ? `MCP server "${id}" is blocked: its tool definitions changed after they were approved (possible "rug pull") — re-add the server to review and re-approve`
+          : `MCP server "${id}" is blocked by nemesis; it cannot be connected`,
+      );
     }
     this.setHealth(id, "starting");
+    let tools: McpToolDescriptor[];
+    /**
+     * Held OUTSIDE the try so the failure path can tear it down.
+     *
+     * `connect()` spawns the child (stdio) or opens the session (http); `listTools()` is the
+     * next call. A throw anywhere between them left the transport unreferenced — `this.live` is
+     * only populated on success — with nothing left holding a handle to close it. The concrete
+     * shape is a server that starts but does not speak MCP: a wrong binary, a missing argument,
+     * an `npx -y @modelcontextprotocol/server-…` cold download that outruns the handshake
+     * timeout. The connect fails, the health flips to "error", and the process stays alive for
+     * the rest of the session. Retrying the connect leaks another one.
+     *
+     * The tool-drift path below already tears down for exactly this reason; this is the same
+     * best-effort close, on the path that needed it more.
+     */
+    let transport: McpClientTransport | undefined;
     try {
-      const transport = this.deps.transport(cfg);
+      transport = this.deps.transport(cfg);
       await transport.connect();
-      const tools = await transport.listTools();
+      tools = await transport.listTools();
       this.live.set(id, transport);
-      const updated: McpServerConfig = {
-        ...this.requireServer(id),
-        capabilities: { tools, resources: false, prompts: false },
-        health: "ready",
-        enabled: true,
-      };
-      this.deps.store.upsert(updated);
-      return updated;
     } catch (e) {
       this.setHealth(id, "error");
+      // A close() that itself rejects must not replace the real failure the caller needs to see.
+      try {
+        await transport?.close();
+      } catch {
+        /* best effort — the connect error below is the one that matters */
+      }
       throw e instanceof Error ? e : new Error(String(e));
     }
+    const hash = hashToolDescriptors(tools);
+    const pinned = cfg.toolsPinnedHash;
+    if (pinned !== undefined && pinned !== hash) {
+      const scan = scanToolDescriptors(tools);
+      this.deps.onToolDrift?.({ id, flaggedSignals: scan.signals });
+      const live = this.live.get(id);
+      this.live.delete(id);
+      // Best-effort teardown: a transport whose close() rejects must not skip persisting the
+      // block below — the drift is already confirmed, and a close failure is a second, separate
+      // problem that must never suppress the first one's result.
+      try {
+        await live?.close();
+      } catch {
+        /* best effort */
+      }
+      this.deps.store.upsert({
+        ...this.requireServer(id),
+        health: "blocked",
+        enabled: false,
+        blockedReason: "tool-drift",
+      });
+      throw new Error(
+        `MCP server "${id}"'s tool definitions changed since they were approved (possible "rug pull") — re-add the server to review and re-approve`,
+      );
+    }
+    const updated: McpServerConfig = {
+      ...this.requireServer(id),
+      capabilities: { tools, resources: false, prompts: false },
+      health: "ready",
+      enabled: true,
+      toolsPinnedHash: hash,
+    };
+    this.deps.store.upsert(updated);
+    return updated;
   }
 
   /**

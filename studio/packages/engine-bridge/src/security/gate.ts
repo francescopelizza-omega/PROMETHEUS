@@ -272,10 +272,37 @@ export async function gate(
     // No target => nothing trustworthy to render => fail closed.
     return failClosedVerdict(target, "empty target");
   }
+  /**
+   * A dash-leading target is not a target — it is a flag, and nemesis reads `-` as "the body is
+   * on stdin".
+   *
+   * `runNemesis` writes no stdin for a gate and closes the pipe immediately, so `gate("-")`
+   * made nemesis scan an EMPTY body and answer with a perfectly well-formed
+   * `verdict:"allow", risk_score:0, exit 0` — which reconciled cleanly and returned a clean
+   * SecurityVerdict whose `target` had even been replaced by nemesis's own `"<stdin>"`. Nothing
+   * was scanned and everything downstream was told it was safe. It is reachable: a `.promext`
+   * manifest's `repo` is accepted verbatim (`ext/manifest.ts`), wins over the staging dir
+   * (`ext/loader.ts` gateTargetFor), and is handed to this function by the desktop's extension
+   * host — so a downloaded extension declaring `"repo": "-"` installed with neither the repo nor
+   * its staging directory ever scanned.
+   *
+   * This package already owns the guard for exactly this input class one directory over:
+   * `commands.ts`'s `notFlag()` — "a value starting with '-' is … an attempt to smuggle a flag
+   * into the engine's argparse — reject it loudly" — applied to every catalog builder and to
+   * none of the security path. Both halves are fixed: refuse the input, and pass `--` so no
+   * future target can be reinterpreted as an option either.
+   *
+   * The file header promises "FAIL-CLOSED (C5) … we can never under-report risk". This is what
+   * makes that true for a dash-leading target.
+   */
+  if (target.trimStart().startsWith("-")) {
+    return failClosedVerdict(target, `refusing an option-shaped scan target: ${target}`);
+  }
 
   let res: NemesisRunResult;
   try {
-    res = await runNemesis(["gate", target], opts, config);
+    // `--` ends the option list: a target can never be consumed as a nemesis flag.
+    res = await runNemesis(["gate", "--", target], opts, config);
   } catch (e) {
     // missing binary / spawn / timeout / abort => fail closed BLOCK.
     const msg = e instanceof Error ? e.message : String(e);

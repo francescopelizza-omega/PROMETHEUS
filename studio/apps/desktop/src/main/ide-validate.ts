@@ -642,7 +642,7 @@ export const gitPrCommentSchema = z.object({
     .max(65_536, "comment body is too large")
     // allow tab/newline/CR (multi-line comment), forbid NUL + other control chars.
     // eslint-disable-next-line no-control-regex
-    .regex(/^[^ --]*$/, "comment has control characters"),
+    .regex(/^[^\x00-\x08\x0b\x0c\x0e-\x1f]*$/, "comment has control characters"),
 });
 export const gitPrSetTokenSchema = z.object({
   root: PATH,
@@ -663,7 +663,7 @@ export const gitApplyPatchSchema = z.object({
     .string()
     .min(1, "patch is empty")
     .max(2_000_000, "patch is too large")
-    .regex(/^[^ ]*$/, "patch must not contain a NUL byte"),
+    .regex(/^[^\x00]*$/, "patch must not contain a NUL byte"),
   cached: z.boolean().optional().default(true),
   reverse: z.boolean().optional().default(false),
 });

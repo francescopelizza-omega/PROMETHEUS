@@ -29,4 +29,13 @@ export type AgentEvent =
   // still wanted a tool at the last allowed round. Existing `for await` switch/if
   // chains ignore this variant safely (it is purely additive).
   | { kind: "capped"; rounds: number; canContinue: boolean }
+  /**
+   * The turn PAUSED after a bounded stretch of true model-side inactivity (idle-watchdog.ts) —
+   * NOT a failure, NOT the model finishing. Distinct from `capped` (which fires on the ROUND
+   * cap) so a host can tell "the model is answering a really long agentic task" apart from "the
+   * model, or the local runner, went silent" — but both are resumed through the exact same
+   * `/continue` + `resumeThread` mechanism; see `MessageTurnResult.paused`/`.thread`.
+   * `canContinue` mirrors `capped`'s field for symmetry (always `true` when this fires today).
+   */
+  | { kind: "paused"; reason: "idle-timeout"; idleMs: number; canContinue: boolean }
   | { kind: "done" };

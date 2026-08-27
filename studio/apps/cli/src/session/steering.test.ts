@@ -199,6 +199,32 @@ test("the walk STOPS at the repository boundary", () => {
   );
 });
 
+test("outside any git repo, the walk stops at the REAL os home, not at PROMETHEUS_HOME", () => {
+  // `home` (PROMETHEUS_HOME, ~/.prometheus) is a SUBDIRECTORY of the real OS home and is
+  // therefore never an ancestor of an ordinary cwd — passing it as the walk boundary made the
+  // boundary dead for any non-git working directory, letting the walk climb to the filesystem
+  // root instead of stopping at $HOME. `osHome` is the real seam that must be honored.
+  const files: Record<string, string> = {}; // no .git anywhere
+  const read = (p: string): string | null => files[p] ?? null;
+  const exists = (p: string): boolean => p in files;
+  const out = discoverSteering(
+    "/Users/alice/scratch/notes",
+    "/Users/alice/.prometheus",
+    read,
+    exists,
+    "/Users/alice",
+  );
+  const project = out.filter((f) => f.scope === "project");
+  assert.ok(
+    project.every((f) => f.path.startsWith("/Users/alice/")),
+    "the walk must not climb above the real os home directory",
+  );
+  assert.ok(
+    !project.some((f) => f.path === "/AGENTS.md" || f.path === "/Users/AGENTS.md"),
+    "the walk must not reach the filesystem root or a sibling-user directory",
+  );
+});
+
 test("an ANCESTOR contributes only files that exist — no phantom candidates", () => {
   // `cwd` still offers every candidate so `/memory create` has something to create; doing that
   // for every ancestor would list one phantom AGENTS.md per directory up to the root.

@@ -57,13 +57,28 @@ const MUTATING_VERBS = new Set([
   "purge",
   "bundle",
   "sync",
-  "harden",
   "disinfect",
   "quarantine",
+  // "harden" is deliberately NOT here: it is a read-only, THIS-machine-only posture audit
+  // (roSpec, no args/flags ever forwarded — see packages/core/src/commands.ts) that never
+  // touches nemesis/gate at all. Its presence used to make `/harden --force` show a needless,
+  // factually-wrong typed-confirm ("overriding the engine's nemesis verdict") that could only
+  // ever block the harmless report, never override anything (the flag was never forwarded).
 ]);
+
+/**
+ * pentest's own destructive actions, checked as a (family, action) PAIR rather than as bare
+ * words in `MUTATING_VERBS` — "build"/"run"/"shell" are common enough words (e.g. `/test run`)
+ * that adding them as bare entries would wrongly force-gate unrelated commands that happen to
+ * share a path segment with them.
+ */
+const PENTEST_MUTATING_ACTIONS = new Set(["destroy", "build", "run", "shell"]);
 
 /** Does this parsed command path mutate state (drives the §4 force guard)? */
 function isMutating(path: readonly string[]): boolean {
+  if (path[0] === "pentest" && path[1] !== undefined && PENTEST_MUTATING_ACTIONS.has(path[1])) {
+    return true;
+  }
   return path.some((p) => MUTATING_VERBS.has(p));
 }
 
@@ -92,7 +107,9 @@ async function forceGate(
   if (!isMutating(parsed.command)) return undefined; // a read-only verb's --force is inert
 
   // A force-forbidding profile (ci) has no human at the keyboard to confirm — hard block.
-  if (cliProfiles.profileForbidsForce(ctx.profile) && !process.env.PROM_ALLOW_FORCE) {
+  // EXACTLY "1" — see `forceOverrideAllowed`. The bare presence check this replaced let
+  // PROM_ALLOW_FORCE=0 open the escape hatch it was meant to close.
+  if (cliProfiles.profileForbidsForce(ctx.profile) && !cliProfiles.forceOverrideAllowed()) {
     return blocked(
       command,
       `--force is blocked under the '${ctx.profile}' profile. Set PROM_ALLOW_FORCE=1 to override (there is no human to type the confirmation).`,

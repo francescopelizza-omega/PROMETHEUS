@@ -23,6 +23,7 @@ import { createRequire } from "node:module";
 import { resolve } from "node:path";
 import react from "@vitejs/plugin-react";
 import { defineConfig, externalizeDepsPlugin } from "electron-vite";
+import type { Plugin } from "vite";
 
 const ROOT = resolve(__dirname, "..", "..");
 const require = createRequire(import.meta.url);
@@ -39,6 +40,8 @@ const require = createRequire(import.meta.url);
  */
 const CORE_SUBPATHS: Record<string, string> = {
   "@prometheus/core/mcp-node": "packages/core/src/mcp/host/node.ts",
+  "@prometheus/core/ai-usage": "packages/core/src/ai/usage.ts",
+  "@prometheus/core/metadata": "packages/core/src/metadata/index.ts",
   "@prometheus/core/agent-authorization": "packages/core/src/agent/authorization.ts",
   "@prometheus/core/agent-files": "packages/core/src/agent/agent-files.ts",
   "@prometheus/core/agent-hooks": "packages/core/src/agent/hooks.ts",
@@ -58,6 +61,7 @@ const CORE_SUBPATHS: Record<string, string> = {
   "@prometheus/core/agent-tools": "packages/core/src/agent/tools.ts",
   "@prometheus/core/agent-patch": "packages/core/src/agent/patch.ts",
   "@prometheus/core/agent-compact": "packages/core/src/agent/compact.ts",
+  "@prometheus/core/agent-idle-watchdog": "packages/core/src/agent/idle-watchdog.ts",
   "@prometheus/core/agent-todo": "packages/core/src/agent/todo.ts",
   "@prometheus/core/agent-subagent": "packages/core/src/agent/subagent.ts",
   "@prometheus/core/agent-question": "packages/core/src/agent/question.ts",
@@ -65,6 +69,9 @@ const CORE_SUBPATHS: Record<string, string> = {
   "@prometheus/core/agent-permission-modes": "packages/core/src/agent/permission-modes.ts",
   "@prometheus/core/ai-retry": "packages/core/src/ai/retry-index.ts",
   "@prometheus/core/ai-effort": "packages/core/src/ai/effort/index.ts",
+  "@prometheus/core/ai-model-health": "packages/core/src/ai/model-health.ts",
+  "@prometheus/core/ai-context-window": "packages/core/src/ai/context-window.ts",
+  "@prometheus/core/agent-schedule": "packages/core/src/agent/schedule.ts",
   "@prometheus/core/commands": "packages/core/src/commands.ts",
   "@prometheus/core/editor": "packages/core/src/editor/index.ts",
   "@prometheus/core/format": "packages/core/src/format/index.ts",
@@ -164,11 +171,70 @@ function devCspRelax() {
   };
 }
 
+/* ── the CommonJS shim, injected SAFELY ───────────────────────────────────────
+ *
+ * An ESM main bundle still contains `__dirname` / `require(` from the dependencies rolled into
+ * it, so a shim defining them has to be prepended. electron-vite ships one — and its way of
+ * deciding WHERE to prepend it is to run an ESM-import regex over the finished bundle and append
+ * after the last match (`vite:esm-shim` → `findStaticImports`). That regex has no idea what is
+ * code and what is data, so it happily matches inside a string literal.
+ *
+ * Ours did. `src/main/persona-store.ts` contains:
+ *
+ *     return { ok: false, error: "persona has no body text to import" };
+ *     …
+ *     const importedDir = join(home, "agents", "imported");
+ *
+ * The word `import` at the end of that message, preceded by a space, starts the match; the
+ * closing quote opens a "specifier" that runs on until the NEXT quote — the one in
+ * `join(home, "`. The shim was then spliced into the middle of that call, and esbuild failed
+ * the whole desktop build with `Unterminated string literal`, pointing at a source line that is
+ * perfectly well-formed. Nothing about the message says "your bundler mangled this".
+ *
+ * So we drop that plugin and prepend the same shim at offset 0, where no scan of the bundle's
+ * contents is involved and no string can ever be mistaken for an import. The `node:url` /
+ * `node:path` form is used rather than `import.meta.filename` because it works on every Node
+ * and Electron version, and this is not the place to be clever.
+ */
+const CJS_SYNTAX_RE = /__filename|__dirname|require\(|require\.resolve\(/;
+const CJS_SHIM = `// -- CommonJS Shims --
+import __cjs_url__ from 'node:url';
+import __cjs_path__ from 'node:path';
+import __cjs_mod__ from 'node:module';
+const __filename = __cjs_url__.fileURLToPath(import.meta.url);
+const __dirname = __cjs_path__.dirname(__filename);
+const require = __cjs_mod__.createRequire(import.meta.url);
+`;
+
+function safeEsmShimPlugin(): Plugin {
+  return {
+    name: "prometheus:safe-esm-shim",
+    apply: "build",
+    enforce: "post",
+    configResolved(config) {
+      // Remove electron-vite's own shim so the two cannot both fire (double `const __filename`
+      // would not even parse). If upstream ever renames or fixes it, this findIndex misses and
+      // ours simply becomes a no-op via the `includes` guard below — never a double injection.
+      const plugins = config.plugins as Plugin[];
+      const i = plugins.findIndex((p) => p.name === "vite:esm-shim");
+      if (i >= 0) plugins.splice(i, 1);
+    },
+    renderChunk(code, _chunk, options) {
+      if (options.format !== "es") return null;
+      if (code.includes(CJS_SHIM) || !CJS_SYNTAX_RE.test(code)) return null;
+      // A pure prepend: every original offset shifts by a constant, so the chunk needs no
+      // sourcemap rewrite beyond what rollup does for us (main is built without sourcemaps).
+      return { code: CJS_SHIM + code, map: null };
+    },
+  };
+}
+
 export default defineConfig({
   main: {
     // Bundle our workspace packages into the main bundle; externalise node + electron.
     plugins: [
       externalizeDepsPlugin({ exclude: ["@prometheus/engine-bridge", "@prometheus/core"] }),
+      safeEsmShimPlugin(),
     ],
     resolve: { alias },
     build: {

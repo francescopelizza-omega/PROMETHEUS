@@ -41,7 +41,6 @@ declare const __PROM_CLI_VERSION__: string | undefined;
  * broken build) — the regression test forbids that in-tree.
  */
 function resolvePromVersion(): string {
-  // biome-ignore lint/complexity/useOptionalChain: `typeof` on an undeclared global is the point
   if (typeof __PROM_CLI_VERSION__ === "string" && __PROM_CLI_VERSION__) {
     return __PROM_CLI_VERSION__;
   }
@@ -272,6 +271,29 @@ export function helpForTopic(ctx: CliContext, rawTopic: string): CommandOutcome 
       exitCode: 0,
     };
   }
+  /**
+   * A REAL verb with no help entry is not an unknown topic.
+   *
+   * `prometheus budget --help` answered `unknown help topic: budget` and exited 2, even though
+   * `prometheus budget` prints its own usage and works. Six verbs were in this state —
+   * budget, completion, man, meet, persona, tasks — so the standard way to ask a command what it
+   * does told the user the command did not exist. Point at the verb instead of denying it.
+   */
+  if (ROUTED_VERBS.includes(topic)) {
+    return {
+      text: [
+        c.dim(`No detailed help page for "${topic}" yet.`),
+        `Run ${c.bold(`prometheus ${topic}`)} to see its usage.`,
+      ].join("\n"),
+      json: {
+        ok: true,
+        id: topic,
+        synopsis: `run \`prometheus ${topic}\` for usage`,
+        examples: [`prometheus ${topic}`],
+      },
+      exitCode: 0,
+    };
+  }
   const near = cliProfiles.nearestKey(topic, allHelpTopics());
   return {
     text: `${c.red(`unknown help topic: ${rawTopic}`)}${near ? `\n${c.dim(`did you mean "${near}"?`)}` : ""}`,
@@ -351,6 +373,10 @@ ${c.bold("SYSTEM")}
 ${c.bold("CONFIG · PROFILES · SESSIONS")}
   ${c.cyan("profile")} <list|use|new|edit>   ${c.cyan("config")} <get|set|list|path>   ${c.cyan("updates")} [--json]
   ${c.cyan("schedule")} <…>          Scheduled cloud agents (cron)   ${c.cyan("inventory")}   Installed-agent census
+  ${c.cyan("tasks")} <add|list|remove|enable|disable|run-due|install-cron>   Unattended cron-scheduled agent runs (bounded autonomy)
+  ${c.cyan("persona")} <list|export|import|remove>   Share sub-agent personas — imports are always read-only, no model override
+  ${c.cyan("budget")} <status|set-session|set-daily|set-warn|set-unpriced>   Spend visibility + caps (--project for team policy)
+  ${c.cyan("meet")}                Meet your codebase — a friendly first-look overview of the current directory
   ${c.cyan("mcp")} <list|add|remove|test>    ${c.cyan("agents")} <list|attach|kill>   ${c.cyan("localai")} <audit|list|models|…>
 
 ${c.bold("HEADLESS / SCRIPTING")}

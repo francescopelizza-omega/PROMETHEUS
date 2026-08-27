@@ -11,7 +11,9 @@ import test from "node:test";
 import {
   type CompleterFs,
   completePath,
+  completeSlashArg,
   createPathCycler,
+  findSlashPathArg,
   longestCommonPrefix,
 } from "./path-completer.js";
 
@@ -181,4 +183,48 @@ test("cycler preserves ~ notation while filtering dirs (CLI-066)", () => {
   const c1 = cy.tab("~/AL");
   assert.match(c1.buffer, /^~\/(AL2|ALPHA)\/$/); // ~ preserved + dir slash
   assert.ok(!c1.candidates.some((c) => c.includes("file.txt"))); // file excluded
+});
+
+/* ── path-taking slash commands (`/cd ~/pro<Tab>`) ───────────────────────────── */
+
+test("findSlashPathArg: locates the argument token of a path-taking command", () => {
+  assert.deepEqual(findSlashPathArg("/cd ~/pro", 9), {
+    tokenStart: 4,
+    token: "~/pro",
+    dirsOnly: true,
+  });
+});
+
+test("findSlashPathArg: `~` belongs to the token — stopping at it would read `/x` as ABSOLUTE", () => {
+  const arg = findSlashPathArg("/cd ~/ALPHA/x", 13);
+  assert.equal(arg?.token, "~/ALPHA/x");
+});
+
+test("findSlashPathArg: an empty argument is still a trigger (list the base directory)", () => {
+  assert.deepEqual(findSlashPathArg("/cd ", 4), { tokenStart: 4, token: "", dirsOnly: true });
+});
+
+test("findSlashPathArg: /mention takes a FILE — dirsOnly is false", () => {
+  assert.equal(findSlashPathArg("/mention src/x", 14)?.dirsOnly, false);
+});
+
+test("findSlashPathArg: a command with no path argument, a flag, or a caret still in the name", () => {
+  assert.equal(findSlashPathArg("/help foo", 9), null, "/help takes no path");
+  assert.equal(findSlashPathArg("/add-dir --remove", 17), null, "a flag is not a path");
+  assert.equal(findSlashPathArg("/cd ~/pro", 2), null, "caret still inside the command word");
+  assert.equal(findSlashPathArg("/cd", 3), null, "no space yet — the NAME dropdown owns this");
+});
+
+test("completeSlashArg: hits are full-LINE replacements, dirs-only for /cd", () => {
+  const fs = fakeFs({ "/p": ["src", "srcB", "notes.md"] }, ["/p", "/p/src", "/p/srcB"]);
+  const [hits, line] = completeSlashArg("/cd /p/s", fs) ?? [[], ""];
+  assert.equal(line, "/cd /p/s");
+  assert.deepEqual(hits, ["/cd /p/src/", "/cd /p/srcB/"]);
+});
+
+test("completeSlashArg: /mention keeps files; a non-path command returns null", () => {
+  const fs = fakeFs({ "/p": ["src", "notes.md"] }, ["/p", "/p/src"]);
+  const [hits] = completeSlashArg("/mention /p/n", fs) ?? [[], ""];
+  assert.deepEqual(hits, ["/mention /p/notes.md"]);
+  assert.equal(completeSlashArg("/help /p/n", fs), null);
 });

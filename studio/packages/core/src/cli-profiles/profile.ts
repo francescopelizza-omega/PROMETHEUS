@@ -16,6 +16,7 @@ import { SYSTEM_MEMORY_TOOLS } from "../agent/system/memory.js";
 import { SYSTEM_TOOLS } from "../agent/system/tools.js";
 import { TODO_TOOLS } from "../agent/todo.js";
 import type { ModelRef } from "../agents/types.js";
+import { isEffortTier } from "../ai/effort/types.js";
 import { type TomlTable, parseToml, stringifyToml } from "./toml.js";
 
 export interface CliProfile {
@@ -27,6 +28,22 @@ export interface CliProfile {
     /** max model⇄tool rounds per turn before the loop pauses + offers `/continue` (CLI-072).
      *  Maps to AgentTuning.maxRounds. A value < 1 means "use the default" (never 0 → bricked). */
     maxIterations?: number;
+    /**
+     * The reasoning-effort tier this project/user starts at — the `/think` ladder, pinned.
+     *
+     * Maps to `AgentTuning.effort`. Absent ⇒ the session starts unset, which is NOT the same
+     * as `"off"`: unset means "no tier was chosen", and the composer badge reads the model's
+     * own default rather than claiming one.
+     */
+    effort?: "off" | "low" | "medium" | "high" | "max";
+    /**
+     * Send the effort knob even when `ai/effort/rules.ts` says this model has none.
+     *
+     * OFF by default and deliberately awkward to reach, because it re-opens exactly the
+     * failure that module exists to close: a forwarded `reasoning_effort` is a hard 400 on a
+     * GPT-4-class model. It exists for the model released after these rules were written.
+     */
+    effortForce?: boolean;
   };
   engine: {
     gateMode?: "enforce" | "warn" | "off";
@@ -49,6 +66,15 @@ export interface CliProfile {
   };
 }
 
+/**
+ * `DEFAULT_SYSTEM` (and any profile's own `agent.systemPrompt`) is the PERSONA layer only —
+ * "who Prometheus is". Behavioral instructions (tool-discipline, the pre-write recheck,
+ * effort-as-text, steering/memory/repo-map) are no longer this function's job: they are added
+ * on top, once per turn, by the preamble dispatch pipeline in
+ * `apps/cli/src/session/agent-runtime.ts`'s `runMessageTurn`. `resolveTuning` stays PURE and
+ * profile-only on purpose; it has no endpoint, no effort capability, no transport to build a
+ * `PreambleCtx` from.
+ */
 const DEFAULT_SYSTEM =
   "You are Prometheus. Always scan before installing. Prefer free/local tools.";
 
@@ -76,6 +102,11 @@ export function parseProfile(toml: string, name?: string): CliProfile | null {
   if (!model) return null; // agent.model is the one mandatory field
   const toolsT = asTable(agentT?.tools);
   const maxIterations = num(agentT?.maxIterations);
+  // `[agent] effort` — validated against the ladder, because a typo'd tier that silently
+  // became "unset" would look identical to not configuring one at all.
+  const effortRaw = str(agentT?.effort);
+  const effort = isEffortTier(effortRaw) ? effortRaw : undefined;
+  const effortForce = bool(agentT?.effortForce);
   const engineT = asTable(doc.engine);
   const pathsT = asTable(engineT?.paths);
   const gateMode = str(engineT?.gateMode);
@@ -104,6 +135,8 @@ export function parseProfile(toml: string, name?: string): CliProfile | null {
       model,
       ...(str(agentT?.systemPrompt) ? { systemPrompt: str(agentT?.systemPrompt) } : {}),
       ...(maxIterations !== undefined ? { maxIterations } : {}),
+      ...(effort !== undefined ? { effort } : {}),
+      ...(effortForce !== undefined ? { effortForce } : {}),
       ...(toolsT
         ? {
             tools: {
@@ -142,6 +175,8 @@ export function serializeProfile(profile: CliProfile): string {
   const agent: TomlTable = { model: profile.agent.model };
   if (profile.agent.systemPrompt) agent.systemPrompt = profile.agent.systemPrompt;
   if (profile.agent.maxIterations !== undefined) agent.maxIterations = profile.agent.maxIterations;
+  if (profile.agent.effort !== undefined) agent.effort = profile.agent.effort;
+  if (profile.agent.effortForce !== undefined) agent.effortForce = profile.agent.effortForce;
   const t = profile.agent.tools;
   if (t) {
     const tools: TomlTable = {};
@@ -188,13 +223,22 @@ export interface ProfileFlagOverrides {
   dryRun?: boolean;
   yes?: boolean;
   model?: string;
+  /** `--effort <tier>` — the human at the keyboard outranks every config layer (§6). */
+  effort?: "off" | "low" | "medium" | "high" | "max";
+  /** `--force-effort` — send the knob over the capability table's objection. */
+  effortForce?: boolean;
 }
 
 /** Merge CLI flags on top of a profile — flags win (§6). */
 export function mergeFlags(profile: CliProfile, flags: ProfileFlagOverrides): CliProfile {
   return {
     ...profile,
-    agent: { ...profile.agent, ...(flags.model ? { model: flags.model } : {}) },
+    agent: {
+      ...profile.agent,
+      ...(flags.model ? { model: flags.model } : {}),
+      ...(flags.effort ? { effort: flags.effort } : {}),
+      ...(flags.effortForce !== undefined ? { effortForce: flags.effortForce } : {}),
+    },
     engine: {
       ...profile.engine,
       ...(flags.gateMode ? { gateMode: flags.gateMode } : {}),
@@ -417,6 +461,12 @@ function mergeLayers(layers: {
     user?.agent.maxIterations,
     builtin.agent.maxIterations,
   );
+  const effort = pick(project?.agent.effort, user?.agent.effort, builtin.agent.effort);
+  // NOT taken from the project layer. `effortForce` re-opens the 400 this table exists to
+  // prevent, and `.prometheus.toml` arrives with the code — the same reason the project layer
+  // may tighten the safety posture and never loosen it (see `sanitizeProjectLayer`). A repo
+  // cannot decide to bypass capability checking on a machine it was merely cloned onto.
+  const effortForce = pick(user?.agent.effortForce, builtin.agent.effortForce);
   const gateMode = pick(project?.engine.gateMode, user?.engine.gateMode, builtin.engine.gateMode);
   const dryRun = pick(project?.engine.dryRun, user?.engine.dryRun, builtin.engine.dryRun);
   const yes = pick(project?.engine.yes, user?.engine.yes, builtin.engine.yes);
@@ -427,6 +477,8 @@ function mergeLayers(layers: {
       model,
       ...(systemPrompt ? { systemPrompt } : {}),
       ...(maxIterations !== undefined ? { maxIterations } : {}),
+      ...(effort !== undefined ? { effort } : {}),
+      ...(effortForce !== undefined ? { effortForce } : {}),
       ...(tools ? { tools } : {}),
     },
     engine: {
@@ -449,6 +501,11 @@ export function resolveTuning(profile: CliProfile): AgentTuning {
   return {
     model: parseModelRef(profile.agent.model),
     systemPrompt: profile.agent.systemPrompt ?? DEFAULT_SYSTEM,
+    // A configured tier has to survive session start, or `[agent] effort = "high"` is a line
+    // the file accepts and nothing reads. Omitted (not defaulted) when unset: `undefined` and
+    // `"off"` mean different things to the badge and to `/status`.
+    ...(profile.agent.effort !== undefined ? { effort: profile.agent.effort } : {}),
+    ...(profile.agent.effortForce !== undefined ? { effortForce: profile.agent.effortForce } : {}),
     tools: {
       enabled: profile.agent.tools?.enabled ?? true,
       allow: profile.agent.tools?.allow ?? [],

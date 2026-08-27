@@ -14,11 +14,16 @@ import type { SidecarDeps } from "./sidecar-cmd.js";
 
 setColorEnabled(false);
 
-function makeCtx(command: string[], positionals: string[] = [], json = false): CliContext {
+function makeCtx(
+  command: string[],
+  positionals: string[] = [],
+  json = false,
+  unmatchedSub?: string,
+): CliContext {
   return {
     client: undefined as unknown as CliContext["client"],
     json,
-    args: { command, positionals, flags: {}, json } as unknown as ParsedArgs,
+    args: { command, positionals, flags: {}, json, unmatchedSub } as unknown as ParsedArgs,
   };
 }
 
@@ -97,11 +102,21 @@ test("--json emits the raw envelope", async () => {
   assert.equal(out.exitCode, 0);
 });
 
-test("unknown verb → exit 2 listing valid verbs (no spawn)", async () => {
+test("unknown verb → exit 1 listing valid verbs (no spawn)", async () => {
   const { deps, calls } = fakeDeps({ ok: true, command: "x" });
   const out = await runRefactor(makeCtx(["refactor"], ["m.py"]), deps);
-  assert.equal(out.exitCode, 2);
+  assert.equal(out.exitCode, 1);
   assert.match(out.text ?? "", /structure, imports, callgraph/);
+  assert.equal(calls.length, 0);
+});
+
+test("a typo'd verb names the ACTUAL typo, not '(none)' — regression for unmatchedSub", async () => {
+  // command[1] is undefined for a TWO_WORD mismatch (parse.ts sets `unmatchedSub` instead),
+  // so this used to render "unknown verb (none)" instead of naming the typo.
+  const { deps, calls } = fakeDeps({ ok: true, command: "x" });
+  const out = await runRefactor(makeCtx(["refactor"], ["m.py"], false, "structur"), deps);
+  assert.equal(out.exitCode, 1);
+  assert.match(out.text ?? "", /unknown verb "structur"/);
   assert.equal(calls.length, 0);
 });
 

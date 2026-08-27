@@ -5,15 +5,18 @@
  * The fs half of `@prometheus/core/agent-files`'s `loadAgentFile` (core stays pure) — this is
  * the SAME split apps/cli/src/session/agent-file-store.ts already made, ported here so
  * desktop's `spawn_agent` gets the exact same persona support over IPC (the renderer is
- * sandboxed and cannot touch node:fs, C5). Two directories, and the distinction between them is
- * the security model, not a convenience:
+ * sandboxed and cannot touch node:fs, C5). Three directories, and the distinction between them
+ * is the security model, not a convenience:
  *
- *   ~/.prometheus/agents/*.md         USER scope — the human's own files, honoured.
- *   <repo>/.prometheus/agents/*.md    PROJECT scope — arrives with cloned code, clamped hard.
+ *   ~/.prometheus/agents/*.md           USER scope — the human's own files, honoured.
+ *   <repo>/.prometheus/agents/*.md      PROJECT scope — arrives with cloned code, clamped hard.
+ *   ~/.prometheus/agents/imported/*.md  IMPORTED scope — arrived from another user via persona
+ *     sharing (main/persona-ipc.ts's import), clamped IDENTICALLY to PROJECT — same reasoning
+ *     as the CLI's twin (session/agent-file-store.ts).
  *
  * `loadAgentFile` does the clamping (model refused, read-only forced, tools only narrow, body
  * capped/fenced); this module only decides which scope a path belongs to, and never lets a
- * project file win a name — same as the CLI's twin.
+ * project or imported file win a name — same as the CLI's twin.
  *
  * Fail-soft throughout: an unreadable directory means no personas, never a broken session.
  */
@@ -68,14 +71,27 @@ export function discoverProjectAgentsDir(
   return undefined;
 }
 
+/** `~/.prometheus/agents/imported/*.md` — personas imported from another user via sharing.
+ *  Always IMPORTED scope, regardless of what any individual file's frontmatter claims. */
+export function loadImportedAgentFiles(home: string = prometheusHome()): LoadedAgent[] {
+  return loadDir(join(home, "agents", "imported"), "imported");
+}
+
 /**
- * Every persona available for `root`, USER scope first. A user file WINS a name collision —
- * the project layer may add personas; it may not replace one the human wrote.
+ * Every persona available for `root`, USER scope first, then PROJECT, then IMPORTED. A user
+ * file WINS every name collision; project and imported each add personas but never replace one
+ * an earlier, higher-priority layer already defined.
  */
 export function loadAgentFiles(root: string, home: string = prometheusHome()): LoadedAgent[] {
   const user = loadDir(join(home, "agents"), "user");
   const projectDir = discoverProjectAgentsDir(root, home);
   const project = projectDir ? loadDir(projectDir, "project") : [];
+  const imported = loadImportedAgentFiles(home);
+
   const taken = new Set(user.map((a) => a.name));
-  return [...user, ...project.filter((a) => !taken.has(a.name))];
+  const keptProject = project.filter((a) => !taken.has(a.name));
+  for (const a of keptProject) taken.add(a.name);
+  const keptImported = imported.filter((a) => !taken.has(a.name));
+
+  return [...user, ...keptProject, ...keptImported];
 }

@@ -13,12 +13,15 @@ import type { CliContext, CommandOutcome } from "../context.js";
 import { c, heading, table } from "../render.js";
 
 export function runKeymap(ctx: CliContext): CommandOutcome {
-  const action = ctx.args.command[1] ?? "list";
+  // `unmatchedSub` (parse.ts) distinguishes "a second word WAS typed but didn't match
+  // list" from "nothing was typed" — without it, `keymap lsit` (a typo) silently defaulted
+  // to `list` instead of ever reaching the "unknown verb" branch below.
+  const action = ctx.args.unmatchedSub ?? ctx.args.command[1] ?? "list";
   if (action !== "list") {
     return {
       text: `prometheus keymap ${action}: unknown verb.\n  ${c.dim("try:")} keymap list [--preset <id>]`,
       json: { ok: false, error: "unknown-verb", command: `keymap ${action}` },
-      exitCode: 2,
+      exitCode: 1,
     };
   }
 

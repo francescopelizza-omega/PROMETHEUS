@@ -118,3 +118,30 @@ test("audit: a nemesis BLOCK escalates the banner; clean/low stays clean", () =>
   // an unknown word must never be downgraded to clean
   assert.match(mk("weird-new-tier"), /AUDIT WARN/);
 });
+
+test("a long cell is CLIPPED so one wide field cannot take the whole row with it", () => {
+  /**
+   * `table()` sizes each column to its widest cell, so the catalog's ~250-character `summary`
+   * turned `plugin list` into a wall that wrapped several times per row. The clip is a DISPLAY
+   * decision only — `--json` still carries the untouched value.
+   */
+  const long = "x".repeat(400);
+  const out = renderEnvelope("plugin list", env({ catalog: [{ name: "a", summary: long }] })) ?? "";
+  assert.ok(out.includes("…"), "a clipped cell must say so");
+  for (const line of out.split("\n")) {
+    assert.ok(line.length < 200, `a row must stay readable, got ${line.length} columns`);
+  }
+  assert.ok(!out.includes(long), "the untruncated value must not reach the terminal");
+});
+
+test("an array-of-records payload renders as a TABLE, not as a bare summary line", () => {
+  // `plugin list` / `skill list` printed `"<cmd>: ok"` and threw this away — see generic.ts.
+  const out =
+    renderEnvelope(
+      "skill list",
+      env({ skills_dir: "/s", skills: [{ name: "x", state: "disabled" }] }),
+    ) ?? "";
+  assert.match(out, /skills \(1\)/);
+  assert.match(out, /NAME\s+STATE/);
+  assert.match(out, /x\s+disabled/);
+});

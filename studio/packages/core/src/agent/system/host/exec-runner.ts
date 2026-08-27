@@ -58,6 +58,33 @@ const MAX_STREAM_BYTES = 256 * 1024;
 export const DEFAULT_EXEC_TIMEOUT_MS = 30_000;
 /** Hard ceiling a caller may not exceed. */
 export const MAX_EXEC_TIMEOUT_MS = 600_000;
+
+/**
+ * Background jobs get their own budget, because the foreground numbers measure a different
+ * thing: 30s is how long a turn may STALL waiting for output, which has nothing to do with how
+ * long a detached job may live. Sharing them meant `mode:"background"` silently killed every
+ * job at 30 seconds — a `sleep 120`, a dev server, a long build — while `job_status` reported
+ * `timeout · exit 124`, defeating the entire feature. The default here is the largest span the
+ * exec layer already sanctions; the ceiling is generous but finite, because a job with no
+ * ceiling is an orphan waiting to happen and `job_kill` is a handle, not a guarantee.
+ */
+export const DEFAULT_BACKGROUND_TIMEOUT_MS = 600_000; // 10 min
+export const MAX_BACKGROUND_TIMEOUT_MS = 6 * 60 * 60_000; // 6 h
+
+/**
+ * The timeout a `run_command` gets, given its MODE and any explicit `timeoutSeconds`.
+ *
+ * Extracted so the mode-awareness is a thing a test can state directly. Inline, the mode was
+ * read AFTER the timeout was computed, so both modes silently shared the foreground numbers.
+ */
+export function execTimeoutMs(mode: string, timeoutSeconds?: number): number {
+  const background = mode === "background";
+  const fallback = background ? DEFAULT_BACKGROUND_TIMEOUT_MS : DEFAULT_EXEC_TIMEOUT_MS;
+  const ceiling = background ? MAX_BACKGROUND_TIMEOUT_MS : MAX_EXEC_TIMEOUT_MS;
+  const asked =
+    timeoutSeconds !== undefined && timeoutSeconds > 0 ? timeoutSeconds * 1000 : fallback;
+  return Math.min(asked, ceiling);
+}
 /** Grace between SIGTERM and SIGKILL. */
 const KILL_GRACE_MS = 2_000;
 

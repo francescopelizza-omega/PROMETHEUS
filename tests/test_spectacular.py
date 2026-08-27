@@ -11,6 +11,7 @@ Pure stdlib (unittest) — no pytest / no third-party deps.
 import os
 import sys
 import json
+import pathlib
 import tempfile
 import unittest
 from pathlib import Path
@@ -279,6 +280,138 @@ class TestSpectacularHardening(unittest.TestCase):
         (p.PROM_DIR, p.PROM_CONFIG, p.JSON_OUT, p.DRY_RUN, p.Log.STREAM) = self._orig
         self._tmp.cleanup()
 
+    # ---- --dry-run must not mutate ------------------------------------------
+    def test_dry_run_models_config_writes_nothing(self):
+        """`--dry-run models config --set-root DIR` used to CREATE DIR and PERSIST models_root,
+        then report ok — a dry run that silently repointed the user's whole model library.
+        Validation still runs (a dry run that "succeeds" on a path it would reject is useless);
+        only the two mutations are withheld."""
+        target = self._dir / "would-be-models-root"
+        p.JSON_OUT = True
+        p.DRY_RUN = True
+        rc, d = _run_main_json(["--dry-run", "models", "config", "--set-root", str(target)])
+        self.assertEqual(rc, 0)
+        self.assertTrue(d["ok"])
+        self.assertTrue(d.get("dry_run"), msg="a machine caller must be told nothing was persisted")
+        self.assertFalse(d["exists"], msg="`exists` must be honest — the folder was not created")
+        self.assertFalse(target.exists(), "--dry-run created the folder")
+        self.assertFalse(p.PROM_CONFIG.exists(), "--dry-run persisted the config")
+
+    def test_dry_run_still_validates_the_path(self):
+        # a dry run reports the SAME refusal a real run would — a file where a folder must be.
+        clash = self._dir / "not-a-folder"
+        clash.write_text("x")
+        p.JSON_OUT = True
+        p.DRY_RUN = True
+        rc, d = _run_main_json(["--dry-run", "models", "config", "--set-root", str(clash)])
+        self.assertEqual(rc, 2)
+        self.assertFalse(d["ok"])
+        self.assertIn("not a directory", d["error"])
+
+    def test_real_run_still_persists(self):
+        # the guard must not disarm the real path.
+        target = self._dir / "real-models-root"
+        p.JSON_OUT = True
+        p.DRY_RUN = False
+        rc, d = _run_main_json(["models", "config", "--set-root", str(target)])
+        self.assertEqual(rc, 0)
+        self.assertTrue(d["exists"])
+        self.assertNotIn("dry_run", d)
+        self.assertTrue(target.is_dir())
+        self.assertTrue(p.PROM_CONFIG.exists())
+
+    def test_dry_run_never_persists_a_trust_APPROVAL(self):
+        """`install_repo_spec` calls `enforce_gate` under --dry-run on purpose, to show the
+        verdict a real run would gate on. If that gate hit the WARN tier and the user answered
+        `y` (or passed --yes), the approval was WRITTEN — so the next REAL install skipped the
+        prompt, silently pre-approved by a run whose contract is that it changes nothing.
+        A security decision is the last thing a dry run may persist."""
+        trust = self._dir / "trust.json"
+        orig = p.TRUST_FILE
+        p.TRUST_FILE = trust
+        try:
+            p.DRY_RUN = True
+            p._save_trust({"plugin@claude#abc": {"verdict": "warn", "approvedBy": "--yes"}})
+            self.assertFalse(trust.exists(), "--dry-run persisted a gate approval")
+            p.DRY_RUN = False
+            p._save_trust({"plugin@claude#abc": {"verdict": "warn", "approvedBy": "--yes"}})
+            self.assertTrue(trust.exists(), "the guard must not disarm the real path")
+        finally:
+            p.TRUST_FILE = orig
+
+    # ---- settings.json integrity + auto-arm ---------------------------------
+    def test_write_settings_never_clobbers_an_unparseable_config(self):
+        """`_read_settings` goes through `_read_json`, which swallows JSONDecodeError and
+        returns {}. Every caller is a read-modify-write, so ONE stray trailing comma in
+        ~/.claude/settings.json meant env/model/hooks/statusLine/theme/... were all replaced by
+        whatever a single caller assembled — no backup, no warning."""
+        settings = self._dir / "settings.json"
+        orig = p.USER_SETTINGS
+        p.USER_SETTINGS = settings
+        try:
+            original = '{ "env": {"A": "1"}, "model": "opus", "hooks": {"x": 1},  }'  # trailing comma
+            settings.write_text(original)
+            self.assertEqual(p._read_settings(), {}, "precondition: the read loses everything")
+            p.DRY_RUN = False
+            p._write_settings({"enabledPlugins": {"caveman": True}})
+            baks = [f for f in self._dir.iterdir() if ".prom.bak" in f.name]
+            self.assertTrue(baks, "an unreadable config must be backed up before it is replaced")
+            self.assertEqual(baks[0].read_text(), original, "the backup must be byte-identical")
+            self.assertFalse([f for f in self._dir.iterdir() if f.name.endswith(".tmp")],
+                             "an interrupted write must not leave a .tmp orphan")
+            # a PARSEABLE config needs no backup — the guard must not fire on the normal path
+            for f in baks:
+                f.unlink()
+            settings.write_text(json.dumps({"model": "opus"}))
+            p._write_settings({"model": "opus", "theme": "dark"})
+            self.assertFalse([f for f in self._dir.iterdir() if ".prom.bak" in f.name])
+            self.assertEqual(json.loads(settings.read_text())["theme"], "dark")
+        finally:
+            p.USER_SETTINGS = orig
+
+    def test_auto_arm_skips_a_plugin_whose_install_was_refused(self):
+        """`install --arm` looped over every REQUESTED target, ignoring the failures it had just
+        counted — so a plugin the nemesis gate BLOCKED still got enabledPlugins[id]=true and its
+        marketplace written to settings.json. The scanner refused to put the code on disk and
+        Prometheus then told Claude to load it every session."""
+        ev = p.InstallEvent
+        events = [ev("good", "claude", "claude-only", "installed", "claude_plugin"),
+                  ev("evil", "claude", "claude-only", "blocked", "claude_plugin"),
+                  ev("gone", "claude", "claude-only", "failed", "claude_plugin"),
+                  ev("here", "claude", "claude-only", "already", "claude_plugin")]
+        ok = {e.plugin for e in events if e.result in ("installed", "already")}
+        refused = {e.plugin for e in events if e.result in ("blocked", "failed")}
+        self.assertEqual(ok, {"good", "here"})
+        self.assertEqual(refused, {"evil", "gone"})
+        self.assertNotIn("evil", ok, "a gate-blocked plugin must never be armed")
+
+    def test_non_interactive_uninstall_refuses_instead_of_deleting(self):
+        """`if not (...) and sys.stdin.isatty():` had the polarity backwards — with stdin NOT a
+        tty the confirmation was SKIPPED and the rmtree ran anyway. So
+        `prometheus uninstall <id> < /dev/null` (a script, a cron job, an agent that pipes stdin)
+        deleted ~/.claude/skills/<id> outright, with no --yes and no prompt. The `_confirm`
+        helper in the same file is the convention and gets it right: non-interactive is NO."""
+        class NoTTY:
+            def isatty(self):
+                return False
+        real, sys.stdin = sys.stdin, NoTTY()
+        try:
+            p.ASSUME_YES = p.DRY_RUN = p.FORCE = False
+            self.assertFalse(p._confirm("delete it?"), "non-interactive must default to NO")
+            p.ASSUME_YES = True
+            self.assertTrue(p._confirm("delete it?"), "--yes must still work non-interactively")
+        finally:
+            sys.stdin = real
+            p.ASSUME_YES = p.DRY_RUN = p.FORCE = False
+        # and the uninstall paths must ROUTE through that helper, not re-implement the guard
+        src = pathlib.Path(p.__file__).read_text()
+        body = src[src.index("def _uninstall_foreign_claude"):src.index("def _confirm(")]
+        # strip comments — the explanation of the fix naturally mentions the old expression
+        code = "\n".join(l for l in body.splitlines() if not l.strip().startswith("#"))
+        self.assertNotIn("sys.stdin.isatty()", code,
+                         "the foreign uninstall must not hand-roll the tty check again")
+        self.assertEqual(body.count("_confirm("), 2, "both delete paths go through _confirm")
+
     # ---- argparse JSON guard ------------------------------------------------
     def test_argparse_missing_arg_emits_json(self):
         rc, d = _run_main_json(["where"])  # missing required `name`
@@ -311,10 +444,21 @@ class TestSpectacularHardening(unittest.TestCase):
         self.assertFalse(d["ok"])
 
     def test_tutorial_json_ok(self):
+        # The dossier catalog (AI_SKILLS_WONDERLAND/) is curated OUTSIDE this repo and is not
+        # checked in, so `tutorial <id>` has no text to print on a clean clone — this asserted
+        # rc 0 against content that can never be there, and failed for everyone but the
+        # maintainer. Assert the CONTRACT instead: the id resolves in the catalog either way,
+        # and the answer is the dossier when present or the explanatory refusal when not.
         rc, d = _run_main_json(["tutorial", "ruflo"])
-        self.assertEqual(rc, 0)
-        self.assertTrue(d["ok"])
-        self.assertIn("ruflo", d["text"].lower())
+        self.assertIn("ruflo", p._catalog_index())
+        if rc == 0:
+            self.assertTrue(d["ok"])
+            self.assertIn("ruflo", d["text"].lower())
+        else:
+            self.assertEqual(rc, 2)
+            self.assertFalse(d["ok"])
+            # never a bare "not found" that reads like a typo — it must say WHY.
+            self.assertIn("dossier", d["error"].lower())
 
     def test_methods_json_missing_id(self):
         rc, d = _run_main_json(["methods", ""])
@@ -493,14 +637,18 @@ class TestSpectacularHardening(unittest.TestCase):
         self.assertEqual(d["command"], "sync")
         self.assertFalse(d["ok"])
 
-    def test_catalog_reads_stay_human_text(self):
-        # models/apps/worldsim/doctor are HUMAN-TABLE reads parsed as text by
-        # engine-bridge catalog.ts — they must NOT emit a JSON object even under --json.
-        # (localai NOW ships a v1 JSON envelope — CLI-026 — so it is intentionally excluded.)
+    def test_catalog_reads_stay_readable_by_the_bridge(self):
+        # models/apps/worldsim/inventory are the catalog READS engine-bridge's `rawEngine`
+        # renders as rows. This used to demand they never emit JSON at all — but several have
+        # since grown a real `{command, action, lines:[…]}` envelope, and the bridge now reads
+        # `lines` out of one. So the contract is no longer "human text only"; it is that a
+        # consumer can always get DISPLAY ROWS: either the stdout lines themselves, or the
+        # envelope's `lines` array. An envelope WITHOUT `lines` would be rendered as a single
+        # blob of JSON in Studio's catalog panes, which is the failure this guards.
         import io
         import contextlib
         for argv in (["models", "list"], ["apps", "list"], ["worldsim", "list"],
-                     ["doctor"]):
+                     ["inventory"]):
             buf = io.StringIO()
             with contextlib.redirect_stdout(buf):
                 try:
@@ -508,9 +656,44 @@ class TestSpectacularHardening(unittest.TestCase):
                 except SystemExit:
                     pass
             out = buf.getvalue().strip()
-            if out:
-                with self.assertRaises(json.JSONDecodeError, msg=f"{argv} must stay human text"):
-                    json.loads(out)
+            if not out:
+                continue
+            try:
+                env = json.loads(out)
+            except json.JSONDecodeError:
+                continue                      # human table — the bridge splits stdout
+            self.assertIsInstance(env, dict, msg=f"{argv}")
+            self.assertIn("lines", env,
+                          msg=f"{argv} emits a JSON envelope with no `lines` — the bridge "
+                              f"would render the whole envelope as one row")
+            self.assertTrue(all(isinstance(x, str) for x in env["lines"]), msg=f"{argv}")
+            self.assertGreater(len(env["lines"]), 1, msg=f"{argv}")
+            # `ok` is how every consumer decides success — an envelope without it forces each
+            # one to invent a default. `quarantine list` was the single command that omitted it.
+            self.assertIn("ok", env, msg=f"{argv} emits a JSON envelope with no `ok`")
+
+    def test_every_json_read_envelope_carries_ok(self):
+        # Widened past the four catalog reads: ANY read that answers in JSON must say whether it
+        # succeeded, in the same field, so a script can branch on `.ok` uniformly (CLI-084).
+        import io
+        import contextlib
+        for argv in (["quarantine", "list"], ["skills", "list"], ["vault", "status"],
+                     ["scan"], ["list"], ["matrix"], ["superscan"], ["doctor"],
+                     ["localai", "models"], ["localai", "audit"], ["localai", "endpoints"]):
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                try:
+                    p.main(["--json", *argv])
+                except SystemExit:
+                    pass
+            out = buf.getvalue().strip()
+            if not out:
+                continue
+            try:
+                env = json.loads(out)
+            except json.JSONDecodeError:
+                self.fail(f"{argv} was asked for --json and did not answer with JSON")
+            self.assertIn("ok", env, msg=f"{argv} emits a JSON envelope with no `ok`")
 
     # ---- _catalog_index robustness -----------------------------------------
     def test_catalog_index_builds_without_crash(self):

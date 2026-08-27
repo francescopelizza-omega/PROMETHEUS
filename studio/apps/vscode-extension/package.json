@@ -62,8 +62,8 @@
       "properties": {
         "prometheus.model": {
           "type": "string",
-          "default": "prometheus-local",
-          "description": "Model id passed to the agent loop's tuning."
+          "default": "",
+          "description": "Model id served by `prometheus.baseUrl`. Leave empty to use the first model the endpoint actually serves."
         },
         "prometheus.authLevel": {
           "type": "number",

@@ -93,6 +93,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
    */
   readonly posted: ToWebview[] = [];
 
+  /** Whether a turn is running right now — survives the backlog cap. See `post`. */
+  private busyState = false;
+
   constructor(deps: ChatViewDeps) {
     this.deps = deps;
   }
@@ -116,10 +119,41 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     view.onDidDispose(() => {
       if (this.view === view) this.view = undefined;
     });
+    /**
+     * REPLAY what this view missed.
+     *
+     * VS Code disposes and re-creates a webview when the user collapses the sidebar or switches
+     * activity-bar container. Setting fresh HTML and posting nothing left the panel EMPTY —
+     * while `posted`, the 1000-message history right below, held the whole conversation the
+     * entire time. A turn running at that moment had already sent its `busy` to the OLD view, so
+     * the new one showed no spinner: an idle, empty panel while the model was still working.
+     *
+     * Deferred a tick because the webview's script has not loaded yet at resolve time; posting
+     * synchronously would drop every message on the floor for the same reason.
+     */
+    const backlog = [...this.posted];
+    // Re-assert the busy state LAST, after the backlog: whatever the (capped) history contains,
+    // the panel must end up in the state the turn is actually in.
+    if (this.busyState && !backlog.some((m) => m.type === "busy" && m.busy)) {
+      backlog.push({ type: "busy", busy: true });
+    }
+    if (backlog.length > 0) {
+      setTimeout(() => {
+        if (this.view !== view) return; // superseded again before the replay landed
+        for (const msg of backlog) void view.webview.postMessage(msg);
+      }, 0);
+    }
   }
 
   /** Post to the panel. Safe to call when no view is resolved — the record still happens. */
   post(msg: ToWebview): void {
+    // The CURRENT busy state is tracked outside the capped backlog. A `busy:true` is posted once,
+    // at the start of a turn, and a long streaming turn easily posts more than 1000 deltas after
+    // it — at which point the cap below splices the marker off the FRONT. The replay then had no
+    // `busy` in it, so a webview re-created mid-turn (collapse the sidebar, switch container)
+    // came back UNLOCKED while the model was still working, and the user could send into a
+    // running turn.
+    if (msg.type === "busy") this.busyState = msg.busy;
     this.posted.push(msg);
     if (this.posted.length > 1000) this.posted.splice(0, this.posted.length - 1000);
     void this.view?.webview.postMessage(msg);
@@ -139,6 +173,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           type: "status",
           text: `paused after ${rounds} rounds — send another message to continue`,
         }),
+      onPaused: (idleMs) =>
+        this.post({
+          type: "status",
+          text: `⏸ paused after ${Math.round(idleMs / 1000)}s of inactivity — nothing lost, send another message to continue`,
+        }),
     };
   }
 
@@ -155,9 +194,24 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     await session.send(text, this.sinks());
   }
 
-  reset(): void {
-    this.deps.session()?.reset();
+  /**
+   * Cancels and WAITS OUT any in-flight turn (via `ChatSession.reset()`) before clearing the
+   * webview's transcript and posting `{type:"reset"}` — posting first used to let main.js call
+   * `setBusy(false)` (hiding Cancel, re-enabling Send) while the extension host's session was
+   * still genuinely running, so the only control that could stop it disappeared from view.
+   */
+  async reset(): Promise<void> {
+    await this.deps.session()?.reset();
     this.post({ type: "reset" });
+  }
+
+  /**
+   * Stop the turn currently running, if any. Used by both the `prometheus.cancel` command and
+   * the webview's Cancel button — same method, same session, so the two surfaces can never
+   * disagree about whether a turn is actually running.
+   */
+  cancel(): boolean {
+    return this.deps.session()?.cancel() ?? false;
   }
 
   private async onMessage(msg: FromWebview): Promise<void> {
@@ -169,7 +223,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         await this.submit(msg.text);
         break;
       case "reset":
-        this.reset();
+        await this.reset();
+        break;
+      case "cancel":
+        this.cancel();
         break;
     }
   }
@@ -202,6 +259,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 <form id="composer">
 <textarea id="prompt" rows="1" placeholder="Ask Prometheus about this workspace…" aria-label="Message"></textarea>
 <button id="send" type="submit">Send</button>
+<button id="cancel" type="button" hidden>Cancel</button>
 </form>
 <script nonce="${nonce}" src="${uri("media", "main.js")}"></script>
 </body>

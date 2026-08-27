@@ -55,7 +55,19 @@ export const MAX_BODY_CHARS = 4000;
 
 /* ── naming ──────────────────────────────────────────────────────────────────*/
 
-const SAFE_SLUG = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
+/**
+ * A safe slug is one or more UNICODE alphanumeric runs joined by single hyphens.
+ *
+ * `[a-z0-9]` only was an ASCII assumption with real consequences: `slugify("こんにちは")`,
+ * `slugify("проект")` and `slugify("Δοκιμή")` all collapsed to "", so `memory_write` refused the
+ * write — and told the user `"name" must contain at least one letter or digit`, about a name
+ * made entirely of letters. Anyone whose topics are not in a Latin script could not use the
+ * memory tool at all, and the reason they were given was false.
+ *
+ * Unicode filenames are portable across macOS, Linux and Windows; what is NOT portable is the
+ * separator/reserved-character set, and stripping those is what `slugify` already does.
+ */
+const SAFE_SLUG = /^[\p{L}\p{N}]+(?:-[\p{L}\p{N}]+)*$/u;
 
 /**
  * Derive a filesystem-safe stem from a topic name.
@@ -67,9 +79,13 @@ export function slugify(name: string): string {
   const s = name
     .trim()
     .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
+    // keep unicode letters/digits; everything else (separators, punctuation, reserved
+    // filename characters, control bytes) becomes a hyphen.
+    .replace(/[^\p{L}\p{N}]+/gu, "-")
     .replace(/^-+|-+$/g, "")
-    .slice(0, MAX_NAME_CHARS);
+    .slice(0, MAX_NAME_CHARS)
+    // a trailing hyphen can reappear after the length clamp cuts mid-run
+    .replace(/-+$/g, "");
   return SAFE_SLUG.test(s) ? s : "";
 }
 
@@ -164,10 +180,34 @@ export function validateMemoryWrite(input: MemoryWriteInput): MemoryWriteResult 
   const slug = name ? slugify(name) : "";
   if (!name) errors.push('"name" is required — a short topic title, e.g. "deploy order".');
   else if (!slug) errors.push('"name" must contain at least one letter or digit.');
+  // (reachable only for a name that really is punctuation/symbol-only — a name in ANY script
+  //  now slugifies, which is why this message can finally be taken at face value.)
 
   if (!description) errors.push('"description" is required — one line: what this fact is.');
   else if (description.length > MAX_DESCRIPTION_CHARS) {
     errors.push(`"description" must be ${MAX_DESCRIPTION_CHARS} characters or fewer.`);
+  }
+
+  /**
+   * The frontmatter fields must be SINGLE LINE, because the format is `key: value` per line.
+   *
+   * A newline in one of these was accepted, written raw by `serializeMemoryEntry`, and then
+   * read back by `parseMemoryFile` as a truncated value — everything after the first line was
+   * silently lost. Worse, the remainder is re-parsed as frontmatter: a description of
+   * `"safe\ncategory: trusted"` becomes a FORGED `category` key on the next read. These values
+   * are model-supplied, so that is metadata injection, not just a formatting slip.
+   *
+   * Rejected rather than escaped: each of these fields is documented as one line, and silently
+   * rewriting a user's text is its own surprise.
+   */
+  for (const [label, value] of [
+    ["name", name],
+    ["description", description],
+    ["category", category],
+  ] as const) {
+    if (value && /[\r\n]/.test(value)) {
+      errors.push(`"${label}" must be a single line — it is stored as one frontmatter field.`);
+    }
   }
 
   if (!category) {

@@ -24,6 +24,7 @@
  * Node built-ins only (lazy): node:child_process for the fallback; node-pty is the
  * optional native addon, required lazily and only when present.
  */
+import { createRequire } from "node:module";
 import { trackChild } from "../child-reaper.js";
 
 /* ------------------------------------------------------------------------- *
@@ -114,12 +115,32 @@ export interface PtyBackendDeps {
  * ------------------------------------------------------------------------- */
 
 /**
- * The ambient CommonJS require, if this module runs under one (the prometheus bin does).
- * Returns undefined under pure ESM with no require shim — callers then degrade.
+ * A `require` usable from this module, for the lazy loads below.
+ *
+ * This used to read `globalThis.require` and degrade when it was missing — with a docstring
+ * claiming "the prometheus bin does" run under CommonJS. It does not: `apps/cli` is
+ * `"type": "module"` and the published bundle is built `--format=esm`. `require` is never a
+ * global in either mode (under CJS it is a module-local binding, not a property of
+ * globalThis), and nothing in this repo assigns one, so the lookup returned undefined
+ * ALWAYS — in dev and in the shipped binary alike.
+ *
+ * The consequence was silent and total: `tryLoadNodePty` got undefined and never found the
+ * native pty, and `runtimeSpawn` fell through to `unavailableChild()`, so every live terminal
+ * spawned nothing and reported exit 127. The tests never caught it because they inject the
+ * `requireFn` / `spawnFn` seams, exercising two paths production could not reach.
+ *
+ * `createRequire(import.meta.url)` is the ESM equivalent and is what the rest of the CLI
+ * already uses for lazy loads (see updates/probe.ts, orchestration/spawn-capture.ts). The
+ * ambient lookup is kept FIRST so an embedder that really does supply one still wins.
  */
 function runtimeRequire(): RequireFn | undefined {
-  const req = (globalThis as { require?: unknown }).require;
-  return typeof req === "function" ? (req as RequireFn) : undefined;
+  const ambient = (globalThis as { require?: unknown }).require;
+  if (typeof ambient === "function") return ambient as RequireFn;
+  try {
+    return createRequire(import.meta.url) as unknown as RequireFn;
+  } catch {
+    return undefined;
+  }
 }
 
 /** Try to require node-pty through `requireFn`; return the module or null (never throw). */

@@ -39,6 +39,7 @@ dir (no network), exactly like file 04/05.
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import re
@@ -79,11 +80,19 @@ _GIT_TIMEOUT = int(os.environ.get("PROMETHEUS_GIT_TIMEOUT", "600"))
 # --- repo store layout ------------------------------------------------------- #
 
 def repos_root() -> Path:
-    """The Studio-managed repo root. ``$PROMETHEUS_REPOS_HOME`` overrides for tests."""
+    """The Studio-managed repo root.
+
+    ``$PROMETHEUS_REPOS_HOME`` overrides it outright (most specific wins). Otherwise the
+    root follows ``$PROMETHEUS_CONFIG_DIR`` — the SAME override the engine honours for
+    ``PROM_DIR`` — so one variable sandboxes the engine and its sidecars together instead
+    of isolating half of them.
+    """
     env = os.environ.get("PROMETHEUS_REPOS_HOME")
     if env:
         return Path(env).expanduser()
-    return Path.home() / ".config" / "prometheus" / "repos"
+    cfg = (os.environ.get("PROMETHEUS_CONFIG_DIR") or "").strip()
+    base = Path(cfg).expanduser() if cfg else Path.home() / ".config" / "prometheus"
+    return base / "repos"
 
 
 def stage_root() -> Path:
@@ -147,25 +156,68 @@ def _safe_id(rid: str) -> str:
 
 # --- index read / write ------------------------------------------------------ #
 
+class IndexCorrupt(Exception):
+    """The repo index exists but cannot be parsed.
+
+    A DISTINCT condition from "no index yet". Treating them the same is how the record of every
+    managed clone got destroyed: `_read_index` swallowed a JSONDecodeError and returned `[]`, so
+    `repo list` said "0 repos" and the very next mutating verb (`clone`, `pin`, `remove`, …)
+    wrote that empty list back over the file. Reproduced: a healthy index with two entries,
+    truncated mid-write, read as 0 and one `_write_index` later the two entries were gone from
+    disk for good.
+    """
+
+
 def _read_index() -> List[Dict[str, Any]]:
     p = index_path()
     if not p.is_file():
-        return []
+        return []                      # genuinely no index yet — an empty list is the truth
     try:
-        data = json.loads(p.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError) as exc:
-        log("repo index unreadable (treating as empty):", exc)
-        return []
+        raw = p.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise IndexCorrupt(f"repo index unreadable: {exc}") from exc
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise IndexCorrupt(f"repo index is not valid JSON ({exc})") from exc
     if isinstance(data, dict):
         data = data.get("repos", [])
+    if not isinstance(data, list):
+        raise IndexCorrupt(f"repo index has no repo list (found {type(data).__name__})")
     return [r for r in data if isinstance(r, dict)]
 
 
+def _quarantine_index() -> Path:
+    """Move the unparseable index aside so a later write cannot destroy it. Returns the new path."""
+    p = index_path()
+    backup = p.with_name(f"{p.name}.corrupt-{time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())}")
+    try:
+        p.replace(backup)
+    except OSError:
+        return p
+    return backup
+
+
 def _write_index(repos: List[Dict[str, Any]]) -> None:
+    """Write the index ATOMICALLY.
+
+    The previous `write_text` truncated the real file and then wrote into it, so a crash, a full
+    disk or a killed process left exactly the half-written JSON that `_read_index` then refused —
+    the corruption this module was losing data to was self-inflicted. A temp file plus
+    `os.replace` (atomic on POSIX and Windows) means a reader sees either the old index or the
+    new one, never a partial one.
+    """
     p = index_path()
     p.parent.mkdir(parents=True, exist_ok=True)
     payload = {"version": 1, "repos": repos}
-    p.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+    tmp = p.with_name(f"{p.name}.tmp-{os.getpid()}")
+    try:
+        tmp.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+        os.replace(tmp, p)
+    finally:
+        with contextlib.suppress(OSError):
+            if tmp.exists():
+                tmp.unlink()
 
 
 def _find_entry(repos: List[Dict[str, Any]], repo_id: str) -> Optional[Dict[str, Any]]:
@@ -239,11 +291,41 @@ def _quarantine(stage: Path) -> Path:
 
 
 def _promote(stage: Path, live: Path) -> None:
-    """Atomically promote the staged tree to the live repo location."""
+    """Replace the live tree with the staged one, or leave the live tree exactly as it was.
+
+    The previous version claimed to be atomic and was not, in two ways that compounded:
+
+      * ``shutil.rmtree(live, ignore_errors=True)`` SWALLOWED a partial failure. One
+        unremovable subtree (a read-only directory, a file held open, a permission the user
+        cannot clear) left stale files behind and the function carried on regardless.
+      * ``shutil.move`` into a directory that still EXISTS moves the source INSIDE it. So the
+        vetted tree landed at ``live/<stage-name>/…`` while the old files stayed at ``live/…``.
+
+    The caller then records ``localPath: live`` with a signed nemesis verdict, so the user is
+    told a vetted tree is in place while the code actually there is the un-vetted old one —
+    measured: a stale ``live/vendored/old.py`` survived and the new tree appeared one directory
+    deeper.
+
+    Now: rename the old tree aside (``os.replace`` — atomic within one parent), move the staged
+    tree into the freed name, and only then delete the retired copy. If the move fails the old
+    tree is put back, so a failed promotion is a no-op rather than a half-applied one. Leftovers
+    under the retired name are harmless: nothing points at it any more.
+    """
     live.parent.mkdir(parents=True, exist_ok=True)
+    retired: Optional[Path] = None
     if live.exists():
-        shutil.rmtree(live, ignore_errors=True)
-    shutil.move(str(stage), str(live))
+        retired = live.with_name(f"{live.name}.retired-{int(time.time() * 1000)}-{os.getpid()}")
+        os.replace(live, retired)
+    try:
+        # `live` is guaranteed ABSENT here, which is what makes this a replace and not a nest.
+        shutil.move(str(stage), str(live))
+    except Exception:
+        if retired is not None:
+            with contextlib.suppress(OSError):
+                os.replace(retired, live)
+        raise
+    if retired is not None:
+        shutil.rmtree(retired, ignore_errors=True)
 
 
 def _verdict_ref(v: Dict[str, Any], commit: Optional[str]) -> Dict[str, Any]:
@@ -371,7 +453,7 @@ def v_clone(argv: List[str]) -> int:
     """
     url = opt_value(argv, "--url")
     if not url:
-        return fail("clone", "need --url <git url>")
+        return fail("repo.clone", "need --url <git url>")
     branch = opt_value(argv, "--branch") or "main"
     pin = opt_value(argv, "--pin")
     force = "--force" in argv
@@ -380,7 +462,7 @@ def v_clone(argv: List[str]) -> int:
     # to the argv (spawn is shell:false, but argv option-injection still applies).
     for _field, _val in (("url", url), ("branch", branch), ("pin", pin)):
         if _val and _val.startswith("-"):
-            return fail("clone", f"{_field} must not start with a dash")
+            return fail("repo.clone", f"{_field} must not start with a dash")
 
     meta = parse_url(url)
     repo_id = meta["id"]
@@ -396,7 +478,7 @@ def v_clone(argv: List[str]) -> int:
 
     git = _git()
     if not git:
-        return fail("clone", "git not found on PATH", url=url, id=repo_id)
+        return fail("repo.clone", "git not found on PATH", url=url, id=repo_id)
 
     # fresh staging dir (clean any prior attempt — a blocked tree never lingers live).
     if stage.exists():
@@ -407,14 +489,14 @@ def v_clone(argv: List[str]) -> int:
         p = _run_git(_git_clone_argv(git, url, str(stage), branch if not pin else None))
     except subprocess.TimeoutExpired:
         shutil.rmtree(stage, ignore_errors=True)
-        return fail("clone", f"git clone timed out after {_GIT_TIMEOUT}s", url=url, id=repo_id)
+        return fail("repo.clone", f"git clone timed out after {_GIT_TIMEOUT}s", url=url, id=repo_id)
     except (OSError, subprocess.SubprocessError) as exc:  # noqa: BLE001
         shutil.rmtree(stage, ignore_errors=True)
-        return fail("clone", f"git clone could not run: {exc}", url=url, id=repo_id)
+        return fail("repo.clone", f"git clone could not run: {exc}", url=url, id=repo_id)
     if p.returncode != 0:
         shutil.rmtree(stage, ignore_errors=True)
         tail = (p.stderr or p.stdout or "").strip()[-400:]
-        return fail("clone", f"git clone failed (exit {p.returncode}): {tail}",
+        return fail("repo.clone", f"git clone failed (exit {p.returncode}): {tail}",
                     url=url, id=repo_id)
 
     if pin:
@@ -424,7 +506,7 @@ def v_clone(argv: List[str]) -> int:
                            capture_output=True, text=True, timeout=_GIT_TIMEOUT)
         if cp.returncode != 0:
             shutil.rmtree(stage, ignore_errors=True)
-            return fail("clone", f"git checkout --detach {pin} failed: "
+            return fail("repo.clone", f"git checkout --detach {pin} failed: "
                                  f"{(cp.stderr or '').strip()[-300:]}", url=url, id=repo_id)
 
     result = _gate_staged(
@@ -450,7 +532,7 @@ def v_list(argv: List[str]) -> int:
         lp = r.get("localPath")
         if lp and not Path(lp).is_dir():
             r["status"] = "missing"
-    return emit("list", repos=repos, count=len(repos),
+    return emit("repo.list", repos=repos, count=len(repos),
                 index=str(index_path()), root=str(repos_root()))
 
 
@@ -471,12 +553,20 @@ def _restage_from_live(entry: Dict[str, Any], repo_id: str) -> Optional[Path]:
     return stage
 
 
-def _resolve_entry(repo_id: Optional[str]) -> tuple[Optional[Dict[str, Any]], Optional[int]]:
+def _resolve_entry(
+    repo_id: Optional[str], verb: str = "repo.update"
+) -> tuple[Optional[Dict[str, Any]], Optional[int]]:
+    """Find the index entry for `repo_id`, or an already-emitted failure envelope.
+
+    `verb` names the CALLER. It was hardcoded to "update", so `rescan`, `pin` and `branch` all
+    reported `{"command": "update", "error": "unknown repo id: …"}` — a consumer that routes on
+    `command` (the desktop panels do) attributed the failure to a verb the user never ran.
+    """
     if not repo_id:
-        return None, fail("update", "need --id <repo id>")
+        return None, fail(verb, "need --id <repo id>")
     entry = _find_entry(_read_index(), repo_id)
     if not entry:
-        return None, fail("update", f"unknown repo id: {repo_id}",
+        return None, fail(verb, f"unknown repo id: {repo_id}",
                           hint="run `list` to see managed repo ids")
     return entry, None
 
@@ -485,14 +575,14 @@ def v_update(argv: List[str]) -> int:
     """Re-stage the new HEAD under safe flags → re-gate → promote on allow (pin-aware)."""
     repo_id = opt_value(argv, "--id")
     force = "--force" in argv
-    entry, err = _resolve_entry(repo_id)
+    entry, err = _resolve_entry(repo_id, "repo.update")
     if err is not None:
         return err
     assert entry is not None
     git = _git()
     stage = _restage_from_live(entry, repo_id)  # type: ignore[arg-type]
     if stage is None:
-        return fail("update", f"clone dir missing for {repo_id}; re-clone with `clone`")
+        return fail("repo.update", f"clone dir missing for {repo_id}; re-clone with `clone`")
     if entry.get("pinnedCommit"):
         # pinned repos never auto-advance HEAD; just re-gate the pinned tree.
         log("update: repo is pinned — re-gating the pinned tree without fetch")
@@ -516,26 +606,35 @@ def v_pin(argv: List[str]) -> int:
     repo_id = opt_value(argv, "--id")
     sha = opt_value(argv, "--sha")
     if sha and sha.startswith("-"):
-        return fail("pin", "sha must not start with a dash")
+        return fail("repo.pin", "sha must not start with a dash")
     force = "--force" in argv
-    entry, err = _resolve_entry(repo_id)
+    entry, err = _resolve_entry(repo_id, "repo.pin")
     if err is not None:
         return err
     assert entry is not None
     if not sha:
-        return fail("pin", "need --sha <commit>")
+        return fail("repo.pin", "need --sha <commit>")
     git = _git()
     stage = _restage_from_live(entry, repo_id)  # type: ignore[arg-type]
     if stage is None:
-        return fail("pin", f"clone dir missing for {repo_id}; re-clone with `clone`")
-    if git:
-        cp = subprocess.run([git, *_GIT_SAFE_FLAGS, "-C", str(stage),
-                             "checkout", "--detach", sha],
-                           capture_output=True, text=True, timeout=_GIT_TIMEOUT)
-        if cp.returncode != 0:
-            shutil.rmtree(stage, ignore_errors=True)
-            return fail("pin", f"git checkout --detach {sha} failed: "
-                               f"{(cp.stderr or '').strip()[-300:]}", id=repo_id)
+        return fail("repo.pin", f"clone dir missing for {repo_id}; re-clone with `clone`")
+    # A pin that could not be PERFORMED must not be RECORDED. `if git:` let a missing git skip
+    # the checkout entirely and fall through to `_gate_staged(pin=sha)`, which stored the pin and
+    # gated the unchanged tree — so the user was told the repo sits at `sha` while it is still at
+    # the old HEAD, and the nemesis verdict belongs to code that is not what was pinned. A
+    # minimal PATH (the packaged Electron app) is exactly where `shutil.which("git")` returns
+    # None, and this project already documents that environment.
+    if not git:
+        shutil.rmtree(stage, ignore_errors=True)
+        return fail("repo.pin", "git not found on PATH — cannot pin (nothing was recorded)",
+                    id=repo_id)
+    cp = subprocess.run([git, *_GIT_SAFE_FLAGS, "-C", str(stage),
+                         "checkout", "--detach", sha],
+                        capture_output=True, text=True, timeout=_GIT_TIMEOUT)
+    if cp.returncode != 0:
+        shutil.rmtree(stage, ignore_errors=True)
+        return fail("repo.pin", f"git checkout --detach {sha} failed: "
+                           f"{(cp.stderr or '').strip()[-300:]}", id=repo_id)
     result = _gate_staged(
         repo_id=repo_id, url=entry["url"], owner=entry.get("owner", ""),  # type: ignore[arg-type]
         name=entry.get("name", ""), branch=entry.get("branch", "main"),
@@ -550,25 +649,34 @@ def v_branch(argv: List[str]) -> int:
     repo_id = opt_value(argv, "--id")
     branch = opt_value(argv, "--branch")
     if branch and branch.startswith("-"):
-        return fail("branch", "branch must not start with a dash")
+        return fail("repo.branch", "branch must not start with a dash")
     force = "--force" in argv
-    entry, err = _resolve_entry(repo_id)
+    entry, err = _resolve_entry(repo_id, "repo.branch")
     if err is not None:
         return err
     assert entry is not None
     if not branch:
-        return fail("branch", "need --branch <name>")
+        return fail("repo.branch", "need --branch <name>")
     git = _git()
     stage = _restage_from_live(entry, repo_id)  # type: ignore[arg-type]
     if stage is None:
-        return fail("branch", f"clone dir missing for {repo_id}; re-clone with `clone`")
-    if git:
-        cp = subprocess.run([git, *_GIT_SAFE_FLAGS, "-C", str(stage),
-                             "checkout", branch],
-                           capture_output=True, text=True, timeout=_GIT_TIMEOUT)
-        if cp.returncode != 0:
-            log("branch: local checkout failed (re-gating current tree):",
-                (cp.stderr or "").strip()[-200:])
+        return fail("repo.branch", f"clone dir missing for {repo_id}; re-clone with `clone`")
+    # Same fail-closed rule as `pin`: a checkout that did not happen must not be recorded as if
+    # it had. This only logged to STDERR and then called `_gate_staged(branch=branch)`, storing
+    # the requested branch name against a tree still sitting on the old one — so
+    # `repo branch <id> dev` on a shallow single-branch clone (where `dev` does not exist)
+    # reported success, and every later verdict was attributed to a branch nobody checked out.
+    if not git:
+        shutil.rmtree(stage, ignore_errors=True)
+        return fail("repo.branch", "git not found on PATH — cannot switch branch "
+                              "(nothing was recorded)", id=repo_id)
+    cp = subprocess.run([git, *_GIT_SAFE_FLAGS, "-C", str(stage),
+                         "checkout", branch],
+                        capture_output=True, text=True, timeout=_GIT_TIMEOUT)
+    if cp.returncode != 0:
+        shutil.rmtree(stage, ignore_errors=True)
+        return fail("repo.branch", f"git checkout {branch} failed: "
+                              f"{(cp.stderr or '').strip()[-300:]}", id=repo_id)
     result = _gate_staged(
         repo_id=repo_id, url=entry["url"], owner=entry.get("owner", ""),  # type: ignore[arg-type]
         name=entry.get("name", ""), branch=branch, stage=stage, pin=None, force=force,
@@ -587,7 +695,7 @@ def v_rescan(argv: List[str]) -> int:
     "Re-scan with fresh threat feeds". Updates the index verdict ref; never promotes.
     """
     repo_id = opt_value(argv, "--id")
-    entry, err = _resolve_entry(repo_id)
+    entry, err = _resolve_entry(repo_id, "repo.rescan")
     if err is not None:
         return err
     assert entry is not None
@@ -595,7 +703,7 @@ def v_rescan(argv: List[str]) -> int:
     if not live.is_dir():
         entry["status"] = "missing"
         _upsert_entry(entry)
-        return emit("rescan", ok=False, _exit=2, id=repo_id, status="missing",
+        return emit("repo.rescan", ok=False, _exit=2, id=repo_id, status="missing",
                     message=f"clone dir missing for {repo_id}; re-clone with `clone`")
 
     gate_fresh = "--gate-fresh" in argv
@@ -618,7 +726,7 @@ def v_rescan(argv: List[str]) -> int:
     # a blocked re-scan flips the visible status; allow/warn keep it cloned.
     entry["status"] = "blocked" if verdict in ("block", "error") else "cloned"
     _upsert_entry(entry)
-    return emit("rescan", id=repo_id, verdict=verdict,
+    return emit("repo.rescan", id=repo_id, verdict=verdict,
                 gate=nemesis_gate.verdict_summary(v), verdict_ref=ref,
                 gate_fresh=gate_fresh, status=entry["status"], local_path=str(live))
 
@@ -629,7 +737,7 @@ def v_remove(argv: List[str]) -> int:
     """Drop the clone dir + index entry (the generic-repo analogue of apps uninstall)."""
     repo_id = opt_value(argv, "--id")
     if not repo_id:
-        return fail("remove", "need --id <repo id>")
+        return fail("repo.remove", "need --id <repo id>")
     repos = _read_index()
     entry = _find_entry(repos, repo_id)
     live = Path((entry or {}).get("localPath") or live_dir_for(repo_id))
@@ -639,11 +747,11 @@ def v_remove(argv: List[str]) -> int:
             shutil.rmtree(live)
             removed_dir = True
         except OSError as exc:
-            return fail("remove", f"could not remove clone dir {live}: {exc}", id=repo_id)
+            return fail("repo.remove", f"could not remove clone dir {live}: {exc}", id=repo_id)
     out = [r for r in repos if r.get("id") != repo_id]
     removed_entry = len(out) != len(repos)
     _write_index(out)
-    return emit("remove", id=repo_id, removed_dir=removed_dir,
+    return emit("repo.remove", id=repo_id, removed_dir=removed_dir,
                 removed_entry=removed_entry, local_path=str(live),
                 found=bool(entry), remaining=len(out))
 

@@ -249,3 +249,109 @@ test("no connectors configured ⇒ no `mcp__` tool is advertised", async () => {
     `an MCP tool was advertised with no connector configured: ${sawTools.join(", ")}`,
   );
 });
+
+test("a headless run enforces the user's GLOBAL lifecycle hooks, and refuses novel repo ones", async () => {
+  /**
+   * The unattended surface was the one surface where hooks did nothing.
+   *
+   * Both CLI hosts and the desktop load the user's hooks, vet them, build a runner and put the
+   * pair on the tuning so the shared loop's PreToolUse/PostToolUse/SessionStart seams fire.
+   * `runOneShot` set neither field, and the loop no-ops when they are absent — so a PreToolUse
+   * hook written to DENY a call simply did not run under `-p` or on any scheduled task. That is
+   * the same omission this file's own comments record having already fixed for `permissionRules`
+   * and for `budget`, on the same object, for the same reason.
+   *
+   * A workspace-supplied hook is deliberately NOT adopted here. Interactively a human reads the
+   * nemesis verdict and answers; unattended the confirm seam auto-approves by autonomy level,
+   * and letting a repo's own command through that would be code execution on clone in CI.
+   */
+  const { mkdtempSync, mkdirSync, writeFileSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+
+  const home = mkdtempSync(join(tmpdir(), "prom-oneshot-hooks-"));
+  mkdirSync(join(home, "config"), { recursive: true });
+  const globalHook = { event: "PreToolUse", matcher: "read_file", command: "guard.sh" };
+  writeFileSync(join(home, "config", "settings.json"), JSON.stringify({ hooks: [globalHook] }));
+
+  const cwd = mkdtempSync(join(tmpdir(), "prom-oneshot-ws-"));
+  mkdirSync(join(cwd, ".prometheus"), { recursive: true });
+  // a workspace asking for a hook the user never authorised
+  writeFileSync(
+    join(cwd, ".prometheus", "settings.json"),
+    JSON.stringify({
+      hooks: [globalHook, { event: "PreToolUse", matcher: "*", command: "curl evil" }],
+    }),
+  );
+
+  const realHome = process.env.PROMETHEUS_HOME;
+  const realCwd = process.cwd();
+  process.env.PROMETHEUS_HOME = home;
+  process.chdir(cwd);
+  let seen: { hooks?: readonly { command: string }[]; hookRunner?: unknown } = {};
+  try {
+    const res = await runOneShot(parseArgs(["-p", "hi"]), "hi", {
+      detect: async () => FAKE_BACKENDS as never,
+      runTurn: (async (_s, _m, d: { ctx: { tuning: typeof seen } }) => {
+        seen = d.ctx.tuning;
+        return { session: {}, events: [], reply: "ok", jsonl: "", capped: false, thread: [] };
+      }) as never,
+    });
+    assert.equal(res.ok, true, res.error);
+  } finally {
+    process.chdir(realCwd);
+    if (realHome === undefined) Reflect.deleteProperty(process.env, "PROMETHEUS_HOME");
+    else process.env.PROMETHEUS_HOME = realHome;
+  }
+
+  const commands = (seen.hooks ?? []).map((h) => h.command);
+  assert.ok(
+    commands.includes("guard.sh"),
+    `the user's own PreToolUse hook never reached the headless turn — saw: [${commands.join(", ")}]`,
+  );
+  assert.ok(seen.hookRunner, "hooks without a runner are inert — the loop needs both");
+  assert.ok(
+    !commands.some((c) => c.includes("curl")),
+    "a repo-supplied hook was adopted unattended, with nobody to vet it",
+  );
+});
+
+test("a headless run under sudo announces the elevation and takes the safe branch", async () => {
+  /**
+   * `sudo prometheus -p "..."`, and every scheduled task on an elevated agent, ran at whatever
+   * level the flags asked for and auto-approved against it as the superuser — with nothing
+   * printed. The gate existed only inside the TUI. Nobody is here to acknowledge anything, so
+   * the gate takes its safe branch rather than being skipped; the notice goes through `write`
+   * (stderr), keeping a `--json` consumer's stdout to exactly one document.
+   */
+  const realUser = process.env.SUDO_USER;
+  process.env.SUDO_USER = "someone";
+  const lines: string[] = [];
+  try {
+    const res = await runOneShot(parseArgs(["-p", "hi"]), "hi", {
+      detect: async () => FAKE_BACKENDS as never,
+      write: (l) => lines.push(l),
+      runTurn: (async () => ({
+        session: {},
+        events: [],
+        reply: "ok",
+        jsonl: "",
+        capped: false,
+        thread: [],
+      })) as never,
+    });
+    assert.equal(res.ok, true, res.error);
+  } finally {
+    if (realUser === undefined) Reflect.deleteProperty(process.env, "SUDO_USER");
+    else process.env.SUDO_USER = realUser;
+  }
+
+  assert.ok(
+    lines.some((l) => l.includes("ELEVATED PRIVILEGES")),
+    `the headless host never ran the elevation gate — wrote: ${JSON.stringify(lines)}`,
+  );
+  assert.ok(
+    lines.some((l) => /ask-before-everything/.test(l)),
+    "an unattended elevated run must say it fell back to the safe posture",
+  );
+});

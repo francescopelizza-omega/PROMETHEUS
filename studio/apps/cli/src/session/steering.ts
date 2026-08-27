@@ -12,6 +12,7 @@
  * truth wins.)
  */
 import { readFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 
 import { rules } from "@prometheus/core";
@@ -109,17 +110,24 @@ export function steeringDirs(
  * Discover steering files (project tree + global ~/.prometheus) in precedence order. Every
  * candidate is returned (loaded OR missing) so `/memory` can list + offer to create them.
  *
- * The project layer walks from the repository root down to `cwd` — see `steeringDirs`.
+ * The project layer walks from the repository root down to `cwd` — see `steeringDirs`. Its stop
+ * boundary is the real OS home directory (`osHome`, default `os.homedir()`), NOT `home` — `home`
+ * is `PROMETHEUS_HOME` (`~/.prometheus`, this function's OTHER parameter, used below for the
+ * global AGENTS.md/CLAUDE.md lookup) which is a subdirectory of the real home and therefore
+ * essentially never an ancestor of any `cwd`, so passing it as the walk boundary made the "stop
+ * at $HOME" half of `steeringDirs`'s own contract dead code for every ordinary working directory
+ * outside a git repo — the walk would otherwise climb to the filesystem root instead.
  */
 export function discoverSteering(
   cwd: string,
   home: string = prometheusHome(),
   read: ReadSeam = defaultRead,
   exists?: (p: string) => boolean,
+  osHome: string = homedir(),
 ): SteeringFile[] {
   const out: SteeringFile[] = [];
   const seen = new Set<string>();
-  const dirs = steeringDirs(cwd, home, exists);
+  const dirs = steeringDirs(cwd, osHome, exists);
   const here = resolve(cwd);
   for (const dir of dirs) {
     for (const name of PROJECT_NAMES) {

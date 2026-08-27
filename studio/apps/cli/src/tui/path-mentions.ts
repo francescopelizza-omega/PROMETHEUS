@@ -19,7 +19,7 @@ import { join } from "node:path";
 
 import { type PathEntry, rankEntries } from "@prometheus/core/path-completion";
 
-import { type CompleterFs, defaultFs } from "../session/path-completer.js";
+import { type CompleterFs, defaultFs, findSlashPathArg } from "../session/path-completer.js";
 import type { AcItem, AcState } from "./autocomplete.js";
 
 /** Chars allowed in a path token after "@" — mirrors the desktop's ai/mention.ts token set
@@ -27,12 +27,36 @@ import type { AcItem, AcState } from "./autocomplete.js";
 const TOKEN_CHARS = /[\w./-]/;
 
 export interface PathTrigger {
-  /** code-point index of the "@" in the input. */
+  /**
+   * Where the path came from.
+   *
+   * `"mention"` — an "@" anywhere in the composer; it sits mid-sentence, so Enter ACCEPTS the
+   * highlighted entry rather than sending the turn.
+   * `"slash-arg"` — the path argument of a path-taking slash command (`/cd ~/pro`); here the
+   * whole line IS the path, so Tab completes and Enter RUNS the command, which is the shell
+   * behaviour every user already has in their fingers.
+   */
+  kind: "mention" | "slash-arg";
+  /** code-point index of the sigil ("@") for a mention; the token start for a slash argument. */
   start: number;
+  /** code-point index of the first char of the path TOKEN itself (past any sigil). */
+  tokenStart: number;
   /** the directory typed so far, e.g. "src/tui" in "@src/tui/re" ("" if none yet). */
   dirPart: string;
   /** the partial name being completed, e.g. "re" in "@src/tui/re". */
   frag: string;
+  /** keep only directories in the dropdown (`/cd`, `/cwd`, `/add-dir`). */
+  dirsOnly: boolean;
+}
+
+/** Split a typed path token into "the directory part" and "the fragment being completed".
+ *  A LONE leading "/" stays the dirPart (dropping it would make "/etc" resolve relatively). */
+function splitToken(token: string): { dirPart: string; frag: string } {
+  const slash = token.lastIndexOf("/");
+  return {
+    dirPart: slash < 0 ? "" : slash === 0 ? "/" : token.slice(0, slash),
+    frag: slash >= 0 ? token.slice(slash + 1) : token,
+  };
 }
 
 /**
@@ -53,17 +77,37 @@ export function detectPathTrigger(input: string, cursor: number): PathTrigger | 
   if (i < 0 || chars[i] !== "@") return null;
   const before = i > 0 ? (chars[i - 1] as string) : "";
   if (before && /\w/.test(before)) return null; // `foo@bar` — not a mention
-  const token = chars.slice(i + 1, pos).join("");
-  const slash = token.lastIndexOf("/");
-  // token.slice(0, slash) for a SINGLE leading slash (slash === 0) is "" — which would
-  // silently drop the "/" and make "@/etc" resolve as a RELATIVE fragment against baseDir
-  // instead of the filesystem root. Keep the lone "/" itself as dirPart in that case (still
-  // correctly recognized as absolute by resolvePathDir's `startsWith("/")` check).
-  const dirPart = slash < 0 ? "" : slash === 0 ? "/" : token.slice(0, slash);
+  // splitToken keeps a LONE leading "/" as the dirPart: dropping it would make "@/etc"
+  // resolve as a RELATIVE fragment against baseDir instead of the filesystem root.
   return {
+    kind: "mention",
     start: i,
-    dirPart,
-    frag: slash >= 0 ? token.slice(slash + 1) : token,
+    tokenStart: i + 1,
+    dirsOnly: false,
+    ...splitToken(chars.slice(i + 1, pos).join("")),
+  };
+}
+
+/**
+ * The OTHER way a path gets typed: as the argument of a path-taking slash command
+ * (`/cd ~/pro`, `/add-dir ../lib`, `/mention src/x.ts`).
+ *
+ * Without this, `/cd` had no completion of any kind in the composer — the slash dropdown
+ * closes at the first space (it is completing the command NAME) and the "@" trigger never
+ * fires on a line that contains no "@". The only way through was to type the whole path
+ * correctly, blind. The table of which commands take a path — and which of them accept only
+ * a directory — lives in session/path-completer.ts, shared with the readline host's Tab
+ * completer so the two surfaces cannot drift.
+ */
+export function detectSlashPathTrigger(input: string, cursor: number): PathTrigger | null {
+  const arg = findSlashPathArg(input, cursor);
+  if (!arg) return null;
+  return {
+    kind: "slash-arg",
+    start: arg.tokenStart,
+    tokenStart: arg.tokenStart,
+    dirsOnly: arg.dirsOnly,
+    ...splitToken(arg.token),
   };
 }
 
@@ -141,7 +185,7 @@ export function syncPathAutocomplete(
   prev: PathAcState = EMPTY_PATH_AC,
 ): PathAcState {
   if (!ctx) return EMPTY_PATH_AC;
-  const trigger = detectPathTrigger(input, cursor);
+  const trigger = detectPathTrigger(input, cursor) ?? detectSlashPathTrigger(input, cursor);
   if (!trigger) return EMPTY_PATH_AC;
 
   const dirPath = resolvePathDir(trigger.dirPart, ctx.baseDir);
@@ -149,8 +193,12 @@ export function syncPathAutocomplete(
   const reuseEntries = prev.trigger !== null && prev.dirPath === dirPath;
   const rawEntries = reuseEntries ? prev.rawEntries : listDir(dirPath, fs);
 
-  // dotfile hiding unless the user explicitly typed a leading dot (mirrors path-completer.ts).
-  const visible = rawEntries.filter((e) => trigger.frag.startsWith(".") || !e.name.startsWith("."));
+  // dotfile hiding unless the user explicitly typed a leading dot (mirrors path-completer.ts);
+  // `dirsOnly` drops plain files for the commands that can only take a directory (`/cd`).
+  const visible = rawEntries.filter(
+    (e) =>
+      (trigger.frag.startsWith(".") || !e.name.startsWith(".")) && (!trigger.dirsOnly || e.isDir),
+  );
   const frecency = ctx.frecencyForDir?.(dirPath) ?? new Map<string, number>();
   const ranked = rankEntries(trigger.frag, visible, frecency);
 
@@ -207,7 +255,7 @@ export function acceptPathAc(input: string, state: PathAcState): PathAcceptResul
       : trig.dirPart.endsWith("/")
         ? trig.dirPart.length
         : trig.dirPart.length + 1;
-  const headEnd = trig.start + 1 + dirLen; // just past "@" + dirPart + "/"
+  const headEnd = trig.tokenStart + dirLen; // just past the sigil + dirPart + "/"
   const tokenEnd = headEnd + trig.frag.length;
   const head = chars.slice(0, headEnd).join("");
   const tail = chars.slice(tokenEnd).join("");

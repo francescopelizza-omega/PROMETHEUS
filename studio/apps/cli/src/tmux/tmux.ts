@@ -23,6 +23,7 @@
  * Color flows ONLY through ../render.ts (c.* helpers, which source their SGR codes
  * from @prometheus/ui/tokens) — no raw hex, no bespoke ANSI.
  */
+import { createRequire } from "node:module";
 import type { ChatTerminalEnvelope } from "@prometheus/engine-bridge";
 
 import type { ParsedArgs } from "../parse.js";
@@ -325,13 +326,15 @@ function defaultLookupBin(
 ): (bin: string) => string | null {
   return (bin: string): string | null => {
     // Lazy-require so importing this module never touches fs.
-    const nodeRequire = (globalThis as { require?: (m: string) => unknown }).require;
-    const fs = (nodeRequire ? nodeRequire("node:fs") : undefined) as
-      | { existsSync(p: string): boolean }
-      | undefined;
-    const pathMod = (nodeRequire ? nodeRequire("node:path") : undefined) as
-      | { join(...p: string[]): string }
-      | undefined;
+    let fs: { existsSync(p: string): boolean } | undefined;
+    let pathMod: { join(...p: string[]): string } | undefined;
+    try {
+      const nodeRequire = moduleRequire();
+      fs = nodeRequire("node:fs") as typeof fs;
+      pathMod = nodeRequire("node:path") as typeof pathMod;
+    } catch {
+      return null;
+    }
     if (!fs || !pathMod) return null;
     const { dirs, exts } = pathParts(env);
     for (const dir of dirs) {
@@ -399,15 +402,31 @@ interface ChildProcessLike {
   ): { status: number | null; stderr?: string | Buffer; error?: Error };
 }
 
-/** Lazy-require node:child_process; returns null if unavailable (never throws). */
+/**
+ * Lazy-require node:child_process; returns null if unavailable (never throws).
+ *
+ * `globalThis.require` is undefined in this package — it is `"type": "module"` and the
+ * published bundle is `--format=esm`, and `require` is never a global even under CommonJS.
+ * Reading it therefore returned null on every call, so `tmuxAvailable()` was hard-wired to
+ * false: `--tmux` degraded silently and `chat --cli X --tmux` reported "tmux not found on
+ * PATH" on machines where tmux was installed and on PATH. `createRequire` keeps the load
+ * lazy (importing this module still touches nothing) while actually working.
+ */
 function lazyChildProcess(): ChildProcessLike | null {
-  const nodeRequire = (globalThis as { require?: (m: string) => unknown }).require;
-  if (!nodeRequire) return null;
   try {
-    return nodeRequire("node:child_process") as ChildProcessLike;
+    return moduleRequire()("node:child_process") as ChildProcessLike;
   } catch {
     return null;
   }
+}
+
+/** The ESM-safe `require` used for every lazy load in this module. Built once, on demand. */
+let cachedRequire: ((m: string) => unknown) | undefined;
+function moduleRequire(): (m: string) => unknown {
+  const ambient = (globalThis as { require?: unknown }).require;
+  if (typeof ambient === "function") return ambient as (m: string) => unknown;
+  cachedRequire ??= createRequire(import.meta.url) as unknown as (m: string) => unknown;
+  return cachedRequire;
 }
 
 /** Coerce any thrown value into a single-line message (never throws). */

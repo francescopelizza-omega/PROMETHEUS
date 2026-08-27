@@ -9,8 +9,8 @@
  * All seams (manager / gate / transport / confirm) are injectable for tests.
  */
 import { mcpHost } from "@prometheus/core";
-import { createMcpTransportFactory } from "@prometheus/core/mcp-node";
-import { type EngineConfig, type VerdictTier, gate as engineGate } from "@prometheus/engine-bridge";
+import { appendMcpAudit, createMcpTransportFactory } from "@prometheus/core/mcp-node";
+import { type EngineConfig, createMcpGateRunner } from "@prometheus/engine-bridge";
 
 import type { CliContext, CommandOutcome } from "../context.js";
 import { prometheusHome } from "../home.js";
@@ -19,39 +19,47 @@ import { c, heading, table } from "../render.js";
 import { createCliSecretsStore } from "../secrets-backend.js";
 
 /** The keychain service under which `--auth-secret <ref>` bearer tokens are stored (never in config). */
-const MCP_AUTH_SERVICE = "prometheus-mcp-auth";
+// one canonical service name, shared with the desktop — see core's mcpHost.
+const MCP_AUTH_SERVICE = mcpHost.MCP_AUTH_SERVICE;
 
 type McpHostManager = mcpHost.McpHostManager;
 
 /** The real nemesis gate for the CLI (wraps engine-bridge `gate` — fail-closed to error). */
 function createCliMcpGate(config: EngineConfig = {}): mcpHost.NemesisGate {
-  return async (target: string): Promise<mcpHost.HostGateVerdict> => {
-    try {
-      const v = await engineGate(target, {}, config);
-      return { verdict: v.verdict, riskScore: v.risk_score, target, findings: v.findings.length };
-    } catch {
-      return { verdict: "error" as VerdictTier, target, findings: 0 };
-    }
-  };
+  // The runner lives in engine-bridge: this file, its sibling in session/, and the desktop each
+  // had their own copy, and all three fed the target to nemesis's FILE scanner — so `npx` scored
+  // `error`/risk 100, every server was persisted `health:"blocked"`, and no MCP connector could
+  // be added at all. `createMcpGateRunner` judges a launch command as command TEXT instead.
+  return createMcpGateRunner(config) as mcpHost.NemesisGate;
 }
 
 export interface McpCmdDeps {
   manager: McpHostManager;
   confirm: (prompt: string) => Promise<boolean>;
+  /**
+   * The gate a `--dry-run` preview consults — the SAME one `manager` would use for a real add.
+   *
+   * Injected rather than freshly constructed, so a preview and the real thing can never disagree
+   * about a verdict. Building a new real gate here made the preview ignore an injected one
+   * entirely, which is the "two copies of one decision" pattern this repo keeps being bitten by.
+   */
+  gate?: mcpHost.NemesisGate;
 }
 
 function defaultMcpDeps(home: string = prometheusHome()): McpCmdDeps {
   // The http transport resolves `--auth-secret <ref>` bearer tokens through the OS keychain at
   // connect time; the raw token never lands in mcp-servers.json (only the ref name does).
   const secrets = createCliSecretsStore();
+  const gate = createCliMcpGate();
   const manager = new mcpHost.McpHostManager({
     store: new CliMcpConfigStore(mcpStorePath(home)),
-    gate: createCliMcpGate(),
+    gate,
     transport: createMcpTransportFactory({
       resolveAuth: (ref: string) => secrets.get(MCP_AUTH_SERVICE, ref),
     }),
+    onToolDrift: (info) => appendMcpAudit(home, { event: "tool-drift", ...info }),
   });
-  return { manager, confirm: async () => false }; // non-interactive default = deny (never-force)
+  return { manager, gate, confirm: async () => false }; // non-interactive default = deny (never-force)
 }
 
 function flagStr(ctx: CliContext, key: string): string | undefined {
@@ -70,8 +78,21 @@ export async function runMcpCommand(
   ctx: CliContext,
   deps: McpCmdDeps = defaultMcpDeps(),
 ): Promise<CommandOutcome> {
-  const sub = ctx.args.command[1] ?? "list";
+  // `unmatchedSub` (parse.ts) distinguishes "a second word WAS typed but didn't match
+  // list/add/remove/test" from "nothing was typed" — without it a typo silently fell
+  // through to the "list" branch below instead of being reported.
+  const sub = ctx.args.unmatchedSub ?? ctx.args.command[1] ?? "list";
   const { manager } = deps;
+
+  if (sub !== "list" && sub !== "add" && sub !== "remove" && sub !== "test") {
+    return {
+      text: c.red(
+        `prometheus mcp ${sub}: unknown mcp verb.\n  ${c.dim("try:")} list · add · remove · test`,
+      ),
+      json: { ok: false, error: "unknown-verb", command: `mcp ${sub}` },
+      exitCode: 1,
+    };
+  }
 
   if (sub === "add") {
     const name = ctx.args.positionals[0];
@@ -158,13 +179,54 @@ export async function runMcpCommand(
         health: "unknown",
       };
     }
+    /**
+     * `--dry-run` PREVIEWS. It used to be ignored entirely.
+     *
+     * `dry-run` is a declared global boolean (`parse.ts`), forwarded to the engine for every
+     * registry-routed verb, and shown in `--help` — so a user who types it on a prom-native verb
+     * reasonably expects a preview. `mcp add --dry-run` instead ran the full add: gated, wrote
+     * `mcp-servers.json`, and the server appeared in `mcp list`. Measured end to end.
+     *
+     * The GATE still runs, because "what would happen" includes "would nemesis allow it" — that
+     * is the useful half of a preview here. Nothing is persisted.
+     */
+    if (ctx.args.dryRun) {
+      const spec = mcpHost.gateTargetSpec(cfg);
+      const verdict = await (deps.gate ?? createCliMcpGate())(spec.target, spec.kind);
+      const blocked = mcpHost.verdictBlocks(verdict);
+      return {
+        text: blocked
+          ? c.red(`mcp add (preview): "${name}" WOULD BE BLOCKED by nemesis (${verdict.verdict}).`)
+          : `${c.dim("preview:")} would add MCP server ${c.bold(name)} ${c.dim(`(${transportLabel(cfg)})`)} — nothing written`,
+        json: { ok: !blocked, preview: true, id: name, gate: verdict },
+        exitCode: blocked ? 2 : 0,
+      };
+    }
     const stored = await manager.addServer(cfg); // nemesis-gated inside (http → URL is gated)
     if (stored.health === "blocked") {
+      /**
+       * "not added" was FALSE. `addServer` deliberately PERSISTS a blocked server —
+       * `enabled:false, health:"blocked"` — and that record is load-bearing: `connect()` refuses
+       * on it and the re-enable path checks it, so the row is what makes the block stick. The
+       * control holds; only the report was wrong, and it was wrong in the direction that matters,
+       * telling the user nothing had been written while `mcp list` showed the server and
+       * `mcp-servers.json` contained it.
+       */
       return {
         text: c.red(
-          `mcp add: "${name}" was BLOCKED by nemesis (${stored.gate?.verdict}) — not added.`,
+          `mcp add: "${name}" was BLOCKED by nemesis (${stored.gate?.verdict}).\n` +
+            `  recorded as blocked and DISABLED — it cannot be started. ` +
+            `Remove it with \`prometheus mcp remove ${name} --yes\`.`,
         ),
-        json: { ok: false, error: "gate-blocked", id: name, gate: stored.gate },
+        json: {
+          ok: false,
+          error: "gate-blocked",
+          id: name,
+          stored: true,
+          enabled: false,
+          health: "blocked",
+          gate: stored.gate,
+        },
         exitCode: 2,
       };
     }
@@ -191,6 +253,14 @@ export async function runMcpCommand(
         text: `to remove "${name}", re-run with ${c.bold("--yes")}`,
         json: { ok: false, error: "confirm-required", id: name },
         exitCode: 2,
+      };
+    }
+    // `--dry-run` previews here too — it used to remove the server outright. Measured.
+    if (ctx.args.dryRun) {
+      return {
+        text: `${c.dim("preview:")} would remove ${c.bold(name)} — nothing changed`,
+        json: { ok: true, preview: true, id: name },
+        exitCode: 0,
       };
     }
     await manager.removeServer(name);
@@ -266,10 +336,13 @@ function healthCell(h: mcpHost.McpServerHealth): string {
   }
 }
 
+/** A LOCAL twin of `sidecar-cmd.ts`'s `usageError` — kept in step with it by the CLI-084 guard. */
 function usage(command: string, usageStr: string): CommandOutcome {
   return {
     text: `prometheus ${command}: missing argument.\n  ${c.dim("usage:")} prometheus ${command} ${usageStr}`,
     json: { ok: false, error: "missing-argument", command },
-    exitCode: 2,
+    // Bad args are class 1; 2 is the fail-closed security-block signal. This copy still said 2
+    // after `usageError` moved — the exact drift `prom.test.ts`'s source-level guard now catches.
+    exitCode: 1,
   };
 }

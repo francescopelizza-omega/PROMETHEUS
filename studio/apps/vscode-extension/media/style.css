@@ -119,3 +119,21 @@ body {
   opacity: 0.5;
   cursor: default;
 }
+
+#cancel {
+  flex: 0 0 auto;
+  padding: 5px 12px;
+  cursor: pointer;
+  color: var(--vscode-button-secondaryForeground, var(--vscode-foreground));
+  background: var(--vscode-button-secondaryBackground, transparent);
+  border: 1px solid var(--vscode-button-border, var(--vscode-panel-border, transparent));
+  border-radius: 3px;
+}
+
+#cancel:hover {
+  background: var(--vscode-button-secondaryHoverBackground, var(--vscode-toolbar-hoverBackground));
+}
+
+#cancel[hidden] {
+  display: none;
+}

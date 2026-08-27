@@ -125,31 +125,55 @@ export function openTab(state: TabsState, uri: string, opts: OpenOpts): TabsStat
 }
 
 /**
- * Close a tab (file 07 §3.1). The group's active pointer falls back to the nearest
- * remaining tab IN THE SAME GROUP (the one before it, else the one after), or is
- * dropped when the group empties. Immutable; a no-op for an unknown uri.
+ * Close ONE tab row (file 07 §3.1) — a (group, uri) pair, not every row sharing the uri.
+ *
+ * `uri` stops being a unique key the moment a split exists: `splitActive` deliberately copies
+ * the active doc into a NEW group under the SAME uri so both panes share Monaco's ITextModel.
+ * This filtered on `d.uri !== uri`, so closing one pane's tab deleted the row from EVERY group —
+ * open a file, split right, click × on either side, and BOTH panes vanish along with the split
+ * itself. `activeByGroup` was then left pointing at a doc that no longer existed, directly
+ * contradicting this docstring's "or is dropped when the group empties".
+ *
+ * `group` is optional so existing callers keep compiling; omitted, it closes the row in the
+ * doc's own group (the first match), which is the single-pane case and is what they meant.
+ *
+ * The group's active pointer falls back to the nearest remaining tab IN THE SAME GROUP (the one
+ * before it, else the one after), and any group left with no docs at all loses its pointer.
+ * Immutable; a no-op for an unknown uri.
  */
-export function closeTab(state: TabsState, uri: string): TabsState {
-  const target = findDoc(state, uri);
+export function closeTab(state: TabsState, uri: string, group?: number): TabsState {
+  const target =
+    group === undefined
+      ? findDoc(state, uri)
+      : state.docs.find((d) => d.uri === uri && d.group === group);
   if (!target) return state;
+  const g = target.group;
 
-  const idxInGroup = state.docs
-    .filter((d) => d.group === target.group)
-    .findIndex((d) => d.uri === uri);
-  const docs = state.docs.filter((d) => d.uri !== uri);
+  const idxInGroup = state.docs.filter((d) => d.group === g).findIndex((d) => d.uri === uri);
+  const docs = state.docs.filter((d) => !(d.uri === uri && d.group === g));
   const activeByGroup = { ...state.activeByGroup };
 
-  if (activeByGroup[target.group] === uri) {
-    const survivors = docs.filter((d) => d.group === target.group);
+  if (activeByGroup[g] === uri) {
+    const survivors = docs.filter((d) => d.group === g);
     if (survivors.length === 0) {
-      delete activeByGroup[target.group];
+      delete activeByGroup[g];
     } else {
       // pick the previous tab in-group, else the first survivor.
       const next = survivors[Math.max(0, Math.min(idxInGroup - 1, survivors.length - 1))];
-      activeByGroup[target.group] = next ? next.uri : (survivors[0] as TabDoc).uri;
+      activeByGroup[g] = next ? next.uri : (survivors[0] as TabDoc).uri;
     }
   }
-  return { ...state, docs, activeByGroup };
+  // No pointer may outlive its group. A group can empty through a path that never touched its
+  // own active pointer, which is how a closed split left `{"1": "…"}` behind with no docs at all.
+  for (const key of Object.keys(activeByGroup)) {
+    const gid = Number(key);
+    if (!docs.some((d) => d.group === gid)) delete activeByGroup[gid];
+  }
+  // Focus must land on a group that still exists, or the next open would target a dead pane.
+  const focusedGroup = docs.some((d) => d.group === state.focusedGroup)
+    ? state.focusedGroup
+    : (docs[0]?.group ?? 0);
+  return { ...state, docs, activeByGroup, focusedGroup };
 }
 
 /** Activate an already-open tab (the model-swap trigger). No-op for unknown uri. */

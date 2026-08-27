@@ -346,11 +346,39 @@ def _quarantine(stage: Path) -> Path:
 
 
 def _move_to_live(stage: Path, live: Path) -> None:
-    """Atomically promote the staged tree to the live library location."""
+    """Promote the staged tree to the live library location, keeping the old one until it lands.
+
+    The docstring here said "atomically" while the body did `rmtree(live)` and THEN `move(...)`
+    — two steps, destructive one first. Between them the previously admitted, already-gated model
+    was simply gone, and if the move then failed (disk full, a cross-device copy fallback, a
+    permission error, power loss) the user was left with nothing at `live` and no backup. The
+    `ignore_errors=True` made it worse in a quieter way: a partial delete was swallowed, so a
+    stale mixture of old and new files could survive into the tree the manifest then vouches for.
+
+    The staged bytes themselves were never at risk — CPython's `shutil.move` copies before it
+    removes the source, so a failed promotion leaves the vetted stage intact and `admit`
+    re-runnable. What was destroyed is the working model being REPLACED. So the old tree is moved
+    aside first and only removed once the new one is in place; if anything throws, it goes back.
+    This mirrors what the engine's own layout path already does with `_backup_live`.
+    """
     live.parent.mkdir(parents=True, exist_ok=True)
+    backup: Optional[Path] = None
     if live.exists():
-        shutil.rmtree(live, ignore_errors=True)
-    shutil.move(str(stage), str(live))
+        backup = live.with_name(f"{live.name}.replacing-{os.getpid()}")
+        # a leftover from a previous crashed run must not block the rename
+        if backup.exists():
+            shutil.rmtree(backup, ignore_errors=True)
+        os.rename(live, backup)
+    try:
+        shutil.move(str(stage), str(live))
+    except Exception:
+        if backup is not None and not live.exists():
+            os.rename(backup, live)  # put the working model back
+            backup = None
+        raise
+    finally:
+        if backup is not None:
+            shutil.rmtree(backup, ignore_errors=True)
 
 
 def _write_manifest(

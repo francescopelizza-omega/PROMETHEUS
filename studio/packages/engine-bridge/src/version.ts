@@ -25,6 +25,7 @@
  */
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
+import { safeChildEnv } from "./safe-env.js";
 
 import { DEFAULT_TIMEOUT_MS, type EngineConfig, resolveEngine } from "./config.js";
 
@@ -142,7 +143,12 @@ function probeVersionRaw(config: EngineConfig, timeoutMs: number): Promise<strin
         shell: false,
         stdio: ["ignore", "pipe", "pipe"],
         cwd: config.cwd,
-        env: process.env,
+        // safeChildEnv, like every other spawn in this package (run.ts, security/gate.ts,
+        // catalog.ts, sidecar-runner.ts, serve-host.ts, system-probe.ts, modelhub/localai.ts).
+        // This was the ONE that handed the raw parent environment to a python child, so an
+        // exported PYTHONPATH / PYTHONSTARTUP was re-opened on every version probe — and the
+        // probe fires on every sidecar health check, i.e. at desktop and CLI startup.
+        env: safeChildEnv(),
       });
     } catch {
       resolve("");

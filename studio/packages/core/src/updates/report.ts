@@ -110,7 +110,10 @@ export function toUpdatesJson(r: UpdateReport): UpdatesJson {
       name: `ollama:${tag}`,
       current: null,
       latest: null,
-      severity: "update",
+      // NOT "update": this diff compares the LOCAL digest against the local digest recorded at
+      // the previous check, so a tag lands here after the user PULLED it. It is a record of a
+      // local change, not evidence that a newer version exists upstream — see `hasUpdates`.
+      severity: "none",
       action: `ollama pull ${tag}`,
     });
   }
@@ -128,10 +131,22 @@ export function toUpdatesJson(r: UpdateReport): UpdatesJson {
 
 /** Did anything actionable turn up? */
 export function hasUpdates(r: UpdateReport): boolean {
+  /**
+   * `models.diff.changed` is NOT an available update.
+   *
+   * `fetchOllamaTags` reads the LOCAL daemon, so `diffDigests` compares this run's local digests
+   * against the ones recorded at the previous check. A tag therefore lands in `changed` exactly
+   * when the user has ALREADY pulled it — and Prometheus then greeted them at startup with
+   * "↑ Updates available: 1 local model" and told them to `ollama pull` the thing they had just
+   * pulled. The inverse was worse: a genuinely stale model, untouched since the last check, has
+   * an unchanged digest and was reported as "installed models up to date".
+   *
+   * Answering "is a newer version available" needs the registry, which nothing here queries.
+   * Until something does, this must not drive an update nudge.
+   */
   return (
     r.self.updateAvailable ||
     r.clis.some((c) => c.updateAvailable) ||
-    r.models.diff.changed.length > 0 ||
     r.models.suggestions.length > 0
   );
 }
@@ -139,13 +154,19 @@ export function hasUpdates(r: UpdateReport): boolean {
 /** Count actionable items (for the startup one-liner). */
 export function countUpdates(r: UpdateReport): {
   clis: number;
+  /** models KNOWN to be out of date. Always 0 until something queries the registry. */
   models: number;
+  /** models whose local digest moved since the last check (i.e. the user pulled them). */
+  modelsChanged: number;
   suggestions: number;
   self: number;
 } {
   return {
     clis: r.clis.filter((c) => c.updateAvailable).length,
-    models: r.models.diff.changed.length,
+    // 0, deliberately: nothing here checks a registry, so no local model can be KNOWN to be out
+    // of date. The digest diff is reported separately as the local change it actually is.
+    models: 0,
+    modelsChanged: r.models.diff.changed.length,
     suggestions: r.models.suggestions.length,
     self: r.self.updateAvailable ? 1 : 0,
   };
@@ -203,11 +224,16 @@ export function formatUpdateReport(r: UpdateReport): string {
   lines.push("");
   lines.push("Local models (Ollama)");
   if (r.models.diff.changed.length > 0) {
-    lines.push("  ↑ newer layers available — pull to update:");
-    for (const tag of r.models.diff.changed) lines.push(`      ollama pull ${tag}`);
-  } else {
-    lines.push("  installed models up to date");
+    // Say what this IS. It was labelled "newer layers available — pull to update", which is the
+    // opposite of the truth: these are the tags whose LOCAL digest moved since the last check.
+    lines.push("  changed locally since the last check (already pulled):");
+    for (const tag of r.models.diff.changed) lines.push(`      ${tag}`);
   }
+  // No "up to date" claim either way: nothing here asks the registry what the current digest is,
+  // so Prometheus does not know. `ollama pull <tag>` is a cheap no-op when you are current.
+  lines.push(
+    "  (local models are not checked against the registry — `ollama pull <tag>` to refresh one)",
+  );
   if (r.models.suggestions.length > 0) {
     lines.push("  Suggested free coding models you don't have:");
     for (const m of r.models.suggestions) {

@@ -1,3 +1,4 @@
+import assert from "node:assert/strict";
 /**
  * tmux/tmux.test.ts — the P6 tmux command builder + runner (node:test, source import).
  *
@@ -11,7 +12,9 @@
  *   - runTmux is crash-free: missing binary / new session / existing session /
  *     spawn failure / thrown runner each return a code AND restore the tty.
  */
-import assert from "node:assert/strict";
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 
 import type { ParsedArgs } from "../parse.js";
@@ -321,4 +324,32 @@ test("runTmux: a throwing restoreTty never escapes (exit path stays crash-free)"
     },
   });
   assert.equal(code, 2); // missing-binary path, but restore throw is swallowed.
+});
+
+test("the DEFAULT PATH lookup — no injected lookupBin — finds a real binary", () => {
+  /**
+   * `tmuxAvailable()` is called in production without a `lookupBin`, so it fell through to
+   * `defaultLookupBin`, which lazy-loaded node:fs and node:path off `globalThis.require`. That
+   * is undefined in this ESM package, so the loader bailed and the lookup returned null for
+   * EVERY binary: `tmuxAvailable()` was hard-wired to false. `--tmux` degraded silently and
+   * `chat --cli X --tmux` told users "tmux not found on PATH" on machines where tmux was
+   * installed and on PATH. Every existing test passes a fake `lookupBin`, so none of them
+   * touched the code that actually shipped.
+   *
+   * A temp dir holding an executable literally named `tmux` makes this deterministic — it does
+   * not matter whether the machine running the suite has tmux.
+   */
+  const dir = mkdtempSync(join(tmpdir(), "prom-tmux-path-"));
+  writeFileSync(join(dir, "tmux"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+
+  assert.equal(
+    tmuxAvailable({ env: { PATH: dir } }),
+    true,
+    "the real PATH probe could not see a binary sitting in the only PATH entry",
+  );
+  // and it still says no when the directory genuinely holds nothing
+  assert.equal(
+    tmuxAvailable({ env: { PATH: mkdtempSync(join(tmpdir(), "prom-tmux-empty-")) } }),
+    false,
+  );
 });

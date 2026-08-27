@@ -171,7 +171,49 @@ export function runTodoTool(
   store: TodoStore,
 ): { ok: boolean; summary: string } | null {
   if (name === "todowrite") {
-    const items = store.write(args.todos);
+    /**
+     * REFUSE rather than wipe.
+     *
+     * `store.write` runs everything through `parseTodos`, which is deliberately forgiving — it
+     * would rather keep a task with a typo'd status than lose the plan. But a payload that is
+     * not a list at all (the field omitted, a bare string, an object) parsed to the EMPTY list,
+     * so the store was cleared and the model was told "task list updated" with `ok: true`. It
+     * had just lost its own plan, mid-task, and had no way to know. Reproduced: a two-item list,
+     * then `todowrite {}` → 0 items, `ok: true`.
+     *
+     * An explicitly EMPTY array is a legitimate "clear the list" and still goes through.
+     */
+    const raw = args.todos;
+    // A JSON string holding an array is accepted (some models send one); anything else that is
+    // not an array is a mistake, not an instruction to clear the list.
+    let list: unknown[] | null = Array.isArray(raw) ? raw : null;
+    if (list === null && typeof raw === "string") {
+      try {
+        const decoded: unknown = JSON.parse(raw);
+        list = Array.isArray(decoded) ? decoded : null;
+      } catch {
+        list = null;
+      }
+    }
+    if (list === null) {
+      const existing = store.list();
+      const got =
+        raw === undefined ? "nothing" : typeof raw === "string" ? "a plain string" : typeof raw;
+      return {
+        ok: false,
+        summary: `todowrite: 'todos' must be an array of {text, status} — got ${got}. The existing task list is UNCHANGED (${todoSummary(existing)}).\n${renderTodos(existing)}`,
+      };
+    }
+    const parsed = parseTodos(list);
+    const supplied = list.length;
+    if (supplied > 0 && parsed.length === 0) {
+      const existing = store.list();
+      return {
+        ok: false,
+        summary: `todowrite: none of the ${supplied} entries had usable text, so nothing was written. Each entry needs a non-empty 'text'. The existing task list is UNCHANGED (${todoSummary(existing)}).\n${renderTodos(existing)}`,
+      };
+    }
+    const items = store.write(list);
     return {
       ok: true,
       summary: `task list updated (${todoSummary(items)})\n${renderTodos(items)}`,

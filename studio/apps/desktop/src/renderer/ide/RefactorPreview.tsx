@@ -27,7 +27,7 @@ import { Button, Panel } from "@prometheus/ui";
 import { type ReactElement, useEffect, useRef, useState } from "react";
 
 import { Z } from "@prometheus/ui";
-import { streamChat } from "./ai/ai-client.js";
+import { StreamPausedError, streamChat } from "./ai/ai-client.js";
 import { toEndpoints } from "./ai/endpoints.js";
 import { loadMonaco } from "./monaco-loader.js";
 import {
@@ -970,13 +970,21 @@ export function RefactorHost(): ReactElement | null {
       }
     } catch (err) {
       if (stRef.current?.detail !== current.detail) return;
-      setSt({
-        ...current,
-        stage: "params",
-        aiOffer: true,
-        error: `local AI generation failed: ${err instanceof Error ? err.message : String(err)}`,
-      });
-      return;
+      // A pause (idle watchdog), not a failure — if the model had already produced SOME code
+      // before going quiet, `out` holds real, reviewable content and falls through to the
+      // normal preview below rather than being discarded for a from-scratch retry.
+      if (!(err instanceof StreamPausedError) || out.trim() === "") {
+        setSt({
+          ...current,
+          stage: "params",
+          aiOffer: true,
+          error:
+            err instanceof StreamPausedError
+              ? "the model went idle — paused before producing any code (nothing lost). Retry."
+              : `local AI generation failed: ${err instanceof Error ? err.message : String(err)}`,
+        });
+        return;
+      }
     }
     if (stRef.current?.detail !== current.detail) return;
     if (out.trim() === "") {

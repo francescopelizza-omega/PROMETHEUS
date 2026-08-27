@@ -7,7 +7,26 @@
  * loads an installed extension's main module, and calls its `ActivateFn` with a
  * PERMISSION-BOUND ExtensionContext. The context's backends are reverse-RPC proxies: every
  * capability call posts a host-rpc frame to main (which gates it via dispatchWebviewRpc) and
- * awaits the reply — so the utility process holds NO ambient authority.
+ * awaits the reply.
+ *
+ * WHAT THE PERMISSION MODEL ACTUALLY BOUNDS — read this before trusting it.
+ *
+ * `buildCapabilities(manifest.permissions)` gates the ExtensionContext API and nothing else.
+ * This is a full Node process: the module loaded by `await import(req.mainPath)` below can
+ * `import("node:child_process")`, `node:fs` or `node:net` directly and never touch a single
+ * proxy. The declared permissions are therefore a description of what an extension says it
+ * needs through the SUPPORTED API — not a confinement of what its code can do.
+ *
+ * This header used to assert the opposite — that the process is stripped of ambient authority
+ * altogether — which is simply false, and is the more dangerous half: a reader who believes it
+ * will treat an unreviewed `.promext` as sandboxed. It is not. Forking into a separate process buys ISOLATION FROM MAIN
+ * AND THE RENDERER (a crash or a hang here cannot take the window with it, and the extension
+ * cannot reach Electron APIs) — that is the property this file genuinely provides.
+ *
+ * The load-bearing control on untrusted extension code is therefore INSTALL-TIME: the
+ * `.promext` is nemesis-gated before it is ever unpacked into the extensions directory
+ * (`main/ext-host.ts` → `isBlocked`), which is why that gate must stay fail-closed. Treat an
+ * extension as code you are choosing to RUN, not as code that is boxed in.
  *
  * Imports only @prometheus/core (pure) + node built-ins — no electron.
  */

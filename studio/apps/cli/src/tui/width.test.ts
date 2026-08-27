@@ -87,3 +87,30 @@ test("graphemeOffset + graphemeSlice map grapheme indices to code units (CLI-065
   assert.equal(graphemeSlice("你好世界", 1, 3), "好世");
   void s;
 });
+
+test("clipToWidth is ANSI-aware — SGR bytes are not columns, and are never cut in half", () => {
+  /**
+   * It iterated raw code points, so an SGR run spent four visible columns (`[`, `3`, `1`, `m` —
+   * ESC itself is zero). A styled string was over-truncated by four columns per colour change,
+   * disagreeing with the `stringWidth` every caller had already measured with. Worse, a cut
+   * landing INSIDE the sequence emitted a bare `\x1b[` — half an escape, which the terminal
+   * completes by eating the next character, so clipping a coloured line corrupted the line
+   * after it.
+   */
+  const RED = "\x1b[31m";
+  const RESET = "\x1b[0m";
+  const styled = `${RED}hello world${RESET} tail`;
+  assert.equal(stringWidth(styled), 16);
+
+  for (const w of [4, 8, 12, 15]) {
+    const out = clipToWidth(styled, w);
+    assert.ok(stringWidth(out) <= w, `clip(${w}) produced ${stringWidth(out)} visible columns`);
+  }
+  // the styling survives, and no partial escape is emitted
+  const cut = clipToWidth(`${RED}abcdefgh`, 2);
+  assert.ok(cut.startsWith(RED), "a whole SGR run is kept");
+  assert.ok(!/\x1b(?!\[[0-9;]*m)/.test(cut), "a bare/severed ESC must never reach the terminal");
+  // plain text is unchanged
+  assert.equal(clipToWidth("abcdefghij", 5), "abcd…");
+  assert.equal(clipToWidth("short", 20), "short");
+});

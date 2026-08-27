@@ -54,8 +54,24 @@ export class CircuitBreaker {
     this.now = opts.now ?? Date.now;
   }
 
-  /** Run `fn` through the breaker. Throws `CircuitOpenError` when open + cooling down. */
-  async exec<T>(fn: () => Promise<T>): Promise<T> {
+  /**
+   * Run `fn` through the breaker. Throws `CircuitOpenError` when open + cooling down.
+   *
+   * `opts.isEndpointFailure` decides whether a thrown error says anything about the ENDPOINT's
+   * health. It defaults to "yes, everything does", which is what every existing caller wants —
+   * but a turn the USER cancelled is not evidence that the model is down, and counting it as
+   * such meant five cancels in a row (routine with a slow local model) opened the breaker and
+   * refused the next perfectly ordinary message for 30 seconds. Reproduced against the real
+   * shared `endpointBreaker`: five AbortErrors, then `CircuitOpenError` on a request that would
+   * have succeeded.
+   *
+   * A non-failure is NOT counted as a success either — it leaves the breaker exactly as it was,
+   * because a cancelled request is no evidence in either direction.
+   */
+  async exec<T>(
+    fn: () => Promise<T>,
+    opts: { isEndpointFailure?: (err: unknown) => boolean } = {},
+  ): Promise<T> {
     this.maybeHalfOpen();
     if (this.state === "open") {
       throw new CircuitOpenError(this.remainingCoolDown());
@@ -69,7 +85,8 @@ export class CircuitBreaker {
       this.onSuccess();
       return result;
     } catch (err) {
-      this.onFailure();
+      if (opts.isEndpointFailure === undefined || opts.isEndpointFailure(err)) this.onFailure();
+      else this.probes = Math.max(0, this.probes - 1); // a half-open probe that never happened
       throw err;
     }
   }

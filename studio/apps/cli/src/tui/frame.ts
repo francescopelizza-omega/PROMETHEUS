@@ -1,6 +1,9 @@
+import { agent } from "@prometheus/core";
+
 import { renderDropdown } from "./autocomplete.js";
 import { layoutComposer, reverseSearchLine } from "./input-box.js";
 import { renderInvokeOverlay } from "./invoke-overlay.js";
+import { renderListOverlay } from "./list-overlay.js";
 /**
  * tui/frame.ts — compose the whole bottom chrome into ONE frame (pure).
  *
@@ -18,7 +21,16 @@ import { renderInvokeOverlay } from "./invoke-overlay.js";
 import { type ColorCaps, paint, painter } from "./palette.js";
 import { isPathOpen, toAcView } from "./path-mentions.js";
 import type { TuiState } from "./reducer.js";
-import { type StatusModel, effortBadge, statusLines } from "./status.js";
+import {
+  type StatusModel,
+  type TraitSpan,
+  effortBadge,
+  statusLines,
+  traitCells,
+  traitFocusHint,
+  traitRailLine,
+  traitRailSpans,
+} from "./status.js";
 import { clipToWidth, graphemeSlice, splitGraphemes, stringWidth, wrapLine } from "./width.js";
 
 export interface FrameInput {
@@ -40,6 +52,12 @@ export interface Frame {
    *  collapse. `firstBodyRow` = frame line of the first text row; `textLeft` = 0-based display
    *  column where text starts; `textWidth` = wrap width used for the text. */
   box?: { firstBodyRow: number; textLeft: number; textWidth: number };
+  /**
+   * The trait rail's screen geometry, so a click can be mapped back to a cell (the mouse twin of
+   * ⌃T). `row` is the frame line the rail is painted on; `spans` are its cells' display-column
+   * ranges measured from `textLeft`. Absent whenever no rail is rendered.
+   */
+  rail?: { row: number; textLeft: number; spans: TraitSpan[] };
 }
 
 const DEFAULT_PLACEHOLDER = 'Try "scan ./"  ·  type / for commands  ·  ⇧⇥ to change mode';
@@ -79,10 +97,39 @@ export function renderFrame(input: FrameInput): Frame {
   const dropdown = slashDropdown.length > 0 ? slashDropdown : pathDropdown;
   lines.push(...dropdown);
 
+  /**
+   * How many rows the chrome below an overlay needs: 3 composer + 2 status, plus the
+   * permission-mode indicator when there is one.
+   *
+   * Both overlays used a flat `rows - 5`, which counts only TWO status lines. `statusLines`
+   * emits a THIRD — the mode indicator — in acceptEdits/plan/bypassPermissions/yolo. The
+   * composer budget further down already subtracts `indicatorRows`, but it floors at one body
+   * row (`Math.max(1, …)`), so the extra line was never absorbed and the frame came out at
+   * rows + 1 — breaking the `lines.length === physical rows` invariant the redraw depends on,
+   * the same invariant the rows=7 overrun broke before it.
+   *
+   * Computed ONCE here and reused by the budget below, so the two cannot disagree about how
+   * tall the chrome is.
+   */
+  const indicatorRows = agent.permissionModeMeta(state.permMode).indicator ? 1 : 0;
+  const overlayRows = rows - 5 - indicatorRows;
+  /**
+   * An overlay draws title + filter + at least one row + hint — four lines, minimum. Below that
+   * there is genuinely no room for it beside the chrome, and the old `Math.max(4, …)` floor took
+   * those four rows anyway, so the frame simply came out taller than the terminal. Dropping the
+   * overlay keeps the `lines.length === physical rows` invariant the redraw depends on; the
+   * overlay state is untouched, so it appears as soon as the terminal has room.
+   */
+  const showOverlay = overlayRows >= 4;
+
   // ── /invoke overlay (CLI-059) — modal, above the box; clamps to the free rows ─── //
-  if (state.invokeOverlay) {
-    const ovRows = Math.max(4, rows - 5);
-    lines.push(...renderInvokeOverlay(state.invokeOverlay, width, ovRows, caps));
+  if (state.invokeOverlay && showOverlay) {
+    lines.push(...renderInvokeOverlay(state.invokeOverlay, width, overlayRows, caps));
+  }
+
+  // ── generic list-overlay (CLI-1xx) — modal, above the box; clamps to the free rows ─── //
+  if (state.listOverlay && showOverlay) {
+    lines.push(...renderListOverlay(state.listOverlay, width, overlayRows, caps));
   }
 
   // ── reverse-i-search prompt line (CLI-019), only while active ─────────────── //
@@ -101,27 +148,80 @@ export function renderFrame(input: FrameInput): Frame {
   // ── composer box (red border in bypass / yolo mode) ──────────────────────── //
   const borderRole =
     state.permMode === "bypassPermissions" || state.permMode === "yolo" ? "danger" : "accent";
-  const boxMaxRows = Math.max(1, Math.min(8, rows - dropdown.length - 4));
-  // Reasoning-effort state rides in the composer's own bottom border rather than the status
-  // bar: it changes when the MODEL changes, and the border of the box you are typing into is
-  // the one piece of chrome that cannot be scrolled away or lost in a dense chip row.
-  const badge = effortBadge(status);
+  /**
+   * The model's traits ride in the composer's own chrome rather than the status bar: they
+   * change when the MODEL changes, and the box you are typing into is the one piece of chrome
+   * that cannot be scrolled away or lost in a dense chip row.
+   *
+   * Three renderings, picked by what the terminal can actually afford:
+   *   1. ≤4 traits            → one strip inlaid in the bottom border;
+   *   2. >4 traits, room      → the two-row panel (3 extra lines: rule + 2 rows);
+   *   3. >4 traits, no room   → the effort cell alone — of the set, the only one the user can act on.
+   *
+   * Panel width is `width - 4`: the box spends 1 column on each border and 1 pad on each side.
+   */
+  /**
+   * Rows left for the composer.
+   *
+   * Counts everything ALREADY emitted — `lines` at this point holds the dropdown AND the
+   * /invoke or list overlay AND the reverse-i-search prompt — not just the dropdown. The old
+   * `rows - dropdown.length - 4` under-counted by the whole overlay, which was survivable
+   * while the composer was three lines and is not now that the trait panel can add three more:
+   * with an overlay open the frame overran `rows` by exactly the panel's height, breaking the
+   * `lines.length === physical rows` invariant the redraw math depends on.
+   */
+  /**
+   * The permission-mode INDICATOR is a third status line.
+   *
+   * `statusLines` emits [status bar, indicator?, key hint] — two lines by default and THREE
+   * whenever a non-default mode is active. This budget subtracted a fixed 4, so in
+   * acceptEdits / plan / bypassPermissions / yolo the frame came out one line taller than the
+   * terminal at exactly the height where the composer is already down to its minimum: a
+   * 7-row terminal rendered 8 lines, breaking the `lines.length === physical rows` invariant
+   * the redraw math depends on — the same class of overrun the comment above describes for
+   * overlays.
+   */
+  const room = rows - lines.length - 4 - indicatorRows;
+  /**
+   * The rail's compartment: the `├──┤` rule + the rail itself, + the key-hint row while ⌃T
+   * focus is open. The old two-row grid cost three lines and spread five short facts across a
+   * ragged 3×2 table with a hole in it; one dense line says the same thing and leaves room for
+   * the hint that makes the row operable.
+   */
+  const cells = traitCells(status);
+  const hint = state.traitFocus ? traitFocusHint(cells, state.traitFocus) : "";
+  const railLines = 1 + 1 + (hint ? 1 : 0); // rule + rail (+ hint)
+  const rail =
+    room - railLines >= 1
+      ? traitRailLine(cells, state.traitFocus, Math.max(1, width - 4), caps)
+      : null;
+  const panel = rail ? [rail, ...(hint ? [p.muted(hint)] : [])] : null;
+  const boxMaxRows = Math.max(1, Math.min(8, panel ? room - railLines : room));
+  const badge = panel ? undefined : (effortBadge(status) ?? effortBadge(status, { traits: false }));
   const composer = layoutComposer(state.input, state.cursor, width, {
     prompt: "›",
     placeholder: input.placeholder ?? DEFAULT_PLACEHOLDER,
     maxRows: boxMaxRows,
     ...(badge ? { badge } : {}),
+    ...(panel ? { panel } : {}),
     paint: {
       border: (s) => p[borderRole](s),
       prompt: (s) => p.brand(s),
       placeholder: (s) => p.muted(s),
       // an unavailable knob reads as muted (a fact), a degraded one as a warning (a caveat).
+      // `pbadge` paints BOTH the inlaid badge and the panel rows. The rail arrives already
+      // colored cell-by-cell (green on / amber off / dim unsupported), so wrapping it in one
+      // more role would put a color code in front of a string whose first cell immediately
+      // resets it — the outer tint would apply to the gaps and nothing else. Identity there;
+      // the badge fallback keeps its own tinting.
       badge: (s) =>
-        status.effort && !status.effort.available
-          ? p.muted(s)
-          : status.effort?.degraded
-            ? p.warn(s)
-            : p.muted(s),
+        panel
+          ? s
+          : status.effort && !status.effort.available
+            ? p.muted(s)
+            : status.effort?.degraded
+              ? p.warn(s)
+              : p.muted(s),
       // CLI-063: paint live `[Pasted text #N, L lines]` chips in accent so they read as tokens,
       // not typed text (ANSI is zero-width → the caret math upstream is unaffected).
       text: (s) => {
@@ -155,6 +255,17 @@ export function renderFrame(input: FrameInput): Frame {
     cursorCol: composer.cursorCol,
     // text body starts after `│ ` + the 2-cell gutter → column 4 (0-based); wrap width = width-6.
     box: { firstBodyRow: boxTop + 1, textLeft: 4, textWidth: Math.max(1, width - 6) },
+    // A panel row is laid out as `│ <content> │`, so its content starts at column 2 — two
+    // columns left of the text body, which carries the extra 2-cell prompt gutter.
+    ...(panel && composer.panelRow !== undefined
+      ? {
+          rail: {
+            row: boxTop + composer.panelRow,
+            textLeft: 2,
+            spans: traitRailSpans(cells),
+          },
+        }
+      : {}),
   };
 }
 

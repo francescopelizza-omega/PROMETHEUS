@@ -368,7 +368,9 @@ def _gate_install(
     pip = _pip_for(env)
     install_action = ["install", "--upgrade"] if upgrade else ["install"]
     plan = {
-        "download": pip + ["download", "--no-deps", "--dest", "<staging>",
+        # the PREVIEW must describe what actually runs — see the staging step below for why
+        # the dependency closure is fetched rather than the named specs alone
+        "download": pip + ["download", "--dest", "<staging>",
                            *(extra_download or []), *specs],
         "gate": ["nemesis", "gate", "<staging>", *_NEMESIS_GATE_FLAGS],
         "install": pip + install_action + ["--no-index", "--find-links", "<staging>",
@@ -383,7 +385,21 @@ def _gate_install(
     # 1) stage — bring the actual bytes onto disk WITHOUT executing them.
     staging = tempfile.mkdtemp(prefix="prom-stage-")
     try:
-        dl_cmd = pip + ["download", "--no-deps", "--dest", staging,
+        # Stage the FULL dependency closure, not just the named specs.
+        #
+        # This passed `--no-deps` while step 3c installs with `--no-index --find-links <staging>`
+        # and no `--no-deps` of its own. pip's resolver still demands the whole transitive
+        # closure, and `--no-index` forbids fetching it, so any package whose dependencies were
+        # not already present in the target env could never install — the gated spine was
+        # unusable for exactly the packages people install (pandas, scikit-learn, fastapi are all
+        # in the builtin templates). It failed as "gated pip install returned non-zero".
+        #
+        # Downloading the closure is also the SAFER half of the trade: `--no-index` means pip can
+        # only ever install from this directory, so staging everything is what makes nemesis's
+        # scan cover every byte that reaches the environment. Staging only the top-level artifact
+        # would have gated one wheel and let its dependencies in unscanned, had the install
+        # worked at all.
+        dl_cmd = pip + ["download", "--dest", staging,
                         "--disable-pip-version-check", *(extra_download or []), *specs]
         log("staging:", " ".join(dl_cmd))
         try:
@@ -653,7 +669,21 @@ def v_env_delete(argv: List[str]) -> int:
         return emit("env.delete", planned=True, plan=cmd, kind="venv", target=str(path),
                     note="re-run with --confirm to execute")
     if path.exists() and _is_venv(path):
+        # `ignore_errors=True` deletes as much as it can, which is what we want — but it also
+        # SWALLOWED a partial failure, and this verb then reported `ok:true, executed:true`
+        # with the environment still on disk. Measured: one read-only subtree
+        # (`chmod 555 <env>/lib`) was enough. Verify the removal rather than assume it; the
+        # second, error-raising pass exists only to name WHY for the user, and may itself
+        # succeed if the first pass cleared whatever was blocking it.
         shutil.rmtree(path, ignore_errors=True)
+        if path.exists():
+            detail = ""
+            try:
+                shutil.rmtree(path)
+            except OSError as exc:
+                detail = f": {type(exc).__name__}: {exc}"
+            if path.exists():
+                return fail("env.delete", f"could not fully remove {path}{detail}")
         return emit("env.delete", executed=True, target=str(path), kind="venv")
     return fail("env.delete", f"path is not a venv or does not exist: {path}")
 

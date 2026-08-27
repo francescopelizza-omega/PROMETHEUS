@@ -7,6 +7,8 @@
  * exactly the metadata a user most wants to scrub (GPS, author, device, …). node:test-
  * tested, no DOM. Type-only import of the contract result shape.
  */
+import { isSensitiveMetadataKey } from "@prometheus/core/metadata";
+
 import type { MetadataInspectResult } from "../../../shared/ipc-contract.js";
 
 export type MetaGroup = "File" | "Extended attributes" | "Content tags";
@@ -42,39 +44,14 @@ export function formatEpoch(seconds: number | undefined): string {
   return new Date(seconds * 1000).toISOString().replace(".000Z", "Z");
 }
 
-const SENSITIVE = [
-  "gps",
-  "latitude",
-  "longitude",
-  "location",
-  "geo",
-  "author",
-  "creator",
-  "owner",
-  "artist",
-  "copyright",
-  "byline",
-  "serial",
-  "device",
-  "make",
-  "model",
-  "software",
-  "lens",
-  "email",
-  "user",
-  "host",
-  "comment",
-  "history",
-  "documentid",
-  "instanceid",
-  "producer",
-];
-
-/** Whether a metadata key commonly leaks personal / location / device info. */
-export function isSensitiveKey(key: string): boolean {
-  const k = key.toLowerCase();
-  return SENSITIVE.some((s) => k.includes(s));
-}
+/**
+ * Whether a metadata key commonly leaks personal / location / device info.
+ *
+ * The list lives in core so this panel and the CLI's `metadata inspect` cannot disagree about
+ * what counts as sensitive — they are two views of the same privacy decision. Re-exported here
+ * because this module's own consumers (and its tests) already import it by this name.
+ */
+export const isSensitiveKey = isSensitiveMetadataKey;
 
 /** Build the grouped, formatted, flagged rows for the table. */
 export function buildMetadataRows(inspect: MetadataInspectResult): MetadataRow[] {

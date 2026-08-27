@@ -24,6 +24,9 @@ export interface ParsedArgs {
   noColor: boolean;
   /** -h/--help requested (global or after a command). */
   help: boolean;
+  /** the first token is not a known verb — a MISTYPED COMMAND, not a request for help on one.
+   *  `help` is set alongside it for backwards compatibility; this is what tells the two apart. */
+  unknownCommand?: boolean;
   /** -v/--version requested. */
   version: boolean;
   /** bare `prometheus` (no command, no -h/-v) → launch the interactive REPL (§1). */
@@ -35,6 +38,10 @@ export interface ParsedArgs {
   force: boolean;
   noGate: boolean;
   gateMode?: "enforce" | "warn" | "off";
+  /** `--effort <off|low|medium|high|max>` — the `/think` ladder, pinned from the command line. */
+  effort?: "off" | "low" | "medium" | "high" | "max";
+  /** `--force-effort` — send the effort knob over the capability table's objection. */
+  forceEffort: boolean;
   profile?: string;
   engine?: string;
   python?: string;
@@ -43,6 +50,16 @@ export interface ParsedArgs {
   quiet: boolean;
   /** any other flags, captured verbatim (name -> value|true). */
   flags: Record<string, string | true>;
+  /**
+   * Set when the first word IS a TWO_WORD-eligible command but the second word did NOT match
+   * its whitelist — the literal, unrecognized second word. Without this, "a second word was
+   * typed but didn't match" and "no second word was typed at all" both collapse into the exact
+   * same shape (`command.length === 1`), so a command like `/repo <typo> <arg>` could not be
+   * told apart from bare `/repo` and silently fell through to the default action, discarding the
+   * user's real (mistyped) verb and its arguments with no error. A command whose own switch
+   * already has an "unknown verb" branch can check this field before defaulting.
+   */
+  unmatchedSub?: string;
 }
 
 /** Commands that take a subcommand token as the SECOND word of the path (§2 tree). */
@@ -58,6 +75,7 @@ const TWO_WORD: Record<string, Set<string>> = {
     "card",
     "fit",
     "pull",
+    "hug",
     "remove",
     "rm",
     "prune",
@@ -91,9 +109,11 @@ const TWO_WORD: Record<string, Set<string>> = {
     "disable",
     "delete",
     "cuda",
-    "init",
     "templates",
     "template",
+    // "init" deliberately NOT here: env-cmd.ts has no handler for it (only "create" makes a
+    // new env) — whitelisting an unimplemented verb let parseArgs claim it was valid before
+    // the handler's own "unknown env verb" case ever got a chance to say so honestly.
   ]),
   secure: new Set([
     "scan",
@@ -120,7 +140,12 @@ const TWO_WORD: Record<string, Set<string>> = {
     "sync",
     "scaffold-skill",
   ]),
-  skill: new Set(["list", "enable", "disable", "mute"]),
+  // The ENGINE's own choices are {list, enable, disable, mute, unmute, audit, integrate}
+  // (prometheus.py `skills` argparse). Three were missing here, so `prometheus skill unmute <x>`
+  // was unroutable — the un-mute half of the mute feature simply had no way in from the CLI,
+  // while the engine implemented it. Measured: engine `skills unmute demo-skill` works;
+  // `prometheus skill unmute demo-skill` answered `unknown-verb`.
+  skill: new Set(["list", "enable", "disable", "mute", "unmute", "audit", "integrate"]),
   repo: new Set([
     "add",
     "clone",
@@ -198,6 +223,11 @@ const ONE_WORD = new Set([
   "matrix",
   "inventory",
   "gate",
+  // omitted here, "nemesis" fell through to the "unknown command" branch below, which sets
+  // help:true — and since "nemesis" IS a real, registered CommandSpec id, dispatch() printed its
+  // synthesized help synopsis (exit 0, json {ok:true}) instead of ever calling client.gate(): the
+  // command's own "FREE nemesis threat scan" never actually ran, for any input, ever.
+  "nemesis",
   "list",
   "ls",
   "info",
@@ -221,6 +251,10 @@ const ONE_WORD = new Set([
   "session",
   "sessions",
   "schedule",
+  "tasks",
+  "persona",
+  "budget",
+  "meet",
   "profile",
   "config",
   "keymap",
@@ -257,6 +291,10 @@ const ONE_WORD = new Set([
   "models",
   "vault",
   "wizard",
+  // same class of bug the comment above documents for "nemesis": omitted here, "auto" fell
+  // through to "unknown command" (help:true) and its refresh-feeds/audit/pin maintenance
+  // routine never actually ran, for any invocation, ever.
+  "auto",
 ]);
 
 const isFlag = (t: string): boolean => t.startsWith("-");
@@ -273,12 +311,28 @@ const isFlag = (t: string): boolean => t.startsWith("-");
  *     continue (prometheus --continue resumes the newest session, CLI-013).
  *     (json / no-color / help / version are matched EARLIER, before this branch.)
  *   VALUE-TAKING (deliberately absent, so greedy `--key value` still applies):
- *     profile, engine, python, cwd, gate-mode, only, host, preset, cli, tmux,
- *     local.
+ *     profile, engine, python, cwd, gate-mode, effort, only, host, preset, cli,
+ *     tmux, local.
  * A boolean's explicit `--flag=value` form is still honored (the `=` branch runs
  * first) and coerced by flagBool() in liftGlobals, so `--strict=false` reads false.
  */
+/**
+ * Flags whose VALUE may legitimately start with a dash, so the value is always consumed.
+ *
+ * The generic rule below refuses to treat the next token as a value when it `isFlag(next)` —
+ * right for `--json --quiet`, wrong for a flag whose whole job is to carry someone else's
+ * command line. `prometheus mcp add fs --cmd npx --args "-y @modelcontextprotocol/server-…"`
+ * silently stored `args: []`, so the server was registered with NO arguments — unusable, and
+ * nothing said so. (`mcp-cmd.ts` even comments that a leading `-` here "is a legit flag FOR THE
+ * SERVER, so it is allowed" — it never got the chance, because the value was dropped one layer
+ * earlier.) The `--args=…` form always worked, which is what made this hard to see.
+ */
+const VALUE_FLAGS = new Set<string>(["args"]);
+
 const BOOLEAN_FLAGS = new Set<string>([
+  // `--force-effort` is a boolean; `--effort <tier>` is NOT (it must stay greedy so the tier
+  // is read as its value rather than as the next positional).
+  "force-effort",
   "strict",
   "no-strict",
   "yes",
@@ -306,6 +360,18 @@ const BOOLEAN_FLAGS = new Set<string>([
   "keep-unverified",
   "force-budget",
   "explain", // CLI-080: `secure <target> --explain` — boolean so it never consumes the target
+  "fresh", // `gate --fresh <target>` — bypass the nemesis verdict cache
+  "sign", // `gate --sign <target>` — sign the verdict
+  "conda", // `env create --conda <name>` — conda rather than venv
+  "keep-pin", // `env remove --keep-pin <name> <pkg>` — keep the requirements pin
+  "autostart", // `model serve --autostart <id>` — auto-launch on missing runner
+  "tolerate-flaky", // `test run --tolerate-flaky <target>` — CI safety-valve
+  "github-annotations", // `test run --github-annotations <target>` — CI output format
+  "gate-fresh", // `repo rescan <id> --gate-fresh` — bypass the nemesis verdict cache
+  "all", // `secure db update --all` — refresh every feed, not just stale ones
+  "blocks", // `secure trust log --blocks` — audit-filter: only blocked entries
+  "forced", // `secure trust log --forced` — audit-filter: only forced-danger entries
+  "last24h", // `secure trust log --last24h` — audit-filter: last 24h only
 ]);
 
 /**
@@ -322,6 +388,7 @@ export function parseArgs(argv: string[]): ParsedArgs {
     version: false,
     repl: false,
     dryRun: false,
+    forceEffort: false,
     yes: false,
     strict: false,
     force: false,
@@ -358,7 +425,20 @@ export function parseArgs(argv: string[]): ParsedArgs {
       result.help = true;
       continue;
     }
-    if (tok === "-v" || tok === "--version") {
+    /**
+     * `-v` / `--version` is the VERSION REQUEST only while no command has been seen.
+     *
+     * It was matched unconditionally, so it swallowed every command that takes a
+     * `--version <N>` ARGUMENT of its own: `prometheus app rollback yt-dlp --version 1`
+     * printed the version banner and exited 0 — the rollback never ran, and the caller was
+     * told it succeeded. Measured on the built binary; `worldsim`, `model rollback` and
+     * `… versions` were affected the same way.
+     *
+     * `rest.length === 0` is the test because `rest` collects the non-flag tokens, i.e. the
+     * command path. Before a command, `--version` can only mean "which prometheus is this?";
+     * after one, it belongs to that command and falls through to the generic flag branch.
+     */
+    if ((tok === "-v" || tok === "--version") && rest.length === 0) {
       result.version = true;
       continue;
     }
@@ -376,6 +456,13 @@ export function parseArgs(argv: string[]): ParsedArgs {
           continue;
         }
         const next = argv[i + 1];
+        // A VALUE_FLAG's value is taken verbatim even when it starts with a dash — that is the
+        // whole point of the list. Still refused when there IS no next token.
+        if (VALUE_FLAGS.has(key) && next !== undefined) {
+          result.flags[key] = next;
+          i++;
+          continue;
+        }
         if (next !== undefined && !isFlag(next) && !looksLikeCommandTail(rest, next)) {
           result.flags[key] = next;
           i++;
@@ -406,10 +493,20 @@ export function parseArgs(argv: string[]): ParsedArgs {
   }
 
   if (!ONE_WORD.has(first)) {
-    // unknown command — flag help so bin.ts can print usage + nonzero exit
+    /**
+     * Unknown command. `help` stays set so every existing caller still prints usage and exits
+     * nonzero — but it is ALSO marked as an unknown command, because those two are not the same
+     * thing and the dispatcher could not tell them apart.
+     *
+     * With only the `help` flag, `prometheus keys` was indistinguishable from
+     * `prometheus keys --help`, so dispatch looked "keys" up as a HELP TOPIC and answered
+     * "unknown help topic: keys" — talking about a help system the user never invoked, and
+     * suggesting the nearest topic instead of the nearest COMMAND.
+     */
     result.command = [first];
     result.positionals = rest.slice(1);
     result.help = true;
+    result.unknownCommand = true;
     return result;
   }
 
@@ -422,6 +519,7 @@ export function parseArgs(argv: string[]): ParsedArgs {
   } else {
     result.command = [normalizeAlias(first)];
     result.positionals = rest.slice(1);
+    if (twoWordSet && sub !== undefined) result.unmatchedSub = sub;
   }
 
   return result;
@@ -480,6 +578,7 @@ function flagBool(flags: Record<string, string | true>, ...keys: string[]): bool
 function liftGlobals(result: ParsedArgs): void {
   const f = result.flags;
   result.dryRun = flagBool(f, "dry-run");
+  result.forceEffort = flagBool(f, "force-effort");
   result.yes = flagBool(f, "yes", "y");
   result.strict = flagBool(f, "strict");
   result.force = flagBool(f, "force", "force-unsafe");
@@ -489,6 +588,18 @@ function liftGlobals(result: ParsedArgs): void {
   const gateMode = flagStr(f, "gate-mode");
   if (gateMode === "enforce" || gateMode === "warn" || gateMode === "off")
     result.gateMode = gateMode;
+  // `--effort` is validated against the ladder here rather than downstream: an unrecognised
+  // tier must be ignored, not carried as a string that quietly fails a comparison later.
+  const effort = flagStr(f, "effort");
+  if (
+    effort === "off" ||
+    effort === "low" ||
+    effort === "medium" ||
+    effort === "high" ||
+    effort === "max"
+  ) {
+    result.effort = effort;
+  }
   const profile = flagStr(f, "profile");
   if (profile) result.profile = profile;
   const engine = flagStr(f, "engine");

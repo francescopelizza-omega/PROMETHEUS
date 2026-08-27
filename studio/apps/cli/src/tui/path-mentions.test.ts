@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { homedir } from "node:os";
 import test from "node:test";
 
 import type { CompleterFs } from "../session/path-completer.js";
@@ -6,6 +7,7 @@ import {
   EMPTY_PATH_AC,
   acceptPathAc,
   detectPathTrigger,
+  detectSlashPathTrigger,
   isPathOpen,
   movePathAc,
   resolvePathDir,
@@ -30,29 +32,64 @@ function fakeFs(tree: Record<string, string[]>, dirs: string[]): CompleterFs {
 
 test("detectPathTrigger: a bare @ at the caret is an active trigger", () => {
   const t = detectPathTrigger("@", 1);
-  assert.deepEqual(t, { start: 0, dirPart: "", frag: "" });
+  assert.deepEqual(t, {
+    kind: "mention",
+    start: 0,
+    tokenStart: 1,
+    dirsOnly: false,
+    dirPart: "",
+    frag: "",
+  });
 });
 
 test("detectPathTrigger: splits dirPart/frag on the last slash", () => {
   const t = detectPathTrigger("@src/tui/re", 11);
-  assert.deepEqual(t, { start: 0, dirPart: "src/tui", frag: "re" });
+  assert.deepEqual(t, {
+    kind: "mention",
+    start: 0,
+    tokenStart: 1,
+    dirsOnly: false,
+    dirPart: "src/tui",
+    frag: "re",
+  });
 });
 
 test("detectPathTrigger: a single-level absolute path keeps the leading slash as dirPart", () => {
   const t = detectPathTrigger("@/etc", 5);
-  assert.deepEqual(t, { start: 0, dirPart: "/", frag: "etc" });
+  assert.deepEqual(t, {
+    kind: "mention",
+    start: 0,
+    tokenStart: 1,
+    dirsOnly: false,
+    dirPart: "/",
+    frag: "etc",
+  });
 });
 
 test("detectPathTrigger: a bare trailing slash after the root is also dirPart '/'", () => {
   const t = detectPathTrigger("@/", 2);
-  assert.deepEqual(t, { start: 0, dirPart: "/", frag: "" });
+  assert.deepEqual(t, {
+    kind: "mention",
+    start: 0,
+    tokenStart: 1,
+    dirsOnly: false,
+    dirPart: "/",
+    frag: "",
+  });
 });
 
 test("detectPathTrigger: works mid-sentence, anchored at the caret", () => {
   const input = "please check @src/foo and reply";
   const caret = "please check @src/foo".length;
   const t = detectPathTrigger(input, caret);
-  assert.deepEqual(t, { start: 13, dirPart: "src", frag: "foo" });
+  assert.deepEqual(t, {
+    kind: "mention",
+    start: 13,
+    tokenStart: 14,
+    dirsOnly: false,
+    dirPart: "src",
+    frag: "foo",
+  });
 });
 
 test("detectPathTrigger: an email-like a@b is not a mention", () => {
@@ -247,4 +284,49 @@ test("acceptPathAc: a single-level absolute path (@/e) lists the filesystem ROOT
 
 test("acceptPathAc: null when nothing is highlighted / no active trigger", () => {
   assert.equal(acceptPathAc("no mention", EMPTY_PATH_AC), null);
+});
+
+/* ── detectSlashPathTrigger: the argument of a path-taking slash command ─────── */
+
+test("detectSlashPathTrigger: /cd's argument is a dirs-only path token", () => {
+  assert.deepEqual(detectSlashPathTrigger("/cd src/tu", 10), {
+    kind: "slash-arg",
+    start: 4,
+    tokenStart: 4,
+    dirsOnly: true,
+    dirPart: "src",
+    frag: "tu",
+  });
+});
+
+test("detectSlashPathTrigger: `~/` resolves against $HOME, not as an absolute `/`", () => {
+  const t = detectSlashPathTrigger("/cd ~/pro", 9);
+  assert.equal(t?.dirPart, "~");
+  assert.equal(t?.frag, "pro");
+  assert.equal(resolvePathDir(t?.dirPart ?? "", "/base"), homedir());
+});
+
+test("detectSlashPathTrigger: not a path command / caret in the name / a flag → no trigger", () => {
+  assert.equal(detectSlashPathTrigger("/help x", 7), null);
+  assert.equal(detectSlashPathTrigger("/cd x", 2), null);
+  assert.equal(detectSlashPathTrigger("/add-dir --remove", 17), null);
+});
+
+test("syncPathAutocomplete: /cd offers directories only; /mention offers files too", () => {
+  const fs = fakeFs({ "/proj": ["src", "README.md"] }, ["/proj", "/proj/src"]);
+  const ctx = { baseDir: "/proj", fs };
+  const cd = syncPathAutocomplete("/cd ", 4, ctx);
+  assert.deepEqual(
+    cd.items.map((i) => i.name),
+    ["src/"],
+  );
+  const mention = syncPathAutocomplete("/mention ", 9, ctx);
+  assert.ok(mention.items.some((i) => i.name === "README.md"));
+});
+
+test("acceptPathAc splices into a slash argument without eating the command", () => {
+  const fs = fakeFs({ "/proj": ["src"] }, ["/proj", "/proj/src"]);
+  const state = syncPathAutocomplete("/cd s", 5, { baseDir: "/proj", fs });
+  const accepted = acceptPathAc("/cd s", state);
+  assert.equal(accepted?.input, "/cd src/");
 });

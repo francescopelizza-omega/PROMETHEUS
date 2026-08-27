@@ -16,7 +16,7 @@
 // FULL-surface registry here, hence getCommandSpec — NOT getCommand.
 import { type RawArgs, getCommandSpec, invoke } from "@prometheus/core";
 
-import type { CliContext, CommandOutcome } from "../context.js";
+import { type CliContext, type CommandOutcome, failureCode } from "../context.js";
 import { renderEnvelope } from "../render/envelope-view.js";
 import { renderVerdictCard } from "../verdict-view.js";
 
@@ -67,9 +67,16 @@ export async function routeViaRegistry(id: string, ctx: CliContext): Promise<Com
     : ((res.verdict ? renderVerdictCard(res.verdict) : null) ??
       (res.envelope ? renderEnvelope(id, res.envelope) : null) ??
       res.summary);
+  // CLI-084: 2 is reserved for a fail-closed SECURITY block (a nemesis verdict — see
+  // commands.ts's gate/secure-scan/nemesis specs, the ONLY producers of `res.verdict`).
+  // Everything else here is an engine ENVELOPE failure (bad args, unknown id, "interactive;
+  // not available over --json", ...) — a generic failure, whose real severity the engine
+  // already encoded in `envelope._exit` (its raw process exit code). Forcing those to 2 too
+  // would falsely look like a security block to a script checking `$? -eq 2`.
+  const exitCode = res.ok ? 0 : res.verdict ? 2 : failureCode(res.envelope?._exit);
   return {
     text,
     json: payload,
-    exitCode: res.ok ? 0 : 2,
+    exitCode,
   };
 }

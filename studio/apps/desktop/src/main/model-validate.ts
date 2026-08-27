@@ -121,6 +121,7 @@ const RUN_ID = z
 const SOURCE = z.enum(["hf", "ollama"]);
 const DL_SOURCE = z.enum(["hf", "ollama", "url"]);
 const RUNNER = z.enum(["llamacpp", "vllm", "ollama"]);
+const HUG_TARGET = z.enum(["ollama", "llamacpp", "vllm", "lmstudio"]);
 
 /* ── per-channel argument schemas ───────────────────────────────────────────*/
 
@@ -203,6 +204,42 @@ export const modelRepointSchema = z.object({
     .min(1, "base url must not be empty")
     .max(2048, "base url is too long")
     .regex(/^https?:\/\/\S+$/, "base url must be an http(s) url"),
+});
+
+/* ── /hug: fetch → convert → install-target ─────────────────────────────────*/
+
+/** model:fetchHf — repo id (a PATH-shaped bound, not MODEL_ID's tighter charset —
+ *  it's echoed straight to `hf download` and to `convert`'s --src downstream). */
+export const modelFetchHfSchema = z.object({
+  repo: PATH,
+  out: PATH.optional(),
+  revision: PATH.optional(),
+  runId: RUN_ID.optional(),
+});
+
+export const modelInstallHfCliSchema = z.object({ runId: RUN_ID.optional() });
+
+/** model:convert — src dir + optional quant/id/out. */
+export const modelConvertSchema = z.object({
+  src: PATH,
+  quant: QUANT.optional(),
+  // path-shaped, not MODEL_ID: this can be "org/repo" OR a local folder's basename,
+  // which may contain spaces/parens MODEL_ID's shell-char charset would reject.
+  id: PATH.optional(),
+  out: PATH.optional(),
+  runId: RUN_ID.optional(),
+});
+
+export const modelInstallConverterSchema = z.object({ runId: RUN_ID.optional() });
+
+/** model:installTarget — target + id + (gguf | src) + optional quant. */
+export const modelInstallTargetSchema = z.object({
+  target: HUG_TARGET,
+  id: PATH,
+  gguf: PATH.optional(),
+  src: PATH.optional(),
+  quant: QUANT.optional(),
+  runId: RUN_ID.optional(),
 });
 
 /* ── the parse→GuardResult bridge (identical to env-validate.ts) ─────────────*/
@@ -397,4 +434,94 @@ export function validateModelRepoint(arg: unknown): GuardResult<ModelRepointArgs
   const r = runSchema(modelRepointSchema, asObject(arg));
   if (!r.ok) return r;
   return { ok: true, value: { tool: r.value.tool, baseUrl: r.value.baseUrl } };
+}
+
+/* ── /hug: fetch → convert → install-target ─────────────────────────────────*/
+
+export interface ModelFetchHfArgs {
+  repo: string;
+  out?: string;
+  revision?: string;
+  runId?: string;
+}
+export function validateModelFetchHf(arg: unknown): GuardResult<ModelFetchHfArgs> {
+  const r = runSchema(modelFetchHfSchema, asObject(arg));
+  if (!r.ok) return r;
+  const v: ModelFetchHfArgs = { repo: r.value.repo };
+  if (r.value.out !== undefined) v.out = r.value.out;
+  if (r.value.revision !== undefined) v.revision = r.value.revision;
+  if (r.value.runId !== undefined) v.runId = r.value.runId;
+  return { ok: true, value: v };
+}
+
+export interface ModelInstallHfCliArgs {
+  runId?: string;
+}
+export function validateModelInstallHfCli(arg: unknown): GuardResult<ModelInstallHfCliArgs> {
+  const r = runSchema(modelInstallHfCliSchema, asObject(arg));
+  if (!r.ok) return r;
+  const v: ModelInstallHfCliArgs = {};
+  if (r.value.runId !== undefined) v.runId = r.value.runId;
+  return { ok: true, value: v };
+}
+
+export interface ModelConvertArgs {
+  src: string;
+  quant?: string;
+  id?: string;
+  out?: string;
+  runId?: string;
+}
+export function validateModelConvert(arg: unknown): GuardResult<ModelConvertArgs> {
+  const r = runSchema(modelConvertSchema, asObject(arg));
+  if (!r.ok) return r;
+  const v: ModelConvertArgs = { src: r.value.src };
+  if (r.value.quant !== undefined) v.quant = r.value.quant;
+  if (r.value.id !== undefined) v.id = r.value.id;
+  if (r.value.out !== undefined) v.out = r.value.out;
+  if (r.value.runId !== undefined) v.runId = r.value.runId;
+  return { ok: true, value: v };
+}
+
+export interface ModelInstallConverterArgs {
+  runId?: string;
+}
+export function validateModelInstallConverter(
+  arg: unknown,
+): GuardResult<ModelInstallConverterArgs> {
+  const r = runSchema(modelInstallConverterSchema, asObject(arg));
+  if (!r.ok) return r;
+  const v: ModelInstallConverterArgs = {};
+  if (r.value.runId !== undefined) v.runId = r.value.runId;
+  return { ok: true, value: v };
+}
+
+export interface ModelInstallTargetArgs {
+  target: "ollama" | "llamacpp" | "vllm" | "lmstudio";
+  id: string;
+  gguf?: string;
+  src?: string;
+  quant?: string;
+  runId?: string;
+}
+export function validateModelInstallTarget(arg: unknown): GuardResult<ModelInstallTargetArgs> {
+  const r = runSchema(modelInstallTargetSchema, asObject(arg));
+  if (!r.ok) return r;
+  // vLLM needs --src; every other target needs --gguf (mirrors modelhub.py's own checks).
+  const needsSrc = r.value.target === "vllm";
+  if (needsSrc ? r.value.src === undefined : r.value.gguf === undefined) {
+    return {
+      ok: false,
+      error: {
+        kind: "invalid-args",
+        message: needsSrc ? "vllm install-target needs src" : "install-target needs gguf",
+      },
+    };
+  }
+  const v: ModelInstallTargetArgs = { target: r.value.target, id: r.value.id };
+  if (r.value.gguf !== undefined) v.gguf = r.value.gguf;
+  if (r.value.src !== undefined) v.src = r.value.src;
+  if (r.value.quant !== undefined) v.quant = r.value.quant;
+  if (r.value.runId !== undefined) v.runId = r.value.runId;
+  return { ok: true, value: v };
 }

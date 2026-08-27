@@ -14,6 +14,8 @@
  *   model serve <id> [--quant Q] [--runner R] [--port N] [--yes] build+start [mutate]
  *   model status | ps             liveness-verified live CLI servers         [read]
  *   model pull <id> [--quant Q] [--source S] [--license L]        [mutate/gated]
+ *   model hug <path|repo-id> [--target ollama|llamacpp|vllm|lmstudio] [--quant Q]
+ *             [--id ID] [--yes]   fetch (if needed) → convert → install, ONE copy [mutate]
  *   model remove <id> [--quant Q]                                       [mutate]
  *   model stop <profileId> [--yes]   SIGTERM→SIGKILL the CLI-recorded runner  [mutate]
  */
@@ -36,6 +38,7 @@ import {
   flagSet,
   flagStr,
   forceBlocked,
+  isPreviewRun,
   previewOutcome,
   renderMutation,
   runMutation,
@@ -46,8 +49,18 @@ import {
 
 const SCRIPT = "modelhub.py" as const;
 
+const HUG_TARGETS = new Set(["ollama", "llamacpp", "vllm", "lmstudio"]);
+
+// Quant strings that mean "leave at full precision" — modelhub.py's v_convert skips
+// llama-quantize entirely for these (kept in exact sync with its own _QUANT_NO_REQUANT).
+const HUG_NO_REQUANT_QUANTS = new Set(["f32", "fp32", "f16", "fp16", "bf16", "auto"]);
+
 function sub(ctx: CliContext): string {
-  return ctx.args.command[1] ?? "list";
+  // `unmatchedSub` (parse.ts) distinguishes "a second word WAS typed but didn't match
+  // model's whitelist" from "nothing was typed" — without it, `model pl ./x` (typo of
+  // `pull`) silently defaulted to `list`, discarding both the typo and the extra arg,
+  // instead of ever reaching this function's own "unknown model verb" default case.
+  return ctx.args.unmatchedSub ?? ctx.args.command[1] ?? "list";
 }
 
 /**
@@ -267,18 +280,34 @@ const OLLAMA_MANUAL =
 /**
  * Offer an OS-aware ollama install when the runner binary is absent (CLI-027). Reuses
  * the engine's install-runner seam (engine-bridge is the sole spawner — the CLI never
- * runs brew/curl). Fail-closed consent: `--yes` proceeds non-interactively, else a TTY
- * y/N (default N); non-TTY/EOF/decline exits 0 with the manual command. On confirm it
- * installs (launch-guarded), re-probes to VERIFY, then retries the original action.
+ * runs brew/curl). Fail-closed consent: a TTY y/N (default N); non-TTY/EOF/decline exits
+ * 0 with the manual command. On confirm it installs (launch-guarded), re-probes to
+ * VERIFY, then retries the original action.
+ *
+ * `consentCovers` says what the user's `--yes` actually answered, and only "runner" lets
+ * it stand in for that y/N. `model serve --runner ollama` IS a request to run ollama, so
+ * `--yes` covers installing it. `model pull` / `model hug` preview a MODEL DOWNLOAD and
+ * never mention ollama (see the hug preview text below), so `--yes` there is consent to
+ * fetch weights — not to a brew / `curl … | sh` package install. Treating the two as one
+ * made `confirmRunnerInstall`, the `??` fallback below, and the whole decline branch dead
+ * code in production: every call site is already behind `wantsExecute(ctx)`, so a bare
+ * `wantsExecute(ctx) || confirm()` was unconditionally true and the documented prompt was
+ * only ever reached by the tests.
  */
 async function offerRunnerInstall(
   ctx: CliContext,
   deps: SidecarDeps,
   retry: { base: string[]; command: string } | null,
+  consentCovers: "runner" | "model",
 ): Promise<CommandOutcome> {
-  const notice = c.yellow("ollama is not installed — it downloads AND serves local models.");
+  const notice = c.yellow(
+    consentCovers === "runner"
+      ? "ollama is not installed — it downloads AND serves local models."
+      : "ollama is not installed — it downloads AND serves local models. Installing it is a package install (brew / curl | sh), not part of the model download.",
+  );
   const confirm = deps.confirmRunnerInstall ?? defaultSidecarDeps.confirmRunnerInstall;
-  const proceed = wantsExecute(ctx) || (confirm ? await confirm() : false);
+  const proceed =
+    (consentCovers === "runner" && wantsExecute(ctx)) || (confirm ? await confirm() : false);
   if (!proceed) {
     return {
       text: `${notice}\n  ${c.dim(OLLAMA_MANUAL)}`,
@@ -531,11 +560,6 @@ export async function runModelCommand(
       if (quant) argv.push("--quant", quant);
       const runner = flagStr(ctx, "runner");
       if (runner) argv.push("--runner", runner);
-      // CLI-027: an ollama-runner serve needs the runner present — offer to install it.
-      if (runner === "ollama") {
-        const probe = deps.probeRunner ?? defaultSidecarDeps.probeRunner!;
-        if (!(await probe("ollama"))) return offerRunnerInstall(ctx, deps, null);
-      }
       const port = flagStr(ctx, "port");
       if (port) argv.push("--port", port);
       const gguf = flagStr(ctx, "gguf");
@@ -559,6 +583,16 @@ export async function runModelCommand(
         const out = renderServe(env);
         out.text = `${out.text ?? ""}\n  ${c.dim("re-run with")} ${c.bold("--yes")} ${c.dim("to start the runner locally.")}`;
         return out;
+      }
+      // CLI-027: an ollama-runner serve needs the runner present — offer to install it. This
+      // check is deliberately AFTER the preview-and-return above (matching case "hug"'s
+      // ordering in this same file) — a bare preview call must never solicit install consent;
+      // it used to reach this unconditionally, so a plain `/model serve <id> --runner ollama`
+      // (no --yes) would block on a live "install ollama now?" y/N prompt even though the user
+      // only asked to preview.
+      if (runner === "ollama") {
+        const probe = deps.probeRunner ?? defaultSidecarDeps.probeRunner!;
+        if (!(await probe("ollama"))) return offerRunnerInstall(ctx, deps, null, "runner");
       }
       // 3) EXECUTE: spawn the runner via the CLI serve-host and record its pid.
       const spec = serveSpecFrom(env);
@@ -627,10 +661,19 @@ export async function runModelCommand(
 
       // CLI-027: an ollama-routed pull needs the runner present. If it is missing, offer
       // an OS-aware install (confirm/decline/install/verify/retry) instead of dead-ending.
-      if (useOllama) {
+      //
+      // Gated behind wantsExecute(ctx) — this used to run unconditionally, so a PLAIN preview
+      // call (no --yes) with ollama absent would solicit "install ollama now?" and, on a bare
+      // "yes" to that narrower question, unconditionally run the REAL pull afterward
+      // (offerRunnerInstall then treated the narrower answer as consent) — a mutating action
+      // running from an answer to a DIFFERENT question than the
+      // one this file's preview/execute contract asks everywhere else. When not executing, fall
+      // through to runMutation below, which correctly previews (no sidecar call, no prompt) —
+      // matching case "hug"'s ordering in this same file.
+      if (useOllama && wantsExecute(ctx)) {
         const probe = deps.probeRunner ?? defaultSidecarDeps.probeRunner!;
         if (!(await probe("ollama"))) {
-          return offerRunnerInstall(ctx, deps, { base, command: "model pull" });
+          return offerRunnerInstall(ctx, deps, { base, command: "model pull" }, "model");
         }
       }
 
@@ -688,6 +731,201 @@ export async function runModelCommand(
       return out;
     }
 
+    case "hug": {
+      const source = pos[0];
+      if (!source) {
+        return usageError(
+          "model hug",
+          "<path|repo-id> [--target ollama|llamacpp|vllm|lmstudio] [--quant Q] [--id ID] [--yes]",
+        );
+      }
+      if (source.startsWith("-")) {
+        return { text: c.red(`model hug: refusing option-shaped source: ${source}`), exitCode: 2 };
+      }
+      const target = (flagStr(ctx, "target") ?? "ollama").toLowerCase();
+      if (!HUG_TARGETS.has(target)) {
+        return {
+          text: c.red(
+            `model hug: --target must be one of ollama|llamacpp|vllm|lmstudio (got '${target}')`,
+          ),
+          exitCode: 2,
+        };
+      }
+      const quant = (flagStr(ctx, "quant") ?? "q4_k_m").toLowerCase();
+      // POSIX absolute (/…), home (~…), explicit relative (./…, ../…), or a Windows
+      // drive-letter absolute path (C:\… or C:/…) — anything else is an HF repo id.
+      const isLocal = /^([a-zA-Z]:[\\/]|\/|~|\.\.?\/)/.test(source);
+      const modelId =
+        flagStr(ctx, "id") ??
+        (isLocal ? (source.split(/[\\/]/).filter(Boolean).pop() ?? source) : source);
+
+      // PREVIEW by default — describe the plan, touch nothing.
+      if (!wantsExecute(ctx)) {
+        const steps: string[] = [];
+        if (!isLocal && target === "ollama") {
+          steps.push(
+            `ollama pull hf.co/${source}  (Ollama's own HF passthrough — no local download)`,
+          );
+        } else {
+          if (!isLocal) steps.push(`fetch ${source} from Hugging Face (via the \`hf\` CLI)`);
+          if (target !== "vllm") {
+            steps.push(
+              `convert → GGUF${HUG_NO_REQUANT_QUANTS.has(quant) ? "" : ` (quantize ${quant})`}, always via llama.cpp's own tools`,
+            );
+          }
+          steps.push(
+            `install into ${target}${target === "lmstudio" ? " (symlink, no duplicate bytes)" : ""}`,
+          );
+        }
+        return {
+          text: `${c.bold("prometheus model hug")}  ${c.dim("(preview — nothing changed)")}\n${steps.map((s) => `  ${c.cyan("would")}  ${s}`).join("\n")}\n  ${c.dim("re-run with")} ${c.bold("--yes")} ${c.dim("to execute")}`,
+          json: {
+            ok: true,
+            status: "preview",
+            command: "model hug",
+            source,
+            target,
+            quant,
+            id: modelId,
+          },
+          exitCode: 0,
+        };
+      }
+
+      const blocked = forceBlocked(ctx, "model hug");
+      if (blocked) return blocked;
+
+      // FAST PATH: Ollama + an HF repo → Ollama's OWN HF-hosted-GGUF passthrough.
+      // Zero local download, zero duplication — Ollama fetches and stores the
+      // bytes itself; Prometheus never touches them.
+      if (!isLocal && target === "ollama") {
+        const probe = deps.probeRunner ?? defaultSidecarDeps.probeRunner!;
+        if (!(await probe("ollama"))) {
+          return offerRunnerInstall(
+            ctx,
+            deps,
+            {
+              base: ["pull", "--id", modelId, "--tag", `hf.co/${source}`],
+              command: "model hug",
+            },
+            "model",
+          );
+        }
+        return runMutation(ctx, {
+          command: "model hug",
+          script: SCRIPT,
+          base: ["pull", "--id", modelId, "--tag", `hf.co/${source}`],
+          note: `ollama pull hf.co/${source} → served at the ollama OpenAI-compatible endpoint`,
+          deps,
+          confirm: false,
+        });
+      }
+
+      // Everything else needs the raw weights locally: fetch (if HF) → convert → install.
+      let srcDir = source;
+      if (!isLocal) {
+        let fetchEnv = await deps.runSidecar(SCRIPT, ["fetch-hf", "--repo", source]);
+        if (fetchEnv.ok === false && fetchEnv.installable) {
+          const inst = await deps.runSidecar(SCRIPT, ["install-hf-cli"]);
+          if (inst.ok === false) {
+            return {
+              text: c.red(`model hug: ${inst.error ?? "could not install the hf CLI"}`),
+              json: inst,
+              exitCode: 2,
+            };
+          }
+          fetchEnv = await deps.runSidecar(SCRIPT, ["fetch-hf", "--repo", source]);
+        }
+        if (fetchEnv.ok === false) {
+          return {
+            text: c.red(`model hug: ${fetchEnv.error ?? "fetch failed"}`),
+            json: fetchEnv,
+            exitCode: 2,
+          };
+        }
+        srcDir = String(fetchEnv.path);
+      }
+
+      // vLLM reads the raw HF directory directly — it never needs the GGUF
+      // conversion at all (modelhub.py's install-target vllm branch says so
+      // explicitly), so skip convert entirely for that target rather than doing
+      // (and potentially failing on missing llama.cpp tooling for) pointless work.
+      let ggufPath = "";
+      if (target !== "vllm") {
+        let conv = await deps.runSidecar(SCRIPT, [
+          "convert",
+          "--src",
+          srcDir,
+          "--quant",
+          quant,
+          "--id",
+          modelId,
+        ]);
+        if (conv.ok === false && conv.installable) {
+          const inst = await deps.runSidecar(SCRIPT, ["install-converter"]);
+          if (inst.ok === false) {
+            return {
+              text: c.red(`model hug: ${inst.error ?? "could not install llama.cpp's converter"}`),
+              json: inst,
+              exitCode: 2,
+            };
+          }
+          conv = await deps.runSidecar(SCRIPT, [
+            "convert",
+            "--src",
+            srcDir,
+            "--quant",
+            quant,
+            "--id",
+            modelId,
+          ]);
+        }
+        if (conv.ok === false) {
+          if (conv.low_disk) {
+            return {
+              text: `${c.yellow("⚠")} model hug: ${conv.error}\n  ${c.dim(String(conv.hint ?? ""))}`,
+              json: conv,
+              exitCode: 2,
+            };
+          }
+          return {
+            text: c.red(`model hug: ${conv.error ?? "conversion failed"}`),
+            json: conv,
+            exitCode: 2,
+          };
+        }
+        // convert() already fully quantizes (or intentionally leaves f16/bf16/…
+        // untouched) — the resulting GGUF is already at the requested precision, so
+        // it must NEVER be handed to install-target's ollama --quantize again
+        // (which expects an UNquantized f16/f32 source, not an already-quantized one).
+        ggufPath = String(conv.canonical_path ?? conv.path);
+      }
+
+      const installArgv =
+        target === "vllm"
+          ? ["install-target", "--target", "vllm", "--id", modelId, "--src", srcDir]
+          : ["install-target", "--target", target, "--id", modelId, "--gguf", ggufPath];
+      const install = await deps.runSidecar(SCRIPT, installArgv);
+      if (ctx.json) return { json: install, exitCode: install.ok === false ? 2 : 0 };
+      if (install.ok === false) {
+        return {
+          text: c.red(`model hug: ${install.error ?? "install failed"}`),
+          json: install,
+          exitCode: 2,
+        };
+      }
+      const endpoint =
+        typeof install.endpoint === "string" ? `\n  ${kv("endpoint", install.endpoint)}` : "";
+      const installedPath =
+        typeof install.path === "string" ? `\n  ${kv("path", install.path)}` : "";
+      const note = typeof install.note === "string" ? `\n  ${c.dim(install.note)}` : "";
+      return {
+        text: `${c.green("✓")} hugged ${c.bold(modelId)} → ${target}${endpoint}${installedPath}${note}`,
+        json: install,
+        exitCode: 0,
+      };
+    }
+
     case "remove":
     case "rm": {
       const id = pos[0];
@@ -698,6 +936,16 @@ export async function runModelCommand(
       // TYPED confirm (scriptable, matches sessions-cmd): `--yes` bypasses; otherwise the
       // id must be echoed back exactly via `--confirm <id>`. Wrong/empty/absent → refuse
       // (exit 2) and NEVER call the sidecar — non-TTY never blocks on a prompt.
+      // `--dry-run` outranks BOTH arms. The typed confirm ORs past `wantsExecute`, so the
+      // preview guard inside it never reached this site: `model rm <id> --confirm <id>
+      // --dry-run` deleted the model anyway.
+      if (isPreviewRun(ctx)) {
+        return {
+          text: `${c.dim("preview:")} would remove model ${c.bold(id)} — nothing deleted`,
+          json: { ok: true, status: "preview", command: "model rm", id },
+          exitCode: 0,
+        };
+      }
       const confirmed = wantsExecute(ctx) || flagStr(ctx, "confirm") === id;
       if (!confirmed) {
         return {
@@ -800,9 +1048,9 @@ export async function runModelCommand(
       return {
         text:
           `prometheus model ${verb}: unknown model verb.\n` +
-          `  ${c.dim("try:")} hw · list · library · search · browse · info · card · fit · pull · rm · prune · serve · status · stop · endpoints · repoint`,
+          `  ${c.dim("try:")} hw · list · library · search · browse · info · card · fit · pull · hug · rm · prune · serve · status · stop · endpoints · repoint`,
         json: { ok: false, error: "unknown-verb", command: `model ${verb}` },
-        exitCode: 2,
+        exitCode: 1,
       };
   }
 }
@@ -872,10 +1120,25 @@ function renderSearch(
     });
   }
   if (typeof opts.limit === "number" && opts.limit >= 0) rows = rows.slice(0, opts.limit);
+  // `--free`/`--limit` are applied HERE, not by the sidecar — `runRead` prefers this `json`
+  // field over the raw envelope precisely so `model browse --json` reflects them too, the
+  // same way `model search --json` already builds its own filtered/limited payload.
+  const json = {
+    ok: true,
+    count: rows.length,
+    results: rows.map((r) => ({
+      id: r.id ?? r.name ?? null,
+      source: r.source ?? null,
+      params_b: typeof r.params_b === "number" ? r.params_b : null,
+      context: typeof r.context === "number" ? r.context : null,
+      license: r.license ?? null,
+      description: r.description ?? null,
+    })),
+  };
   const lines = [heading(`Models  ${c.dim(`(${rows.length})`)}`), ""];
   if (rows.length === 0) {
     lines.push(c.dim("No matches."));
-    return { text: lines.join("\n"), exitCode: 0 };
+    return { text: lines.join("\n"), json, exitCode: 0 };
   }
   // One block per model: id + a meta line, then the one-line description so a user
   // picks by WHAT THE MODEL DOES (conscious choice), not by web fame.
@@ -889,7 +1152,7 @@ function renderSearch(
     const rl = resourceLine(r.resource);
     if (rl) lines.push(`  ${rl}`);
   }
-  return { text: lines.join("\n"), exitCode: 0 };
+  return { text: lines.join("\n"), json, exitCode: 0 };
 }
 
 /** Ranked RESULT TABLE for `model search` (ID · FAMILY · SIZE · CTX · LICENSE · FIT). */
@@ -1064,10 +1327,26 @@ function renderCard(e: Record<string, unknown>, id: string, open: boolean): Comm
   const r = pickRow(e, id);
   const repo = r && typeof r.repo === "string" ? r.repo : "";
   if (!repo) {
+    /**
+     * `ok:false` with exit 0 and no `error` — three contradictions at once. A script checking
+     * the exit code saw success; one checking `error` found nothing to report; and `ok` said it
+     * had failed. Exit 1 is the BAD-ARGS/not-found class in `context.ts`'s CLI-084 table (2 is
+     * the security-block signal and must not be spent on a typo).
+     *
+     * The two cases are also genuinely different and were collapsed into one message: an id
+     * that is not in the catalog AT ALL is the user's typo; an id that IS catalogued but has no
+     * `repo` recorded is a gap in our data, and telling the user to search for it would be a
+     * wild goose chase. `pickRow` — the same lookup `model info` uses — separates them.
+     */
+    const unknown = r === undefined;
     return {
-      text: `prometheus model card ${id}: ${c.dim("no HuggingFace repo on record for this id.")}`,
-      json: { ok: false, id, url: null },
-      exitCode: 0,
+      text: unknown
+        ? `prometheus model card ${id}: ${c.dim("not in the bundled open catalog — try")} ${c.bold(`prometheus model search ${id}`)}`
+        : `prometheus model card ${id}: ${c.dim("no HuggingFace repo on record for this id.")}`,
+      json: unknown
+        ? { ok: false, error: "unknown-model", id, url: null, hint: "model search" }
+        : { ok: false, error: "no-model-card", id, url: null },
+      exitCode: 1,
     };
   }
   const url = `https://huggingface.co/${repo}`;

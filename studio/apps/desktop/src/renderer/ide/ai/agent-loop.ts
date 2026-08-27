@@ -21,6 +21,8 @@
 import { AGENT_TOOL_DISCIPLINE } from "@prometheus/core/agent-loop";
 import type { EffortResolution } from "@prometheus/core/ai-effort";
 import type {
+  AgentCanaryTripRequest,
+  AgentCanaryTripResult,
   AgentEngineToolRequest,
   AgentGrant,
   AgentGrantsResult,
@@ -445,6 +447,9 @@ export interface AgentLoopDeps {
     /** list/run the user's lifecycle hooks — MAIN spawns; the renderer only proxies.
      *  Optional so a harness (or an older preload) degrades to "no hooks", never a throw. */
     hookRun?(req: AgentHookRunRequest): Promise<AgentHookRunResult>;
+    /** record a tripped canary token (point 6b) — MAIN owns the audit disk, not the renderer.
+     *  Optional so a harness (or an older preload) degrades to "not recorded", never a throw. */
+    canaryTrip?(req: AgentCanaryTripRequest): Promise<AgentCanaryTripResult>;
   };
   root?: string;
   neverSendToCloud: boolean;

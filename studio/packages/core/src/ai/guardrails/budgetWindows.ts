@@ -80,6 +80,48 @@ function recordUsd(r: SpendRecord, priceFor: PriceFor): number | null {
   });
 }
 
+/** How much has actually been spent, independent of whether any cap is even configured — the
+ *  read half of the budget feature (roadmap point 4: budget visibility), as opposed to
+ *  `evaluateBudgets`'s decide-whether-to-block half. Reuses the exact same per-record pricing
+ *  (`recordUsd`) and local-day bucketing (`localDayKey`) evaluateBudgets already uses, so a
+ *  status display and the real enforcement gate can never silently disagree on a number. */
+export interface SpendSummary {
+  /** every record handed in, summed. */
+  sessionSpentUsd: number;
+  /** only the records whose `atIso` falls on `nowIso`'s LOCAL calendar day. */
+  dailySpentUsd: number;
+  /** distinct model ids with no price entry — their spend is in neither total above. */
+  unpriced: string[];
+}
+
+/**
+ * Sum `records` into a session total and a today-only total, in USD. `records` should be
+ * whatever the caller considers "this session" (e.g. every record in one CLI run's accounting
+ * file) — pass the SAME record set as both the session and the day total's source (a superset
+ * covering at least today) when there is no narrower "session" concept to report, since the day
+ * filter only looks at each record's own `atIso`.
+ */
+export function summarizeSpend(
+  records: readonly SpendRecord[],
+  nowIso: string,
+  priceFor: PriceFor,
+): SpendSummary {
+  const today = localDayKey(nowIso);
+  let sessionSpentUsd = 0;
+  let dailySpentUsd = 0;
+  const unpriced = new Set<string>();
+  for (const r of records) {
+    const usd = recordUsd(r, priceFor);
+    if (usd === null) {
+      unpriced.add(r.model);
+      continue;
+    }
+    sessionSpentUsd += usd;
+    if (localDayKey(r.atIso) === today) dailySpentUsd += usd;
+  }
+  return { sessionSpentUsd, dailySpentUsd, unpriced: [...unpriced].sort() };
+}
+
 /**
  * Decide whether the NEXT metered turn may fire, given the session's accounting records.
  * Returns the MOST SEVERE window decision (block > warn > ok). A block names the window,

@@ -79,6 +79,10 @@
       "types": "./dist/agent/compact.d.ts",
       "import": "./dist/agent/compact.js"
     },
+    "./agent-idle-watchdog": {
+      "types": "./dist/agent/idle-watchdog.d.ts",
+      "import": "./dist/agent/idle-watchdog.js"
+    },
     "./agent-patch": {
       "types": "./dist/agent/patch.d.ts",
       "import": "./dist/agent/patch.js"
@@ -95,9 +99,25 @@
       "types": "./dist/agent/protocol/index.d.ts",
       "import": "./dist/agent/protocol/index.js"
     },
+    "./ai-usage": {
+      "types": "./dist/ai/usage.d.ts",
+      "import": "./dist/ai/usage.js"
+    },
     "./ai-effort": {
       "types": "./dist/ai/effort/index.d.ts",
       "import": "./dist/ai/effort/index.js"
+    },
+    "./ai-model-health": {
+      "types": "./dist/ai/model-health.d.ts",
+      "import": "./dist/ai/model-health.js"
+    },
+    "./ai-context-window": {
+      "types": "./dist/ai/context-window.d.ts",
+      "import": "./dist/ai/context-window.js"
+    },
+    "./agent-schedule": {
+      "types": "./dist/agent/schedule.d.ts",
+      "import": "./dist/agent/schedule.js"
     },
     "./agent-session": {
       "types": "./dist/agent/session-store.d.ts",
@@ -150,6 +170,10 @@
     "./path-completion": {
       "types": "./dist/path-completion/index.d.ts",
       "import": "./dist/path-completion/index.js"
+    },
+    "./metadata": {
+      "types": "./dist/metadata/index.d.ts",
+      "import": "./dist/metadata/index.js"
     }
   },
   "scripts": {

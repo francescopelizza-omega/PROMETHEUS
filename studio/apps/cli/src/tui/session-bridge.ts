@@ -13,27 +13,31 @@
 import {
   repl,
   type AiEndpoint,
+  CONTEXT_PROBE_AWAIT_MS,
   DEFAULT_CONTEXT_WINDOW,
   agent,
   ai,
   cliProfiles,
+  createEndpointProbe,
   loadPricing,
   mcpServer,
   orchestration,
-  probeContextWindow,
 } from "@prometheus/core";
 
 import {
   createHookRunner,
+  expandHome,
   loadMemoryIndexBlock,
   loadPermissionRules,
   nodePreviewIo,
+  resolveEffectiveHooks,
+  runSystemTool,
 } from "@prometheus/core/agent-system-host";
 import { type EngineClient, createEngineClient } from "@prometheus/engine-bridge";
-import { loadHooksDetailed } from "../session/hooks-config.js";
+import { type HooksSource, loadHooksDetailed } from "../session/hooks-config.js";
 import { createKeyResolver, keychainProviders } from "../session/key-resolver.js";
 
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { isAbsolute, join, resolve } from "node:path";
 
 import { PROM_VERSION } from "../commands/help.js";
@@ -46,6 +50,7 @@ import {
 } from "../commands/invoke.js";
 import { readTokenToggles } from "../commands/token-toggles.js";
 import type { CommandOutcome } from "../context.js";
+import { guardOwnRepo, resolveCwd } from "../cwd-guard.js";
 import { ensureHomeTree, prometheusHome, resolveCategory } from "../home.js";
 import { runDemos } from "../orchestration/demos-cmd.js";
 import type { ParsedArgs } from "../parse.js";
@@ -54,6 +59,7 @@ import { defaultOpenEditor } from "../profile-store.js";
 import { c } from "../render.js";
 import { loadAgentFiles } from "../session/agent-file-store.js";
 import {
+  type CheckpointHook,
   type ContextComponent,
   type EditRecord,
   type SessionCtx as TurnCtx,
@@ -75,6 +81,12 @@ import {
 } from "../session/agent-runtime.js";
 import { readSavedAuthLevel, saveAuthLevel } from "../session/authorisation-store.js";
 import { type SessionCtx as VerbCtx, execVerb } from "../session/command-exec.js";
+import { type LoadedCommand, expandCommand, loadCommandFiles } from "../session/command-files.js";
+import {
+  loadContextWindowTokens,
+  saveContextWindowTokens,
+} from "../session/context-window-setting.js";
+import { loadEffortRules } from "../session/effort-rules.js";
 import {
   type ExecDecision,
   appendExecAudit,
@@ -95,9 +107,12 @@ import {
   loadTurns,
   recordSession,
   rotateSessions,
+  updateSessionSummary,
 } from "../session/history-store.js";
 import { makeBudgetGuard, banner as renderBanner, seedTuningWithNotes } from "../session/host.js";
+import { loadIdleTimeoutMs, saveIdleTimeoutMs } from "../session/idle-timeout-setting.js";
 import { type McpSession, openMcpSession, withMcpTools } from "../session/mcp-session.js";
+import { modelCandidates, resolveModelCandidate } from "../session/model-candidates.js";
 import {
   type Backends,
   backendSummary,
@@ -106,9 +121,16 @@ import {
   runPathsWizard,
   runSetup,
 } from "../session/onboarding.js";
-import { DEFAULT_SUBAGENTS, orchestratorNote, spawnCapFor } from "../session/orchestrator.js";
+import {
+  DEFAULT_SUBAGENTS,
+  detachedRunNote,
+  orchestratorNote,
+  spawnCapFor,
+  startDetachedRun,
+} from "../session/orchestrator.js";
 import { applyRepoMapVerb, makeRepoMapState, repoMapStats } from "../session/repo-map-state.js";
 import { maybeStopServicesOnExit } from "../session/service-shutdown.js";
+import { newSessionId } from "../session/session-id.js";
 import {
   type SessionCtx as LegacySlashCtx,
   type SlashResult,
@@ -118,10 +140,12 @@ import {
   type HookListing,
   type HookTestOutcome,
   type SlashCtx,
+  allSlashNames,
   findSlash,
 } from "../session/slash-registry.js";
 import { createSteeringController } from "../session/steering.js";
 import { execVarsFromEnv } from "../session/system-tools.js";
+import { turnSummaryOf } from "../session/turn-summary.js";
 import { createWorkingSet, isPathAllowed } from "../session/working-set.js";
 import { insideTmux } from "../tmux/tmux.js";
 import { runUpdates } from "../updates/updates-cmd.js";
@@ -316,6 +340,8 @@ export interface BridgeDeps {
   ask: (prompt: string) => Promise<string>;
   /** in-TUI folder prompt. */
   askPath: (prompt: string, def: string) => Promise<string>;
+  /** `/traits` — focus the composer's trait rail (the ⌃T mode). Absent ⇒ the command says so. */
+  focusTraitRail?: () => boolean;
   /** end the session (control:quit). */
   quit: () => void;
   /** the resolved color depth (for the /demos live view). */
@@ -356,6 +382,19 @@ export interface SessionBridge {
   revertLastEdit: () => string | undefined;
   /** quick-toggle all agent tools (Ctrl+T); returns the new global enabled state. CLI-018. */
   toggleTools: () => boolean;
+  /** set the tools switch explicitly — the trait rail's ↑/↓ set a STATE, not a flip. */
+  setToolsEnabled: (on: boolean) => boolean;
+  /**
+   * Move the effort tier by ±1 on the `off < low < medium < high < max` ladder and report where
+   * it landed, clamped at both ends. Returns the tier that is now SET (what `/effort` would
+   * print), not the one that will be applied — the badge beside the rail already reports the
+   * resolution, degradation and all.
+   */
+  stepEffort: (delta: number) => ai.EffortTier;
+  /** set the effort tier outright (the rail's `think` cell switches between `off` and a tier). */
+  setEffort: (tier: ai.EffortTier) => ai.EffortTier;
+  /** put thinking back at the tier it was last ON at (the rail's `think` ↑). */
+  resumeThinking: () => ai.EffortTier;
   /** the `/invoke` overlay's catalog rows (name · summary · install presence), CLI-059. [] on error. */
   invokeCatalog: () => Promise<InvokeItem[]>;
   /** dispatch the overlay's pick+args through the SAME nemesis-gated install path (CLI-059). */
@@ -388,27 +427,145 @@ export async function createSessionBridge(deps: BridgeDeps): Promise<SessionBrid
   for (const r of seeded.rejected) {
     deps.write(`  ! .prometheus.toml: ${r.key} ignored — ${r.reason}`);
   }
-  let state = repl.initialReplState(seeded.tuning, parsed.cwd ?? process.cwd());
+  let state = repl.initialReplState(seeded.tuning, resolveCwd(parsed.cwd, deps.write));
   // capture the profile's system prompt BEFORE any /system override → /system reset (CLI-017).
   const systemPromptDefault = state.tuning.systemPrompt;
   let permMode: PermissionModeId = "default";
   // the fine-grained 0–7 autonomy scale (--authorisation). The SOURCE OF TRUTH for allow/ask;
   // permMode is kept synced as the coarse Shift-Tab/indicator companion. Default 1 = ask-for-changes.
-  let authLevel: number = agent.DEFAULT_AUTH_LEVEL;
+  // Restored from the last-saved level (mirrors the readline host) — `readSavedAuthLevel` was
+  // imported but never actually called here, so "last-set becomes the next-session default"
+  // (the very comment on `saveAuthLevel`'s call sites below) was never true for this TUI host.
+  let authLevel: number = readSavedAuthLevel(deps.configHome) ?? agent.DEFAULT_AUTH_LEVEL;
   let history: agent.ThreadMessage[] = [];
   let session: agent.Session | undefined;
   // CLI-072: resume state for `/continue` — a capped turn's full non-system thread (tool results
   // included) is stashed here; `continueCount` shows "resumed N×". Mirrors the host.
   let capturedResume: agent.ThreadMessage[] | null = null;
   let continueCount = 0;
-  // /recall session-history (mirrors the host): per-session id + one-time first-prompt record.
-  const sessionId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+  // /recall (/restore) session-history (mirrors the host): per-session id + one-time
+  // first-prompt record. `let`, not `const`: `/cd` mints a fresh one when it rotates projects.
+  let sessionId = newSessionId();
   let sessionRecorded = false;
+  // /context window: the user-chosen ceiling auto-compact budgets against (mirrors the host).
+  let contextWindowSetting = loadContextWindowTokens(home);
+  // (A) `/timeout` — the inactivity-pause threshold this session's turns use (default 10 min).
+  let idleTimeoutMsSetting = loadIdleTimeoutMs(home);
 
   const backends: Backends =
     deps.backends ??
     (await detectBackends({ client }).catch(() => ({ liveRunners: [], paidClis: [] }) as Backends));
   let endpoint: AiEndpoint | undefined = backends.localEndpoint;
+  /**
+   * The in-flight context-window/capability probe, if one was kicked off below — awaited
+   * (bounded) exactly once, right before the FIRST turn reads `endpoint.contextWindow`. See the
+   * readline host's identical `contextProbe` and `CONTEXT_PROBE_AWAIT_MS`.
+   */
+  let contextProbe: Promise<unknown> | undefined;
+  /**
+   * The session's ONE measuring seam, cache and all. See `ai/endpoint-probe.ts` — the short
+   * version is that `/model`, `/worker` and `/setup` each rebind `endpoint` to a freshly built
+   * object that carries neither a measured window nor `probedCapabilities`, and before this
+   * existed nothing re-measured, so switching model silently reverted compaction to the 8192
+   * floor and `/think` to "not available".
+   */
+  const endpointProbe = createEndpointProbe({ fetch: fetch as never });
+  /**
+   * The session's EFFECTIVE effort capability table: the builtins, plus any user or workspace
+   * override file. Loaded ONCE — it is disk-backed, and re-reading it per turn would put two
+   * file stats on the request path for a table that only changes when a human edits it.
+   *
+   * Malformed entries are reported rather than swallowed: a rule the user believes is in force
+   * but which was silently dropped is worse than no override at all.
+   */
+  let effortRulesLoad = loadEffortRules(state.cwd, home);
+  // Say what was refused. A malformed override is the one case where silence is worse than
+  // noise: the user edited a file specifically to change this behaviour.
+  for (const note of effortRulesLoad.notes) {
+    deps.write(`  ! effort rules: ${note}`);
+  }
+  /**
+   * What THIS endpoint has been observed to do about tool calls, across the whole session.
+   *
+   * Declared HERE, above `adoptEndpoint`, because that function assigns it and is CALLED during
+   * session setup (the fire-and-forget probe below). The declaration used to sit ~700 lines
+   * further down, so the setup call touched a `let` still in its temporal dead zone and threw
+   * `Cannot access 'toolCapability' before initialization` — which `launchTui` catches and
+   * reports as "Prometheus's modern terminal UI failed to start", silently dropping every
+   * session to the readline compatibility host. The TUI was unreachable, and the only clue was
+   * one warning line. The readline host declares its twin before use, which is why `--plain`
+   * was unaffected.
+   */
+  let toolCapability = agent.protocol.initialCapability();
+
+  /**
+   * Point the session at `next` AND (re)measure it. EVERY rebind goes through here.
+   *
+   * Returns the in-flight probe so an interactive caller (`/model`, `/setup` — the user is
+   * already waiting on a command) can await it and have `/think`/`/status` be right on the very
+   * next line, while session start stays fire-and-forget and lets the existing bounded
+   * `contextProbe` wait ahead of the first turn cover the race.
+   */
+  const adoptEndpoint = (next: AiEndpoint): Promise<void> => {
+    /**
+     * A new endpoint starts with a CLEAN capability slate.
+     *
+     * `toolCapability` is documented as "what THIS endpoint has been observed to do about tool
+     * calls" but was a single session-scoped variable that nothing ever reset. So one model
+     * rejecting native tool calls latched the whole session into the text protocol, and
+     * `/model` to a model that supports them natively kept the degraded transport for the rest
+     * of the session — with the preamble still teaching a text syntax the new model does not
+     * need. The observation is only ever true of the endpoint it was made against.
+     */
+    toolCapability = agent.protocol.initialCapability();
+    endpoint = next;
+    // pre-load the local model NOW (fire-and-forget) so the user's next prompt is warm.
+    warmupLocalModel(next);
+    const settled = endpointProbe
+      .attach(next)
+      .then((r) => {
+        // A slow probe for a model the user has ALREADY switched away from must not resurrect
+        // it. Identity is (id, model): `/model` rebuilds the object, so reference equality
+        // would never hold, and the id alone is not unique across a runner's models.
+        if (endpoint?.id !== next.id || endpoint?.model !== next.model) return;
+        if (r.measured) {
+          endpoint = r.endpoint;
+          return;
+        }
+        if (r.failed) {
+          // `source:"default"` means the probe FAILED (unreachable runner, unrecognised
+          // shape, wrong runner) — not that 8192 is this model's real window. Silently
+          // keeping the floor is indistinguishable, to the user, from a real 8k model: a
+          // 128k+ model whose probe failed would compact as though it were about to
+          // overflow for the whole session with no visible sign anything went wrong.
+          deps.write(
+            `  ! could not measure ${next.model}'s real context window — using the ${DEFAULT_CONTEXT_WINDOW}-token floor (context budgeting may be too conservative)`,
+          );
+        }
+      })
+      .catch(() => {
+        /* fail-soft: the documented floor stands */
+      });
+    contextProbe = settled;
+    /**
+     * Interactive callers await THIS, not `settled`.
+     *
+     * `probeContextWindow` bounds each request at `PROBE_TIMEOUT_MS`, but it makes TWO of them
+     * in sequence, so a wedged runner could still freeze `/model` for ~5s with no output. This
+     * caps the wait at the same `CONTEXT_PROBE_AWAIT_MS` the pre-turn wait uses; the probe is
+     * NOT cancelled — it keeps running and adopts its answer when it lands, guarded against
+     * having been switched away from in the meantime.
+     *
+     * The timer is unref'd so a one-shot run is never held open by a wait nobody is watching.
+     */
+    return Promise.race([
+      settled,
+      new Promise<void>((resolve) => {
+        const t = setTimeout(resolve, CONTEXT_PROBE_AWAIT_MS);
+        t.unref?.();
+      }),
+    ]);
+  };
   /**
    * The cloud providers configured on this machine.
    *
@@ -434,35 +591,13 @@ export async function createSessionBridge(deps: BridgeDeps): Promise<SessionBrid
         model: { provider: backends.localRunner?.name ?? "ollama", modelId: endpoint.model ?? "" },
       },
     });
-    // pre-load the local model NOW (fire-and-forget) so the user's first prompt is warm.
-    warmupLocalModel(endpoint);
-    // …and ask the runner how big this model's context ACTUALLY is. Every endpoint builder
-    // in this repo hard-coded 8192, which on this machine is right for gemma4:12b and wrong
-    // by 32x for qwen3.6 (262144). That number is what compaction budgets against, so the
-    // assumption made a long run compact a huge-window model as if it were about to
-    // overflow. Fire-and-forget and fail-soft: an unreachable runner keeps the floor.
-    if (endpoint.locality === "local" && endpoint.model) {
-      void probeContextWindow(endpoint.baseUrl, endpoint.model, fetch as never)
-        .then((r) => {
-          if (r.source !== "default") {
-            if (r.contextWindow !== endpoint?.contextWindow) {
-              endpoint = { ...(endpoint as AiEndpoint), contextWindow: r.contextWindow };
-            }
-            return;
-          }
-          // `source:"default"` means the probe FAILED (unreachable runner, unrecognised
-          // shape, wrong runner) — not that 8192 is this model's real window. Silently
-          // keeping the floor is indistinguishable, to the user, from a real 8k model: a
-          // 128k+ model whose probe failed would compact as though it were about to
-          // overflow for the whole session with no visible sign anything went wrong.
-          deps.write(
-            `  ! could not measure ${endpoint?.model}'s real context window — using the ${DEFAULT_CONTEXT_WINDOW}-token floor (context budgeting may be too conservative)`,
-          );
-        })
-        .catch(() => {
-          /* fail-soft: the documented floor stands */
-        });
-    }
+    // Warm the model AND ask the runner how big its context ACTUALLY is / what it can do.
+    // Every endpoint builder in this repo hard-codes 8192, which on this machine is right for
+    // gemma4:12b and wrong by 32x for qwen3.6 (262144). That number is what compaction budgets
+    // against, so the assumption made a long run compact a huge-window model as if it were
+    // about to overflow. Fire-and-forget here (the bounded wait ahead of the first turn closes
+    // the race); `/model` and `/setup` await the same seam instead.
+    void adoptEndpoint(endpoint);
   }
 
   const orchestrating = insideTmux();
@@ -483,8 +618,11 @@ export async function createSessionBridge(deps: BridgeDeps): Promise<SessionBrid
    * multiplexer would be a silent downgrade of a setting nobody touched.
    */
   let explicitAgents: number | null = null;
-  // per-session working set of extra readable dirs (/add-dir, CLI-004).
-  const ws = createWorkingSet();
+  // per-session working set of extra readable dirs (/add-dir, CLI-004). `let`: /cd resets it for
+  // the new project — every OTHER piece of project-scoped state in changeProjectDirectory is
+  // deliberately reset with a comment justifying it; this was the one omission, so a directory
+  // granted access in the OLD project silently kept its read/write scope in an unrelated new one.
+  let ws = createWorkingSet();
   // pre-image log for applied propose_edit calls (CLI-010) → /revert.
   const editHistory: EditRecord[] = [];
   // turn-atomic workspace checkpoints for /revert + /checkpoints (CLI-015).
@@ -536,8 +674,23 @@ export async function createSessionBridge(deps: BridgeDeps): Promise<SessionBrid
    * SAME shared loop, so a PreToolUse hook means one thing regardless of which binary the user
    * launched. That is the specific failure plan mode had before it moved into the loop, and it
    * is not worth repeating for hooks.
+   *
+   * The workspace layer can only NARROW the global hooks (select from the user's own set) or ADD
+   * ones that pass a nemesis scan and a one-time trust confirmation — never silently replace or
+   * auto-run a repo-supplied command. See hooks-trust.ts.
    */
-  const { hooks: sessionHooks, source: hooksSource } = loadHooksDetailed({ home, cwd: state.cwd });
+  const rawHooks = loadHooksDetailed({ home, cwd: state.cwd });
+  const { hooks: sessionHooks, refused: hookRefusals } = await resolveEffectiveHooks({
+    home,
+    cwd: state.cwd,
+    globalHooks: rawHooks.globalHooks,
+    workspaceHooks: rawHooks.workspaceHooks,
+    confirm: deps.confirm,
+  });
+  const hooksSource: HooksSource = rawHooks.workspaceHooks !== undefined ? "workspace" : "global";
+  for (const r of hookRefusals) {
+    write(c.dim(`  hook refused (${r.event}): ${r.command} — ${r.reason}`));
+  }
   const hookRunner =
     sessionHooks.length > 0 ? createHookRunner({ cwd: state.cwd, env: process.env }) : undefined;
   /** SessionStart output, captured once (not awaited — a slow script must not delay the UI). */
@@ -1027,16 +1180,29 @@ export async function createSessionBridge(deps: BridgeDeps): Promise<SessionBrid
   // into the next one; `project`/`user` grants are loaded from and written back to disk, so
   // "don't ask again" survives a restart — which is the only reading of those words.
   // The user's `[permissions]` rules — the same loader the readline host and headless use.
-  const permissionRules = loadPermissionRules({
+  // `let`: `/cd` re-derives this for the NEW cwd — a project's own tightened rules must govern
+  // it, not whatever the OLD project declared.
+  let permissionRules = loadPermissionRules({
     home: deps.configHome,
-    cwd: parsed.cwd ?? process.cwd(),
+    // `state.cwd` was already resolved through `resolveCwd` above — reusing it here (rather than
+    // recomputing `parsed.cwd ?? process.cwd()`) is what keeps this in sync with the guard: a run
+    // redirected away from Prometheus's own repo must have ITS permission rules loaded for the
+    // redirected directory, never the original one.
+    cwd: state.cwd,
   });
-  /** What THIS endpoint has been observed to do about tool calls, across the whole session. */
-  let toolCapability = agent.protocol.initialCapability();
   const grants = new agent.ScopedPermissionStore();
   const loadedGrants = loadGrantsInto(grants, deps.configHome);
-  // Sub-agent personas, clamped by scope — see the readline host's twin.
-  const agentFiles = loadAgentFiles(parsed.cwd ?? process.cwd(), home);
+  // Sub-agent personas, clamped by scope — see the readline host's twin. `let`: `/cd` re-derives
+  // this for the NEW cwd — a persona from the OLD project keeping its trust in a different one
+  // would be a correctness (and trust) bug, not a convenience.
+  let agentFiles = loadAgentFiles(state.cwd, home);
+  // User-defined `/name` commands (project/user .prometheus/command/*.md) — see the readline
+  // host's twin. Built-in names are refused at load time, and `submit` below consults the
+  // built-in registry first, so a repo cannot redefine `/gate`. This was entirely missing from
+  // the TUI: a command file that worked under --plain/--tmux (host.ts) silently did not exist
+  // on the default raw-mode TUI surface — the same shape of gap as /background before it was
+  // fixed. `let`: `/cd` re-derives this for the new cwd, same reason as agentFiles above.
+  let commandFiles = loadCommandFiles(state.cwd, new Set(allSlashNames()), home);
   if (loadedGrants.refused > 0) {
     // The file asked for something the UI would never have accepted — say so rather than
     // dropping it silently, because a hand-edited or hostile grants file is the case that
@@ -1047,7 +1213,14 @@ export async function createSessionBridge(deps: BridgeDeps): Promise<SessionBrid
   // never written to the user's repo.
   const todos = new agent.TodoStore();
 
-  const turnCtx = (): TurnCtx => {
+  /**
+   * `writeOverride` lets a caller redirect a turn's output away from the live pane — the seam
+   * `/background` needs so a detached run's text feeds the run's own ring buffer (`agents
+   * attach`) instead of interleaving into whatever the user is doing at the prompt right now.
+   * Every ordinary call site omits it and gets the pane's `write`, unchanged.
+   */
+  const turnCtx = (writeOverride?: (s: string) => void): TurnCtx => {
+    const w = writeOverride ?? write;
     const cols = deps.width?.();
     return {
       client,
@@ -1071,8 +1244,13 @@ export async function createSessionBridge(deps: BridgeDeps): Promise<SessionBrid
         ...(sessionHooks.length > 0 ? { hooks: sessionHooks } : {}),
         ...(hookRunner ? { hookRunner } : {}),
       },
+      // (A) `/timeout` — the session's inactivity-pause threshold.
+      idleTimeoutMs: idleTimeoutMsSetting,
       json: parsed.json,
       ...(endpoint ? { endpoint } : {}),
+      // The session's effective effort capability table (builtins ⊕ user ⊕ workspace
+      // override files). Loaded once at startup — see `session/effort-rules.ts`.
+      effortRules: effortRulesLoad.rules,
       confirm: turnConfirm,
       // The `question` tool's seam — the TUI already has a free-text modal.
       ask: deps.ask,
@@ -1105,16 +1283,16 @@ export async function createSessionBridge(deps: BridgeDeps): Promise<SessionBrid
        * is the assignment that was missing.
        */
       subagentBudget: { maxSpawns: spawnCap },
-      onTodos: (items) => write(`  ▤ ${agent.todoSummary(items)}`),
+      onTodos: (items) => w(`  ▤ ${agent.todoSummary(items)}`),
       onRemember: (subject, scope) => {
-        write(`  ✓ remembered: ${subject} (${scope})`);
+        w(`  ✓ remembered: ${subject} (${scope})`);
         // Written now, not at exit: a session that ends in a crash or a kill would otherwise
         // lose exactly the answer the user took the trouble to give.
         if (scope === "project" || scope === "user") saveGrants(grants, deps.configHome);
       },
-      onAutoApprove: (subject) => write(`  ↩ auto-approved from a remembered grant: ${subject}`),
+      onAutoApprove: (subject) => w(`  ↩ auto-approved from a remembered grant: ${subject}`),
       ...(mcp ? { callMcpTool: (id, tool, args) => mcp.callTool(id, tool, args) } : {}),
-      write,
+      write: w,
       ...(cols && cols > 0 ? { width: cols } : {}),
       // terminal color depth → Pelly syntax highlighting of code inside the reasoning stream.
       ...(deps.caps ? { caps: deps.caps } : {}),
@@ -1164,14 +1342,29 @@ export async function createSessionBridge(deps: BridgeDeps): Promise<SessionBrid
       const note = orchestratorNote(input, subagentCount);
       if (note) write(`🛸 ${note}`);
     }
-    // auto-compact BEFORE the turn when the transcript nears the context budget (CLI-016).
+    if (contextProbe) {
+      // Bounded: see the readline host's identical wait ahead of `maybeAutoCompact`.
+      await Promise.race([
+        contextProbe.catch(() => undefined),
+        new Promise((r) => setTimeout(r, CONTEXT_PROBE_AWAIT_MS)),
+      ]);
+      contextProbe = undefined;
+    }
+    // auto-compact BEFORE the turn when the transcript nears the context budget (CLI-016). The
+    // window is the SMALLER of the endpoint's own window and `contextWindowSetting` (`/context
+    // window`, default 250k) — a user-chosen ceiling always wins over a bigger number the
+    // model's metadata claims, and a genuinely smaller real window always wins over an
+    // optimistic setting. See the readline host's `maybeAutoCompact` for the full rationale.
     const policy = autoCompactPolicy(
       COMPACT_THRESHOLD_PCT,
-      endpoint?.contextWindow ?? 8192,
+      Math.min(endpoint?.contextWindow ?? DEFAULT_CONTEXT_WINDOW, contextWindowSetting),
       COMPACT_KEEP_RECENT,
     );
     if (session && shouldAutoCompact(session, policy) && policy) {
-      const { summarize, offline } = makeSummarizer(turnCtx());
+      const { summarize, offline } = makeSummarizer(turnCtx(), {
+        ...(opts?.signal ? { signal: opts.signal } : {}),
+        onStatus: write,
+      });
       const auto = await compactSession(
         sessionId,
         session,
@@ -1198,6 +1391,8 @@ export async function createSessionBridge(deps: BridgeDeps): Promise<SessionBrid
     // persist the turn transcript: user prompt + every AgentEvent (CLI-012). Fail-soft.
     appendTurnEvents(home, sessionId, [{ role: "user", text: input }, ...res.events]);
     rotateSessions(home, { maxBytes: SESSION_TRANSCRIPT_CAP_BYTES, liveId: sessionId });
+    // /restore's picker column: what THIS turn actually did (mechanical, no model round-trip).
+    updateSessionSummary(home, sessionId, turnSummaryOf(input, res.events));
     if (res.reply.trim()) {
       state = repl.reduce(state, { type: "message", role: "prometheus", text: res.reply });
     }
@@ -1221,14 +1416,23 @@ export async function createSessionBridge(deps: BridgeDeps): Promise<SessionBrid
     }
   };
 
-  /** CLI-072: fold a turn's cap outcome into resume state (stash on cap, clear on clean end). */
-  const settleCap = (res: { capped: boolean; thread: agent.ThreadMessage[] }): void => {
-    if (res.capped) {
+  /** CLI-072: fold a turn's cap OR idle-pause outcome into resume state (stash, clear on clean end). */
+  const settleCap = (res: {
+    capped: boolean;
+    paused?: boolean;
+    pausedIdleMs?: number;
+    thread: agent.ThreadMessage[];
+  }): void => {
+    if (res.capped || res.paused) {
       capturedResume = res.thread;
-      // yolo (run-to-done) auto-resumes the chain itself — don't print the manual "/continue" hint.
-      if (!agent.isRunToDoneMode(permMode)) {
+      // yolo (run-to-done) only auto-resumes a CAPPED turn (below) — an idle pause is left for
+      // the user to notice and act on, matching "pause forever until the user gets back".
+      if (!agent.isRunToDoneMode(permMode) || res.paused) {
         const again = continueCount > 0 ? ` (resumed ${continueCount}×)` : "";
-        write(c.dim(`⎿ paused at the step cap — /continue to resume${again}`));
+        const why = res.paused
+          ? `paused after ${Math.round((res.pausedIdleMs ?? 0) / 1000)}s of inactivity`
+          : "paused at the step cap";
+        write(c.dim(`⎿ ${why} — /continue to resume, or just keep typing${again}`));
       }
     } else {
       capturedResume = null;
@@ -1251,6 +1455,7 @@ export async function createSessionBridge(deps: BridgeDeps): Promise<SessionBrid
     session = res.session;
     appendTurnEvents(home, sessionId, [{ role: "user", text: "/continue" }, ...res.events]);
     rotateSessions(home, { maxBytes: SESSION_TRANSCRIPT_CAP_BYTES, liveId: sessionId });
+    updateSessionSummary(home, sessionId, turnSummaryOf("/continue", res.events));
     if (res.reply.trim()) {
       state = repl.reduce(state, { type: "message", role: "prometheus", text: res.reply });
     }
@@ -1267,18 +1472,11 @@ export async function createSessionBridge(deps: BridgeDeps): Promise<SessionBrid
         })
       : history;
     settleCap(res);
-    if (!res.capped) continueCount = 0;
+    // A pause (idle-timeout) is still an open chain, exactly like a round cap — `settleCap`
+    // above already re-stashed the resume state for it, so the counter must not reset either,
+    // or "resumed N×" understates how many times this SAME chain has had to be continued.
+    if (!res.capped && !res.paused) continueCount = 0;
     return res;
-  };
-
-  /** A stable digest of a round's tool activity — an identical repeat ⇒ no progress (auto-continue halt). */
-  const digestOf = (events: readonly agent.AgentEvent[]): string => {
-    const parts: string[] = [];
-    for (const e of events) {
-      if (e.kind === "tool_use") parts.push(`u:${e.call.name}`);
-      else if (e.kind === "tool_result") parts.push(`r:${e.call.name}:${e.ok}`);
-    }
-    return parts.join("|").slice(0, 2000);
   };
 
   /**
@@ -1304,7 +1502,7 @@ export async function createSessionBridge(deps: BridgeDeps): Promise<SessionBrid
         budget: agent.DEFAULT_AUTO_CONTINUE_BUDGET,
         nowMs: Date.now(),
         tokensSpent: tokens,
-        progressDigest: digestOf(cur.events),
+        progressDigest: agent.progressDigest(cur.events),
       });
       if (!decision.resume) {
         if (cur.capped) write(c.dim(`⎿ yolo auto-continue stopped: ${decision.reason}`));
@@ -1354,7 +1552,22 @@ export async function createSessionBridge(deps: BridgeDeps): Promise<SessionBrid
      * it, so the first compaction (or an immediate `/condense`) replaced the entire restored
      * conversation with `turnsToHistory([])` — nothing at all, silently.
      */
-    if (session) session = { ...session, turns: turnsFromRecords(records) };
+    /**
+     * Build the session when there ISN'T one — `if (session)` skipped exactly the case that
+     * matters.
+     *
+     * `session` stays undefined until the first turn of THIS process assigns it, and a resume
+     * is by definition the thing you do BEFORE any turn has run. So on a fresh
+     * `prometheus` + `/recall`, the restore repainted the transcript, refilled `history`, and
+     * left `session` undefined — the comment above describing a fix that never fired. Compaction
+     * then rebuilt `history` from the handful of turns worked since, silently deleting the whole
+     * restored conversation: the exact failure this line was written to prevent.
+     */
+    session = {
+      ...(session ??
+        agent.createSession(sessionId, r.descriptor || "resumed", r.ts, r.cwd || state.cwd)),
+      turns: turnsFromRecords(records),
+    };
     capturedResume = null; // CLI-072: a restored session has no in-flight capped turn.
     continueCount = 0;
     if (r.cwd) state = repl.reduce(state, { type: "cwd", dir: r.cwd });
@@ -1378,22 +1591,186 @@ export async function createSessionBridge(deps: BridgeDeps): Promise<SessionBrid
     }
   };
 
+  /**
+   * Run a user-defined command file (a project/user `.prometheus/command/*.md`) — mirrors the
+   * readline host's identical `runCommandFile`. `@ref` reads and `!cmd` shell requests inside the
+   * file are expanded here (never inside the model's own context), with a real confirm prompt
+   * for the shell case — a command file authored months ago has not earned the ladder's
+   * auto-approval the way a command the model just composed in response to a live request has.
+   */
+  const runCommandFile = async (cmd: LoadedCommand, rest: string): Promise<void> => {
+    const argv = rest.trim() ? rest.trim().split(/\s+/) : [];
+    const { prompt, rejected } = await expandCommand(cmd, argv, {
+      readFile: async (rel) => {
+        const out = await runSystemTool(
+          "read_file",
+          { path: rel },
+          { cwd: state.cwd, roots: [state.cwd, ...ws.list()] },
+        );
+        if (!out?.ok) throw new Error(out?.summary ?? "unreadable");
+        return out.summary;
+      },
+      runShell: async (command) => {
+        write(c.dim(`  ${cmd.file.name}: wants to run  ${command}`));
+        if (!(await deps.confirm(`run \`${command}\` from ${cmd.path}?`))) return null;
+        const out = await runSystemTool(
+          "run_command",
+          { command },
+          {
+            cwd: state.cwd,
+            roots: [state.cwd, ...ws.list()],
+            gateMode: state.tuning.gateMode,
+            home,
+            // The session's level, so this human-approved run is confined by the OS sandbox
+            // to exactly what the ladder already permits — omitting it would silently pin
+            // every command-file shell to the safe default however the session is set.
+            authLevel,
+          },
+        );
+        return out?.ok ? out.summary : null;
+      },
+    });
+    for (const r of rejected) write(c.yellow(`  ! ${r.what} — ${r.reason}`));
+    if (!prompt.trim()) {
+      write(c.red(`/${cmd.file.name}: expanded to nothing`));
+      return;
+    }
+    await runAgentMessage(prompt);
+  };
+
   const runHostSetup = async (): Promise<void> => {
     const r = await runSetup({ client, write, ask: deps.ask, askPath: deps.askPath, home });
     if (r.endpoint) {
-      endpoint = r.endpoint;
       process.env.PROMETHEUS_MODELS_DIR = resolveCategory("open_models", home);
       state = repl.reduce(state, {
         type: "tune",
         patch: { model: { provider: "ollama", modelId: r.endpoint.model ?? "" } },
       });
-      // pre-load the just-chosen model so the next prompt is warm.
-      warmupLocalModel(endpoint);
+      // Adopt = point at it, warm it, AND measure it. `/setup` used to rebind without probing,
+      // which handed the freshly downloaded model the 8192 floor and no `probedCapabilities` —
+      // so `/think` reported "not available" for a model that had just been installed BECAUSE
+      // it can think. Awaited: the user is already standing at a wizard.
+      await adoptEndpoint(r.endpoint);
     }
   };
   const runHostPaths = async (): Promise<void> => {
     await runPathsWizard({ client, write, ask: deps.ask, askPath: deps.askPath, home });
     process.env.PROMETHEUS_MODELS_DIR = resolveCategory("open_models", home);
+  };
+
+  /**
+   * `/cd` — move to a different project WITHOUT quitting and relaunching. Mirrors the readline
+   * host's `changeProjectDirectory` exactly (see its header there for the full rationale): the
+   * target is validated FIRST (a bad path is a no-op, not a wrecked conversation), then the
+   * session rotates — fresh id, empty transcript/history, project-scoped state (personas,
+   * permission rules, the built-in repo map, steering docs) re-derived for the NEW directory —
+   * while tuning (model/system prompt/tools/gate/dry-run/verbosity/effort/authLevel/permMode)
+   * carries over unchanged. This host has no `/name` command-file layer, so there is nothing
+   * equivalent to reload for it.
+   */
+  /**
+   * Re-point every PROJECT-SCOPED binding at `target`. Shared by `/cd` and `/cwd`.
+   *
+   * `/cwd` used to do only the `cwd` reduce, so it moved the session and reloaded NOTHING: the
+   * new project's AGENTS.md/CLAUDE.md/PROMETHEUS.md were never read, `/memory` kept listing the
+   * OLD project's steering paths, and permission rules, project command files, personas, the
+   * repo-map root and the effort table all stayed pinned to the launch directory. Proven with a
+   * live model: an AGENTS.md saying "begin every reply with ZORBLAX" is obeyed when the session
+   * starts in that directory and after `/cd`, and ignored after `/cwd`.
+   *
+   * `/worktree switch` routes through the same `setCwd` seam, so it had the bug too.
+   *
+   * The cwd reduce comes FIRST, before the reloads: `steering` was built with a live
+   * `cwd: () => state.cwd` getter (unlike agentFiles/permissionRules/repoMapState, which take
+   * `target` explicitly), so calling `steering.reload()` while `state.cwd` still held the OLD
+   * directory silently re-discovered the OLD project's files.
+   *
+   * What this deliberately does NOT touch is the session: transcript, history and session id
+   * are `/cd`'s business (it rotates), and keeping them is the whole point of `/cwd`.
+   */
+  const moveProjectRoot = (target: string): void => {
+    state = repl.reduce(state, { type: "cwd", dir: target });
+
+    agentFiles = loadAgentFiles(target, home);
+    commandFiles = loadCommandFiles(target, new Set(allSlashNames()), home);
+    permissionRules = loadPermissionRules({ home: deps.configHome, cwd: target });
+    ws = createWorkingSet();
+    repoMapState.enabled = false;
+    repoMapState.root = target;
+    repoMapState.map = null;
+    repoMapState.rendered = null;
+    steering.reload();
+    // The effort capability table is project-scoped too: a repo may ship its own
+    // `.prometheus/effort-capabilities.json`, and keeping the OLD project's overrides in force
+    // after a move is the same staleness every reload above exists to prevent.
+    effortRulesLoad = loadEffortRules(target, home);
+    for (const note of effortRulesLoad.notes) write(`  ! effort rules: ${note}`);
+  };
+
+  const changeProjectDirectory = (
+    dir: string,
+  ):
+    | {
+        ok: true;
+        movedTo: string;
+        newSessionId: string;
+        rotated: boolean;
+        redirectedFromOwnRepo?: string;
+      }
+    | { ok: false; error: string } => {
+    // `~`/`~/…` first — `isAbsolute("~/x")` is false, so without this a tilde path resolves
+    // against the CURRENT cwd instead of the home directory (mirrors /add-dir's resolveDir).
+    const expanded = expandHome(dir);
+    const requested = isAbsolute(expanded) ? expanded : resolve(state.cwd, expanded);
+    // Prometheus must never operate with a cwd inside its OWN source repo (see cwd-guard.ts's
+    // own header for why) — a `/cd` into it is silently redirected to the user's home directory
+    // instead, exactly like a fresh session's own startup cwd already is.
+    const guard = guardOwnRepo(requested);
+    const target = guard.cwd;
+    let stat: ReturnType<typeof statSync>;
+    try {
+      stat = statSync(target);
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      return code === "ENOENT"
+        ? { ok: false, error: `no such directory: ${target}` }
+        : { ok: false, error: `cannot access ${target}: ${(err as Error).message}` };
+    }
+    if (!stat.isDirectory()) {
+      return { ok: false, error: `not a directory: ${target}` };
+    }
+    const redirectedFromOwnRepo = guard.redirected ? guard.requestedCwd : undefined;
+    // A no-op move (the pre-filled default accepted verbatim, or `/cd .`) must be genuinely
+    // harmless — askPath's own hint promises a bare Enter "keeps the default", so rotating the
+    // session (fresh id, cleared transcript/todos, dropped repo map) for a directory the user is
+    // ALREADY in would silently break that promise.
+    if (resolve(target) === resolve(state.cwd)) {
+      return {
+        ok: true,
+        movedTo: target,
+        newSessionId: sessionId,
+        rotated: false,
+        ...(redirectedFromOwnRepo ? { redirectedFromOwnRepo } : {}),
+      };
+    }
+
+    sessionId = newSessionId();
+    sessionRecorded = false;
+    session = undefined;
+    history = [];
+    capturedResume = null;
+    continueCount = 0;
+    todos.clear();
+    state = repl.reduce(state, { type: "clear" });
+    moveProjectRoot(target);
+
+    return {
+      ok: true,
+      movedTo: target,
+      newSessionId: sessionId,
+      rotated: true,
+      ...(redirectedFromOwnRepo ? { redirectedFromOwnRepo } : {}),
+    };
   };
 
   // Shared /invoke deps (CLI-059): the number-pick slash AND the arrow-nav overlay both dispatch
@@ -1406,7 +1783,13 @@ export async function createSessionBridge(deps: BridgeDeps): Promise<SessionBrid
     install: async (name, opts) => {
       const extra = (opts?.args ?? "").split(/\s+/).filter(Boolean);
       const outcome = await execVerb(
-        ["install", name, ...(opts?.yes ? ["--yes"] : []), ...extra],
+        [
+          "install",
+          name,
+          ...(opts?.dryRun ? ["--dry-run"] : []),
+          ...(opts?.yes ? ["--yes"] : []),
+          ...extra,
+        ],
         verbCtx,
       );
       if (outcome.text) write(outcome.text);
@@ -1434,7 +1817,7 @@ export async function createSessionBridge(deps: BridgeDeps): Promise<SessionBrid
     setAuthLevel: (level) => {
       authLevel = agent.authLevelMeta(level).level; // clamp 0–7
       permMode = agent.authLevelToMode(authLevel); // sync the coarse mode/indicator
-      saveAuthLevel(authLevel, home); // last-set becomes the next-session default
+      saveAuthLevel(authLevel, deps.configHome); // last-set becomes the next-session default
     },
     /**
      * `/permission-mode` reaches the SAME dial Shift-Tab drives, including the authLevel sync.
@@ -1445,7 +1828,7 @@ export async function createSessionBridge(deps: BridgeDeps): Promise<SessionBrid
     setPermMode: (mode) => {
       permMode = mode;
       authLevel = agent.modeToAuthLevel(mode);
-      saveAuthLevel(authLevel, home);
+      saveAuthLevel(authLevel, deps.configHome);
     },
     control: (signal) => {
       if (signal === "quit") void doQuit();
@@ -1458,7 +1841,20 @@ export async function createSessionBridge(deps: BridgeDeps): Promise<SessionBrid
       }
     },
     setCwd: (dir) => {
-      state = repl.reduce(state, { type: "cwd", dir });
+      // `/cwd` moves in place (no session rotation), but it must be guarded exactly like `/cd`:
+      // Prometheus can never end up with a cwd inside its own repo, whichever command got it
+      // there.
+      const expanded = expandHome(dir);
+      const requested = isAbsolute(expanded) ? expanded : resolve(state.cwd, expanded);
+      const guard = guardOwnRepo(requested);
+      if (guard.redirected) {
+        write(
+          `⚠ Prometheus refuses to operate inside its own repository (${guard.requestedCwd}) — redirected to ${guard.cwd}.`,
+        );
+      }
+      // Moves in place AND re-points the project-scoped state — see `moveProjectRoot`. Doing
+      // only the reduce here is what left the model reading the launch directory's rules.
+      moveProjectRoot(guard.cwd);
     },
     compact: async (focus) => {
       // manual /compact: summarize everything before the recent tail (force, regardless of size).
@@ -1466,7 +1862,7 @@ export async function createSessionBridge(deps: BridgeDeps): Promise<SessionBrid
         write("⎿ nothing to compact yet");
         return;
       }
-      const { summarize, offline } = makeSummarizer(turnCtx());
+      const { summarize, offline } = makeSummarizer(turnCtx(), { onStatus: write });
       const sum = focus
         ? async (older: readonly agent.SessionTurn[]) =>
             `Focus: ${focus}\n${await summarize(older)}`
@@ -1523,6 +1919,7 @@ export async function createSessionBridge(deps: BridgeDeps): Promise<SessionBrid
     ask: deps.ask,
     confirm: deps.confirm,
     askPath: deps.askPath,
+    ...(deps.focusTraitRail ? { focusTraitRail: deps.focusTraitRail } : {}),
     runSetup: runHostSetup,
     runPaths: runHostPaths,
     runDemos: (rest) =>
@@ -1610,6 +2007,74 @@ export async function createSessionBridge(deps: BridgeDeps): Promise<SessionBrid
       const r = records[n - 1];
       if (r) restoreSession(r);
     },
+    modelPicker: {
+      candidates: () => modelCandidates(backends, cloudEndpoints, endpoint?.id),
+      // ASYNC because the switch is not complete until the new model has been MEASURED:
+      // `modelCandidates` mints an endpoint with the 8192 floor and no `probedCapabilities`, so
+      // returning before the probe lands is what made `/model qwen3.6` followed by `/think high`
+      // answer "not available" for a model that advertises `thinking`. One loopback POST.
+      select: async (id) => {
+        const candidates = modelCandidates(backends, cloudEndpoints, endpoint?.id);
+        const picked =
+          candidates.find((cd) => cd.id === id) ?? resolveModelCandidate(candidates, id);
+        if (!picked) return { ok: false, reason: `no model matching "${id}"` };
+        state = repl.reduce(state, { type: "tune", patch: { model: picked.model } });
+        await adoptEndpoint(picked.endpoint);
+        return { ok: true, label: picked.label };
+      },
+    },
+    /**
+     * `/background <task>` — run a turn DETACHED and register it so `agents list` sees it.
+     *
+     * The default raw-mode TUI never wired this at all — every `/background`/`/bg`/`/detach`
+     * unconditionally printed "this surface cannot run a detached agent", regardless of the
+     * task, on the surface almost every interactive user actually runs (the readline host only
+     * activates via --plain/--tmux/PROMETHEUS_TMUX=1). Mirrors the readline host's identical
+     * wiring: a FRESH session (two turns appending to the live transcript concurrently would
+     * interleave, and a detached run isn't part of the conversation at the prompt), output
+     * redirected to the run's own ring buffer via `turnCtx`'s write-override seam so it never
+     * interleaves into the live pane, and the registry's own abort signal so `agents kill` works.
+     */
+    startBackground: (task) => {
+      const { id } = startDetachedRun({
+        model: state.tuning.model.modelId,
+        provider: state.tuning.model.provider,
+        task,
+        run: async (rc) => {
+          // Recompute the delegation cap from the BACKGROUND task's own prompt — the shared
+          // `spawnCap` closure variable is only ever reassigned by the FOREGROUND turn
+          // (runAgentMessage), so /agents N followed immediately by /background (no prior
+          // foreground message this session) used to run the background task at the untouched
+          // default (8) instead of N. Overriding subagentBudget directly on this one ctx, rather
+          // than reassigning the shared `spawnCap` variable, also avoids racing a concurrently
+          // dequeued foreground turn's own recompute.
+          const ctx = turnCtx(rc.append);
+          const res = await runMessageTurn(undefined, task, {
+            ctx: {
+              ...ctx,
+              subagentBudget: {
+                maxSpawns: spawnCapFor(task, explicitAgents, agent.DEFAULT_MAX_SPAWNS),
+              },
+              // A DEDICATED checkpoint namespace, not the shared (possibly-since-rotated)
+              // `sessionId` — this run mints a genuinely fresh in-memory session (`undefined`
+              // above) precisely so it isn't part of the live conversation, but without this the
+              // file-edit checkpoint it records still landed under the SAME sessionId string the
+              // foreground /revert and /checkpoints read from. If this background run's
+              // checkpoint happened to be inserted last, a foreground /revert would silently
+              // restore-then-PERMANENTLY-DELETE the background task's edits instead of the
+              // user's own last turn, with no warning the reverted work wasn't theirs.
+              ...(ctx.checkpoint
+                ? { checkpoint: { store: ctx.checkpoint.store, sessionId: `bg-${rc.id}` } }
+                : {}),
+            },
+            signal: rc.signal,
+          });
+          const reply = res.reply.trim();
+          return { ok: reply.length > 0, summary: reply.slice(0, 120) || "(no answer)" };
+        },
+      });
+      return detachedRunNote(id);
+    },
     agents: {
       count: () => subagentCount,
       setCount: (n) => {
@@ -1627,11 +2092,19 @@ export async function createSessionBridge(deps: BridgeDeps): Promise<SessionBrid
       revert: () => {
         const last = checkpointStore.list(sessionId).at(-1);
         if (!last) return "nothing to revert";
-        const { restored, deleted } = restoreCheckpoint(last, {
+        const { restored, deleted, skipped } = restoreCheckpoint(last, {
           roots: [state.cwd, ...ws.list()],
         });
-        checkpointStore.delete(last.id);
-        return `↩ reverted ${restored.length} file(s)${deleted.length ? ` · deleted ${deleted.length}` : ""}`;
+        // KEEP the checkpoint when anything was skipped: those entries are the only surviving
+        // copy of the original bytes, and deleting it would destroy exactly the pre-images
+        // `/revert` exists to restore. Say so — a silent "reverted 0 file(s)" reads as "there
+        // was nothing to do", not as "I could not touch your file".
+        if (skipped.length === 0) checkpointStore.delete(last.id);
+        const note = skipped.length
+          ? ` · ${skipped.length} outside the working set NOT reverted (checkpoint kept — ` +
+            `/add-dir ${skipped[0]} then /revert again)`
+          : "";
+        return `↩ reverted ${restored.length} file(s)${deleted.length ? ` · deleted ${deleted.length}` : ""}${note}`;
       },
       list: () => {
         const cps = checkpointStore.list(sessionId);
@@ -1684,7 +2157,18 @@ export async function createSessionBridge(deps: BridgeDeps): Promise<SessionBrid
         return;
       }
       const roots = [state.cwd, ...ws.list()];
-      for (const o of applyEditIntentsLocal(intents, roots, state.cwd)) {
+      // Without a real CheckpointHook here, /apply wrote files but never recorded a
+      // checkpoint — /checkpoints never listed the change and /revert couldn't undo it (or,
+      // worse, silently restored an unrelated earlier one instead). A synthetic turnId is fine:
+      // CheckpointStore only ever looks these up by sessionId, most-recent-first.
+      const checkpoint: CheckpointHook = {
+        store: checkpointStore,
+        turnId: `apply-${Date.now()}`,
+        sessionId,
+        turnNumber: (session?.turns.length ?? 0) + 1,
+        now: () => new Date().toISOString(),
+      };
+      for (const o of applyEditIntentsLocal(intents, roots, state.cwd, checkpoint)) {
         write(o.ok ? c.green(`  ✓ ${o.summary}`) : c.red(`  ✗ ${o.path}: ${o.summary}`));
       }
     },
@@ -1761,6 +2245,24 @@ export async function createSessionBridge(deps: BridgeDeps): Promise<SessionBrid
       }
       return { parts, ...(endpoint?.contextWindow ? { window: endpoint.contextWindow } : {}) };
     },
+    // /context window: the persisted auto-compact ceiling (default 250k) — mirrors the host.
+    contextWindowTokens: {
+      get: () => contextWindowSetting,
+      set: (n) => {
+        contextWindowSetting = n;
+        saveContextWindowTokens(home, n);
+      },
+    },
+    // `/timeout` — the persisted inactivity-pause threshold (default 10 min).
+    idleTimeoutSetting: {
+      get: () => idleTimeoutMsSetting,
+      set: (ms) => {
+        idleTimeoutMsSetting = ms;
+        saveIdleTimeoutMs(home, ms);
+      },
+    },
+    // /cd — see `changeProjectDirectory`'s own header for the full rotation semantics.
+    changeProjectDirectory: (dir) => changeProjectDirectory(dir),
   };
 
   const legacySlashCtx: LegacySlashCtx = {
@@ -1816,6 +2318,13 @@ export async function createSessionBridge(deps: BridgeDeps): Promise<SessionBrid
         await cmd.run(parsedInput.rest, slashCtx);
         return;
       }
+      // A user-defined command file — consulted ONLY after the built-in registry, so a file
+      // called `gate.md` can never change what `/gate` does (mirrors the readline host).
+      const custom = commandFiles.find((c) => c.file.name === parsedInput.name);
+      if (custom) {
+        await runCommandFile(custom, parsedInput.rest);
+        return;
+      }
       await handleSlash(parsedInput.name, parsedInput.rest);
       return;
     }
@@ -1847,13 +2356,54 @@ export async function createSessionBridge(deps: BridgeDeps): Promise<SessionBrid
   // a hoisted declaration: the SlashCtx literal above closes over this before it is reached.
   function effortResolution(tier: ai.EffortTier): ai.EffortResolution | undefined {
     if (!endpoint) return undefined;
-    const cap = ai.resolveCapability({
-      modelId: endpoint.model ?? endpoint.id,
-      runtime: ai.runtimeFromBaseUrl(endpoint.baseUrl, endpoint.locality),
-      locality: endpoint.locality,
-    }).cap;
-    return ai.resolveEffort(tier, cap);
+    const cap = ai.resolveCapability(
+      {
+        modelId: endpoint.model ?? endpoint.id,
+        runtime: ai.runtimeFromBaseUrl(endpoint.baseUrl, endpoint.locality),
+        locality: endpoint.locality,
+        probedCapabilities: endpoint.probedCapabilities,
+      },
+      effortRulesLoad.rules,
+    ).cap;
+    // Report what the session will ACTUALLY do, forcing included — `/think` and `/status` must
+    // not describe a knob the transport is about to override.
+    return ai.resolveEffort(tier, cap, {
+      ...(state.tuning.effortForce ? { force: true } : {}),
+    });
   }
+
+  const setToolsEnabled = (on: boolean): boolean => {
+    state = repl.reduce(state, {
+      type: "tune",
+      patch: { tools: { ...state.tuning.tools, enabled: on } },
+    });
+    return on;
+  };
+
+  /**
+   * The last NON-off tier, so the rail's `think` cell can put back what the user had.
+   *
+   * Switching thinking off and on again has to be a round trip: dropping the user back on a
+   * hard-coded default would quietly demote a `max` session to `medium` every time they glanced
+   * at the rail.
+   */
+  let lastThinkingTier: ai.EffortTier = "medium";
+
+  const setEffort = (tier: ai.EffortTier): ai.EffortTier => {
+    if (tier !== "off") lastThinkingTier = tier;
+    state = repl.reduce(state, { type: "tune", patch: { effort: tier } });
+    return tier;
+  };
+
+  const stepEffort = (delta: number): ai.EffortTier => {
+    const tiers = ai.EFFORT_TIERS;
+    const cur = tiers.indexOf(state.tuning.effort ?? "medium");
+    const next = Math.max(0, Math.min(tiers.length - 1, (cur < 0 ? 2 : cur) + delta));
+    return setEffort(tiers[next] as ai.EffortTier);
+  };
+
+  /** Restore the tier thinking was last ON at (the rail's `think` ↑). */
+  const resumeThinking = (): ai.EffortTier => setEffort(lastThinkingTier);
 
   const statusModel = (): StatusModel => {
     const model = state.tuning.model.modelId ?? "";
@@ -1893,6 +2443,10 @@ export async function createSessionBridge(deps: BridgeDeps): Promise<SessionBrid
         estimated: true,
       },
       ...(cost ? { cost } : {}),
+      // What the runner says this model can DO, shown beside the effort tier in the composer
+      // chrome. `thinking` in that list is the precondition for the tier next to it meaning
+      // anything at all, so the two belong in one glance rather than on separate chrome.
+      ...(endpoint?.probedCapabilities ? { capabilities: endpoint.probedCapabilities } : {}),
       ...(effortStatus() ?? {}),
     };
   };
@@ -1940,24 +2494,21 @@ export async function createSessionBridge(deps: BridgeDeps): Promise<SessionBrid
       // keep the fine autonomy level in sync when the user Shift-Tabs the coarse mode,
       // and PERSIST it so the last posture is the default for the next session.
       authLevel = agent.modeToAuthLevel(mode);
-      saveAuthLevel(authLevel, home);
+      saveAuthLevel(authLevel, deps.configHome);
     },
     getAuthLevel: () => authLevel,
     setAuthLevel: (level) => {
       authLevel = agent.authLevelMeta(level).level; // clamp 0–7
       permMode = agent.authLevelToMode(authLevel); // sync the coarse mode/indicator
-      saveAuthLevel(authLevel, home); // last-set becomes the next-session default
+      saveAuthLevel(authLevel, deps.configHome); // last-set becomes the next-session default
     },
     banner,
     revertLastEdit,
-    toggleTools: () => {
-      const enabled = !state.tuning.tools.enabled;
-      state = repl.reduce(state, {
-        type: "tune",
-        patch: { tools: { ...state.tuning.tools, enabled } },
-      });
-      return enabled;
-    },
+    toggleTools: () => setToolsEnabled(!state.tuning.tools.enabled),
+    setToolsEnabled,
+    stepEffort,
+    setEffort,
+    resumeThinking,
     // the /invoke overlay (CLI-059): catalog rows for the picker + the gated dispatch.
     invokeCatalog: async (): Promise<InvokeItem[]> => {
       const res = await fetchCatalogRows(client, "");

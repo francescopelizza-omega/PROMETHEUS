@@ -175,6 +175,53 @@ test("never-force: --force on a READ-ONLY verb is inert (no confirm, runs normal
   assert.deepEqual(calls, ["runPrometheus:describe foo"]);
 });
 
+/**
+ * Regression: "harden" used to be listed as a mutating verb even though it is a read-only,
+ * THIS-machine posture audit that never forwards args/flags at all — `/harden --force` showed a
+ * needless, factually-wrong "overriding the engine's nemesis verdict" confirm that could only
+ * ever block the harmless report, never override anything (the flag was never forwarded either
+ * way). It must now behave exactly like any other read-only verb's --force: inert.
+ */
+test("never-force: --force on 'harden' is now inert too (it never touches nemesis/gate)", async () => {
+  const { client, calls } = makeFakeClient();
+  const { ctx, prompts } = makeCtx(client, { confirm: false });
+
+  const out = await execVerb(["harden", "--force"], ctx);
+
+  assert.equal(out.exitCode, 0);
+  assert.equal(prompts.length, 0);
+  assert.deepEqual(calls, ["runPrometheus:harden"]);
+});
+
+/**
+ * Regression: pentest's own destructive actions (destroy/build/run/shell) were entirely absent
+ * from the mutating-verb set, so `/pentest destroy --force` under a force-forbidding profile
+ * skipped the typed-confirm/CI-hard-block entirely and reached the engine straight away — unlike
+ * every other mutating verb, which correctly hard-blocks under 'ci'.
+ */
+test("never-force: pentest's destroy/build/run/shell now hard-block under a force-forbidding profile", async () => {
+  const prev = process.env.PROM_ALLOW_FORCE;
+  process.env.PROM_ALLOW_FORCE = undefined;
+  // biome-ignore lint/performance/noDelete: ensure the override env is truly unset for the test
+  delete process.env.PROM_ALLOW_FORCE;
+  try {
+    const { client, calls } = makeFakeClient();
+    const { ctx, prompts } = makeCtx(client, { confirm: true, profile: "ci" });
+
+    const out = await execVerb(["pentest", "destroy", "--force"], ctx);
+
+    assert.equal(out.exitCode, 2);
+    assert.match(
+      (out.json as { error: string }).error,
+      /--force is blocked under the 'ci' profile/,
+    );
+    assert.equal(prompts.length, 0); // hard block — never even offers the confirm
+    assert.deepEqual(calls, []); // and the engine is never touched
+  } finally {
+    if (prev !== undefined) process.env.PROM_ALLOW_FORCE = prev;
+  }
+});
+
 test("crash-free: an engine error renders a friendly outcome (no throw)", async () => {
   const { client } = makeFakeClient({ installThrows: true });
   const { ctx } = makeCtx(client, { confirm: true });

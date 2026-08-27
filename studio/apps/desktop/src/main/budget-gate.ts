@@ -186,6 +186,16 @@ export function makePriceFor(
   };
 }
 
+/** A read-only spend snapshot (roadmap point 4: budget visibility) — see `DesktopBudgetGate.status`. */
+export interface BudgetStatusView {
+  capped: boolean;
+  config: ai.BudgetConfig;
+  sessionSpentUsd: number;
+  dailySpentUsd: number;
+  /** distinct model ids with no price entry — excluded from both totals above. */
+  unpriced: string[];
+}
+
 /** The live gate — one per app run; `warned` latches so a warn prints once per window. */
 export class DesktopBudgetGate {
   private readonly warned = new Set<string>();
@@ -251,6 +261,47 @@ export class DesktopBudgetGate {
         message: `budget check failed (fail-closed block): ${(e as Error).message}`,
       };
     }
+  }
+
+  /**
+   * A read-only spend snapshot for the Settings ▸ Budget & Spend page (roadmap point 4).
+   *
+   * Deliberately NOT fail-closed like `check()`: an enforcement gate that cannot read its store
+   * must BLOCK the turn (the whole point of CLI-030's fail-closed guarantee), but a STATUS
+   * DISPLAY that cannot read its store should show an honest "$0 / unknown" rather than crash
+   * the Settings panel — nothing is actually at stake in rendering a number, only in gating a
+   * spend. `isLocalModel` defaults to this module's own `isLocalModelId` (unlike `check()`,
+   * which lets the caller override it) since a status read has no caller-specific reason not to
+   * use the real one.
+   */
+  status(
+    nowIso: string = new Date().toISOString(),
+    isLocalModel: (model: string) => boolean = isLocalModelId,
+  ): BudgetStatusView {
+    const config = this.config();
+    const priceFor = makePriceFor(this.pricing, isLocalModel);
+    let sessionRecords: DesktopSpendRecord[] = [];
+    let dayRecords: DesktopSpendRecord[] = [];
+    try {
+      sessionRecords = readSessionRecords(this.userDataPath, nowIso, this.startedMs);
+    } catch {
+      /* unreadable store ⇒ an honest empty snapshot, never a crashed Settings page */
+    }
+    try {
+      dayRecords = readDayRecords(this.userDataPath, nowIso);
+    } catch {
+      /* same */
+    }
+    const sessionSummary = ai.summarizeSpend(sessionRecords, nowIso, priceFor);
+    const daySummary = ai.summarizeSpend(dayRecords, nowIso, priceFor);
+    const unpriced = [...new Set([...sessionSummary.unpriced, ...daySummary.unpriced])].sort();
+    return {
+      capped: ai.hasBudgetCap(config),
+      config,
+      sessionSpentUsd: sessionSummary.sessionSpentUsd,
+      dailySpentUsd: daySummary.dailySpentUsd,
+      unpriced,
+    };
   }
 
   /** Record one metered call. No-op for a local endpoint (it can never move a USD cap). */

@@ -305,6 +305,21 @@ def _run_tool(tool: str, tool_path: str, files: Sequence[str]) -> Tuple[List[Dic
         diags = _PARSERS[tool](proc.stdout)
     except Exception as exc:  # noqa: BLE001 — a bad parse must not crash the run
         return [], f"{tool}: parse failed: {exc}"
+    # A tool that CRASHED must be skipped, not reported clean.
+    #
+    # The exit code was inspected for ruff only, so a usage error, a bad-config abort or any
+    # crash in flake8/mypy/pylint left stdout empty, the parser returned [], and `run()` listed
+    # the tool as having executed with nothing to say. In the Problems panel that is
+    # indistinguishable from a clean run — a silent false clean on a tool the user believes is
+    # guarding their code. This is the "empty parse-on-crash" case the docstring above already
+    # named as a failure and nothing implemented.
+    #
+    # Finding violations is NOT this case: every one of these tools writes them to stdout, so a
+    # nonzero exit WITH parsed output is the ordinary "it found something" path and stays clean.
+    if proc.returncode != 0 and not diags and not proc.stdout.strip():
+        detail = (proc.stderr or "").strip().splitlines()
+        note = detail[-1][:200] if detail else "no output"
+        return [], f"{tool}: exited {proc.returncode} with no findings — {note}"
     return diags, None
 
 

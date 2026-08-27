@@ -105,9 +105,28 @@ test("the LAST round is never dropped entirely, however tight the budget", () =>
   });
   assert.ok(out.length > 0, "everything was dropped");
   assert.ok(
-    out.some((m) => m.role === "user" && m.content === "question 2"),
+    // The oldest surviving round's opening message now carries the ROUND_DROP marker ahead of
+    // its original text (round 1 was dropped to make room) — so it ends with, rather than
+    // equals, the original question.
+    out.some((m) => m.role === "user" && m.content.endsWith("question 2")),
     "the most recent question was dropped",
   );
+});
+
+test("a whole-round drop MARKS the surviving round, so the model can tell dropped from never-sent", () => {
+  const out = carryForward([...round(1, "a".repeat(50_000)), ...round(2, "b".repeat(50_000))], {
+    budgetTokens: 100,
+  });
+  const opening = out.find((m) => m.role === "user" && m.content.endsWith("question 2"));
+  assert.ok(opening, "no surviving question found");
+  assert.match(opening?.content ?? "", /earlier rounds? of this conversation were dropped/);
+});
+
+test("no rounds dropped ⇒ no marker anywhere", () => {
+  const out = carryForward([...round(1, "a"), ...round(2, "b")], { budgetTokens: 10_000 });
+  for (const m of out) {
+    assert.doesNotMatch(m.content, /this conversation were dropped/);
+  }
 });
 
 test("an empty thread carries nothing, and does not throw", () => {

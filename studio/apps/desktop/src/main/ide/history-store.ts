@@ -47,6 +47,20 @@ export class LocalHistoryManager {
   private readonly debounceMs: number;
   private readonly histories = new Map<string, LocalHistory>();
   private readonly timers = new Map<string, ReturnType<typeof setTimeout>>();
+  /**
+   * The persist currently WRITING for each root.
+   *
+   * `flush()` used to clear pending timers and await a fresh `persist()`, which is correct only
+   * while no write is already under way. Once a debounce timer has fired, its root is gone from
+   * `timers` and its `persist()` promise was `void`-ed — so `flush()` saw nothing to wait for
+   * and resolved immediately, with a temp file still being written and renamed behind it. On
+   * quit (the case this method exists for) that is the revision loss it is supposed to prevent;
+   * in tests it was a tmpdir removed out from under an in-flight write (ENOTEMPTY).
+   *
+   * Persists for one root are also CHAINED through this map, so two of them can never interleave
+   * their temp+rename against the same destination.
+   */
+  private readonly inflight = new Map<string, Promise<void>>();
   private activeRoot: string | null = null;
 
   constructor(opts: LocalHistoryManagerOptions) {
@@ -114,12 +128,18 @@ export class LocalHistoryManager {
 
   /** Persist NOW (flush) — used on dispose so no revision is lost on quit. */
   async flush(): Promise<void> {
-    const roots = [...this.timers.keys()];
+    // BOTH sets: a root with a pending timer (its write has not started) and a root whose write
+    // is already running (its timer is gone). Missing the second was the bug.
+    const roots = new Set([...this.timers.keys(), ...this.inflight.keys()]);
     for (const root of roots) {
       const t = this.timers.get(root);
-      if (t) clearTimeout(t);
-      this.timers.delete(root);
-      await this.persist(root);
+      if (t) {
+        clearTimeout(t);
+        this.timers.delete(root);
+        await this.startPersist(root); // chains behind any write already in flight
+      } else {
+        await this.inflight.get(root);
+      }
     }
   }
 
@@ -128,10 +148,21 @@ export class LocalHistoryManager {
     if (prev) clearTimeout(prev);
     const t = setTimeout(() => {
       this.timers.delete(root);
-      void this.persist(root);
+      void this.startPersist(root);
     }, this.debounceMs);
     if (typeof t.unref === "function") t.unref();
     this.timers.set(root, t);
+  }
+
+  /** Run a persist for `root`, chained behind any in-flight one and tracked so `flush()` can
+   *  await it. `persist` never rejects (it swallows IO failures), so this promise never does. */
+  private startPersist(root: string): Promise<void> {
+    const p = (this.inflight.get(root) ?? Promise.resolve()).then(() => this.persist(root));
+    const tracked = p.then(() => {
+      if (this.inflight.get(root) === tracked) this.inflight.delete(root);
+    });
+    this.inflight.set(root, tracked);
+    return tracked;
   }
 
   private async persist(root: string): Promise<void> {

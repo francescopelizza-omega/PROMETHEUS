@@ -33,15 +33,18 @@ import {
 
 /* ── pure parser unit tests (no repo needed) ────────────────────────────────*/
 
+/** git -z terminates every record with a NUL; the helper mirrors that exactly. */
+const Z = (...records: string[]): string => `${records.join("\u0000")}\u0000`;
+
 test("parseStatus groups staged / unstaged / untracked / branch", () => {
   const out = parseStatus(
-    [
+    Z(
       "## main...origin/main [ahead 1, behind 2]",
       "M  staged.ts",
       " M dirty.ts",
       "?? new.ts",
       "A  added.ts",
-    ].join("\n"),
+    ),
   );
   assert.equal(out.branch, "main");
   assert.equal(out.ahead, 1);
@@ -57,11 +60,49 @@ test("parseStatus groups staged / unstaged / untracked / branch", () => {
   );
 });
 
-test("parseStatus detects a rename (R old -> new)", () => {
-  const out = parseStatus("## main\nR  old.ts -> new.ts");
+test("parseStatus detects a rename — the ORIGINAL path is the record that follows", () => {
+  // Under -z a rename is two records: the status line naming the NEW path, then the old path
+  // alone. There is no " -> " delimiter to split on, and a real filename could contain one.
+  const out = parseStatus(Z("## main", "R  new.ts", "old.ts"));
   assert.equal(out.staged[0]?.path, "new.ts");
   assert.equal(out.staged[0]?.origPath, "old.ts");
   assert.equal(out.staged[0]?.staged, "renamed");
+});
+
+test("parseStatus keeps paths with spaces and non-ASCII usable as pathspecs", () => {
+  /**
+   * Captured from real git (`git status --porcelain=v1 -b -z` on a repo holding `café.py`,
+   * `src/old name.py` renamed to `src/new name.py`, and an untracked `untracked file.txt`).
+   *
+   * WITHOUT -z the same repo prints ` M "caf\303\251.py"` and
+   * `R  "src/old name.py" -> "src/new name.py"` — C-quoted, octal-escaped, and with the arrow
+   * INSIDE the quotes. The parser took `raw.slice(3)` verbatim, so the path it handed back
+   * still carried the quotes, and every per-file operation fed that string to git as a
+   * pathspec: stage exited 128, diff came back empty, blame returned nothing. Two GitPanel
+   * call sites discard the result, so the file simply refused to stage with no error shown.
+   * `core.quotepath=false` does not help — git quotes the space case regardless.
+   */
+  const out = parseStatus(
+    Z("## main", " M café.py", "R  src/new name.py", "src/old name.py", "?? untracked file.txt"),
+  );
+  assert.deepEqual(
+    out.unstaged.map((c) => c.path),
+    ["café.py"],
+    "a non-ASCII path must arrive unquoted and unescaped",
+  );
+  assert.deepEqual(
+    out.untracked.map((c) => c.path),
+    ["untracked file.txt"],
+    "a path with a space must arrive without surrounding quotes",
+  );
+  assert.equal(out.staged[0]?.path, "src/new name.py");
+  assert.equal(out.staged[0]?.origPath, "src/old name.py");
+  for (const c of [...out.staged, ...out.unstaged, ...out.untracked]) {
+    assert.ok(
+      !c.path.startsWith('"') && !c.path.includes("\\3"),
+      `"${c.path}" is still C-quoted — git will reject it as a pathspec`,
+    );
+  }
 });
 
 test("parseLog splits the unit-separated machine format (root commit, no refs)", () => {

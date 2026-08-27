@@ -101,7 +101,7 @@ export function makeContext(args: ParsedArgs, client?: EngineClient): CliContext
 
 /** Clamp a raw exit code to a valid non-zero FAILURE code (CLI-084): a bogus/absent/0/256-wrap
  *  value can never be reported as success — an error is always ≥1. */
-function failureCode(raw: unknown): number {
+export function failureCode(raw: unknown): number {
   return Number.isInteger(raw) && (raw as number) >= 1 && (raw as number) <= 255
     ? (raw as number)
     : 1;

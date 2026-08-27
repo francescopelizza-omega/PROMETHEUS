@@ -20,6 +20,7 @@ import {
   type AiEndpoint,
   CloudPolicyError,
   type FetchLike,
+  ModelIdlePausedError,
   type WorkspacePolicy,
   createAiClient,
   deltaFromPayload,
@@ -166,6 +167,145 @@ test("chat() without a usage frame leaves chunk.usage undefined (fallback is the
   } finally {
     stub.server.close();
   }
+});
+
+/* --- inactivity pause ------------------------------------------------------
+ *
+ * `stream()` (and therefore `chat()`) used to have NO idle protection of any kind — this is the
+ * ONE shared transport every non-native caller falls back to (the CLI's text-protocol demotion,
+ * `makeSummarizer`'s background call, and the entire VS Code extension), so a cold-loading or
+ * wedged local model hung any of them forever, silently, with no way to recover short of
+ * killing the process. These tests exercise the real `IdleWatchdog` wired into `stream()`
+ * itself, using the SAME time-compressed-clock technique
+ * `apps/cli/src/session/agent-runtime.test.ts` already established: a realistic,
+ * floor-respecting `idleTimeoutMs` (≥30s) fires in milliseconds of real test time.
+ */
+
+/** A stub that accepts the connection but never writes ANY response — the pre-first-byte hang
+ *  this whole fix targets (a cold model load, or a queue wait behind another request). */
+async function startHangingStub(): Promise<{ server: Server; url: string }> {
+  const server = createServer((req) => {
+    req.on("data", () => {});
+    req.on("end", () => {
+      /* never responds */
+    });
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const addr = server.address();
+  const port = typeof addr === "object" && addr ? addr.port : 0;
+  return { server, url: `http://127.0.0.1:${port}` };
+}
+
+/** Real-elapsed-time × `speedup`, mirroring `agent-runtime.test.ts`'s `compressedClock` — lets a
+ *  test request a fully realistic `idleTimeoutMs` while the watchdog fires in real milliseconds. */
+function compressedClock(speedup: number) {
+  const start = Date.now();
+  return {
+    now: () => start + (Date.now() - start) * speedup,
+    setTimeoutFn: (cb: () => void, ms: number) => setTimeout(cb, ms / speedup),
+    clearTimeoutFn: (h: ReturnType<typeof setTimeout>) => clearTimeout(h),
+  };
+}
+
+test("chat(): a response that never arrives PAUSES via ModelIdlePausedError, not an indefinite hang", async () => {
+  const stub = await startHangingStub();
+  try {
+    const client = createAiClient(localEndpoint(stub.url), OPEN_POLICY, { fetch: realFetch });
+    const clock = compressedClock(1000); // a real "30s" idle window fires in ~30ms of test time
+    const started = Date.now();
+    await assert.rejects(
+      async () => {
+        for await (const _chunk of client.chat([{ role: "user", content: "hi" }], {
+          idleTimeoutMs: 30_000,
+          idleWatchdogNow: clock.now,
+          idleWatchdogSetTimeout: clock.setTimeoutFn,
+          idleWatchdogClearTimeout: clock.clearTimeoutFn,
+        })) {
+          /* never yields */
+        }
+      },
+      (err: unknown) => {
+        assert.ok(err instanceof ModelIdlePausedError, `expected ModelIdlePausedError, got ${err}`);
+        assert.ok(err.idleMs >= 30_000, `idleMs (${err.idleMs}) should be at least the window`);
+        return true;
+      },
+    );
+    const elapsed = Date.now() - started;
+    assert.ok(
+      elapsed < 2000,
+      `expected a bounded pause well under 2s of real time, took ${elapsed}ms`,
+    );
+  } finally {
+    stub.server.close();
+  }
+});
+
+test("chat(): an idle-fire landing during a retry backoff sleep still PAUSES, not silently retried forever (regression: the watchdog used to abort a controller nothing was listening to and could never fire again)", async () => {
+  // A 503 is retryable (isRetryableStatus), so the FIRST failed attempt schedules a real
+  // backoff sleep via retry() — exactly the window the old per-attempt-controller design lost
+  // an idle-fire in. `watchdog.touch()` (fired via onRetry) resets the idle clock right as that
+  // sleep begins, and the compressed clock lets the (real, floor-respecting) 30s window elapse
+  // in milliseconds of test time while the sleep is still pending.
+  let attempts = 0;
+  const doFetch: FetchLike = (async () => {
+    attempts += 1;
+    return {
+      ok: false,
+      status: 503,
+      statusText: "Service Unavailable",
+      async text() {
+        return "";
+      },
+      headers: { get: () => null },
+    };
+  }) as unknown as FetchLike;
+  const client = createAiClient(localEndpoint("http://127.0.0.1:1"), OPEN_POLICY, {
+    fetch: doFetch,
+    /**
+     * Pin the jitter to its MAXIMUM, which is what makes this test deterministic.
+     *
+     * `retry()` applies FULL jitter — the delay is uniform in `[0, backoffDelay]` — so the first
+     * retry's 400ms curve can land anywhere from 0ms to 400ms. The compressed idle window below
+     * is ~30ms of real time, so roughly one run in thirteen drew a shorter sleep than that,
+     * finished the backoff first, and fired a second attempt: a flake in the TEST, not in the
+     * watchdog it is guarding. No speedup can fix that by itself (a 0ms sleep always wins), so
+     * the race is removed rather than tuned — `rng: () => 1` makes the sleep the full 400ms,
+     * an order of magnitude past the window it has to lose to.
+     *
+     * The pause still resolves in milliseconds of real time: the idle-fire ABORTS the backoff
+     * sleep rather than waiting it out, which is the behaviour the elapsed-time assertion below
+     * exists to prove.
+     */
+    rng: () => 1,
+  });
+  const clock = compressedClock(1000);
+  const started = Date.now();
+  await assert.rejects(
+    async () => {
+      for await (const _chunk of client.chat([{ role: "user", content: "hi" }], {
+        idleTimeoutMs: 30_000,
+        idleWatchdogNow: clock.now,
+        idleWatchdogSetTimeout: clock.setTimeoutFn,
+        idleWatchdogClearTimeout: clock.clearTimeoutFn,
+      })) {
+        /* never yields */
+      }
+    },
+    (err: unknown) => {
+      assert.ok(err instanceof ModelIdlePausedError, `expected ModelIdlePausedError, got ${err}`);
+      return true;
+    },
+  );
+  const elapsed = Date.now() - started;
+  assert.ok(
+    elapsed < 2000,
+    `expected a bounded pause well under 2s of real time, took ${elapsed}ms`,
+  );
+  assert.equal(
+    attempts,
+    1,
+    "the idle-fire during the backoff sleep must stop the retry loop before a second attempt — not be silently lost and let a doomed retry run to exhaustion",
+  );
 });
 
 /* --- inline edit --------------------------------------------------------- */
@@ -478,4 +618,189 @@ test("a Gemini endpoint gets generateContent, and its usage is normalized", asyn
   assert.equal(seenHeaders["x-goog-api-key"], "goog-key");
   assert.deepEqual(out, ["yo"]);
   assert.equal(usage?.totalTokens, 6);
+});
+
+test("usageFromPayload reads Anthropic and Gemini frames, not only OpenAI's", () => {
+  /**
+   * It gated on `usage.prompt_tokens` / `usage.completion_tokens` and returned null for anything
+   * else, despite a docstring promising it normalizes the per-provider counters. The CLI's native
+   * tool transport uses it as its ONLY usage source, and native is the transport BOTH Claude and
+   * Gemini take (each wire reports supportsTools:true), so every agentic turn on either provider
+   * fell back to a chars/4 estimate flagged `estimated: true` and recorded no cache counters.
+   */
+  // Anthropic message_start — usage nested under `message`, input + cache counters
+  const start = usageFromPayload(
+    JSON.stringify({
+      type: "message_start",
+      message: {
+        usage: {
+          input_tokens: 12000,
+          cache_read_input_tokens: 9000,
+          cache_creation_input_tokens: 1500,
+        },
+      },
+    }),
+  );
+  assert.equal(start?.inputTokens, 12000);
+  assert.equal(start?.cacheRead, 9000);
+  assert.equal(start?.cacheCreate, 1500);
+
+  // Anthropic message_delta — usage at the top level, output only
+  const delta = usageFromPayload(
+    JSON.stringify({ type: "message_delta", usage: { output_tokens: 350 } }),
+  );
+  assert.equal(delta?.outputTokens, 350);
+
+  // Gemini — no `usage` key at all
+  const gem = usageFromPayload(
+    JSON.stringify({
+      usageMetadata: {
+        promptTokenCount: 900,
+        candidatesTokenCount: 120,
+        cachedContentTokenCount: 400,
+        totalTokenCount: 1020,
+      },
+    }),
+  );
+  assert.equal(gem?.inputTokens, 900);
+  assert.equal(gem?.outputTokens, 120);
+  assert.equal(gem?.totalTokens, 1020);
+  assert.equal(gem?.cacheRead, 400);
+
+  // OpenAI still works exactly as before
+  const oai = usageFromPayload(
+    JSON.stringify({ usage: { prompt_tokens: 10, completion_tokens: 4, total_tokens: 14 } }),
+  );
+  assert.deepEqual(oai, { inputTokens: 10, outputTokens: 4, totalTokens: 14 });
+
+  // and a frame with no usage at all is still null
+  assert.equal(usageFromPayload(JSON.stringify({ choices: [] })), null);
+  assert.equal(usageFromPayload("[DONE]"), null);
+});
+
+test("a mid-stream provider error is REPORTED, not swallowed into an empty answer", async () => {
+  /**
+   * `wire.ts` parses all three providers' mid-stream faults — Anthropic's
+   * `{"type":"error",…}`, an OpenAI-compatible bare `{"error":{…}}`, Gemini's
+   * `promptFeedback.blockReason` — into `WireEvent.error`. The stream loop read only
+   * `delta`/`usage`/`done`, so every one of them was dropped: the turn ended normally, the user
+   * got a truncated or completely empty reply, and nothing anywhere said why.
+   *
+   * Reproduced against a real HTTP server before the fix: text `""`, threw nothing.
+   */
+  const server = createServer((_req, res) => {
+    res.writeHead(200, { "content-type": "text/event-stream" });
+    res.write(`data: ${JSON.stringify({ choices: [{ delta: { content: "first half" } }] })}\n\n`);
+    res.write(`data: ${JSON.stringify({ error: { type: "server_error", message: "boom" } })}\n\n`);
+    res.end();
+  });
+  await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+  const addr = server.address();
+  const url = `http://127.0.0.1:${typeof addr === "object" && addr ? addr.port : 0}`;
+
+  try {
+    const client = createAiClient(localEndpoint(url), OPEN_POLICY, { fetch: realFetch });
+    let text = "";
+    let caught: unknown;
+    try {
+      for await (const c of client.chat([{ role: "user", content: "hi" }])) text += c.delta ?? "";
+    } catch (e) {
+      caught = e;
+    }
+    assert.ok(caught, "the provider error was swallowed — the turn ended as if it succeeded");
+    assert.equal((caught as Error).name, "ProviderStreamError");
+    assert.match((caught as Error).message, /boom/);
+    // the text that DID arrive is not thrown away — a host can still show it
+    assert.equal(text, "first half");
+    assert.equal((caught as { partial?: string }).partial, "first half");
+  } finally {
+    await new Promise<void>((r) => server.close(() => r()));
+  }
+});
+
+/**
+ * A RAW socket server, because `node:http` always emits a content-type and this defect is
+ * about its ABSENCE. Answers any request with the given head + body, then closes.
+ */
+async function startRawStub(
+  contentType: string | null,
+  body: string,
+): Promise<{ close(): void; url: string }> {
+  const { createServer: createNetServer } = await import("node:net");
+  const server = createNetServer((sock) => {
+    sock.once("data", () => {
+      sock.end(
+        `HTTP/1.1 200 OK\r\n${contentType ? `Content-Type: ${contentType}\r\n` : ""}` +
+          `Content-Length: ${Buffer.byteLength(body)}\r\nConnection: close\r\n\r\n${body}`,
+      );
+    });
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const addr = server.address();
+  const port = typeof addr === "object" && addr ? addr.port : 0;
+  return { close: () => server.close(), url: `http://127.0.0.1:${port}` };
+}
+
+const WHOLE_JSON = JSON.stringify({ choices: [{ message: { content: "the real answer" } }] });
+const RAW_SSE =
+  'data: {"choices":[{"delta":{"content":"streamed "}}]}\n\n' +
+  'data: {"choices":[{"delta":{"content":"answer"}}]}\n\ndata: [DONE]\n\n';
+
+async function collectChat(url: string): Promise<{ text: string; threw: string | null }> {
+  const client = createAiClient(localEndpoint(url), OPEN_POLICY, { fetch: realFetch });
+  let text = "";
+  try {
+    for await (const chunk of client.chat([{ role: "user", content: "hi" }])) text += chunk.delta;
+    return { text, threw: null };
+  } catch (e) {
+    return { text, threw: e instanceof Error ? e.message : String(e) };
+  }
+}
+
+test("a 200 with a whole JSON completion and NO content-type is READ, not silently empty", async () => {
+  // regression: the fast path took the whole-body route only when a content-type was PRESENT
+  // (`contentType && !isEventStream`), so a header-less 200 fell through to the SSE reader,
+  // found no `data:` frames and yielded nothing — no text, no error, indistinguishable from the
+  // model declining to answer. Measured against this same raw server: header present →
+  // "the real answer", header absent → "".
+  const stub = await startRawStub(null, WHOLE_JSON);
+  try {
+    const { text, threw } = await collectChat(stub.url);
+    assert.equal(threw, null);
+    assert.equal(text, "the real answer");
+  } finally {
+    stub.close();
+  }
+});
+
+test("the declared-content-type path is unchanged", async () => {
+  const stub = await startRawStub("application/json", WHOLE_JSON);
+  try {
+    assert.equal((await collectChat(stub.url)).text, "the real answer");
+  } finally {
+    stub.close();
+  }
+});
+
+test("a server that streams REAL SSE without declaring a content-type still streams", async () => {
+  // the recovery must not change this: it runs only when the stream yielded nothing at all.
+  const stub = await startRawStub(null, RAW_SSE);
+  try {
+    const { text, threw } = await collectChat(stub.url);
+    assert.equal(threw, null);
+    assert.equal(text, "streamed answer");
+  } finally {
+    stub.close();
+  }
+});
+
+test("a 200 whose body is unreadable is a LOUD failure, never silence", async () => {
+  const stub = await startRawStub(null, "not json at all");
+  try {
+    const { text, threw } = await collectChat(stub.url);
+    assert.equal(text, "");
+    assert.match(String(threw), /no readable content/);
+  } finally {
+    stub.close();
+  }
 });

@@ -109,3 +109,16 @@ test("formatDuration: drops zero counters", () => {
   assert.equal(formatDuration(-5), "0s");
   assert.equal(formatDuration(120_000), "2m"); // exactly 2 minutes → no 0s
 });
+
+test("network reach outranks read-only when a tool carries both hints", () => {
+  /**
+   * `web_search` declares both hints truthfully — it mutates nothing, and it sends the query off
+   * the machine. Testing readOnly first put it in the "read" category, which every authorisation
+   * level auto-approves, so it ran with no prompt at the default level. That contradicted the
+   * comment sitting on its own annotations, which says it must always be confirmed because the
+   * human should see what is about to leave the machine.
+   */
+  assert.equal(classifyAuth("web_search", { readOnlyHint: true, openWorldHint: true }), "install");
+  // and a genuinely local read-only tool is still free
+  assert.equal(classifyAuth("list_dir", { readOnlyHint: true }), "read");
+});

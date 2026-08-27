@@ -57,3 +57,44 @@ test("buildEditView: line numbers are 1-based and correct across a hunk", () => 
     ],
   );
 });
+
+test("a minified one-line file does not build a quadratic word table", () => {
+  /**
+   * `SIZE_GUARD` bounds the LINE-level table only. `wordSpans` then builds a second O(n·m) table
+   * over the TOKENS of a single line, and `tokenize` emits one token per punctuation character —
+   * so a minified or generated one-liner is tens of thousands of tokens and the table is
+   * quadratic in that. A V8 heap OOM is a fatal abort rather than a catchable error, so the
+   * process died mid-confirm, while the user was being asked to approve the very edit that
+   * produced the line. The module header asserted both passes were bounded; only one was.
+   *
+   * Two 60k-token lines would need ~3.6 billion array slots. This completing at all is the
+   * assertion; the timing check keeps it honest if the guard is ever removed.
+   */
+  const minified = `${"a=1;b=2;c=3;".repeat(5000)}\n`;
+  const changed = `${"a=1;b=2;c=4;".repeat(5000)}\n`;
+
+  const started = Date.now();
+  const view = buildEditView(minified, changed);
+  const elapsed = Date.now() - started;
+
+  assert.ok(view.hunks.length > 0, "the edit still produces a reviewable hunk");
+  assert.ok(elapsed < 5000, `word-level diff took ${elapsed}ms — the table is unbounded again`);
+
+  // over the budget the whole line reads as changed, which is what a minified line means
+  const del = view.hunks.flatMap((h) => h.rows).find((r) => r.kind === "del");
+  assert.ok(del, "a deletion row is present");
+  if (del?.spans) {
+    assert.ok(
+      del.spans.every((w) => w.changed),
+      "a line past the token budget must be marked wholly changed, not partly matched",
+    );
+  }
+
+  // and an ordinary short line still gets real word-level spans
+  const small = buildEditView("const a = 1;\n", "const a = 2;\n");
+  const smallDel = small.hunks.flatMap((h) => h.rows).find((r) => r.kind === "del");
+  assert.ok(
+    smallDel?.spans?.some((w) => !w.changed),
+    "normal lines must still diff at word level — the guard must not fire for them",
+  );
+});

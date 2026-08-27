@@ -344,3 +344,29 @@ test("fallback: kill on an already-dead child is swallowed (no throw)", () => {
   };
   assert.doesNotThrow(() => proc.kill("SIGKILL"));
 });
+
+test("the DEFAULT backend — no injected seams — can actually spawn a process", async () => {
+  /**
+   * The production call is `resolvePtyBackend()` with no argument (live-terminal.ts), and every
+   * test above hands it a fake `requireFn` / `spawnFn`. That gap hid a total failure: the require
+   * shim read `globalThis.require`, which is undefined here — this package is `"type": "module"`
+   * and the shipped bundle is built `--format=esm`, and `require` is a module-local binding
+   * rather than a global even under CommonJS. So the lookup always failed, node-pty was never
+   * found, and the fallback spawner became `unavailableChild()`: every live terminal emitted
+   * "child_process unavailable" and exited 127 while the suite stayed green.
+   *
+   * This test therefore refuses the seams on purpose. It runs a real, trivial child.
+   */
+  const backend = resolvePtyBackend({ forceChildProcess: true });
+  const exit = await new Promise<{ exitCode: number; signal?: number }>((resolve, reject) => {
+    const proc = backend.spawn({
+      shell: process.execPath,
+      args: ["-e", "process.stdout.write('alive'); process.exit(0)"],
+      cwd: process.cwd(),
+      env: { PATH: process.env.PATH ?? "" },
+    });
+    proc.onExit(resolve);
+    setTimeout(() => reject(new Error("the default backend never exited")), 10_000).unref?.();
+  });
+  assert.equal(exit.exitCode, 0, "the default fallback spawner could not run node at all");
+});

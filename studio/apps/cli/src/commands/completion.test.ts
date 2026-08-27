@@ -11,6 +11,7 @@ import { COMMAND_SPECS } from "@prometheus/core";
 
 import { makeContext } from "../context.js";
 import { parseArgs } from "../parse.js";
+import { ROUTED_VERBS } from "../route-table.js";
 import {
   bashCompletion,
   completionCommands,
@@ -57,12 +58,12 @@ test("CLI-100 REGRESSION GUARD: every CommandSpec id appears in every generated 
     assert.ok(zsh.includes(id), `zsh missing command "${id}"`);
     assert.ok(fish.includes(id), `fish missing command "${id}"`);
   }
-  // coverage is real: the registry has commands and they're all safe names (none dropped).
+  // Coverage is real, and it is the ROUTER's list rather than the registry's internal ids —
+  // `ALL_IDS` (the CommandSpec ids) contains `env-list`/`model-hw`/`provider-list`/`secure-scan`,
+  // none of which is a command a user can type. Equating the two counts is what let the old bug
+  // sit here looking like a guard.
   assert.ok(completionCommands().length > 0);
-  assert.equal(
-    completionCommands().length,
-    new Set(ALL_IDS.filter((x) => /^[\w:-]+$/.test(x))).size,
-  );
+  assert.deepEqual(completionCommands(), [...new Set(ROUTED_VERBS)].sort());
 });
 
 test("CLI-100 security: interpolated command/flag names are metachar-free (can't break the shell)", () => {
@@ -113,4 +114,58 @@ test("CLI-100 man: valid roff header + a .TP per command + copyable flags (\\-)"
   }
   assert.match(page, /\\fB\\-\\-json\\fR/); // OPTIONS use \- for a copyable minus
   assert.match(page, /\.SH EXIT STATUS/);
+});
+
+test("the generated completion offers only verbs that actually exist", () => {
+  /**
+   * `completionCommands()` used to map `COMMAND_SPECS` to their `id`, but a spec id is an
+   * INTERNAL identifier, not the token a user types — `env-list` is the spec behind
+   * `prometheus env list`. The completion therefore offered `env-list`, `model-hw`,
+   * `provider-list` and `secure-scan`, all four of which exit 2 with "unknown command", while
+   * omitting 32 verbs that do exist. Verified by running each against the built binary.
+   *
+   * `ROUTED_VERBS` already excludes those four by name (`INTERNAL_SPEC_IDS`); this generator
+   * simply was not reading it.
+   */
+  const offered = completionCommands();
+
+  for (const phantom of ["env-list", "model-hw", "provider-list", "secure-scan", "nemesis"]) {
+    assert.ok(!offered.includes(phantom), `completion offers "${phantom}", which is not a command`);
+  }
+  // a spread of real verbs across every routing style: §2 nouns, sub-command trees, and the
+  // three that are routed directly in index.ts
+  for (const real of [
+    "mcp",
+    "env",
+    "model",
+    "repo",
+    "keymap",
+    "sessions",
+    "profile",
+    "agents",
+    "metadata",
+    "completion",
+    "man",
+    "ls",
+    "scan",
+    "secure",
+  ]) {
+    assert.ok(offered.includes(real), `completion omits "${real}", which is a real command`);
+  }
+
+  // and it is exactly the router's own list — the same one `index.ts` suggests from, so the two
+  // can never disagree about what exists
+  assert.deepEqual(offered, [...new Set(ROUTED_VERBS)].sort());
+});
+
+test("completion, man and ls are in the router's own verb list", () => {
+  /**
+   * All three are routed directly in `index.ts` (`completion`/`man`) or as a top-level alias
+   * (`ls` → `list`, byte-identical `--json` output, checked against the binary), yet none was in
+   * `RECOGNIZED_VERBS` — whose own docstring calls itself "the ground truth of direct routing".
+   * So neither the completion nor the router's "did you mean" could offer them.
+   */
+  for (const v of ["completion", "man", "ls"]) {
+    assert.ok(ROUTED_VERBS.includes(v), `${v} runs but is not in ROUTED_VERBS`);
+  }
 });

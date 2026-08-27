@@ -344,6 +344,154 @@ test("enable/disable forward --component and --host (the GUI toggle affordances)
   assert.deepEqual(calls.runPrometheus.at(-1), ["disable", "myplugin", "--only", "hooks-x"]);
 });
 
+/**
+ * Regression: --dry-run/--yes/--force used to be undeclared in enable/disable's argsSchema, so
+ * validateArgs silently stripped them before run() ever saw them (and run() never called
+ * globalFlagArgv either) — a typed `/enable foo --dry-run` always performed the REAL re-arm.
+ */
+test("enable/disable now thread --dry-run / --yes / --force into the engine argv, like install/uninstall", async () => {
+  const { client, calls } = makeFakeClient();
+  await invoke("enable", ctx(client), rawArgs(["foo"], { "dry-run": true }));
+  assert.deepEqual(calls.runPrometheus.at(-1), ["--dry-run", "enable", "foo"]);
+
+  await invoke("disable", ctx(client), rawArgs(["foo"], { "dry-run": true, yes: true }));
+  assert.deepEqual(calls.runPrometheus.at(-1), ["--dry-run", "--yes", "disable", "foo"]);
+});
+
+/**
+ * Regression: 'bundle' was a bare roSpec with NO argsSchema at all, so every typed flag —
+ * --host, and more seriously --dry-run/--yes/--force — was silently dropped; a confirmed
+ * `/bundle --force` typed-confirm never actually reached the engine.
+ */
+test("bundle now forwards --host and the global safety flags (used to drop ALL flags)", async () => {
+  const { client, calls } = makeFakeClient();
+  await invoke("bundle", ctx(client), rawArgs([], { host: "claude,codex" }));
+  assert.deepEqual(calls.runPrometheus.at(-1), ["bundle", "--host", "claude", "--host", "codex"]);
+
+  await invoke("bundle", ctx(client), rawArgs([], { force: true }));
+  assert.deepEqual(calls.runPrometheus.at(-1), ["--force", "bundle"]);
+});
+
+/**
+ * Regression: 'sync' used nameSpec's default (forwards only the name), so the engine's real
+ * `--to <agents>` scoping flag was silently dropped and every sync fell through to the engine's
+ * default of ALL agents with a skills dir — a materially broader outcome than requested.
+ */
+test("sync now forwards --to (used to always scope to every agent, silently)", async () => {
+  const { client, calls } = makeFakeClient();
+  await invoke("sync", ctx(client), rawArgs(["my-skill"], { to: "claude,codex" }));
+  assert.deepEqual(calls.runPrometheus.at(-1), ["sync", "my-skill", "--to", "claude,codex"]);
+
+  await invoke("sync", ctx(client), rawArgs(["my-skill"]));
+  assert.deepEqual(calls.runPrometheus.at(-1), ["sync", "my-skill"]);
+});
+
+/**
+ * Regression: vault's argsSchema enum was missing "list" — the engine's OWN default action
+ * (`prometheus.py`'s `p_vault.add_argument("action", ..., default="list")`) — so
+ * `prometheus vault list` (the obvious, documented way to ask for it) was rejected
+ * client-side before ever reaching the engine.
+ */
+test("vault accepts its own default action 'list' (was missing from the enum)", async () => {
+  const { client, calls } = makeFakeClient();
+  await invoke("vault", ctx(client), rawArgs(["list"]));
+  assert.deepEqual(calls.runPrometheus.at(-1), ["vault", "list"]);
+});
+
+/**
+ * Regression: skills' argsSchema enum only had list/enable/disable/mute — the engine also
+ * supports unmute/audit/integrate (its own description even advertises "`audit` = re-scan +
+ * pin installed sources"), so `skills unmute <x>` / `skills audit` were rejected client-side.
+ * audit's own flags (--restore, --list-quarantine, --defang-*, ...) were also undeclared and
+ * silently dropped.
+ */
+test("skills accepts unmute/audit/integrate + forwards audit's own flags (was missing/dropped)", async () => {
+  const { client, calls } = makeFakeClient();
+  await invoke("skills", ctx(client), rawArgs(["unmute", "foo"]));
+  assert.deepEqual(calls.runPrometheus.at(-1), ["skills", "unmute", "foo"]);
+
+  await invoke("skills", ctx(client), rawArgs(["audit"], { "list-quarantine": true }));
+  assert.deepEqual(calls.runPrometheus.at(-1), ["skills", "audit", "--list-quarantine"]);
+
+  await invoke("skills", ctx(client), rawArgs(["audit"], { restore: "some-vault-dir" }));
+  assert.deepEqual(calls.runPrometheus.at(-1), ["skills", "audit", "--restore", "some-vault-dir"]);
+});
+
+/**
+ * Regression: 'auto' was a hand-written spec that never merged GLOBAL_FLAG_SPECS nor called
+ * globalFlagArgv — a typed `prometheus auto --dry-run` silently performed the REAL mutating
+ * maintenance routine (quarantine/re-pin/skill-integrate) with the flag discarded before run()
+ * ever saw it. Same "globals leak" bug already fixed for enable/disable/bundle/sync, missed here.
+ */
+test("auto now threads --dry-run into the engine argv (used to silently drop it)", async () => {
+  const { client, calls } = makeFakeClient();
+  await invoke("auto", ctx(client), rawArgs([], { "dry-run": true }));
+  assert.deepEqual(calls.runPrometheus.at(-1), ["--dry-run", "auto"]);
+
+  await invoke("auto", ctx(client), rawArgs([], { "dry-run": true, defang: true }));
+  assert.deepEqual(calls.runPrometheus.at(-1), ["--dry-run", "auto", "--defang"]);
+});
+
+/**
+ * Regression: nameSpec() hard-coded argsSchema to NAME_ARG with no seam for a caller to add
+ * its own flags — so audit's --revoke and scaffold-skill's --description/--body/--tools/
+ * --manual were all declared nowhere, and validateArgs silently stripped them before run()
+ * ever saw them (the same "globals leak" bug class already fixed for enable/disable/bundle/
+ * sync/auto, missed here because this whole spec shape had no seam at all).
+ */
+test("audit forwards --revoke (nameSpec used to have no flag seam at all)", async () => {
+  const { client, calls } = makeFakeClient();
+  await invoke("audit", ctx(client), rawArgs(["someplugin"], { revoke: true }));
+  assert.deepEqual(calls.runPrometheus.at(-1), ["audit", "someplugin", "--revoke"]);
+});
+
+test("scaffold-skill forwards --description/--body/--tools/--manual (used to drop all of them)", async () => {
+  const { client, calls } = makeFakeClient();
+  await invoke(
+    "scaffold-skill",
+    ctx(client),
+    rawArgs(["my-skill"], {
+      description: "Use when X",
+      body: "do Y",
+      tools: "Read Edit",
+      manual: true,
+    }),
+  );
+  assert.deepEqual(calls.runPrometheus.at(-1), [
+    "scaffold-skill",
+    "my-skill",
+    "--description",
+    "Use when X",
+    "--body",
+    "do Y",
+    "--tools",
+    "Read Edit",
+    "--manual",
+  ]);
+});
+
+/**
+ * Regression: `purge` (a nameSpec-based, mutating, DELETE-a-config-dir command) never declared
+ * --dry-run/--yes/--force (same "globals leak" bug already fixed for auto), NOR --confirm — the
+ * engine's own --yes+--confirm double-gate (`_cmd_purge_json`) could never actually execute
+ * through this spec, only ever preview, no matter what the CLI user typed.
+ */
+test("purge forwards --dry-run/--yes/--force + --confirm (used to drop all of them)", async () => {
+  const { client, calls } = makeFakeClient();
+  await invoke("purge", ctx(client), rawArgs(["claude"], { "dry-run": true }));
+  assert.deepEqual(calls.runPrometheus.at(-1), ["--dry-run", "purge", "claude"]);
+
+  await invoke("purge", ctx(client), rawArgs(["claude"], { yes: true, confirm: "claude" }));
+  assert.deepEqual(calls.runPrometheus.at(-1), ["--yes", "purge", "claude", "--confirm", "claude"]);
+});
+
+test("nameSpec's call-based commands (where/info/status) are unaffected by the flag seam", async () => {
+  const { client, calls } = makeFakeClient();
+  const out = await invoke("where", ctx(client), rawArgs(["foo"]));
+  assert.equal(out.ok, true);
+  assert.deepEqual(calls.runPrometheus, []); // where/info/status go through client.where/info/status, not runPrometheus
+});
+
 /* --------------------------- lookup helpers ---------------------------- */
 
 test("getCommand / listCommands / commandsByGroup", () => {

@@ -11,6 +11,13 @@
  * PURE: takes a plain `StatusModel` + width + color caps; the host feeds live tuning.
  */
 import { agent } from "@prometheus/core";
+import {
+  TRAIT_INLINE_MAX,
+  type TraitCell,
+  modelTraits as coreTraits,
+  traitGrid,
+  traitRail,
+} from "@prometheus/core/ai-effort";
 
 import { type ColorCaps, type Role, painter } from "./palette.js";
 import { clipToWidth, stringWidth } from "./width.js";
@@ -72,11 +79,47 @@ export interface StatusModel {
     /** one-sentence explanation, shown on the `/effort` line (too long for the border). */
     detail?: string;
   };
+  /**
+   * What the ACTIVE model can actually do, as the runner itself reports it —
+   * `["completion","vision","audio","tools","thinking"]` from Ollama's `/api/show`.
+   *
+   * Shown beside the effort tier because they are the same KIND of fact and are read at the
+   * same moment: the turn right after switching models, when the user needs to know what this
+   * one is capable of before they ask it for anything. `thinking` in particular is the
+   * precondition for the effort tier next to it meaning anything at all — seeing them apart,
+   * on different chrome, made a genuinely causal pair look like two unrelated chips.
+   *
+   * Order is the runner's own, not sorted: it is stable per model, and re-sorting would make
+   * the strip flicker between models for no gain.
+   *
+   * `undefined` ⇒ never probed (a cloud endpoint, or the probe has not landed). Empty ⇒ probed
+   * and the runner reported nothing.
+   */
+  capabilities?: readonly string[];
 }
 
 /**
- * The composer's bottom-border badge: `effort: high` or `effort: not available`. Returns
- * undefined when there is nothing worth saying.
+ * This surface's view of the model's traits. The ORDER and the grid shape live in core
+ * (`ai/effort/traits.ts`) so the terminal and the Electron pane cannot drift into presenting
+ * the same facts differently; what stays here is the terminal's own wording and padding.
+ */
+export function modelTraits(m: StatusModel): string[] {
+  return coreTraits(m.capabilities, effortCell(m));
+}
+
+/** The effort cell on its own: `effort: high`, or `effort: not available`. */
+function effortCell(m: StatusModel): string | undefined {
+  const e = m.effort;
+  if (!e) return undefined;
+  return e.available ? `effort: ${e.tier}` : "effort: not available";
+}
+
+export { TRAIT_INLINE_MAX };
+
+/**
+ * The composer's bottom-border badge — the model's traits on ONE line:
+ * `tools · thinking · effort: high`. Returns undefined when there is nothing worth saying, or
+ * when there are too many traits to fit (the caller renders `capabilityPanel` instead).
  *
  * The `not available` wording is deliberate. Showing a tier the model will ignore is the bug
  * this whole feature exists to remove, so an unusable knob must read as unusable — not as a
@@ -87,11 +130,51 @@ export interface StatusModel {
  * meaning would be ambiguous. A clamped or emulated tier is signalled by the warn tint, and
  * spelled out in full by `/effort` and `/status`.
  */
-export function effortBadge(m: StatusModel): string | undefined {
-  const e = m.effort;
-  if (!e) return undefined;
-  if (!e.available) return "effort: not available";
-  return `effort: ${e.tier}`;
+export function effortBadge(m: StatusModel, opts: { traits?: boolean } = {}): string | undefined {
+  // `traits:false` is the LAST-RESORT rendering, for a terminal too short to afford the panel
+  // and too narrow for the full strip. The effort cell alone, because of the whole set it is
+  // the only one the user can act on.
+  if (opts.traits === false) return effortCell(m);
+  const traits = modelTraits(m);
+  if (traits.length === 0) return undefined;
+  // Past the threshold the caller renders `capabilityPanel` instead — returning a long strip
+  // here would just be dropped whole by `inlayBadge`, which is worse than either option.
+  if (traits.length > TRAIT_INLINE_MAX) return undefined;
+  return traits.join(" · ");
+}
+
+/**
+ * The two-row, tab-aligned trait panel — what the border badge becomes once a model has more
+ * traits than one border can hold.
+ *
+ * A GRID rather than a wrapped sentence, because these are parallel facts and the eye reads a
+ * column of them far faster than a run-on `a · b · c · d · e · f`. Exactly two rows: the point
+ * is to stay a glanceable strip attached to the composer, and a panel that grows with the model
+ * would start competing with the transcript for the screen.
+ *
+ * The effort cell always lands BOTTOM-RIGHT: padding is inserted before it, never after, so the
+ * one control in the set sits in the same place for every model instead of wandering with the
+ * capability count.
+ *
+ * Returns null when `inner` cannot hold a legible grid — the caller then falls back to the
+ * inline badge (which may itself drop). Never returns a clipped cell: a half-rendered
+ * `thinki` reads as a bug, not as information.
+ */
+export function capabilityPanel(m: StatusModel, inner: number): string[] | null {
+  const grid = traitGrid(modelTraits(m));
+  if (!grid) return null;
+  const { cols, cells: padded } = grid;
+  const widest = padded.reduce((n, t) => Math.max(n, stringWidth(t)), 0);
+  const colW = Math.floor(inner / cols);
+  // one space of breathing room between columns, and the widest cell must fit whole.
+  if (colW < widest + 1) return null;
+  const row = (i: number): string =>
+    padded
+      .slice(i * cols, i * cols + cols)
+      .map((t) => t + " ".repeat(Math.max(0, colW - stringWidth(t))))
+      .join("")
+      .trimEnd();
+  return [row(0), row(1)];
 }
 
 /** Compact-k format: 12300 → "12.3k" (1 decimal <100k, floored), 131072 → "131k", <1000 → "N". */
@@ -260,6 +343,7 @@ const HINT_TOKENS = [
   "⇧⇥ mode",
   "⌃C cancel",
   "⌃D exit",
+  "⌃T traits", // focus the model's trait rail (tools / thinking / effort)
   "⌃G panes", // cycle focused pane (CLI-067)
   "⌃S save", // save transcript (CLI-067)
 ];
@@ -270,4 +354,113 @@ export function composerHint(caps: ColorCaps, width = 80): string {
   let tokens = [...HINT_TOKENS];
   while (tokens.length > 1 && visLen(tokens.join("  ·  ")) > width) tokens = tokens.slice(0, -1);
   return p.muted(clip(tokens.join("  ·  "), width));
+}
+
+/* ── the trait rail ───────────────────────────────────────────────────────────── */
+
+/**
+ * This surface's view of the rail: the shared slot order + on/off/unsupported model from core,
+ * with the terminal's own wording for the effort cell.
+ */
+export function traitCells(m: StatusModel): TraitCell[] {
+  return traitRail({
+    capabilities: m.capabilities,
+    toolsEnabled: m.tools,
+    ...(m.effort ? { effort: { tier: m.effort.tier, available: m.effort.available } } : {}),
+  });
+}
+
+/** The `⌃T` focus state: which rail cell the arrow keys are pointed at. */
+export interface TraitFocus {
+  index: number;
+}
+
+/** A rail cell's display-column span, measured from the START of the rail string. */
+export interface TraitSpan {
+  start: number;
+  /** exclusive. */
+  end: number;
+}
+
+/**
+ * Where each cell lands on the rendered rail, so a MOUSE click can be mapped back to a cell.
+ *
+ * Computed from the same `[label]` / ` label ` shapes `traitRailLine` paints, and both are
+ * driven off the same `cells` array — the click target cannot drift from what is on screen
+ * unless one of them stops using this function.
+ */
+export function traitRailSpans(cells: readonly TraitCell[]): TraitSpan[] {
+  const spans: TraitSpan[] = [];
+  let x = 0;
+  for (const c of cells) {
+    const w = stringWidth(c.label) + 2; // ` label ` and `[label]` are the same width
+    spans.push({ start: x, end: x + w });
+    x += w;
+  }
+  return spans;
+}
+
+/**
+ * Paint the rail as ONE line: `txt vis aud tool think    ⚙ high`.
+ *
+ * Green = live this turn, amber = the user switched it off, dim = the model does not have it.
+ * The focused cell (⌃T mode) is bracketed so the selection survives a terminal with no color
+ * at all — a highlight that exists only as a hue is not a selection under NO_COLOR.
+ *
+ * Returns null when the rail is empty (nothing probed and no effort state) or cannot fit in
+ * `width`, so the caller can fall back rather than paint a half-truncated row.
+ */
+/**
+ * Does the rail actually FIT in `width`? — the same test `traitRailLine` applies before painting.
+ *
+ * Exported because ⌃T must not enter its modal trait-focus when nothing is on screen. That guard
+ * only checked whether there were cells at all, while the rail is dropped whenever it does not
+ * fit (a ~35-38 column rail on a narrow terminal). The result was a composer that looked
+ * completely normal — no focus ring, no hint row, no rail — in which every printable key, Enter,
+ * Backspace and ⌃D were silently swallowed by the modal reducer. The user reads that as a frozen
+ * terminal.
+ *
+ * One predicate rather than two, so the key that ENTERS the mode and the code that PAINTS it can
+ * never disagree about whether the rail is there.
+ */
+export function traitRailFits(
+  cells: readonly TraitCell[],
+  width: number,
+  focus?: { index: number } | null,
+): boolean {
+  if (cells.length === 0) return false;
+  const plain = cells
+    .map((c, i) => (focus && focus.index === i ? `[${c.label}]` : ` ${c.label} `))
+    .join("");
+  return stringWidth(plain) <= width;
+}
+
+export function traitRailLine(
+  cells: readonly TraitCell[],
+  focus: TraitFocus | null,
+  width: number,
+  caps: ColorCaps,
+): string | null {
+  if (!traitRailFits(cells, width, focus)) return null;
+  const p = painter(caps);
+  const role = (c: TraitCell): Role =>
+    c.state === "on" ? "traitOn" : c.state === "off" ? "traitOff" : "muted";
+  return cells
+    .map((c, i) => {
+      const text = focus && focus.index === i ? `[${c.label}]` : ` ${c.label} `;
+      return p[role(c)](text);
+    })
+    .join("");
+}
+
+/**
+ * The one-line key hint shown under the rail while ⌃T focus is active — including, for a cell
+ * that has no switch, the REASON, so a refused ↑ explains itself instead of looking broken.
+ */
+export function traitFocusHint(cells: readonly TraitCell[], focus: TraitFocus): string {
+  const cell = cells[focus.index];
+  if (!cell) return "";
+  if (!cell.actionable) return `${cell.label}: ${cell.reason ?? "no switch here"} · esc done`;
+  if (cell.id === "effort") return "↑/↓ raise/lower effort · ←/→ move · esc done";
+  return "↑ on · ↓ off · ←/→ move · esc done";
 }

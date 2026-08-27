@@ -162,3 +162,82 @@ export function createPathCycler(fs: CompleterFs = defaultFs, dirsOnly = false):
     },
   };
 }
+
+/* ── path-taking slash commands ───────────────────────────────────────────── */
+
+/**
+ * The slash commands whose ARGUMENT is a filesystem path, and whether that argument may only
+ * be a directory.
+ *
+ * This table is the single source of truth for both completers: the TUI's live dropdown
+ * (tui/path-mentions.ts) and the readline host's Tab completer below. `/cd ~/pro<Tab>` has to
+ * behave the same way on both surfaces — a user who learns it in one and finds it dead in the
+ * other has learned that Tab completion "doesn't work", which is exactly the report this table
+ * exists to answer.
+ *
+ * Keys are the registry's canonical command names, lowercased, without the leading "/".
+ */
+export const PATH_ARG_COMMANDS: ReadonlyMap<string, { dirsOnly: boolean }> = new Map([
+  ["cd", { dirsOnly: true }],
+  ["cwd", { dirsOnly: true }],
+  ["add-dir", { dirsOnly: true }],
+  ["mention", { dirsOnly: false }],
+  ["export", { dirsOnly: false }],
+]);
+
+/** `/cmd` + the whitespace that ends it — the head that precedes a path argument. */
+const SLASH_PATH_HEAD = /^\/([A-Za-z][\w-]*)([ \t]+)/;
+
+/** Chars that may appear inside a path argument token. Superset of the "@"-mention token set:
+ *  `~` is included, because `/cd ~/x` is how people actually type a home-relative path, and
+ *  stopping the token scan at the `~` would make `/x` look like an ABSOLUTE path. */
+export const PATH_TOKEN_CHARS = /[\w./~-]/;
+
+/** A path argument located inside a slash-command line. */
+export interface SlashPathArg {
+  /** code-point index where the path token starts. */
+  tokenStart: number;
+  /** the token typed so far (may be ""). */
+  token: string;
+  dirsOnly: boolean;
+}
+
+/**
+ * Locate the path argument under `cursor` in a slash-command line, or null when there isn't one
+ * (not a slash command, not a path-taking one, the caret is still in the command word, or the
+ * token under the caret is a flag like `--remove`).
+ *
+ * `cursor` is a CODE-POINT index; the head this matches is ASCII, so its UTF-16 length is also
+ * its code-point length.
+ */
+export function findSlashPathArg(input: string, cursor: number): SlashPathArg | null {
+  const m = SLASH_PATH_HEAD.exec(input);
+  if (!m) return null;
+  const spec = PATH_ARG_COMMANDS.get((m[1] as string).toLowerCase());
+  if (!spec) return null;
+  const chars = [...input];
+  const pos = Math.max(0, Math.min(cursor, chars.length));
+  const argStart = (m[0] as string).length;
+  if (pos < argStart) return null; // caret still inside the command word / its trailing space
+  let i = pos;
+  while (i > argStart && PATH_TOKEN_CHARS.test(chars[i - 1] as string)) i -= 1;
+  if (chars[i] === "-") return null; // `--remove`, `--json`, … — a flag, not a path
+  return { tokenStart: i, token: chars.slice(i, pos).join(""), dirsOnly: spec.dirsOnly };
+}
+
+/**
+ * The readline host's twin of the TUI dropdown: Tab-complete the path ARGUMENT of a
+ * path-taking slash command. Returns readline's `[hits, line]` where each hit is a full
+ * replacement for `line`, or null when the line has no path argument to complete (the caller
+ * then falls back to whatever it does with an ordinary line).
+ */
+export function completeSlashArg(
+  line: string,
+  fs: CompleterFs = defaultFs,
+): [string[], string] | null {
+  const arg = findSlashPathArg(line, [...line].length);
+  if (!arg) return null;
+  const [hits] = completePath(arg.token, fs, { dirsOnly: arg.dirsOnly });
+  const head = [...line].slice(0, arg.tokenStart).join("");
+  return [hits.map((h) => head + h), line];
+}

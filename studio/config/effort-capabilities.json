@@ -1,0 +1,113 @@
+{
+  "$comment": [
+    "Reasoning-effort capability OVERRIDES — how `/think` reaches a model this build has never",
+    "heard of. Copy this file to either layer and edit; both are optional and both start absent:",
+    "",
+    "    ~/.prometheus/effort-capabilities.json          your machine",
+    "    <project>/.prometheus/effort-capabilities.json  checked in with a repo",
+    "",
+    "The built-in table (packages/core/src/ai/effort/rules.ts) is always loaded FIRST, then the",
+    "user layer, then the project layer. Precedence is append order: the resolver scores how",
+    "SPECIFIC each match is and breaks a tie in favour of the LATER rule, so a rule here with the",
+    "same match as a builtin wins, and one with a narrower match wins outright. There is no merge",
+    "step and no override key — later simply wins.",
+    "",
+    "A rule is { id, match, cap }.",
+    "",
+    "  match  — any of: runtime, capability, capabilityAbsent, modelIdPrefix, modelIdRegex,",
+    "           locality. More fields = more specific. `capability`/`capabilityAbsent` test what a",
+    "           runtime PROBE reported (Ollama's /api/show `capabilities`) and outrank every",
+    "           name match, because a model id is a guess and a probe is an answer.",
+    "",
+    "           IMPORTANT, and the thing people hit first: order only breaks TIES. A rule that",
+    "           matches LESS specifically than the one you meant to replace does not win, however",
+    "           late it is loaded. To override a probe-driven builtin you must match the probe too",
+    "           — add `capability: \"thinking\"` (or `capabilityAbsent`) alongside your regex.",
+    "           Verified: a `{runtime, modelIdRegex}` rule loses to the builtin",
+    "           `ollama-openai-shim-thinking`; add `capability` and it wins.",
+    "",
+    "  cap    — mechanism (see below), `supported` (which of off|low|medium|high|max this pair can",
+    "           really express), plus the fields that mechanism needs, and a one-sentence `note`",
+    "           shown to the user whenever the tier is degraded.",
+    "",
+    "Mechanisms, and what each one needs:",
+    "  effort-enum         field + enumMap     a string in the body (reasoning_effort, …)",
+    "  token-budget        field + budgetMap   an integer budget; budgetBounds clamps it",
+    "  native-graded       field + enumMap     a graded field in a non-OpenAI shape",
+    "  binary-toggle       field               on/off only (onValue/offValue, default true/false)",
+    "  template-kwarg      kwarg               a Jinja kwarg the runtime forwards",
+    "  system-prompt-line  promptMap           a literal line the model was TRAINED to read",
+    "  prompt-soft-switch  promptMap           a trained-on token appended to a turn",
+    "  always-on                               it reasons, and the depth cannot be moved",
+    "  none                                    no reasoning control at all",
+    "",
+    "Version-bound your regexes. Reasoning support changes WITHIN a family — Gemma 2/3 cannot",
+    "think and Gemma 4 can — so a family-level pattern is wrong within one generation.",
+    "",
+    "A malformed rule is reported at startup and skipped; the rest of the file still loads.",
+    "",
+    "Three worked examples are below. Delete `_examples` and put real entries in",
+    "`rules` — `rules` is the only key that is read."
+  ],
+  "rules": [],
+  "_examples": [
+    {
+      "id": "my-new-thinking-model",
+      "match": {
+        "modelIdRegex": "(^|[/:_-])my-model-v9"
+      },
+      "cap": {
+        "mechanism": "effort-enum",
+        "field": "reasoning_effort",
+        "supported": [
+          "off",
+          "low",
+          "medium",
+          "high",
+          "max"
+        ],
+        "enumMap": {
+          "off": "none",
+          "low": "low",
+          "medium": "medium",
+          "high": "high",
+          "max": "max"
+        },
+        "note": "my-model-v9 takes the OpenAI reasoning_effort vocabulary"
+      }
+    },
+    {
+      "id": "override-a-builtin-for-one-runtime",
+      "match": {
+        "runtime": "lmstudio",
+        "modelIdRegex": "(^|[/:_-])my-model-v9"
+      },
+      "cap": {
+        "mechanism": "none",
+        "supported": [],
+        "note": "my LM Studio build silently drops reasoning_effort for this model"
+      }
+    },
+    {
+      "id": "override-a-PROBE-driven-builtin",
+      "match": {
+        "runtime": "ollama",
+        "capability": "thinking",
+        "modelIdRegex": "(^|[/:_-])qwen-?3\\.6"
+      },
+      "cap": {
+        "mechanism": "effort-enum",
+        "field": "reasoning_effort",
+        "supported": [
+          "off",
+          "low"
+        ],
+        "enumMap": {
+          "off": "none",
+          "low": "low"
+        },
+        "note": "this repo pins qwen3.6 to low"
+      }
+    }
+  ]
+}

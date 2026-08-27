@@ -160,3 +160,50 @@ test("an option-shaped path is refused rather than resolved", () => {
 test("a non-mutator name returns null so the caller's dispatch falls through", () => {
   assert.equal(runFsMutateTool("read_file", { path: "a" }, { cwd: ws() }), null);
 });
+
+test("delete_file does NOT capture a lossy pre-image for a binary file", async () => {
+  /**
+   * `readFileSync(path, "utf8")` does not throw on binary — it substitutes U+FFFD for every
+   * invalid sequence — so the catch that was supposed to mean "cannot be captured" never fired,
+   * and `/revert` wrote that lossy string back as if it were the file. Measured on a PNG-shaped
+   * buffer: 264 bytes in, 522 bytes out, not identical. The user was told the delete had been
+   * reverted and got a corrupted file, which is worse than not reverting at all.
+   */
+  const { mkdtempSync, writeFileSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const dir = mkdtempSync(join(tmpdir(), "prom-del-bin-"));
+
+  const png = join(dir, "img.png");
+  writeFileSync(
+    png,
+    Buffer.concat([
+      Buffer.from([0x89, 0x50, 0x4e, 0x47]),
+      Buffer.from(Array.from({ length: 256 }, (_, i) => i)),
+    ]),
+  );
+  const txt = join(dir, "a.txt");
+  writeFileSync(txt, "hello\n");
+
+  const captured: string[] = [];
+  const deps = {
+    cwd: dir,
+    roots: [dir],
+    authLevel: 7,
+    onPreImage: (rec: { path: string }) => captured.push(rec.path),
+  } as never;
+
+  const bin = await runFsMutateTool("delete_file", { path: png }, deps);
+  assert.equal(bin?.ok, true, "a binary file still deletes");
+  assert.match(bin?.summary ?? "", /not revertible/, "…and says so, like the directory branch");
+
+  const text = await runFsMutateTool("delete_file", { path: txt }, deps);
+  assert.equal(text?.ok, true);
+  assert.doesNotMatch(text?.summary ?? "", /not revertible/);
+
+  assert.deepEqual(
+    captured.map((p) => p.split("/").pop()),
+    ["a.txt"],
+    "only the file whose bytes round-trip exactly may enter the checkpoint",
+  );
+});

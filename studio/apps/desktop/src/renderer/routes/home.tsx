@@ -213,6 +213,9 @@ export function HomeRoute({
       return;
     }
     try {
+      // main shows a native (unmissable) dialog itself when it redirects the chosen folder
+      // away from Prometheus's OWN repo (see spectacular-ipc.ts's folderOpen handler) — this
+      // route just navigates on whatever `r.path` main actually resolved to.
       const r = await bridge.folderOpen({ title: "Open a project folder" });
       if (r.ok && r.path) {
         setWorkspaceRoot(r.path);

@@ -62,9 +62,18 @@ function moreConservative(a: NemesisVerdictLevel, b: NemesisVerdictLevel): Nemes
   return TIER_RANK[a] >= TIER_RANK[b] ? a : b;
 }
 
-/** Build the `nemesis gate` argv from the options (verbatim, shell:false-safe). */
+/**
+ * Build the `nemesis gate` argv from the options (verbatim, shell:false-safe).
+ *
+ * `--` ends the option list, so the target can never be consumed as a nemesis flag. This is the
+ * same protection `gate()` carries, and it did not: the two are twins and only one was fixed.
+ * Without the separator a target of `-` makes nemesis read the body from STDIN, `runNemesis`
+ * writes no stdin for a gate and closes the pipe, so nemesis scans an EMPTY body and answers
+ * `verdict:"allow", risk_score:0` — and `gateFull` reconciles allow-vs-allow into a clean
+ * verdict. Nothing was scanned, and every surface downstream is told the target is safe.
+ */
 function buildGateArgv(target: string, opts: GateFullOptions): string[] {
-  const argv = ["gate", target];
+  const argv = ["gate", "--", target];
   if (opts.fresh) argv.push("--no-cache");
   if (opts.sign) argv.push("--sign");
   if (opts.policyFile) argv.push("--policy", opts.policyFile);
@@ -83,6 +92,18 @@ export async function gateFull(
 ): Promise<NemesisVerdict> {
   if (!target || !target.trim()) {
     return syntheticErrorVerdict(target, "empty target");
+  }
+  /**
+   * An option-shaped target is refused OUTRIGHT, not merely separated.
+   *
+   * `--` already stops a flag being parsed, but a bare `-` still means "read the body from
+   * stdin" positionally, and a path that genuinely begins with `-` is far likelier to be a
+   * mistake or an injection attempt than a real scan target. `gate()` refuses these fail-closed;
+   * this twin accepted them and reported the resulting empty scan as SAFE. The file header
+   * promises FAIL-CLOSED and "we can never under-report risk" — this is what makes that true.
+   */
+  if (target.trimStart().startsWith("-")) {
+    return syntheticErrorVerdict(target, `refusing an option-shaped scan target: ${target}`);
   }
 
   let res: NemesisRunResult;

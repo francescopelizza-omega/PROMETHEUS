@@ -99,6 +99,43 @@ const firstLine = (s: string): string => (s.split("\n").find((l) => l.trim()) ??
  *  (mirrors the spawn-capture ring cap on the CLI path). */
 const MAX_STREAM_CHARS = 8 * 1024 * 1024;
 
+/**
+ * Accumulate a chat stream into the sub-agent's ANSWER, with an R1-style model's inline
+ * `<think>…</think>` stripped out of it.
+ *
+ * These two invoke paths matter more than the transcript ones, and were missed when the
+ * splitter was wired into the four HOST transports. What they return is not shown to a human
+ * and then forgotten — it is a sub-agent's RESULT, folded into a parent agent's thread and fed
+ * to another model, and it is what `priceCall` measures. A leaked deliberation there becomes
+ * another model's input.
+ *
+ * The thinking is DROPPED rather than routed: an invoke has no thinking channel to route to,
+ * and dropping is strictly better than returning it as the answer. A no-op pass-through when
+ * the model's capability names no tag.
+ */
+async function collectAnswer(
+  stream: AsyncIterable<{ delta?: string; usage?: SseTokenUsage; done?: boolean }>,
+  endpoint: AiEndpoint,
+  onUsage?: (u: SseTokenUsage) => void,
+): Promise<string> {
+  const { cap } = ai.resolveCapability({
+    modelId: endpoint.model ?? endpoint.id,
+    runtime: ai.runtimeFromBaseUrl(endpoint.baseUrl, endpoint.locality),
+    locality: endpoint.locality,
+    ...(endpoint.probedCapabilities ? { probedCapabilities: endpoint.probedCapabilities } : {}),
+  });
+  const splitter = ai.createReasoningTagSplitter(cap.reasoningTag);
+  let text = "";
+  for await (const chunk of stream) {
+    if (chunk.delta) text += splitter.push(chunk.delta).text;
+    if (chunk.usage) onUsage?.(chunk.usage);
+    if (chunk.done || text.length > MAX_STREAM_CHARS) break;
+  }
+  // Flush even on the `break` paths: a stream cut at the byte cap, or ended by `done`, can
+  // leave a held-back partial tag that is ordinary text after all.
+  return text + splitter.end().text;
+}
+
 /** A canned reply for the `fake` backend (dry-run + offline demos). */
 function fakeReply(req: InvokeRequest): string {
   return `[${req.agent.name}/${req.agent.role}] (fake) turn ${req.turn}: acknowledged "${firstLine(req.prompt)}"`;
@@ -118,12 +155,7 @@ async function localInvoke(req: InvokeRequest, deps: InvokerDeps): Promise<strin
   const makeClient = deps.aiClientFactory ?? createAiClient;
   const client = makeClient(endpoint, { neverSendToCloud: false });
   const messages: Msg[] = [{ role: "user", content: req.prompt }];
-  let text = "";
-  for await (const chunk of client.chat(messages)) {
-    if (chunk.delta) text += chunk.delta;
-    if (chunk.done || text.length > MAX_STREAM_CHARS) break;
-  }
-  return text.trim();
+  return (await collectAnswer(client.chat(messages), endpoint)).trim();
 }
 
 /** The pricing table, loaded once per process (it is a shipped JSON file, not user state). */
@@ -186,13 +218,10 @@ async function apiInvoke(req: InvokeRequest, deps: InvokerDeps): Promise<InvokeR
     { resolveKey: async () => fixedKey },
   );
   const messages: Msg[] = [{ role: "user", content: req.prompt }];
-  let text = "";
   let usage: SseTokenUsage | undefined;
-  for await (const chunk of client.chat(messages)) {
-    if (chunk.delta) text += chunk.delta;
-    if (chunk.usage) usage = chunk.usage;
-    if (chunk.done || text.length > MAX_STREAM_CHARS) break;
-  }
+  const text = await collectAnswer(client.chat(messages), endpoint, (u) => {
+    usage = ai.mergeWireUsage(usage, u);
+  });
   return { text: text.trim() || "(no output)", ...priceCall(endpoint.model ?? "", usage, text) };
 }
 

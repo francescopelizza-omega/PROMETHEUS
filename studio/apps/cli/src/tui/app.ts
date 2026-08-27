@@ -24,7 +24,7 @@ import type { ParsedArgs } from "../parse.js";
 import { defaultColorEnabled } from "../render.js";
 import { readSavedAuthLevel } from "../session/authorisation-store.js";
 import type { Backends } from "../session/onboarding.js";
-import { createPathCycler } from "../session/path-completer.js";
+import { completePath, createPathCycler } from "../session/path-completer.js";
 import {
   findProjectRoot,
   loadPathFrecency,
@@ -43,8 +43,9 @@ import { clickToOffset } from "./input-box.js";
 import { appendInputHistory, inputHistoryPath, loadInputHistory } from "./input-history.js";
 import { openInvokeOverlay } from "./invoke-overlay.js";
 import { type KeyEvent, decodeKeys } from "./keys.js";
+import { type ListOverlayItem, openListOverlay } from "./list-overlay.js";
 import { createMarkdownRenderer } from "./markdown.js";
-import { type ColorCaps, detectColorCaps, paint } from "./palette.js";
+import { type ColorCaps, detectColorCaps, paint, paintDuration } from "./palette.js";
 import { workingLine } from "./quantum-verbs.js";
 import { BG_BLACK, BG_RESET, ENTER_TUI, RESTORE_TUI, Renderer } from "./redraw.js";
 import {
@@ -56,16 +57,47 @@ import {
   reduce,
 } from "./reducer.js";
 import { createSessionBridge } from "./session-bridge.js";
+import { traitCells, traitRailFits } from "./status.js";
 import { SUDO_ACK_PROMPT, detectElevation, resolveSudoDecision, sudoWarningLines } from "./sudo.js";
 import { graphemeCount } from "./width.js";
 
 /** Injection seams (tests / non-default streams). */
+/**
+ * The authorisation level a fresh TUI session starts at: the LAST-SET persisted level, else the
+ * sudo-derived default for the starting mode.
+ *
+ * `configHome` is the os.homedir()-rooted CONFIG tree, and passing the right one is the entire
+ * point of this function existing. The caller used to pass `home` — `prometheusHome()`, the
+ * `~/.prometheus` STATE tree — while every writer persists under
+ * `cliProfiles.configDir(configHome ?? os.homedir())`. Nothing ever creates
+ * `~/.prometheus/.config/prometheus-studio/`, so the read missed on every launch: the level fell
+ * back to the default and `setAuthLevel` then wrote that default over the user's real choice,
+ * silently downgrading the posture — and the readline host along with it, since the two share the
+ * one file. The plain host's own comment records the identical mistake as already fixed there.
+ */
+export function resolveStartAuthLevel(
+  configHome: string | undefined,
+  startMode: Parameters<typeof agent.modeToAuthLevel>[0],
+): number {
+  return readSavedAuthLevel(configHome) ?? agent.modeToAuthLevel(startMode);
+}
+
 export interface TuiDeps {
   stdin?: NodeJS.ReadStream;
   stdout?: NodeJS.WriteStream;
   isTty?: boolean;
   client?: EngineClient;
+  /** the `~/.prometheus` STATE tree (accounting, sessions, composer history). */
   home?: string;
+  /**
+   * The os.homedir()-rooted CONFIG tree that holds `<configHome>/.config/prometheus-studio/`.
+   *
+   * Distinct from `home` on purpose, and the distinction is the whole bug this field exists to
+   * close: the persisted authorisation level is read here and written here, and reading it from
+   * `home` instead pointed at a directory that is never created, so the read always missed.
+   * Forwarded to `createSessionBridge` so the reader and the writer can never diverge again.
+   */
+  configHome?: string;
   backends?: Backends;
 }
 
@@ -190,6 +222,18 @@ export async function launchTui(parsed: ParsedArgs, deps: TuiDeps = {}): Promise
   // re-derive + repaint the prompt + typed buffer at the new width. null = no modal open.
   let modal: ModalView | null = null;
   let modalLines = 0; // physical lines the last modal paint occupied (for the repaint move-up).
+  /**
+   * WHERE the last paint left the cursor, 0-based from the modal's first line.
+   *
+   * The repaint used to move up `modalLines - 1` unconditionally, i.e. it assumed the cursor was
+   * still at the end of the LAST line. It usually is — but when the prompt fits one line and a
+   * hint row is present, the block below deliberately moves the cursor back UP to the prompt row
+   * so the caret sits in the text. The next keystroke then moved up another `modalLines - 1`
+   * from there, overshooting by exactly one row every time and walking the prompt up the screen,
+   * repainting over the scrollback above it. The hint row is not hypothetical: the folder prompt
+   * shows a live candidate row on every keystroke.
+   */
+  let modalCursorRow = 0;
   let entered = false;
   let resolveExit: ((code: number) => void) | null = null;
 
@@ -219,6 +263,30 @@ export async function launchTui(parsed: ParsedArgs, deps: TuiDeps = {}): Promise
     const f = lastFrame;
     if (!f?.box) return;
     const frameTop = Math.max(1, size.rows - f.lines.length + 1);
+    /**
+     * A click on the trait rail is the MOUSE twin of ⌃T: the first click focuses the cell (the
+     * arrows take over from there), a second click on the SAME cell throws its switch. It is the
+     * one entry point that needs nothing learned in advance — the rail is already on screen, and
+     * the thing you want to change is the thing you click.
+     *
+     * Checked before the text-area mapping because the rail sits BELOW the body rows: a click
+     * there lands past the last wrapped row, where `clickToOffset` would otherwise quietly park
+     * the caret at the end of the buffer.
+     */
+    if (f.rail && m.y - frameTop === f.rail.row) {
+      const col = m.x - 1 - f.rail.textLeft;
+      const idx = f.rail.spans.findIndex((sp) => col >= sp.start && col < sp.end);
+      if (idx >= 0) {
+        const cell = traitCells(session.statusModel())[idx];
+        if (state.traitFocus?.index === idx && cell?.actionable) {
+          dispatch([{ type: "trait-adjust", id: cell.id, delta: cell.state === "on" ? -1 : 1 }]);
+        } else {
+          state = { ...state, traitFocus: { index: idx } };
+        }
+        scheduleRender();
+      }
+      return;
+    }
     const bodyRow = m.y - frameTop - f.box.firstBodyRow; // 0-based row within the wrapped text
     const textCol = m.x - 1 - f.box.textLeft; // 0-based display column within the text
     if (bodyRow < 0 || textCol < 0) return; // click outside the text area → ignore
@@ -250,8 +318,10 @@ export async function launchTui(parsed: ParsedArgs, deps: TuiDeps = {}): Promise
     }
     return out.join("\n");
   };
+  let bridgeInitError: unknown;
   const bridge = await createSessionBridge({
     parsed,
+    ...(deps.configHome !== undefined ? { configHome: deps.configHome } : {}),
     write: (text) => {
       renderer.printAbove(renderPaneText(text));
       if (!running) scheduleRender();
@@ -260,6 +330,21 @@ export async function launchTui(parsed: ParsedArgs, deps: TuiDeps = {}): Promise
     confirmPhrase: confirmPhraseModal,
     ask: askModal,
     askPath: askPathModal, // CLI-066: Tab folder completion + candidate hint row
+    /**
+     * `/traits` — the typed way into the ⌃T rail mode.
+     *
+     * Returns false rather than opening an empty mode when the frame is painting no rail (a
+     * terminal too short for it, or a model that was never probed): a focus ring on nothing is
+     * exactly the "the command did nothing" report this is meant to answer.
+     */
+    focusTraitRail: () => {
+      const cells = traitCells(session.statusModel());
+      if (cells.length === 0 || !lastFrame?.rail) return false;
+      const first = cells.findIndex((c) => c.actionable);
+      state = { ...state, traitFocus: { index: Math.max(0, first) } };
+      scheduleRender();
+      return true;
+    },
     quit: () => finish(0),
     caps,
     // stream word-wrap width: cols-1 dodges the last-column autowrap glitch (?7l region).
@@ -269,8 +354,28 @@ export async function launchTui(parsed: ParsedArgs, deps: TuiDeps = {}): Promise
     ...(deps.client ? { client: deps.client } : {}),
     ...(deps.home ? { home: deps.home } : {}),
     ...(deps.backends ? { backends: deps.backends } : {}),
-  }).catch(() => null);
-  if (!bridge) return TUI_NOT_TTY;
+  }).catch((err: unknown) => {
+    bridgeInitError = err;
+    return null;
+  });
+  if (!bridge) {
+    // NOT a non-TTY environment — that already returned TUI_NOT_TTY above, silently, by design
+    // (a pipe/CI/dumb-term fallback needs no explanation). This is the modern TUI's OWN backend
+    // setup throwing (a bad hooks/settings file, a home-tree permission hiccup, …), which used to
+    // downgrade to the readline host with the EXACT SAME silent sentinel — so a user landed on a
+    // surface with no real modals/pickers and no way to know why "the menus don't work like they
+    // used to." The terminal hasn't gone raw yet, so a plain write here is safe.
+    const reason =
+      bridgeInitError instanceof Error ? bridgeInitError.message : String(bridgeInitError);
+    stdout.write(
+      `${paint(
+        `⚠ Prometheus's modern terminal UI failed to start (${reason}) — continuing in compatibility mode; interactive pickers are unavailable there.`,
+        "warn",
+        caps,
+      )}\n`,
+    );
+    return TUI_NOT_TTY;
+  }
   const session = bridge; // non-null alias so the closures below don't see `| null`
 
   // --authorisation(s) / --authorization(s): the 0–7 autonomy scale (a digit OR a name,
@@ -283,7 +388,7 @@ export async function launchTui(parsed: ParsedArgs, deps: TuiDeps = {}): Promise
     parsed.flags.authorization;
   // default = the LAST-SET level persisted from any prior session (so the user's chosen posture
   // carries across sessions); falls back to the sudo-derived mode when never set. A flag overrides.
-  let startAuthLevel = readSavedAuthLevel(home) ?? agent.modeToAuthLevel(startMode);
+  let startAuthLevel = resolveStartAuthLevel(deps.configHome, startMode);
   if (authFlag !== undefined) {
     const parsedLevel = typeof authFlag === "string" ? agent.parseAuthLevel(authFlag) : null;
     if (parsedLevel === null) {
@@ -422,17 +527,20 @@ export async function launchTui(parsed: ParsedArgs, deps: TuiDeps = {}): Promise
     const lines = renderModal(modal, size.cols, caps);
     try {
       // move to the start of the modal's first physical line, then wipe from there down.
-      if (modalLines > 1) safeWrite(`\r\x1b[${modalLines - 1}A`);
+      // Up from where the cursor ACTUALLY is, not from where a full-height paint would leave it.
+      if (modalCursorRow > 0) safeWrite(`\r\x1b[${modalCursorRow}A`);
       else safeWrite("\r");
       safeWrite("\x1b[0J"); // erase cursor→end-of-screen (removes wrapped remnants)
       safeWrite(lines.join("\r\n"));
       modalLines = lines.length;
+      modalCursorRow = lines.length - 1; // the write left the cursor on the last line
       // CLI-065/066: reposition the cursor to the caret column on the PROMPT line (row 0) — works
       // with an optional hint row (CLI-066) below the prompt. Only when the prompt itself fits one
       // line (the common case; a wrapped prompt leaves the cursor at the end).
       const promptRows = lines.length - (modal.hint ? 1 : 0);
       if (promptRows === 1) {
         if (lines.length > 1) safeWrite(`\x1b[${lines.length - 1}A`); // back up to the prompt row
+        modalCursorRow = 0; // …and the next repaint must start from HERE
         safeWrite("\r");
         const col = modalCursorCol(modal);
         if (col > 0) safeWrite(`\x1b[${col}C`);
@@ -453,6 +561,21 @@ export async function launchTui(parsed: ParsedArgs, deps: TuiDeps = {}): Promise
     const ctx: ReduceCtx = {
       items: AC_ITEMS,
       running,
+      /**
+       * The rail the CURRENT frame is painting — ⌃T focuses a real cell, and ↑/↓ can tell a
+       * switch from an indicator instead of guessing.
+       *
+       * OMITTED when the rail does not fit, which is the contract `ReduceCtx.traitCells`
+       * documents ("Omitted ⇒ no rail is being painted, and ⌃T falls back to its historical
+       * blind tools flip"). It was passed unconditionally, so on a narrow terminal — the rail is
+       * ~35-38 columns and `traitRailLine` drops it rather than paint a truncated row — ⌃T
+       * entered its MODAL focus with nothing on screen: no rail, no focus ring, no hint row, and
+       * every printable key, Enter, Backspace and ⌃D swallowed by the modal reducer. That reads
+       * as a frozen terminal. `traitRailFits` is the same predicate the painter uses.
+       */
+      ...(traitRailFits(traitCells(session.statusModel()), Math.max(0, size.cols - 5))
+        ? { traitCells: traitCells(session.statusModel()) }
+        : {}),
       pathCompletion: {
         baseDir: process.cwd(),
         frecencyForDir: (dirPath) =>
@@ -518,6 +641,56 @@ export async function launchTui(parsed: ParsedArgs, deps: TuiDeps = {}): Promise
           scheduleRender();
           break;
         }
+        case "trait-adjust": {
+          /**
+           * The trait rail's ↑/↓ (⌃T mode) land here, where the session tuning actually lives.
+           *
+           * `think` and the effort cell are the same switch seen from two sides: thinking OFF is
+           * the tier `off`, and turning it back on has to restore the tier the user was last at
+           * rather than a hard-coded default — otherwise a glance at the rail silently demotes a
+           * `max` session. The rail repaints from `statusModel()` on the next frame, so there is
+           * no second copy of this state to keep in sync.
+           */
+          const on = e.delta > 0;
+          /**
+           * Report a CHANGE, never a keypress.
+           *
+           * Every press used to print a line, including one that changed nothing — `stepEffort`
+           * clamps at both ends, so holding ↓ at `off` (or ↑ at `max`) emitted the same line
+           * again and again. A real session showed `effort off / effort off` and
+           * `effort max / effort max` stacked in the scrollback, which reads as a setting
+           * flapping rather than one that had reached its limit and stayed put.
+           */
+          const before = session.statusModel();
+          if (e.id === "tools") {
+            const now = session.setToolsEnabled(on);
+            if (now !== before.tools) {
+              renderer.printAbove(
+                paint(`⚒ tools ${now ? "ON" : "OFF"}`, now ? "info" : "warn", caps),
+              );
+            }
+          } else if (e.id === "thinking") {
+            const tier = on ? session.resumeThinking() : session.setEffort("off");
+            if (tier !== before.effort?.tier) {
+              renderer.printAbove(
+                paint(
+                  `◆ thinking ${tier === "off" ? "OFF" : `ON (effort ${tier})`}`,
+                  on ? "info" : "warn",
+                  caps,
+                ),
+              );
+            }
+          } else if (e.id === "effort") {
+            const tier = session.stepEffort(e.delta);
+            if (tier !== before.effort?.tier) {
+              renderer.printAbove(
+                paint(`◆ effort ${tier}`, tier === "off" ? "warn" : "info", caps),
+              );
+            }
+          }
+          scheduleRender();
+          break;
+        }
         case "invoke-dispatch": {
           // the overlay picked an entry + args → run the SAME nemesis-gated install (CLI-059).
           const { name, args } = e;
@@ -535,6 +708,11 @@ export async function launchTui(parsed: ParsedArgs, deps: TuiDeps = {}): Promise
             .then(() => scheduleRender());
           break;
         }
+        case "list-pick":
+          // the overlay's own pick — resubmit its text through the NORMAL composer path
+          // (CLI-1xx), exactly as if the user had typed it: no separate execution logic here.
+          dispatch([{ type: "submit", text: e.text }]);
+          break;
         case "pane-changed":
           // Ctrl+G (CLI-060/067): the ⊞ status chip already reflects it; flash the new pane too.
           renderer.printAbove(paint(`⊞ pane: ${e.pane}`, "info", caps));
@@ -569,7 +747,75 @@ export async function launchTui(parsed: ParsedArgs, deps: TuiDeps = {}): Promise
     }
   }
 
+  /** Open a generic pick-one overlay + repaint; the shared tail of every bare-command branch below. */
+  function openPicker(title: string, items: ListOverlayItem[]): void {
+    state = { ...state, listOverlay: openListOverlay(title, items) };
+    scheduleRender();
+  }
+
   async function handleSubmit(text: string): Promise<void> {
+    const trimmed = text.trim();
+    // bare pick-a-thing commands open a real arrow-nav overlay instead of their numbered/static
+    // fallback (CLI-1xx) — `/agents 4`, `/think high`, `/model <id>` and every non-TTY host keep
+    // their existing typed-argument behavior unchanged; only the ARGUMENT-LESS form is special-
+    // cased here, exactly like `/invoke` below.
+    if (trimmed === "/agents" || trimmed === "/subagents" || trimmed === "/team") {
+      const current = session.slashCtx.agents.count();
+      openPicker(
+        "Subagent fan-out — pick 1–16",
+        Array.from({ length: 16 }, (_, i) => {
+          const n = i + 1;
+          return { label: String(n), current: n === current, submitText: `/agents ${n}` };
+        }),
+      );
+      return;
+    }
+    if (trimmed === "/think" || trimmed === "/effort") {
+      const current = session.slashCtx.tuning().effort;
+      openPicker(
+        "Reasoning effort",
+        (["off", "low", "medium", "high", "max"] as const).map((tier) => ({
+          label: tier,
+          current: tier === current,
+          submitText: `/think ${tier}`,
+        })),
+      );
+      return;
+    }
+    if (trimmed === "/commands" || trimmed === "/cmds") {
+      openPicker(
+        "Commands",
+        AC_ITEMS.map((it) => ({
+          label: `/${it.name}`,
+          detail: it.summary,
+          submitText: `/${it.name}`,
+        })),
+      );
+      return;
+    }
+    if (trimmed === "/model" || trimmed === "/worker") {
+      const candidates = session.slashCtx.modelPicker?.candidates() ?? [];
+      if (candidates.length === 0) {
+        renderer.printAbove(
+          paint(
+            "/model: no switchable models detected — run /setup to download a local model or configure a cloud key.",
+            "warn",
+            caps,
+          ),
+        );
+        return;
+      }
+      openPicker(
+        "Active model",
+        candidates.map((cand) => ({
+          label: cand.label,
+          detail: cand.detail,
+          current: cand.current,
+          submitText: `/model ${cand.id}`,
+        })),
+      );
+      return;
+    }
     // bare `/invoke` in the TTY opens the arrow-nav overlay (CLI-059) instead of the number-pick;
     // `/invoke <filter>` and every non-TTY host keep the number-pick list unchanged.
     if (text.trim() === "/invoke") {
@@ -614,8 +860,12 @@ export async function launchTui(parsed: ParsedArgs, deps: TuiDeps = {}): Promise
     // close an unterminated fence at turn end so the box always finishes.
     const tail = md.flush();
     if (tail.length > 0) renderer.printAbove(tail.join("\n"));
-    // elapsed-time resume (dark grey): only the non-zero counters, e.g. "40s" / "1m 30s".
-    renderer.printAbove(paint(`⏱ ${agent.formatDuration(Date.now() - spinStart)}`, "muted", caps));
+    // elapsed-time resume: only the non-zero counters, e.g. "40s" / "1m 30s". Painted BOLD in a
+    // hue that reports how long the turn ran (light blue under 30m … purple past 7h) — the old
+    // `muted` grey was the least readable colour on the palette for the one line that is a
+    // verdict on the turn.
+    const elapsedMs = Date.now() - spinStart;
+    renderer.printAbove(paintDuration(`⏱ ${agent.formatDuration(elapsedMs)}`, elapsedMs, caps));
     turnAbort = null;
     running = false;
     render();
@@ -638,6 +888,8 @@ export async function launchTui(parsed: ParsedArgs, deps: TuiDeps = {}): Promise
         handler = mainHandler;
         modal = null;
         modalLines = 0;
+        modalCursorRow = 0;
+        modalCursorRow = 0;
         safeWrite("\n"); // move off the modal region
         scheduleRender();
         resolve(yes);
@@ -650,6 +902,7 @@ export async function launchTui(parsed: ParsedArgs, deps: TuiDeps = {}): Promise
       };
       modal = { kind: "confirm", prompt, buffer: "", caret: 0 };
       modalLines = 0;
+      modalCursorRow = 0;
       try {
         renderer.clear(); // move to the (frozen) chrome top; the modal paints from there
         paintModal(); // width-aware first paint, shared with the resize repaint (CLI-064)
@@ -667,6 +920,8 @@ export async function launchTui(parsed: ParsedArgs, deps: TuiDeps = {}): Promise
         handler = mainHandler;
         modal = null;
         modalLines = 0;
+        modalCursorRow = 0;
+        modalCursorRow = 0;
         safeWrite("\n");
         scheduleRender();
         resolve(value);
@@ -686,6 +941,7 @@ export async function launchTui(parsed: ParsedArgs, deps: TuiDeps = {}): Promise
       };
       modal = { kind: "ask", prompt, buffer: "", caret: 0 };
       modalLines = 0;
+      modalCursorRow = 0;
       try {
         renderer.clear();
         paintModal();
@@ -706,6 +962,8 @@ export async function launchTui(parsed: ParsedArgs, deps: TuiDeps = {}): Promise
         handler = mainHandler;
         modal = null;
         modalLines = 0;
+        modalCursorRow = 0;
+        modalCursorRow = 0;
         safeWrite("\n");
         scheduleRender();
         resolve(value);
@@ -727,12 +985,37 @@ export async function launchTui(parsed: ParsedArgs, deps: TuiDeps = {}): Promise
           paintModal();
         } else {
           cycler.reset(); // any edit resets the cycle
-          modal = { ...applyModalKey(modal, k), hint: "" };
+          const edited = applyModalKey(modal, k);
+          // LIVE preview, not Tab-only: the candidate row is what tells the user their path is
+          // going somewhere real, and withholding it until Tab is pressed is why the completion
+          // read as "not there". Fail-soft — an unreadable directory yields no candidates.
+          let hint = "";
+          try {
+            hint = candidatesHint(completePath(edited.buffer, undefined, { dirsOnly: true })[0]);
+          } catch {
+            hint = "";
+          }
+          modal = { ...edited, hint };
           paintModal();
         }
       };
-      modal = { kind: "ask", prompt: `${prompt} (default ${def})`, buffer: "", caret: 0 };
+      // seed the candidate row from the empty buffer, so the folder list is on screen BEFORE
+      // the first keystroke rather than only after a Tab nobody knew to press.
+      let seed = "";
+      try {
+        seed = candidatesHint(completePath("", undefined, { dirsOnly: true })[0]);
+      } catch {
+        seed = "";
+      }
+      modal = {
+        kind: "ask",
+        prompt: `${prompt} (default ${def})`,
+        buffer: "",
+        caret: 0,
+        hint: seed,
+      };
       modalLines = 0;
+      modalCursorRow = 0;
       try {
         renderer.clear();
         paintModal();

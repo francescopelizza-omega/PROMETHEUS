@@ -11,8 +11,11 @@
  *   metadata edit      <file> --field <G:Tag> --value <v>   set one field   [mutate]
  *   metadata timestomp <file> --mtime <epoch> [--atime <epoch>]             [mutate]
  */
+import { isSensitiveMetadataKey } from "@prometheus/core/metadata";
+
 import type { CliContext, CommandOutcome } from "../context.js";
 import { c, heading, kv, table } from "../render.js";
+import { renderEnvelope } from "../render/envelope-view.js";
 import {
   type SidecarDeps,
   defaultSidecarDeps,
@@ -25,7 +28,11 @@ import {
 const SCRIPT = "metadata.py" as const;
 
 function sub(ctx: CliContext): string {
-  return ctx.args.command[1] ?? "inspect";
+  // see secure-cmd.ts's identical fix: `unmatchedSub` (parse.ts) distinguishes "a second word
+  // was typed but didn't match" from "no second word at all" — without it, a typo like
+  // `/metadata inspct foo.jpg` silently defaulted to "inspect" and used "inspct" itself (the
+  // typo) as the FILE argument, never touching "foo.jpg" and never reporting an unknown action.
+  return ctx.args.unmatchedSub ?? ctx.args.command[1] ?? "inspect";
 }
 
 export async function runMetadataCommand(
@@ -98,55 +105,50 @@ export async function runMetadataCommand(
           `prometheus metadata ${verb}: unknown metadata verb.\n` +
           `  ${c.dim("try:")} inspect · scrub · edit · timestomp`,
         json: { ok: false, error: "unknown-verb", command: `metadata ${verb}` },
-        exitCode: 2,
+        exitCode: 1,
       };
   }
 }
 
 /* ----------------------------- read renderer ------------------------------ */
 
-interface MetaField {
-  key?: string;
-  tag?: string;
-  value?: unknown;
-  privacy?: boolean;
-  sensitive?: boolean;
-}
-
+/**
+ * Render `metadata inspect` — the PRIVACY surface, so every tag has to be visible.
+ *
+ * This used to look for `e.fields` / `e.metadata` as ARRAYS and, finding neither, fall through
+ * to a flat key/value loop that did `String(v)` on each value. The sidecar
+ * (`studio/python/sidecar/metadata.py`'s `_inspect_payload`) always returns `fs`, `tags` and
+ * `tools` as OBJECT MAPS and never emits `fields`/`metadata` at all — so the array branch was
+ * unreachable dead code and EVERY run printed `fs: [object Object]`, `tags: [object Object]`,
+ * `tools: [object Object]`. It even announced `tagCount: 20` and then showed none of the 20.
+ * Measured on a PNG: all 20 EXIF tags hidden, which is exactly the case that matters — a user
+ * checking a photo for GPS, camera and author data before deciding whether to scrub it.
+ *
+ * `renderEnvelope` is the CLI's own generic projector, written for this bug class ("commands
+ * printed one word while their envelope carried the whole answer"); it recurses into plain
+ * objects, so fs/tags/tools each render as a labelled block. The privacy flag on top comes from
+ * core's shared `isSensitiveMetadataKey`, the same rule the desktop metadata panel uses — the
+ * two surfaces were disagreeing about what the user was even looking at.
+ */
 function renderInspect(file: string, e: Record<string, unknown>): CommandOutcome {
-  const fields: MetaField[] = Array.isArray(e.fields)
-    ? (e.fields as MetaField[])
-    : Array.isArray(e.metadata)
-      ? (e.metadata as MetaField[])
-      : [];
-  const lines = [heading(`Metadata  ${c.dim(file)}`), ""];
-  if (typeof e.type === "string") lines.push(kv("type", c.dim(e.type)));
-  if (fields.length === 0) {
-    // Some inspectors return a flat map under `data`/`raw`; render that as kv.
-    const flat =
-      e.data && typeof e.data === "object"
-        ? (e.data as Record<string, unknown>)
-        : (e as Record<string, unknown>);
-    const entries = Object.entries(flat).filter(
-      ([k]) => !["ok", "command", "_exit", "type", "uri"].includes(k),
-    );
-    if (entries.length === 0) {
-      lines.push(c.dim("No metadata fields."));
-      return { text: lines.join("\n"), exitCode: 0 };
-    }
-    lines.push("");
-    for (const [k, v] of entries) lines.push(kv(k, c.dim(String(v))));
-    return { text: lines.join("\n"), exitCode: 0 };
+  const tags = e.tags && typeof e.tags === "object" ? (e.tags as Record<string, unknown>) : {};
+  const sensitive = Object.keys(tags).filter((k) => isSensitiveMetadataKey(k));
+  const title = `Metadata  ${c.dim(file)}`;
+  // `renderEnvelope` writes its own heading, so this must NOT add a second one.
+  const warning =
+    sensitive.length > 0
+      ? c.yellow(
+          `⚠ ${sensitive.length} privacy-sensitive tag${sensitive.length > 1 ? "s" : ""}: ${sensitive.join(", ")}`,
+        )
+      : "";
+  const body = renderEnvelope(title, e as never);
+  if (!body) {
+    return {
+      text: [heading(title), "", warning || c.dim("No metadata fields.")]
+        .filter(Boolean)
+        .join("\n"),
+      exitCode: 0,
+    };
   }
-  const privacyCount = fields.filter((f) => f.privacy || f.sensitive).length;
-  if (privacyCount > 0) {
-    lines.push(c.yellow(`⚠ ${privacyCount} privacy-sensitive field${privacyCount > 1 ? "s" : ""}`));
-    lines.push("");
-  }
-  const rows = fields.map((f) => [
-    (f.privacy || f.sensitive ? c.yellow("⚠ ") : "  ") + (f.key ?? f.tag ?? "—"),
-    c.dim(String(f.value ?? "")),
-  ]);
-  lines.push(table([{ header: "FIELD" }, { header: "VALUE" }], rows));
-  return { text: lines.join("\n"), exitCode: 0 };
+  return { text: warning ? `${warning}\n\n${body}` : body, exitCode: 0 };
 }

@@ -10,7 +10,7 @@
  * Renderer-SANDBOXED (C5): react + the store + window.prometheus only.
  */
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import { useAiSessionStore } from "../state/stores.js";
 import type { RendererEndpoint } from "./ai-client.js";
@@ -74,12 +74,60 @@ export async function expandServedModels(eps: RendererEndpoint[]): Promise<Rende
   return parts.flat();
 }
 
+/**
+ * MEASURE one local model: its real context window and the runner's capability array.
+ *
+ * Deliberately NOT folded into `expandServedModels`: that runs for every served model on every
+ * endpoint refresh, and one `/api/show` POST per model would turn a 30-model Ollama install
+ * into a 30-request burst on mount. Only the ACTIVE endpoint's numbers are ever read, so only
+ * the active endpoint is measured — the same one-request-per-switch shape the CLI hosts use.
+ *
+ * Fail-soft: an unreachable runner (or a build without the IPC channel) yields nothing and the
+ * endpoint keeps whatever it had, exactly as before this existed.
+ */
+async function probeEndpointMeta(
+  baseUrl: string,
+  model: string,
+): Promise<{ contextWindow?: number; capabilities?: readonly string[] } | null> {
+  try {
+    const res = await ai()?.probeEndpoint(baseUrl, model);
+    // `source:"default"` means the probe RAN and got nothing usable — not that this model has
+    // an 8192 window. Adopting it would be indistinguishable, forever after, from a real
+    // measurement, so a failed probe writes nothing at all.
+    if (!res?.ok || res.source === "default") return null;
+    return {
+      ...(res.contextWindow > 0 ? { contextWindow: res.contextWindow } : {}),
+      ...(res.capabilities && res.capabilities.length > 0
+        ? { capabilities: res.capabilities }
+        : {}),
+    };
+  } catch {
+    return null;
+  }
+}
+
+/** Identity of a probe target. The model name is part of it: one runner serves many models,
+ *  with wildly different windows and capabilities. */
+function probeKey(ep: RendererEndpoint): string {
+  return `${ep.baseUrl}\x00${ep.model ?? ""}`;
+}
+
 /** Resolve the Model Hub endpoints + the active one (auto-selecting the first). */
 export function useActiveEndpoint(): ActiveEndpoint {
   const [endpoints, setEndpoints] = useState<RendererEndpoint[]>([]);
   const endpointId = useAiSessionStore((s) => s.endpointId);
   const selectEndpoint = useAiSessionStore((s) => s.selectEndpoint);
   const neverSendToCloud = useAiSessionStore((s) => s.neverSendToCloud);
+  /**
+   * Probe targets already attempted this mount.
+   *
+   * A ref, not state: it must not re-render, and it must survive the state update the probe
+   * itself causes. It is also what makes a FAILED probe terminate — a failure writes nothing to
+   * the endpoint, so the "has it been probed?" question cannot be answered by looking at the
+   * endpoint, and without this the effect would re-fire on every render, forever, against a
+   * runner that is down.
+   */
+  const probed = useRef<Set<string>>(new Set());
 
   useEffect(() => {
     let alive = true;
@@ -99,9 +147,55 @@ export function useActiveEndpoint(): ActiveEndpoint {
     };
   }, [endpointId, selectEndpoint]);
 
+  const active = endpoints.find((e) => e.id === endpointId) ?? null;
+
+  // Measure the ACTIVE endpoint once per (baseUrl, model), then fold the answer back into the
+  // list so every consumer — the effort chip, the tool preamble budget, compaction — reads a
+  // measured endpoint rather than the 8192 floor `toEndpoints` hands out.
+  // Depend on PRIMITIVES, not the endpoint object: `endpoints.find` mints a fresh reference
+  // every time the list is replaced — including by this effect's own `setEndpoints` — so an
+  // object dependency would re-run the effect on its own result.
+  const activeBaseUrl = active?.locality === "local" ? active.baseUrl : null;
+  const activeModel = active?.locality === "local" ? (active.model ?? null) : null;
+  useEffect(() => {
+    if (activeBaseUrl === null || activeModel === null) return;
+    const key = `${activeBaseUrl} ${activeModel}`;
+    if (probed.current.has(key)) return;
+    probed.current.add(key);
+    let alive = true;
+    void (async () => {
+      const meta = await probeEndpointMeta(activeBaseUrl, activeModel);
+      if (!alive) return;
+      if (!meta) {
+        // A FAILURE is not cached — the same rule core's probe follows. A runner that was still
+        // booting when the pane mounted must be re-askable, and the ref is only here to stop a
+        // render loop, not to blacklist a model for the lifetime of the component. Removing the
+        // key cannot re-fire this effect on its own (the deps have not changed), so the retry
+        // happens the next time the user switches back to this model — which is exactly when
+        // they would expect it.
+        probed.current.delete(key);
+        return;
+      }
+      setEndpoints((prev) =>
+        prev.map((e) =>
+          probeKey(e) === key
+            ? {
+                ...e,
+                ...(meta.contextWindow ? { contextWindow: meta.contextWindow } : {}),
+                ...(meta.capabilities ? { probedCapabilities: meta.capabilities } : {}),
+              }
+            : e,
+        ),
+      );
+    })();
+    return () => {
+      alive = false;
+    };
+  }, [activeBaseUrl, activeModel]);
+
   return {
     endpoints,
-    active: endpoints.find((e) => e.id === endpointId) ?? null,
+    active,
     neverSendToCloud,
   };
 }

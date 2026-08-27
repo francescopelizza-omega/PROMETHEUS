@@ -23,7 +23,8 @@ export function mcpStorePath(home: string = prometheusHome()): string {
 
 export class CliMcpConfigStore implements mcpHost.ConfigStore {
   private readonly path: string;
-  private readonly map = new Map<string, McpServerConfig>();
+  /** Not readonly: `upsert`/`remove` adopt a freshly re-read disk view before writing. */
+  private map = new Map<string, McpServerConfig>();
 
   constructor(path: string) {
     this.path = path;
@@ -39,6 +40,32 @@ export class CliMcpConfigStore implements mcpHost.ConfigStore {
       }
     } catch {
       /* corrupt or unreadable → start empty (never crash over a config file) */
+    }
+  }
+
+  /**
+   * The servers as they are ON DISK right now, or null when the file is unreadable/corrupt.
+   *
+   * `load()` runs once, in the constructor, and `persist()` rewrites the whole file from the
+   * in-memory map — so a long-lived process wrote a snapshot taken at STARTUP. A chat session
+   * open in one terminal and `prometheus mcp add beta` run in another ended with `beta` silently
+   * deleted the moment the session's own `disconnect()` upserted a health field on an unrelated
+   * server. Re-reading immediately before a write turns a whole-file overwrite into the delta it
+   * was always meant to be.
+   */
+  private fromDisk(): Map<string, McpServerConfig> | null {
+    try {
+      if (!existsSync(this.path)) return new Map();
+      const raw = JSON.parse(readFileSync(this.path, "utf8")) as { servers?: McpServerConfig[] };
+      const fresh = new Map<string, McpServerConfig>();
+      for (const c of raw.servers ?? []) {
+        if (c && typeof c.id === "string") fresh.set(c.id, c);
+      }
+      return fresh;
+    } catch {
+      // Corrupt/unreadable: fall back to the in-memory view rather than an EMPTY one, so a
+      // config we cannot parse is never silently replaced by this one process's slice of it.
+      return null;
     }
   }
 
@@ -60,11 +87,15 @@ export class CliMcpConfigStore implements mcpHost.ConfigStore {
     return this.map.get(id);
   }
   upsert(cfg: McpServerConfig): void {
-    this.map.set(cfg.id, cfg);
+    const merged = this.fromDisk() ?? this.map;
+    merged.set(cfg.id, cfg);
+    this.map = merged;
     this.persist();
   }
   remove(id: string): void {
-    this.map.delete(id);
+    const merged = this.fromDisk() ?? this.map;
+    merged.delete(id);
+    this.map = merged;
     this.persist();
   }
 }

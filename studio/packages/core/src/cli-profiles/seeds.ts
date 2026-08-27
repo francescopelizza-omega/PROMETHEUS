@@ -52,6 +52,25 @@ export function profileForbidsForce(name: string | undefined): boolean {
   return name === "ci";
 }
 
+/**
+ * Is the `--force` escape hatch OPEN for this run?
+ *
+ * The override value must be EXACTLY "1" — the only value every message documents ("Set
+ * PROM_ALLOW_FORCE=1 to override"). A bare presence check (`!process.env.PROM_ALLOW_FORCE`)
+ * fails OPEN on `0`, `false`, `no` and `off`: a CI job that sets `PROM_ALLOW_FORCE=0` believing
+ * it is DISABLING the escape hatch actually enables it, and a forced install then runs
+ * unattended straight over a nemesis BLOCK.
+ *
+ * One predicate, three call sites. `sidecar-cmd.ts` had already been hardened with a comment
+ * naming this exact failure, while `generic.ts` (the whole §2 verb tree — plugin/skill/app/
+ * worldsim/localai/pentest install|uninstall|enable|disable|sync, `secure purge`, `pentest
+ * destroy|build|run|shell`) and `command-exec.ts` (the REPL/session gate) both still used the
+ * bare check. A guard copied per call site is a guard that will drift again.
+ */
+export function forceOverrideAllowed(env: { PROM_ALLOW_FORCE?: string } = process.env): boolean {
+  return env.PROM_ALLOW_FORCE === "1";
+}
+
 /** The S005 config key under which the active profile name persists (CLI-044). */
 export const PROFILE_ACTIVE_KEY = "profile.active";
 

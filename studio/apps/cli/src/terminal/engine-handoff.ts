@@ -108,14 +108,62 @@ export interface TerminalChatDeps {
   write?: (text: string) => void;
 }
 
+/**
+ * Read ONE line of stdin in cooked mode; resolves "" on EOF. Mirrors the reader
+ * `provider enable-metered` uses for its typed-consent gate.
+ */
+function readOneLine(): Promise<string> {
+  return new Promise((resolve) => {
+    const stdin = process.stdin;
+    let buf = "";
+    const onData = (b: Buffer): void => {
+      buf += b.toString();
+      const nl = buf.indexOf("\n");
+      if (nl !== -1) {
+        stdin.off("data", onData);
+        stdin.pause();
+        resolve(buf.slice(0, nl + 1));
+      }
+    };
+    stdin.resume();
+    stdin.on("data", onData);
+    stdin.once("end", () => {
+      stdin.off("data", onData);
+      resolve(buf);
+    });
+  });
+}
+
+/**
+ * The real typed-confirm for a bypass launch: print the prompt, require the phrase EXACTLY.
+ *
+ * Without this, `defaultRunLiveTerminal` handed `runLiveTerminal` no `confirm` seam, so it fell
+ * back to its own `async () => false`. That is the correct fail-closed default for a missing
+ * seam, but nothing ever supplied one in production — so a `--bypass` launch was refused
+ * unconditionally with "bypass not confirmed" and there was no input that could approve it. The
+ * gate was not strict; it was unreachable, and the feature could not be used at all.
+ *
+ * A non-TTY stdin still denies without prompting: a bridge or a pipe has no human to type the
+ * phrase, and blocking on a read there would hang the caller instead of answering it.
+ */
+export async function ttyTypedConfirm(prompt: string, phrase: string): Promise<boolean> {
+  if (process.stdin.isTTY !== true) return false;
+  process.stdout.write(`${prompt}\n`);
+  const line = await readOneLine();
+  return line.replace(/\r?\n$/, "") === phrase;
+}
+
 /** Lazy default live-terminal seam (P5). Kept behind a thunk so a missing pty
  *  backend never breaks importing THIS module; the live-terminal module itself
  *  degrades from node-pty → child_process. */
 async function defaultRunLiveTerminal(env: ChatTerminalEnvelope): Promise<number> {
   const mod = (await import("../pty/live-terminal.js")) as {
-    runLiveTerminal: (env: ChatTerminalEnvelope) => Promise<number>;
+    runLiveTerminal: (
+      env: ChatTerminalEnvelope,
+      deps?: { confirm?: (prompt: string, phrase: string) => Promise<boolean> },
+    ) => Promise<number>;
   };
-  return mod.runLiveTerminal(env);
+  return mod.runLiveTerminal(env, { confirm: ttyTypedConfirm });
 }
 
 /** Lazy default tmux seam (P6). The tmux module owns TmuxSpec; we hand it the

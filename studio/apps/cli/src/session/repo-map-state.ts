@@ -21,6 +21,7 @@ function nodeRepoFs(): RepoFs {
       readdirSync(dir || ".", { withFileTypes: true }).map((d) => ({
         name: d.name,
         isDirectory: d.isDirectory(),
+        isSymlink: d.isSymbolicLink(),
       })),
     readFile: (p) => readFileSync(p, "utf8"),
     statSize: (p) => statSync(p).size,

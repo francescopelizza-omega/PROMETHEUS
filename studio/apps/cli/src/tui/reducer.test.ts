@@ -4,6 +4,7 @@
  */
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { type TraitCell, traitRail } from "@prometheus/core/ai-effort";
 
 import type { CompleterFs } from "../session/path-completer.js";
 import type { AcItem } from "./autocomplete.js";
@@ -840,4 +841,145 @@ test("precedence: a real slash query keeps @-path closed even once an @ later ap
   const withMention = run(midCommand, typed("an @src"), CTX_PATH).state;
   assert.equal(withMention.ac.items.length, 0, "the slash dropdown closes once a space is typed");
   assert.ok(withMention.pathAc.items.length > 0, "and only THEN can the @ mention open");
+});
+
+/* ── path completion for a slash command's ARGUMENT (`/cd ~/pro`) ──────────────
+ *
+ * The composer's slash dropdown closes at the first space (it completes the command NAME),
+ * and the "@" trigger never fires on a line without an "@" — so `/cd` had no completion of
+ * any kind and the only way through was to type the whole path correctly, blind.
+ */
+
+test("/cd + a space opens the path dropdown on the ARGUMENT, listing baseDir", () => {
+  const { state } = run(initialTuiState(), typed("/cd "), CTX_PATH);
+  assert.ok(state.pathAc.items.length > 0, "the argument dropdown should be open");
+  assert.equal(state.pathAc.trigger?.kind, "slash-arg");
+  assert.deepEqual(state.ac.items, [], "the command-name dropdown is closed past the space");
+});
+
+test("/cd lists ONLY directories — a file is not a directory to move into", () => {
+  const { state } = run(initialTuiState(), typed("/cd "), CTX_PATH);
+  assert.deepEqual(
+    state.pathAc.items.map((i) => i.name),
+    ["src/"],
+    "README.md is a file and must not be offered to /cd",
+  );
+});
+
+test("/mention completes FILES too — its argument is a file, not a directory", () => {
+  const { state } = run(initialTuiState(), typed("/mention "), CTX_PATH);
+  assert.ok(state.pathAc.items.some((i) => i.name === "README.md"));
+});
+
+/** A deeper tree, so a `/cd` drill-down has somewhere to land: PATH_FS's src/ holds only
+ *  files, which dirs-only completion correctly refuses to offer. */
+const CTX_DEEP: ReduceCtx = {
+  items: ITEMS,
+  running: false,
+  pathCompletion: {
+    baseDir: "/proj",
+    fs: fakeFs(
+      { "/proj": ["src", "README.md"], "/proj/src": ["tui", "reducer.ts"], "/proj/src/tui": [] },
+      ["/proj", "/proj/src", "/proj/src/tui"],
+    ),
+  },
+};
+
+test("Tab on the /cd dropdown splices the directory into the argument and drills deeper", () => {
+  const open = run(initialTuiState(), typed("/cd s"), CTX_DEEP).state;
+  const { state } = run(open, [k("tab")], CTX_DEEP);
+  assert.equal(state.input, "/cd src/");
+  assert.deepEqual(
+    state.pathAc.items.map((i) => i.name),
+    ["tui/"],
+    "drilling into src/ re-opens the dropdown on its SUBDIRECTORIES only",
+  );
+});
+
+test("Enter on a slash-command path argument SUBMITS — Tab is what completes it", () => {
+  // The opposite of the "@" mention rule above, and load-bearing: the dropdown is still open
+  // at the exact moment the user wants to run /cd, so an Enter that only ever accepted would
+  // make the command unreachable from the composer.
+  const open = run(initialTuiState(), typed("/cd s"), CTX_PATH).state;
+  assert.ok(open.pathAc.items.length > 0, "precondition: the dropdown is open");
+  const { effects } = run(open, [k("enter")], CTX_PATH);
+  assert.deepEqual(effects, [{ type: "submit", text: "/cd s" }]);
+});
+
+test("a flag argument is not completed as a path (`/add-dir --remove`)", () => {
+  const { state } = run(initialTuiState(), typed("/add-dir --rem"), CTX_PATH);
+  assert.deepEqual(state.pathAc.items, []);
+});
+
+test("a slash command with no path argument (`/help `) never opens the path dropdown", () => {
+  const { state } = run(initialTuiState(), typed("/help "), CTX_PATH);
+  assert.deepEqual(state.pathAc.items, []);
+});
+
+/* ── ⌃T trait-rail focus ──────────────────────────────────────────────────────
+ *
+ * ⌃T used to be a blind global tools flip: it changed a setting with no indication of what the
+ * setting had been, and none of the model's other facts were reachable at all. It now opens a
+ * contained mode over the rail the composer already paints.
+ */
+
+const RAIL: readonly TraitCell[] = traitRail({
+  capabilities: ["completion", "vision", "audio", "tools", "thinking"],
+  toolsEnabled: true,
+  effort: { tier: "high", available: true },
+});
+const CTX_RAIL: ReduceCtx = { items: ITEMS, running: false, traitCells: RAIL };
+
+test("⌃T opens the rail focused on `tool` — the cell it used to flip blind", () => {
+  const { state, effects } = run(initialTuiState(), [k("ctrl-t")], CTX_RAIL);
+  assert.equal(
+    state.traitFocus?.index,
+    RAIL.findIndex((c) => c.id === "tools"),
+  );
+  assert.deepEqual(effects, [], "opening the rail must not change a setting by itself");
+});
+
+test("with no rail to show, ⌃T still does what it always did", () => {
+  const { state, effects } = run(initialTuiState(), [k("ctrl-t")], CTX);
+  assert.equal(state.traitFocus, null);
+  assert.deepEqual(effects, [{ type: "tools-toggle" }]);
+});
+
+test("←/→ walk every cell and wrap; ↑/↓ throw the focused switch", () => {
+  const open = run(initialTuiState(), [k("ctrl-t")], CTX_RAIL).state;
+  const right = run(open, [k("right")], CTX_RAIL).state;
+  assert.equal(RAIL[right.traitFocus?.index ?? -1]?.id, "thinking");
+  const { effects } = run(right, [k("down")], CTX_RAIL);
+  assert.deepEqual(effects, [{ type: "trait-adjust", id: "thinking", delta: -1 }]);
+  const dial = run(right, [k("right")], CTX_RAIL).state;
+  assert.deepEqual(run(dial, [k("up")], CTX_RAIL).effects, [
+    { type: "trait-adjust", id: "effort", delta: 1 },
+  ]);
+});
+
+test("a cell with no switch answers ↑ with the REASON, not with silence", () => {
+  const open = run(initialTuiState(), [k("ctrl-t")], CTX_RAIL).state;
+  const onVision = { ...open, traitFocus: { index: RAIL.findIndex((c) => c.id === "vision") } };
+  const { effects } = run(onVision, [k("up")], CTX_RAIL);
+  assert.equal(effects.length, 1);
+  assert.equal(effects[0]?.type, "notice");
+  assert.match((effects[0] as { text: string }).text, /no switch/);
+});
+
+test("the mode is CONTAINED: typing, Enter and Tab cannot leak into the draft", () => {
+  const open = run(initialTuiState(), [k("ctrl-t")], CTX_RAIL).state;
+  const { state, effects } = run(open, [k("char", "x"), k("enter"), k("tab")], CTX_RAIL);
+  assert.equal(state.input, "");
+  assert.deepEqual(effects, []);
+  assert.ok(state.traitFocus, "and none of them leaves the mode either");
+});
+
+test("Esc and ⌃T both leave; Ctrl-C leaves AND still interrupts a running turn", () => {
+  const open = run(initialTuiState(), [k("ctrl-t")], CTX_RAIL).state;
+  assert.equal(run(open, [k("esc")], CTX_RAIL).state.traitFocus, null);
+  assert.equal(run(open, [k("ctrl-t")], CTX_RAIL).state.traitFocus, null);
+  const busy: ReduceCtx = { ...CTX_RAIL, running: true };
+  const { state, effects } = run(open, [k("ctrl-c")], busy);
+  assert.equal(state.traitFocus, null);
+  assert.deepEqual(effects, [{ type: "interrupt" }]);
 });

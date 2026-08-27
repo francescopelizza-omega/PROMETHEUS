@@ -136,7 +136,13 @@ test("hasUpdates + summarizeForStartup reflect actionable items", () => {
   assert.equal(u.hasUpdates(r), true);
   const line = u.summarizeForStartup(r);
   assert.match(line, /1 CLI/);
-  assert.match(line, /1 local model/);
+  /**
+   * NOT "1 local model". `models.diff.changed` compares this run's LOCAL digests against the
+   * local digests recorded at the previous check, so a tag lands there once the user has ALREADY
+   * pulled it — and the startup line then told them to pull the thing they had just pulled.
+   * Nothing here queries the registry, so no local model can be KNOWN to be out of date.
+   */
+  assert.doesNotMatch(line, /local model/);
   assert.match(line, /\/updates/);
 });
 
@@ -152,7 +158,10 @@ test("summarizeForStartup is empty when nothing actionable", () => {
 test("formatUpdateReport shows the copyable commands", () => {
   const out = u.formatUpdateReport(sampleReport());
   assert.match(out, /claude\s+2\.1\.190 → 2\.1\.191/);
-  assert.match(out, /ollama pull qwen2\.5-coder:7b/);
+  // the digest diff is reported as the LOCAL CHANGE it is, not as an available update
+  assert.match(out, /changed locally since the last check/);
+  assert.match(out, /qwen2\.5-coder:7b/);
+  assert.doesNotMatch(out, /newer layers available/);
   assert.match(out, /git -C \/p pull/); // self up-to-date still shows how to update
 });
 
@@ -186,7 +195,10 @@ test("toUpdatesJson: flattens the report into the frozen --json envelope (CLI-04
         name: "ollama:qwen2.5-coder:7b",
         current: null,
         latest: null,
-        severity: "update",
+        // severity "none", not "update": the digest diff is a record of a LOCAL change (the
+        // user already pulled it), not evidence that a newer version exists upstream. The
+        // envelope SHAPE is frozen; the value has to tell the truth.
+        severity: "none",
         action: "ollama pull qwen2.5-coder:7b",
       },
     ],
@@ -218,4 +230,41 @@ test("toUpdatesJson: a non-commercial suggestion carries the non-commercial seve
   });
   const c = u.toUpdatesJson(r).components.find((x) => x.name === "ollama:codestral:22b");
   assert.equal(c?.severity, "non-commercial");
+});
+
+test("a model the user just PULLED is not reported as an available update", () => {
+  /**
+   * `fetchOllamaTags` reads the LOCAL daemon, so `diffDigests` compares this run's local digests
+   * against the ones recorded at the previous check. A tag therefore lands in `changed` exactly
+   * when the user has already pulled it — and Prometheus greeted them at startup with
+   * "↑ Updates available: 1 local model", telling them to pull what they had just pulled.
+   *
+   * The inverse was worse: a genuinely stale model, untouched since the last check, has an
+   * unchanged digest and was reported as "installed models up to date". Nothing here queries a
+   * registry, so neither claim was ever knowable.
+   */
+  const justPulled = sampleReport({
+    self: { prometheus: "0.0.0", engine: null, updateAvailable: false, method: "git", plan: [] },
+    clis: [],
+    models: {
+      diff: { changed: ["qwen2.5-coder:7b"], added: [], removed: [] },
+      suggestions: [],
+    },
+  } as never);
+
+  assert.equal(
+    u.hasUpdates(justPulled),
+    false,
+    "a local digest change is not an actionable update",
+  );
+  assert.equal(u.summarizeForStartup(justPulled), "", "and it must not raise a startup nudge");
+
+  const n = u.countUpdates(justPulled);
+  assert.equal(n.models, 0, "no local model can be KNOWN out of date without a registry check");
+  assert.equal(n.modelsChanged, 1, "the local change is still reported, under its own name");
+
+  const out = u.formatUpdateReport(justPulled);
+  assert.doesNotMatch(out, /newer layers available/);
+  assert.match(out, /changed locally since the last check/);
+  assert.match(out, /not checked against the registry/);
 });

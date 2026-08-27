@@ -119,3 +119,40 @@ test("pinTab promotes a preview tab", () => {
   s = pinTab(s, "file:///a.py");
   assert.equal(s.docs[0]?.preview, false);
 });
+
+test("closing one side of a SPLIT leaves the other pane open", () => {
+  /**
+   * `uri` stops being a unique key once a split exists: `splitActive` deliberately copies the
+   * active doc into a new group under the SAME uri so both panes share Monaco's ITextModel.
+   * `closeTab` filtered on `d.uri !== uri`, so closing either pane's tab deleted the row from
+   * EVERY group — both panes vanished, the split collapsed, and `activeByGroup` was left
+   * pointing at a doc that no longer existed, contradicting closeTab's own docstring.
+   * There was no way to close one side of a split at all.
+   */
+  let s = openTab(initialTabsState(), "file:///app.ts", O("app.ts"));
+  s = splitActive(s).state;
+  assert.deepEqual(
+    s.docs.map((d) => d.group),
+    [0, 1],
+    "precondition: the same uri is open in two groups",
+  );
+
+  const right = closeTab(s, "file:///app.ts", 1);
+  assert.deepEqual(
+    right.docs.map((d) => d.group),
+    [0],
+    "the left pane must survive",
+  );
+  assert.equal(right.activeByGroup[0], "file:///app.ts");
+  assert.equal(right.activeByGroup[1], undefined, "a pointer must not outlive its group");
+  assert.equal(right.focusedGroup, 0, "focus must land on a group that still exists");
+
+  // closing the remaining one empties cleanly
+  const none = closeTab(right, "file:///app.ts", 0);
+  assert.equal(none.docs.length, 0);
+  assert.deepEqual(none.activeByGroup, {});
+
+  // and the group-less call (the no-split case every existing caller uses) closes ONE row
+  const legacy = closeTab(s, "file:///app.ts");
+  assert.equal(legacy.docs.length, 1, "omitting the group must still close a single row");
+});

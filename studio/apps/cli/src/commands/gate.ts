@@ -62,8 +62,15 @@ export async function runGate(ctx: CliContext): Promise<CommandOutcome> {
       text: c.red(
         "usage: prometheus gate <path|git-url|owner/repo> [--fresh] [--sign] [--policy <file>] [--tier pentest]",
       ),
-      json: { ok: false, error: "missing target" },
-      exitCode: 2,
+      // Bad args are class 1 (CLI-084); 2 is reserved for a nemesis BLOCK, which is exactly
+      // what THIS command reports when it does run — so the two must not share a code.
+      json: {
+        ok: false,
+        error: "missing-argument",
+        command: "gate",
+        usage: "<path|git-url|owner/repo>",
+      },
+      exitCode: 1,
     };
   }
 

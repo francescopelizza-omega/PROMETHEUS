@@ -23,6 +23,7 @@
  */
 
 import { ipcMain } from "electron";
+import { resolveEnvRefWith } from "./env-ref.js";
 
 import {
   type EnvClientOptions,
@@ -137,10 +138,60 @@ export function registerEnvIpcHandlers(wiring: EnvIpcWiring = {}): () => void {
     if (runId && runs) runs.delete(runId);
   }
 
+  /**
+   * Translate a renderer-facing environment id back into the identifier the SIDECAR understands.
+   *
+   * `env:list` hands the renderer rows whose `id` is `env_<hash>` — a djb2 of the absolute path,
+   * minted by engine-bridge (`env.ts`'s `envIdFromPath`) purely so React has a stable key. The
+   * envmgr sidecar has never heard of it: it resolves environments by NAME. Every handler passed
+   * that id straight through, so for EVERY environment in the panel:
+   *
+   *   env:doctor {id:"env_1t4gemz"} → ok:false "environment not found: env_1t4gemz"
+   *   env:doctor {id:"skytronix"}   → ok:true
+   *   pkg:list  {envId:"env_1t4gemz"} → ok:true, packages: []      ← a SUCCESS with no rows,
+   *   pkg:list  {envId:"skytronix"}   → the real package list         so nothing signalled an error
+   *
+   * Measured against this machine's real environments. The package table rendered empty and
+   * Doctor / Export / Use / Delete all failed, on every row.
+   *
+   * A name (or a path) passed directly still works — the map only ever rewrites ids it minted.
+   */
+  const envRefById = new Map<string, string>();
+
+  /** Refresh the id→name map from the sidecar's own listing. Never throws. */
+  async function refreshEnvRefs(): Promise<void> {
+    try {
+      for (const e of await client.listEnvs()) {
+        const row = e as unknown as { id?: unknown; name?: unknown };
+        if (typeof row.id === "string" && typeof row.name === "string" && row.id && row.name) {
+          envRefById.set(row.id, row.name);
+        }
+      }
+    } catch {
+      /* the caller falls back to the id verbatim, which is what it used to send anyway */
+    }
+  }
+
+  async function resolveEnvRef(idOrName: string): Promise<string> {
+    const direct = resolveEnvRefWith(envRefById, idOrName);
+    if (direct !== null) return direct;
+    // cold map (a handler called before any env:list this session) — build it once, then retry.
+    await refreshEnvRefs();
+    return resolveEnvRefWith(envRefById, idOrName) ?? idOrName;
+  }
+
   // ── env:list — read-only enumeration (never gates) ────────────────────────
   ipcMain.handle(IPC.envEnvList, async (): Promise<EnvListResult> => {
     try {
       const envs = await client.listEnvs();
+      // keep the id→name map warm for every other handler (see `resolveEnvRef`)
+      envRefById.clear();
+      for (const e of envs) {
+        const row = e as unknown as { id?: unknown; name?: unknown };
+        if (typeof row.id === "string" && typeof row.name === "string" && row.id && row.name) {
+          envRefById.set(row.id, row.name);
+        }
+      }
       return { ok: true, envs: envs as unknown as Record<string, unknown>[] };
     } catch (e) {
       return { ok: false, envs: [], error: errString(e) };
@@ -187,7 +238,9 @@ export function registerEnvIpcHandlers(wiring: EnvIpcWiring = {}): () => void {
     const v = validateEnvDelete(arg);
     if (!v.ok) return { ok: false, error: v.error.message };
     try {
-      return toMutation(await client.deleteEnv(v.value.id, { confirm: v.value.confirm }));
+      return toMutation(
+        await client.deleteEnv(await resolveEnvRef(v.value.id), { confirm: v.value.confirm }),
+      );
     } catch (e) {
       return { ok: false, error: errString(e) };
     }
@@ -198,7 +251,7 @@ export function registerEnvIpcHandlers(wiring: EnvIpcWiring = {}): () => void {
     const v = validateEnvUse(arg);
     if (!v.ok) return { ok: false, error: v.error.message };
     try {
-      const r = await client.useEnv(v.value.id);
+      const r = await client.useEnv(await resolveEnvRef(v.value.id));
       return toMutation(r);
     } catch (e) {
       return { ok: false, error: errString(e) };
@@ -210,7 +263,7 @@ export function registerEnvIpcHandlers(wiring: EnvIpcWiring = {}): () => void {
     const v = validateEnvExport(arg);
     if (!v.ok) return { ok: false, error: v.error.message };
     try {
-      return toMutation(await client.exportEnv(v.value.id, v.value.to));
+      return toMutation(await client.exportEnv(await resolveEnvRef(v.value.id), v.value.to));
     } catch (e) {
       return { ok: false, error: errString(e) };
     }
@@ -239,7 +292,7 @@ export function registerEnvIpcHandlers(wiring: EnvIpcWiring = {}): () => void {
     const v = validateEnvDoctor(arg);
     if (!v.ok) return { ok: false, error: v.error.message };
     try {
-      return toMutation(await client.doctorEnv(v.value.id));
+      return toMutation(await client.doctorEnv(await resolveEnvRef(v.value.id)));
     } catch (e) {
       return { ok: false, error: errString(e) };
     }
@@ -250,7 +303,7 @@ export function registerEnvIpcHandlers(wiring: EnvIpcWiring = {}): () => void {
     const v = validatePkgList(arg);
     if (!v.ok) return { ok: false, packages: [], error: v.error.message };
     try {
-      const pkgs = await client.pkgList(v.value.envId);
+      const pkgs = await client.pkgList(await resolveEnvRef(v.value.envId));
       return { ok: true, packages: pkgs as unknown as Record<string, unknown>[] };
     } catch (e) {
       return { ok: false, packages: [], error: errString(e) };
@@ -267,7 +320,7 @@ export function registerEnvIpcHandlers(wiring: EnvIpcWiring = {}): () => void {
     emitEnvProgress(sender, a.runId, `staging ${a.spec.join(" ")} for gate…`);
     try {
       const opts: Parameters<typeof client.pkgInstall>[0] = {
-        envId: a.envId,
+        envId: await resolveEnvRef(a.envId),
         spec: a.spec,
         confirm: a.confirm,
         force: a.force,
@@ -291,7 +344,7 @@ export function registerEnvIpcHandlers(wiring: EnvIpcWiring = {}): () => void {
     emitEnvProgress(sender, a.runId, `staging ${a.spec.join(" ")} for gate…`);
     try {
       const opts: Parameters<typeof client.pkgUpdate>[0] = {
-        envId: a.envId,
+        envId: await resolveEnvRef(a.envId),
         spec: a.spec,
         confirm: a.confirm,
         force: a.force,
@@ -315,7 +368,7 @@ export function registerEnvIpcHandlers(wiring: EnvIpcWiring = {}): () => void {
     emitEnvProgress(sender, a.runId, "resolving outdated set + staging for gate…");
     try {
       const opts: Parameters<typeof client.pkgUpgrade>[0] = {
-        envId: a.envId,
+        envId: await resolveEnvRef(a.envId),
         confirm: a.confirm,
         force: a.force,
       };
@@ -334,7 +387,9 @@ export function registerEnvIpcHandlers(wiring: EnvIpcWiring = {}): () => void {
     if (!v.ok) return { ok: false, error: v.error.message };
     try {
       return toMutation(
-        await client.pkgRemove(v.value.envId, v.value.pkgs, { confirm: v.value.confirm }),
+        await client.pkgRemove(await resolveEnvRef(v.value.envId), v.value.pkgs, {
+          confirm: v.value.confirm,
+        }),
       );
     } catch (e) {
       return { ok: false, error: errString(e) };
@@ -347,7 +402,9 @@ export function registerEnvIpcHandlers(wiring: EnvIpcWiring = {}): () => void {
     if (!v.ok) return { ok: false, error: v.error.message };
     try {
       return toMutation(
-        await client.pkgUninstall(v.value.envId, v.value.pkgs, { confirm: v.value.confirm }),
+        await client.pkgUninstall(await resolveEnvRef(v.value.envId), v.value.pkgs, {
+          confirm: v.value.confirm,
+        }),
       );
     } catch (e) {
       return { ok: false, error: errString(e) };
@@ -360,7 +417,9 @@ export function registerEnvIpcHandlers(wiring: EnvIpcWiring = {}): () => void {
     if (!v.ok) return { ok: false, error: v.error.message };
     try {
       return toMutation(
-        await client.pkgEnable(v.value.envId, v.value.pkg, { confirm: v.value.confirm }),
+        await client.pkgEnable(await resolveEnvRef(v.value.envId), v.value.pkg, {
+          confirm: v.value.confirm,
+        }),
       );
     } catch (e) {
       return { ok: false, error: errString(e) };
@@ -373,7 +432,9 @@ export function registerEnvIpcHandlers(wiring: EnvIpcWiring = {}): () => void {
     if (!v.ok) return { ok: false, error: v.error.message };
     try {
       return toMutation(
-        await client.pkgDisable(v.value.envId, v.value.pkg, { confirm: v.value.confirm }),
+        await client.pkgDisable(await resolveEnvRef(v.value.envId), v.value.pkg, {
+          confirm: v.value.confirm,
+        }),
       );
     } catch (e) {
       return { ok: false, error: errString(e) };
@@ -400,7 +461,7 @@ export function registerEnvIpcHandlers(wiring: EnvIpcWiring = {}): () => void {
     emitEnvProgress(sender, a.runId, "staging the CUDA-matched torch wheel for gate…");
     try {
       const opts: Parameters<typeof client.cudaTorch>[0] = {
-        envId: a.envId,
+        envId: await resolveEnvRef(a.envId),
         confirm: a.confirm,
         force: a.force,
       };

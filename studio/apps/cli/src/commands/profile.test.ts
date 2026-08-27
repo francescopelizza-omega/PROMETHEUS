@@ -262,3 +262,21 @@ test("project .prom.toml pins model over the user profile; PROM_NO_PROJECT_CONFI
     rmSync(home, { recursive: true, force: true });
   }
 });
+
+test("prometheus profile <typo>: reports unknown action, never silently defaults to list", () => {
+  // regression: `path[1]` is undefined for a TWO_WORD mismatch (parse.ts sets `unmatchedSub`
+  // instead), so a typo used to silently fall through to the "list" branch.
+  const badCtx = pctx([]);
+  (badCtx.args as unknown as { unmatchedSub: string }).unmatchedSub = "lst";
+  const out = runProfile(["profile"], badCtx);
+  assert.equal(out.exitCode, 1);
+  assert.match(out.text ?? "", /unknown action "lst"/);
+});
+
+test("prometheus config <typo>: reports unknown action, never silently defaults to path", () => {
+  const badCtx = ctx([]);
+  (badCtx.args as unknown as { unmatchedSub: string }).unmatchedSub = "gt";
+  const out = runConfig(["config"], badCtx);
+  assert.equal(out.exitCode, 1);
+  assert.match(out.text ?? "", /unknown action "gt"/);
+});
