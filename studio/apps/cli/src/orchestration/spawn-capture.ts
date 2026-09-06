@@ -180,8 +180,14 @@ export function makeSpawnCapture(): SpawnCapture {
       function killGroup(timedOut: boolean): void {
         if (settled) return; // the child already closed — never signal a recycled PGID
         killedByTimeout = killedByTimeout || timedOut;
+        // A truthy check alone would still let pid 1 through, and `kill(-1, …)` is kill(2)'s
+        // broadcast to every process this uid owns. Unreachable via a real ChildProcess pid, but
+        // stated explicitly because the same primitive unguarded took the dev machine's session
+        // down four times (see signalPid in engine-bridge/src/model-server.ts).
+        const groupPid =
+          Number.isInteger(child.pid) && (child.pid ?? 0) > 1 ? child.pid : undefined;
         try {
-          if (child.pid) process.kill(-child.pid, "SIGTERM");
+          if (groupPid) process.kill(-groupPid, "SIGTERM");
         } catch {
           try {
             child.kill("SIGTERM");
@@ -192,7 +198,8 @@ export function makeSpawnCapture(): SpawnCapture {
         // hard kill after a grace period so the CLI can cancel its in-flight call first.
         killTimer = setTimeout(() => {
           try {
-            if (child.pid) process.kill(-child.pid, "SIGKILL");
+            // broadcast-kill-allow: groupPid is the `pid > 1` value computed in killGroup above.
+            if (groupPid) process.kill(-groupPid, "SIGKILL");
           } catch {
             /* gone */
           }

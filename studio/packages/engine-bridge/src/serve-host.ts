@@ -186,7 +186,17 @@ export function createServeHost(deps: ServeHostDeps = {}): ServeHostApi {
   const probePort = deps.probePort ?? defaultProbePort;
   const isAlive = deps.isAlive ?? defaultIsAlive;
   const portAnswering = deps.portAnswering ?? defaultPortAnswering;
-  const kill = deps.kill ?? ((pid: number, sig: NodeJS.Signals) => process.kill(pid, sig));
+  // The pid here comes from the on-disk serve state file, not from a live ChildProcess, and
+  // `load()` below only ever checked `typeof rec.pid === "number"`. A corrupt or hand-edited
+  // state file holding `"pid": -1` would therefore reach `process.kill(-1, sig)` — kill(2)'s
+  // broadcast to every process this uid owns. That is the same defect that took this machine's
+  // desktop down four times via signalPid; here the input is a file rather than a test.
+  const kill =
+    deps.kill ??
+    ((pid: number, sig: NodeJS.Signals) => {
+      if (!Number.isInteger(pid) || pid <= 1) return;
+      process.kill(pid, sig);
+    });
   const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
   const now = deps.now ?? (() => Date.now());
   const graceMs = deps.graceMs ?? 5000;
@@ -197,7 +207,15 @@ export function createServeHost(deps: ServeHostDeps = {}): ServeHostApi {
       const arr = Array.isArray(raw?.servers) ? raw.servers : [];
       return arr.filter((r: unknown): r is ServeRecord => {
         const rec = r as ServeRecord;
-        return rec != null && typeof rec.profileId === "string" && typeof rec.pid === "number";
+        // `pid > 1` is part of the schema, not a nicety: every consumer of this record signals
+        // that pid, and 0/-1/1 are kill(2) broadcast or init. A record that cannot name a single
+        // real process is not a valid record.
+        return (
+          rec != null &&
+          typeof rec.profileId === "string" &&
+          Number.isInteger(rec.pid) &&
+          rec.pid > 1
+        );
       });
     } catch {
       return []; // absent/corrupt ⇒ nothing recorded (idempotent)

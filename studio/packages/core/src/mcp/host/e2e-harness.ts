@@ -120,7 +120,12 @@ export function prewarmReferenceServer(timeoutMs = 90_000): Promise<void> {
       settled = true;
       try {
         const pid = p?.pid;
-        if (pid !== undefined) {
+        // `> 1` is not paranoia: `process.kill(-1, …)` is kill(2)'s broadcast — every process this
+        // uid owns — and with SIGKILL that ends the whole logged-in session. libuv never yields a
+        // pid <= 1 here, so this can only ever be a no-op; it is written down because the same
+        // primitive, unguarded, took this machine's desktop out four times (see signalPid in
+        // engine-bridge/src/model-server.ts).
+        if (pid !== undefined && Number.isInteger(pid) && pid > 1) {
           if (isWindows)
             execFileSync("taskkill", ["/pid", String(pid), "/T", "/F"], { stdio: "ignore" });
           else process.kill(-pid, "SIGKILL");
@@ -192,7 +197,8 @@ export function createReferenceHarness(): ReferenceHarness {
 
   const signalGroup = (sig: NodeJS.Signals): void => {
     const pid = child?.pid;
-    if (pid === undefined) return;
+    // See prewarmReferenceServer: a non-positive pid turns this into kill(2)'s broadcast form.
+    if (pid === undefined || !Number.isInteger(pid) || pid <= 1) return;
     try {
       if (isWindows)
         execFileSync("taskkill", ["/pid", String(pid), "/T", "/F"], { stdio: "ignore" });

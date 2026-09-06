@@ -193,6 +193,40 @@ test("stop self-heals a dead/stale pid without killing anything", async () => {
   }
 });
 
+test("a record whose pid is a kill(2) broadcast value is not a record at all", async () => {
+  // Defence in depth for the defect that killed this machine's session four times: the pid in
+  // this file is attacker-or-corruption controlled input, and every consumer signals it. -1 means
+  // "every process this uid owns", 0 means "my process group", 1 is init. None can name a server.
+  for (const pid of [-1, 0, 1, 1.5]) {
+    const { file, cleanup } = tmpState();
+    try {
+      writeFileSync(
+        file,
+        JSON.stringify({
+          servers: [
+            {
+              profileId: "hostile",
+              model: "m",
+              runner: "r",
+              port: 8080,
+              pid,
+              startedAt: "2026-07-17T00:00:00Z",
+            },
+          ],
+        }),
+      );
+      const host = createServeHost({
+        stateFile: file,
+        isAlive: () => true, // even claiming to be alive must not get it loaded
+        portAnswering: async () => true,
+      });
+      assert.equal((await host.status()).length, 0, `pid ${pid} must be rejected`);
+    } finally {
+      cleanup();
+    }
+  }
+});
+
 test("status drops a recorded-but-dead server and prunes the state file", async () => {
   const { file, cleanup } = tmpState();
   try {
@@ -205,7 +239,11 @@ test("status drops a recorded-but-dead server and prunes the state file", async 
             model: "m",
             runner: "r",
             port: 8080,
-            pid: 1,
+            // A plausible dead pid, NOT 1. pid 1 is init and is rejected by the record schema
+            // (every consumer of a record signals its pid, and 0/-1/1 are kill(2) broadcast or
+            // init), so a fixture using it would be dropped at load and never exercise the
+            // prune path this test is about.
+            pid: 999_999,
             startedAt: "2026-07-17T00:00:00Z",
           },
         ],
