@@ -1,0 +1,25 @@
+#!/bin/sh
+# .githooks/pre-commit — the one check that must never be optional.
+#
+# Enable in a fresh clone with:   git config core.hooksPath .githooks
+#
+# WHY NOT lefthook. lefthook is a devDependency here and was tried first. Its generated hook
+# resolves the binary from PATH, does not find it (it lives in studio/node_modules/.bin), and
+# then EXITS 0 — a deliberately unguarded `process.kill` was committed straight through it
+# during testing. A hook that can silently pass is worse than no hook, because it is believed.
+# This one calls node directly and has nothing to resolve.
+#
+# WHY IT IS THIS SMALL. This machine has been driven to ~60 MB free RAM by test/build fan-out
+# (CLAUDE.md section 2). A pre-commit hook that spawns processes would be its own hazard, so
+# this reads files and spawns nothing. Do not add a test or typecheck step here.
+
+set -e
+
+if ! command -v node >/dev/null 2>&1; then
+  echo "pre-commit: node not found — skipping the kill(2) guard." >&2
+  echo "  Run it by hand before pushing:  node studio/scripts/check-broadcast-kill.mjs" >&2
+  exit 0
+fi
+
+ROOT=$(git rev-parse --show-toplevel)
+exec node "$ROOT/studio/scripts/check-broadcast-kill.mjs"
