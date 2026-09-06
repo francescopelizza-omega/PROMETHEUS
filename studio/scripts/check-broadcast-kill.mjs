@@ -52,8 +52,14 @@ const SOURCE = /\.(ts|tsx|mjs|js)$/;
 
 /** How many lines back a guard may sit and still count as guarding the call. */
 const GUARD_WINDOW = 10;
-const GUARD =
-  /pid\s*(<=|>=|>|<|===|!==)\s*-?\d|Number\.isInteger\s*\(|pid\s*==\s*null|typeof\s+\w*pid\w*\s*===\s*"number"/i;
+// Only a real magnitude/integer check counts. Deliberately NOT accepted as guards:
+//   `pid == null`                  — null-safe, but -1 and 0 sail straight through
+//   `typeof pid === "number"`      — NaN and -1 are both numbers
+// The second of those is the exact check that made serve-host's state-file pid reachable, and
+// the first is what sidecar-runner had. Accepting either would make this script rubber-stamp
+// the very defect it exists to catch.
+const GUARD = /pid\s*(<=|>=|>|<|===|!==)\s*-?\d|Number\.isInteger\s*\(/i;
+
 const KILL = /process\.kill\s*\(/;
 /** `process.kill(x, 0)` — signal 0 is a liveness probe, it delivers nothing. */
 const PROBE = /process\.kill\s*\([^,)]+,\s*0\s*\)/;

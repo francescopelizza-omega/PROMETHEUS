@@ -245,8 +245,14 @@ export function runSidecar<T extends SidecarEnvelope = SidecarEnvelope>(
       else opts.signal.addEventListener("abort", onAbort, { once: true });
     }
 
-    child.stdout?.on("data", (b: Buffer) => {
-      const chunk = b.toString();
+    // `setEncoding`, NOT `b.toString()` per chunk. The sidecars emit `ensure_ascii=False`
+    // JSON, so a single UTF-8 character (a model name with a CJK glyph, an em dash in an
+    // error string) can straddle a chunk boundary — `Buffer.toString()` then decodes each
+    // half independently and yields U+FFFD on both sides, corrupting the JSON line before
+    // `JSON.parse` ever sees it. `setEncoding` routes the stream through a StringDecoder,
+    // which holds the incomplete sequence back until its continuation bytes arrive.
+    child.stdout?.setEncoding("utf8");
+    child.stdout?.on("data", (chunk: string) => {
       stdout += chunk;
       // streaming: hand each COMPLETE `{"event":…}` line to the sink as it arrives.
       if (opts.onEvent) {
@@ -279,8 +285,11 @@ export function runSidecar<T extends SidecarEnvelope = SidecarEnvelope>(
         );
       }
     });
-    child.stderr?.on("data", (b: Buffer) => {
-      stderr += b.toString();
+    // same StringDecoder reason as stdout above — this tail is shown to the user verbatim
+    // when the sidecar produces no JSON object.
+    child.stderr?.setEncoding("utf8");
+    child.stderr?.on("data", (chunk: string) => {
+      stderr += chunk;
     });
 
     if (opts.input !== undefined) {
@@ -379,6 +388,13 @@ export interface KernelSidecar {
 
 /** Hard ceiling on a single NDJSON line — a runaway line without a newline is fail-closed. */
 const MAX_KERNEL_LINE_BYTES = 24 * 1024 * 1024;
+
+/**
+ * How much of the kernel's stderr to keep for diagnostics. The stream itself is ALWAYS
+ * drained in full (see the wiring below — that is the point); only what we retain is capped,
+ * because the volume is unbounded and the diagnostic value is in the last few KiB.
+ */
+const MAX_KERNEL_STDERR_TAIL = 8 * 1024;
 
 export function spawnKernelSidecar(opts: KernelSidecarOptions = {}): KernelSidecar {
   const dir = resolveSidecarDir(opts.sidecarDir);
@@ -486,6 +502,29 @@ export function spawnKernelSidecar(opts: KernelSidecarOptions = {}): KernelSidec
       }
     });
 
+    // stderr MUST be drained. A Node stdio stream with no `data` listener never starts
+    // flowing, so the OS pipe buffer (~64 KiB) fills and the WRITER blocks in write(2)
+    // forever. kernel.py's own log() writes here, and — worse — KernelManager.start_kernel()
+    // passes no stdout/stderr to jupyter_client, so the ipykernel GRANDCHILD inherits this
+    // very fd, as does anything a notebook cell shells out to. Unlike runSidecar there is no
+    // timeout on this path, so that hang is permanent, silent, and only escapable by killing
+    // the app. The sibling `child.stdout` wiring above was always correct; this was an
+    // omission, not a design choice.
+    let stderrTail = "";
+    child.stderr?.setEncoding("utf8");
+    child.stderr?.on("data", (chunk: string) => {
+      stderrTail = (stderrTail + chunk).slice(-MAX_KERNEL_STDERR_TAIL);
+    });
+    child.stderr?.on("error", () => {
+      /* the pipe closed under us — `close` below still fail-closes every in-flight cell */
+    });
+
+    // An async EPIPE/ECONNRESET on stdin is an unhandled 'error' event, which is FATAL to the
+    // whole process by default. `write()`'s try/catch only covers the synchronous throw.
+    child.stdin?.on("error", () => {
+      /* the kernel went away mid-write — `close` reports it through the normal path */
+    });
+
     child.on("error", (err: Error) => {
       emit({
         event: "error",
@@ -498,17 +537,21 @@ export function spawnKernelSidecar(opts: KernelSidecarOptions = {}): KernelSidec
     child.on("close", (code: number | null) => {
       if (killTimer) clearTimeout(killTimer);
       // Fail-closed: any cell still in flight gets a synthetic terminal error.
+      // Carry the stderr tail: a kernel that dies mid-cell used to be diagnostically blind.
+      const tail = stderrTail.trim().slice(-1024);
       for (const id of inFlight) {
         emit({
           event: "done",
           id,
           status: "error",
-          error: "kernel exited before the cell finished",
+          error: tail
+            ? `kernel exited before the cell finished: ${tail}`
+            : "kernel exited before the cell finished",
           execution_count: null,
         });
       }
       inFlight.clear();
-      emit({ event: "exit", id: null, code });
+      emit({ event: "exit", id: null, code, ...(tail ? { stderr: tail } : {}) });
       resolveExit(code);
     });
   }
@@ -529,7 +572,12 @@ export function spawnKernelSidecar(opts: KernelSidecarOptions = {}): KernelSidec
     write({ op: "shutdown" });
     const pid = child?.pid;
     const killGroup = (signal: NodeJS.Signals): void => {
-      if (pid == null) return;
+      // `pid > 1`, not just non-null: `process.kill(-1, …)` is kill(2)'s broadcast — every process
+      // this uid owns — and `-0` is the caller's own group. A ChildProcess pid can never be either,
+      // so this is a no-op guard; it matches what exec-runner/child-reaper/orphan-guard-boot already
+      // do, and the one signalling primitive in this repo that lacked it wiped the desktop four
+      // times (see signalPid in ./model-server.ts).
+      if (pid == null || !Number.isInteger(pid) || pid <= 1) return;
       try {
         // Negative pid → the whole detached group (kernel.py + its ipykernel child).
         if (process.platform !== "win32") process.kill(-pid, signal);
