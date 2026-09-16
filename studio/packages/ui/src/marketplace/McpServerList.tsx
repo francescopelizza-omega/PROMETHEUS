@@ -64,6 +64,7 @@ export function McpServerList(props: McpServerListProps): ReactElement {
                   flex: 1,
                   overflow: "hidden",
                   textOverflow: "ellipsis",
+                  minWidth: 0, // flex/grid floor — without it the ellipsis is unreachable
                   whiteSpace: "nowrap",
                 }}
               >
@@ -87,7 +88,10 @@ export function McpServerList(props: McpServerListProps): ReactElement {
                 title={blocked ? "blocked by nemesis — cannot enable" : on ? "disable" : "enable"}
                 style={{
                   background: on ? "var(--ok)" : "transparent",
-                  color: on ? "var(--brand-fg)" : "var(--text-secondary)",
+                  // `--on-ok` is the computed label colour for the `--ok` FILL (tokens/contrast.ts `onFill`).
+                  // The old `--brand-fg` here was WHITE on the dark scheme over a saturated light fill (~2:1),
+                  // and a plain `--bg-app` would be near-white over the same fill on the LIGHT scheme.
+                  color: on ? "var(--on-ok)" : "var(--text-secondary)",
                   border: "1px solid var(--border-strong)",
                   borderRadius: "var(--radius-full, 9999px)",
                   padding: "var(--space-1, 2px) var(--space-4, 8px)",
@@ -109,7 +113,11 @@ export function McpServerList(props: McpServerListProps): ReactElement {
 function ctaStyle(): CSSProperties {
   return {
     background: "var(--brand)",
-    color: "var(--brand-fg)",
+    // The label sits ON the `--brand` fill, so it needs the computed `--on-brand`.
+    // `--brand-fg` is #ffffff on the dark scheme and measures 3.96:1 over `--brand` —
+    // under the 4.5:1 a label carries. It stays in use where it is a FILL, not a label
+    // (the Toggle knob), which is why this is a call-site change and not a token change.
+    color: "var(--on-brand)",
     border: "none",
     borderRadius: "var(--radius-md, 6px)",
     padding: "var(--space-2, 4px) var(--space-6, 12px)",

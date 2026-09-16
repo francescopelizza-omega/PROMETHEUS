@@ -195,7 +195,12 @@ async function runOnePipeline(
   opts: RunPipelineOptions,
 ): Promise<ExecPipelineResult> {
   const spawn = opts.spawnImpl ?? (nodeRequire("node:child_process") as SpawnLike).spawn;
-  const timeoutMs = Math.min(opts.timeoutMs ?? DEFAULT_EXEC_TIMEOUT_MS, MAX_EXEC_TIMEOUT_MS);
+  // NOT re-clamped against MAX_EXEC_TIMEOUT_MS. The mode-correct ceiling is already applied
+  // by `execTimeoutMs` at the two call sites — MAX_EXEC_TIMEOUT_MS for collect/stream and the
+  // much larger MAX_BACKGROUND_TIMEOUT_MS for background — so clamping again here quietly
+  // capped every background job at the 10-minute FOREGROUND limit, which is the one mode
+  // whose whole purpose is outliving it. `Math.max(1, …)` keeps a nonsense 0/negative honest.
+  const timeoutMs = Math.max(1, opts.timeoutMs ?? DEFAULT_EXEC_TIMEOUT_MS);
   const startedAt = Date.now();
 
   let stdout = "";
@@ -222,6 +227,7 @@ async function runOnePipeline(
       const isLast = idx === stages.length - 1;
       const redirOut = stage.redirects.find((r) => r.stream === "stdout" && r.kind === "file");
       const redirIn = stage.redirects.find((r) => r.stream === "stdin" && r.kind === "file");
+      const redirErr = stage.redirects.find((r) => r.stream === "stderr" && r.kind === "file");
       const mergeErr = stage.redirects.some((r) => r.kind === "merge");
 
       // A file redirect is opened HERE, by us, with an explicit flag — never handed to a
@@ -237,6 +243,20 @@ async function runOnePipeline(
           outFd = openSync(resolvePath(opts.cwd, redirOut.target), redirOut.append ? "a" : "w");
         } catch {
           /* fall back to capture; the command will usually fail on its own terms */
+        }
+      }
+      // `2> file` was PARSED, path-GATED and pre-image SNAPSHOTTED — and then silently
+      // dropped: stdio[2] was always "pipe", so the file was never written and the stderr the
+      // user redirected came back in the captured output instead. Everything upstream already
+      // treated it as a real write, which is the worst version of the bug: the guard did its
+      // work and the effect never happened. Skipped when `2>&1` is in play — a merge and a
+      // file redirect on the same stream are mutually exclusive and the merge wins, as parsed.
+      let errFd: number | undefined;
+      if (redirErr?.target && !mergeErr) {
+        try {
+          errFd = openSync(resolvePath(opts.cwd, redirErr.target), redirErr.append ? "a" : "w");
+        } catch {
+          /* fall back to capture, exactly like stdout above */
         }
       }
       let inFd: number | undefined;
@@ -265,7 +285,7 @@ async function runOnePipeline(
         stdio: [
           inFd !== undefined ? inFd : idx === 0 ? "ignore" : "pipe",
           outFd !== undefined ? outFd : "pipe",
-          "pipe",
+          errFd !== undefined ? errFd : "pipe",
         ],
       });
       children.push(child);

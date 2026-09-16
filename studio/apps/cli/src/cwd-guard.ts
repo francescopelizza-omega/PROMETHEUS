@@ -16,17 +16,20 @@
  * disk), where the guard is correctly always a no-op. Discovered ONCE per process and cached —
  * a startup-time fs walk, never a per-call one.
  */
-import { readFileSync } from "node:fs";
+import { readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { expandHome } from "@prometheus/core/agent-system-host";
 import {
   type CwdGuardResult,
   type PackageJsonFs,
   findOwnWorkspaceRoot,
   guardCwd,
 } from "@prometheus/core/agent-system-host";
+
+const nodeStat = { statSync };
 
 const realPackageJsonFs: PackageJsonFs = {
   packageNameAt(dir) {
@@ -107,4 +110,65 @@ export function resolveCwd(requested: string | undefined, write?: (line: string)
     }
   }
   return guard.cwd;
+}
+
+/** The outcome of an explicit mid-session move (`/cwd`, `/cd`, `/worktree switch`). */
+export type CwdMove =
+  | { ok: true; cwd: string; redirectedFrom?: string }
+  | {
+      ok: false;
+      error: string;
+      /**
+       * The target does not exist YET — as opposed to existing and being a file, or being
+       * unreadable. Only this case is offerable as "create it?": the other two are answers,
+       * not gaps, and `mkdir -p` over a file would fail anyway.
+       */
+      missing?: boolean;
+      /** the fully resolved, guard-applied target — what a `create` would have to mkdir. */
+      path?: string;
+    };
+
+/**
+ * Resolve an EXPLICIT mid-session directory change, all the way to a real directory.
+ *
+ * `/cd` validated its target with `statSync` and reported `no such directory: …`; `/cwd` did
+ * not — it expanded, resolved, guarded, and moved. So `/cwd /definitely/not/here` printed a
+ * confident `cwd → /definitely/not/here` and pointed the whole session, its agent files, its
+ * permission rules and its repo map at a directory that does not exist. The confirmation was
+ * unconditional, which is exactly why it read as no confirmation at all.
+ *
+ * Both hosts and both commands go through here so the two can never drift again: the readline
+ * host and the raw TUI each had their own copy of the expand → resolve → guard sequence, and
+ * only one of them had ever grown the existence check.
+ *
+ * `from` is the directory a RELATIVE path resolves against — the session's current cwd, not
+ * `process.cwd()`, which the CLI never chdir's.
+ */
+export function resolveCwdMove(
+  dir: string,
+  from: string,
+  fs: { statSync: (p: string) => { isDirectory(): boolean } } = nodeStat,
+): CwdMove {
+  const trimmed = dir.trim();
+  if (!trimmed) return { ok: false, error: "no directory given" };
+  // `~`/`~/…` first — `isAbsolute("~/x")` is false, so without this a tilde path resolves
+  // against the CURRENT directory instead of home.
+  const expanded = expandHome(trimmed);
+  const requested = isAbsolute(expanded) ? expanded : resolve(from, expanded);
+  const guard = guardOwnRepo(requested);
+  let stat: { isDirectory(): boolean };
+  try {
+    stat = fs.statSync(guard.cwd);
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    return code === "ENOENT"
+      ? { ok: false, error: `no such directory: ${guard.cwd}`, missing: true, path: guard.cwd }
+      : { ok: false, error: `cannot access ${guard.cwd}: ${(err as Error).message}` };
+  }
+  if (!stat.isDirectory()) {
+    return { ok: false, error: `not a directory: ${guard.cwd}`, path: guard.cwd };
+  }
+  return guard.redirected
+    ? { ok: true, cwd: guard.cwd, redirectedFrom: guard.requestedCwd }
+    : { ok: true, cwd: guard.cwd };
 }

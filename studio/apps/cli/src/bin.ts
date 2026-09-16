@@ -10,9 +10,11 @@
  */
 import { createInterface } from "node:readline";
 
+import { cliProfiles } from "@prometheus/core";
 import { createEngineClient } from "@prometheus/engine-bridge";
 
 import { installChildReaper } from "./child-reaper.js";
+import { startOrchestrationResourceGuard } from "./orchestration/resource-guard.js";
 import { prometheusHome } from "./home.js";
 import { dispatch } from "./index.js";
 import { bootOrphanGuard, stopSentinel } from "./orphan-guard-boot.js";
@@ -99,6 +101,17 @@ function wantsInteractiveSession(parsed: ParsedArgs): boolean {
 async function main(): Promise<void> {
   const argv = process.argv.slice(2);
   const parsed = parseArgs(argv);
+
+  /**
+   * One home: bring an existing install's config across before anything reads it.
+   *
+   * The shared config root moved from `~/.config/prometheus-studio` into `~/.prometheus/config`.
+   * This copies the old tree once — never overwriting, never deleting the originals — so an
+   * upgrade does not silently reset profiles, `config.toml` and the saved authorisation level to
+   * their defaults. It fails soft and every reader falls back to the legacy path anyway, so a
+   * home it cannot write is not a reason to refuse the session.
+   */
+  cliProfiles.migrateLegacyConfigDir();
 
   // Color: default from TTY/NO_COLOR, force-off when --no-color or --json.
   setColorEnabled(defaultColorEnabled() && !parsed.noColor && !parsed.json);
@@ -272,6 +285,12 @@ function friendly(err: unknown): string {
 // Without this the swarm's `detached` agent CLIs (all Node) simply keep running after the
 // CLI quits — a handful of start/stop cycles leaves a fleet of orphans eating the machine.
 installChildReaper();
+
+// ACTIVE EVICTION for opencode/hermes specifically (see resource-guard.ts's docstring for why
+// just these two, and why this is separate from the reaper above): the reaper kills children on
+// OUR OWN exit, this stops a runaway one BEFORE that, under sustained critical RAM. A no-op tick
+// on every session that never touches `/demos` — nothing is ever tracked to check.
+startOrchestrationResourceGuard();
 
 // Defence in depth for the one case the reaper cannot cover: SIGKILL / panic / power loss,
 // where no handler of ours runs at all. Three independent layers — a durable registry of

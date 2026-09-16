@@ -24,6 +24,20 @@ files:
   - out/**/*
   - package.json
 asar: true
+# `@prometheus/core`/`engine-bridge`/`ui` live in apps/desktop/package.json's
+# devDependencies, not dependencies (see that file's `//deps-note`) — SPECIFICALLY so
+# electron-builder's production-dependency walker never touches them at all. They are
+# pnpm workspace symlinks OUT to `packages/*` (`@prometheus/core -> ../../../../
+# packages/core`), and everything at runtime is bundled from their SOURCE via
+# electron.vite.config.ts's path aliases (out/main/index.js has zero bare
+# `require("@prometheus/...")` calls) — nothing needs them resolvable via node_modules.
+# Listed as a real `dependencies` entry, electron-builder followed the symlink to
+# package each one's REAL (monorepo, not-just-the-published-shape) directory and the
+# asar packer choked on dev artifacts living outside apps/desktop/ one at a time
+# (packages/core/.turbo/turbo-build.log, then dist/**/*.map, …) — an explicit `files`
+# exclusion here (`!**/node_modules/@prometheus/**`) does NOT prevent this: the walker
+# resolves the symlink to its real path BEFORE the exclude pattern is tested, so the
+# match never fires. Keeping them out of `dependencies` is what actually works.
 # node-pty is N-API (ABI-stable across Electron versions) and ships a prebuilt binary — do
 # NOT let electron-builder auto-run @electron/rebuild on it (the plan's node-pty gotcha). The
 # rebuild also breaks on Python 3.12 (node-gyp 9.x → removed `distutils`); N-API needs none.
@@ -36,6 +50,17 @@ asarUnpack:
   - "**/node_modules/node-pty/**"
   - "**/node_modules/node-pty/build/Release/spawn-helper"
   - "**/node_modules/node-pty/build/Release/*.node"
+  # the whole main bundle, so the detached local-runner WATCHDOG can actually be exec'd.
+  # ollama-watchdog.ts spawns out/main/ollama-watchdog-entry.js as PLAIN node
+  # (ELECTRON_RUN_AS_NODE=1), and a plain-node process has NO asar support — Electron's fs
+  # shim is set up in a bootstrap that RUN_AS_NODE skips. Unpacking just the entry is not
+  # enough: rollup emits it with imports into out/main/chunks/ (it shares eviction-log /
+  # launch-guard / model-server / pid-lock with main), and any future re-chunking would move
+  # more of its graph without warning. out/main is small next to the renderer and pyruntime,
+  # and asar is packaging, not a security boundary, so unpacking the directory is the honest
+  # trade. Electron's shim transparently redirects main's own in-asar imports here, so
+  # index.js/worker.js/extRunner.js are unaffected.
+  - "out/main/**"
 # after every per-OS pack: restore the node-pty spawn-helper's 0755 exec bit inside
 # app.asar.unpacked (asar packing drops it → "No terminal backend" in the packaged app).
 afterPack: build/after-pack.cjs

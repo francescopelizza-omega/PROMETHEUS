@@ -3043,10 +3043,10 @@ function QuickDocHost(): ReactElement | null {
           width: "min(620px, 82%)",
           maxHeight: "60%",
           overflow: "auto",
-          background: "var(--surface-1)",
-          border: "1px solid var(--border)",
+          background: "var(--bg-surface)",
+          border: "1px solid var(--border-subtle)",
           borderRadius: 8,
-          boxShadow: "var(--shadow-e3, 0 12px 40px rgba(0,0,0,0.45))",
+          boxShadow: "var(--elevation-e3)",
           padding: 10,
           fontSize: "0.82rem",
         }}
@@ -3105,6 +3105,7 @@ function QuickDocHost(): ReactElement | null {
                     padding: 0,
                     overflow: "hidden",
                     textOverflow: "ellipsis",
+                    minWidth: 0, // flex/grid floor — without it the ellipsis is unreachable
                     whiteSpace: "nowrap",
                   }}
                 >
@@ -3120,6 +3121,7 @@ function QuickDocHost(): ReactElement | null {
                       color: "var(--text-secondary)",
                       overflow: "hidden",
                       textOverflow: "ellipsis",
+                      minWidth: 0, // flex/grid floor — without it the ellipsis is unreachable
                       whiteSpace: "nowrap",
                     }}
                     title={`${l.url} (host not allowlisted — copy to open manually)`}
@@ -3132,7 +3134,7 @@ function QuickDocHost(): ReactElement | null {
                     onClick={() => void navigator.clipboard?.writeText(l.url)}
                     style={{
                       background: "transparent",
-                      border: "1px solid var(--border)",
+                      border: "1px solid var(--border-subtle)",
                       borderRadius: 4,
                       color: "var(--text-secondary)",
                       cursor: "pointer",

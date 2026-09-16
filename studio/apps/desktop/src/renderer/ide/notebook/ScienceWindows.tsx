@@ -96,6 +96,7 @@ export function VariablesWindow({
                           whiteSpace: open ? "pre-wrap" : "nowrap",
                           overflow: "hidden",
                           textOverflow: "ellipsis",
+                          minWidth: 0, // flex/grid floor — without it the ellipsis is unreachable
                         }}
                       >
                         {v.repr}

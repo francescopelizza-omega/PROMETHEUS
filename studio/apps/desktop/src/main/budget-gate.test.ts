@@ -31,6 +31,19 @@ function tmp(): string {
   dirs.push(d);
   return d;
 }
+
+/**
+ * A throwaway SHARED-ledger directory, passed explicitly to everything that touches it.
+ *
+ * The daily window reads `$PROMETHEUS_HOME/accounting` so that Studio and the terminal count
+ * one number (they used to keep disjoint ledgers, so `budget.dailyUsd` was enforced twice).
+ * That default is right in production and wrong in a test: without an override these cases
+ * read — and appended to — the developer's real spend log, and this file's own "a store that
+ * was never written is []" is what catches it. Every call below passes one of these.
+ */
+function sharedTmp(): string {
+  return tmp();
+}
 after(() => {
   for (const d of dirs) {
     try {
@@ -49,21 +62,26 @@ const PRICED = { "gpt-x": { inputUsdPerMTok: 10, outputUsdPerMTok: 10, match: "g
 
 test("appendSpendRecord → readDayRecords round-trips a call (a DURABLE record, unlike usageMap)", () => {
   const home = tmp();
-  appendSpendRecord(home, {
-    atIso: NOW,
-    model: "gpt-x",
-    promptTokens: 10,
-    completionTokens: 20,
-    estimated: false,
-  });
-  const back = readDayRecords(home, NOW);
+  const sh = sharedTmp();
+  appendSpendRecord(
+    home,
+    {
+      atIso: NOW,
+      model: "gpt-x",
+      promptTokens: 10,
+      completionTokens: 20,
+      estimated: false,
+    },
+    sh,
+  );
+  const back = readDayRecords(home, NOW, sh);
   assert.equal(back.length, 1);
   assert.equal(back[0]?.model, "gpt-x");
   assert.equal(back[0]?.promptTokens, 10);
 });
 
 test("readDayRecords: a store that was never written is [] — the normal first run, not an error", () => {
-  assert.deepEqual(readDayRecords(tmp(), NOW), []);
+  assert.deepEqual(readDayRecords(tmp(), NOW, sharedTmp()), []);
 });
 
 test("readDayRecords: an UNREADABLE store THROWS, so the gate can fail closed", () => {
@@ -80,7 +98,7 @@ test("readDayRecords: an UNREADABLE store THROWS, so the gate can fail closed", 
   // root can read a 000 file, so skip rather than assert a false pass in that environment.
   let readable = false;
   try {
-    readDayRecords(home, NOW);
+    readDayRecords(home, NOW, sharedTmp());
     readable = true;
   } catch {
     /* expected */
@@ -106,22 +124,31 @@ test("parseAccountingFile: a torn line is skipped, the rest of the store survive
 
 test("readSessionRecords: the session window starts at THIS launch, the day window does not", () => {
   const home = tmp();
+  const sh = sharedTmp();
   const startedMs = Date.parse("2026-08-12T12:00:00Z");
-  appendSpendRecord(home, {
-    atIso: "2026-08-12T02:00:00Z", // an earlier launch, same day
-    model: "gpt-x",
-    promptTokens: 1,
-    completionTokens: 1,
-    estimated: false,
-  });
-  appendSpendRecord(home, {
-    atIso: NOW, // this launch
-    model: "gpt-x",
-    promptTokens: 2,
-    completionTokens: 2,
-    estimated: false,
-  });
-  assert.equal(readDayRecords(home, NOW).length, 2, "the day sees both");
+  appendSpendRecord(
+    home,
+    {
+      atIso: "2026-08-12T02:00:00Z", // an earlier launch, same day
+      model: "gpt-x",
+      promptTokens: 1,
+      completionTokens: 1,
+      estimated: false,
+    },
+    sh,
+  );
+  appendSpendRecord(
+    home,
+    {
+      atIso: NOW, // this launch
+      model: "gpt-x",
+      promptTokens: 2,
+      completionTokens: 2,
+      estimated: false,
+    },
+    sh,
+  );
+  assert.equal(readDayRecords(home, NOW, sh).length, 2, "the day sees both");
   assert.equal(
     readSessionRecords(home, NOW, startedMs).length,
     1,
@@ -158,8 +185,15 @@ test("isLocalModelId: narrow on purpose — a false positive would DISABLE the c
 
 /* ── the gate: what actually stops a turn ───────────────────────────────────*/
 
-function gateWith(home: string, settings: Record<string, unknown>): DesktopBudgetGate {
-  const g = new DesktopBudgetGate(home, { startedMs: Date.parse("2026-08-12T00:00:00Z") });
+function gateWith(
+  home: string,
+  settings: Record<string, unknown>,
+  sharedDir: string = sharedTmp(),
+): DesktopBudgetGate {
+  const g = new DesktopBudgetGate(home, {
+    startedMs: Date.parse("2026-08-12T00:00:00Z"),
+    sharedDir,
+  });
   g.setPricing(PRICED);
   g.setSettings(settings);
   return g;
@@ -194,7 +228,8 @@ test("gate: spend over the session cap BLOCKS the next cloud turn", () => {
 
 test("gate: a local call is NOT recorded — it can never move a USD cap", () => {
   const home = tmp();
-  const g = gateWith(home, { "budget.sessionUsd": 1 });
+  const sh = sharedTmp();
+  const g = gateWith(home, { "budget.sessionUsd": 1 }, sh);
   g.record({
     locality: "local",
     model: "ollama:qwen3",
@@ -202,7 +237,8 @@ test("gate: a local call is NOT recorded — it can never move a USD cap", () =>
     completionTokens: 10_000_000,
     nowIso: NOW,
   });
-  assert.deepEqual(readDayRecords(home, NOW), []);
+  // neither ledger: a free turn must not appear in the SHARED daily window either.
+  assert.deepEqual(readDayRecords(home, NOW, sh), []);
   assert.equal(g.check({ locality: "cloud", nowIso: NOW }).action, "ok");
 });
 

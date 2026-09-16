@@ -102,15 +102,35 @@ test("first-party Prometheus + high-contrast schemes are verdict-legible (securi
   }
 });
 
-test("the save-gate catches faithful community-palette verdict dips (would block on save)", () => {
-  // Builtins ship as-is (read-only, 08's data); the §3.4 gate fires when one is
-  // DUPLICATED + saved. Nord/Solarized reproductions dip below 3:1 on the verdict tint —
-  // the gate must catch that (and the editor offers auto-fix), never silently pass it.
-  const flagged = BUILTIN_SCHEMES.filter((s) => checkContrast(s).verdictFailures.length > 0);
+test("the save-gate catches a faithful community-palette verdict dip (would block on save)", () => {
+  // This used to assert on nord-frost, because the shipped Nord/Solarized reproductions
+  // really did dip below 3:1 on the verdict tint. They no longer do — every builtin is
+  // derived through `derivePalette`, which floors the role tokens — so the case is made with
+  // a purpose-built palette instead. Asserting the gate works by shipping a broken scheme was
+  // always the wrong way round: it made "fix the scheme" and "keep the test green" opposites.
+  const nord = getScheme("nord-frost");
+  // Nord's ORIGINAL danger (#bf616a) put back on Nord's own surface: 2.46:1 on the surface and
+  // 2.21:1 on its own 14% tint — the exact dip this gate exists to catch.
+  const dip = {
+    ...nord,
+    id: "verdict-dip",
+    builtin: false,
+    tokens: { ...nord.tokens, danger: "#bf616a" },
+  };
+  const report = checkContrast(dip);
   assert.ok(
-    flagged.some((s) => s.id === "nord-frost"),
-    "nord-frost verdict dip must be detected by the gate",
+    report.verdictFailures.some((f) => f.role === "danger"),
+    "a sub-3:1 danger token must be detected by the gate",
   );
+  assert.equal(canSave(report), false, "a verdict dip must block the save (fail-closed)");
+});
+
+test("every shipped builtin clears the save-gate it would be held to on save", () => {
+  // The other half of the same point: a preset the user can pick from the Appearance list
+  // must not be a scheme the editor would refuse to save. Before the derive rewrite, 28 of
+  // the 41 shipped exactly that contradiction.
+  const blocked = BUILTIN_SCHEMES.filter((s) => !canSave(checkContrast(s))).map((s) => s.id);
+  assert.deepEqual(blocked, [], `builtins that would be blocked on save: ${blocked.join(", ")}`);
 });
 
 test("the deliberately low-contrast fixture FAILS the save-gate (fail-closed; §3.4 CI)", () => {

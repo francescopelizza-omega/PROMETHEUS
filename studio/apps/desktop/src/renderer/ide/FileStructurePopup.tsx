@@ -134,10 +134,10 @@ export function FileStructurePopup({
           maxHeight: "70vh",
           display: "flex",
           flexDirection: "column",
-          background: "var(--surface-1)",
-          border: "1px solid var(--border)",
+          background: "var(--bg-surface)",
+          border: "1px solid var(--border-subtle)",
           borderRadius: 8,
-          boxShadow: "var(--shadow-e3, 0 12px 40px rgba(0,0,0,0.45))",
+          boxShadow: "var(--elevation-e3)",
           overflow: "hidden",
         }}
       >
@@ -152,9 +152,9 @@ export function FileStructurePopup({
             margin: 8,
             padding: "6px 8px",
             fontSize: "0.82rem",
-            background: "var(--surface-2)",
+            background: "var(--bg-surface-2)",
             color: "var(--text-primary)",
-            border: "1px solid var(--border)",
+            border: "1px solid var(--border-subtle)",
             borderRadius: 6,
             outline: "none",
           }}
@@ -186,7 +186,7 @@ export function FileStructurePopup({
                   fontSize: "0.78rem",
                   borderRadius: 4,
                   cursor: "pointer",
-                  background: i === sel ? "var(--surface-3)" : "transparent",
+                  background: i === sel ? "var(--bg-elevated)" : "transparent",
                 }}
               >
                 <span style={{ color: "var(--accent)", width: 12, textAlign: "center" }}>
@@ -207,6 +207,7 @@ export function FileStructurePopup({
                       fontSize: "0.72rem",
                       overflow: "hidden",
                       textOverflow: "ellipsis",
+                      minWidth: 0, // flex/grid floor — without it the ellipsis is unreachable
                       whiteSpace: "nowrap",
                     }}
                   >

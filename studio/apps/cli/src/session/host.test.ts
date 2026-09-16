@@ -127,7 +127,12 @@ function runSession(
     write: (s) => out.push(s),
     handlers,
     // skip the startup network/engine probe — deterministic "no backend" for tests.
-    backends: { liveRunners: [], paidClis: [] },
+    backends: {
+      liveRunners: [],
+      paidClis: [],
+      startedRunners: new Set<string>(),
+      unavailableRunners: [],
+    },
     home: TMP_HOME,
     configHome: TMP_HOME,
   });
@@ -281,7 +286,12 @@ test("Ctrl-C during a turn cancels the in-flight turn; the session stays alive",
       return rl as unknown as never;
     },
     write: (s) => out.push(s),
-    backends: { liveRunners: [], paidClis: [] },
+    backends: {
+      liveRunners: [],
+      paidClis: [],
+      startedRunners: new Set<string>(),
+      unavailableRunners: [],
+    },
     home: TMP_HOME,
     configHome: TMP_HOME,
     handlers: {
@@ -313,7 +323,12 @@ test("the confirm seam asks via readline.question and honors a typed no", async 
       return rl as unknown as never;
     },
     write: (s) => out.push(s),
-    backends: { liveRunners: [], paidClis: [] },
+    backends: {
+      liveRunners: [],
+      paidClis: [],
+      startedRunners: new Set<string>(),
+      unavailableRunners: [],
+    },
     home: TMP_HOME,
     configHome: TMP_HOME,
     handlers: {
@@ -351,7 +366,12 @@ async function captureCtx(
       return rl as unknown as never;
     },
     write: () => {},
-    backends: { liveRunners: [], paidClis: [] },
+    backends: {
+      liveRunners: [],
+      paidClis: [],
+      startedRunners: new Set<string>(),
+      unavailableRunners: [],
+    },
     home: TMP_HOME,
     configHome: TMP_HOME,
     ...over,
@@ -518,21 +538,23 @@ test("/authorisation persists under `configHome` (os.homedir()-rooted), NEVER un
         return rl as unknown as never;
       },
       write: () => {},
-      backends: { liveRunners: [], paidClis: [] },
+      backends: {
+        liveRunners: [],
+        paidClis: [],
+        startedRunners: new Set<string>(),
+        unavailableRunners: [],
+      },
       home: wrongHome,
       configHome: rightConfigHome,
       handlers: { runMessageTurn: async () => turnResult("done") },
     });
 
     const savedAtRightPath = JSON.parse(
-      readFileSync(
-        join(rightConfigHome, ".config", "prometheus-studio", "authorisation.json"),
-        "utf8",
-      ),
+      readFileSync(join(rightConfigHome, ".prometheus", "config", "authorisation.json"), "utf8"),
     );
     assert.equal(savedAtRightPath.level, 6);
     assert.equal(
-      existsSync(join(wrongHome, ".config", "prometheus-studio", "authorisation.json")),
+      existsSync(join(wrongHome, ".prometheus", "config", "authorisation.json")),
       false,
       "must NEVER be written under `home` (prometheusHome()'s accounting/state tree)",
     );
@@ -859,4 +881,259 @@ test("/cwd: re-discovers steering from the NEW directory too — the readline ho
     !out.includes(join(projectA, "AGENTS.md")),
     "project A's AGENTS.md is still being read after /cwd",
   );
+});
+
+/**
+ * The readline host's twin of the TUI's restart journey. The two hosts do NOT share this
+ * wiring — each keeps its own level variable and its own setters — so a fix proven on one of
+ * them proves nothing about the other. They have already drifted apart once: this host still
+ * ignored `--authorisation` long after the TUI read it.
+ */
+test("readline host: /authorisation survives a restart; /permission-mode never overwrites it", async () => {
+  const configHome = mkdtempSync(join(tmpdir(), "prom-host-authjourney-"));
+  const authFile = join(configHome, ".prometheus", "config", "authorisation.json");
+  const saved = (): number | null => {
+    try {
+      return JSON.parse(readFileSync(authFile, "utf8")).level;
+    } catch {
+      return null;
+    }
+  };
+  const run = async (lines: string[], argsOver: Partial<ParsedArgs> = {}): Promise<string> => {
+    const out: string[] = [];
+    const rl = new FakeReadline(lines);
+    await launchSession(args(argsOver), {
+      isTty: true,
+      makeReadline: () => {
+        setImmediate(() => rl.drive());
+        return rl as unknown as never;
+      },
+      write: (s) => out.push(s),
+      backends: {
+        liveRunners: [],
+        paidClis: [],
+        startedRunners: new Set<string>(),
+        unavailableRunners: [],
+      },
+      home: TMP_HOME,
+      configHome,
+      handlers: { runMessageTurn: async () => turnResult("done") },
+    });
+    return out.join("");
+  };
+  try {
+    await run(["/authorisation 7"]);
+    assert.equal(saved(), 7, "an explicit numbered choice is written");
+
+    // "restart": a second launchSession over the same config home reports the saved level back
+    const restored = await run(["/authorisation"]);
+    assert.match(restored, /authorisation: 7 runall/, "the saved posture must survive a restart");
+
+    // a session-scoped posture change must not become the next session's default
+    await run(["/permission-mode default"]);
+    assert.equal(saved(), 7, "/permission-mode is not a preference");
+    const after = await run(["/authorisation"]);
+    assert.match(after, /authorisation: 7 runall/, "the mode change leaked into the next session");
+  } finally {
+    rmSync(configHome, { recursive: true, force: true });
+  }
+});
+
+/**
+ * `--authorisation` parsed, was accepted, and did nothing at all on this host — so
+ * `prometheus --plain --authorisation 7`, every `--tmux` launch and every non-TTY fallback ran
+ * at the persisted-or-default level with nothing printed to say the flag had been dropped.
+ */
+test("readline host: --authorisation is APPLIED for the session but never saved", async () => {
+  const configHome = mkdtempSync(join(tmpdir(), "prom-host-authflag-"));
+  const authFile = join(configHome, ".prometheus", "config", "authorisation.json");
+  const run = async (lines: string[], argsOver: Partial<ParsedArgs> = {}): Promise<string> => {
+    const out: string[] = [];
+    const rl = new FakeReadline(lines);
+    await launchSession(args(argsOver), {
+      isTty: true,
+      makeReadline: () => {
+        setImmediate(() => rl.drive());
+        return rl as unknown as never;
+      },
+      write: (s) => out.push(s),
+      backends: {
+        liveRunners: [],
+        paidClis: [],
+        startedRunners: new Set<string>(),
+        unavailableRunners: [],
+      },
+      home: TMP_HOME,
+      configHome,
+      handlers: { runMessageTurn: async () => turnResult("done") },
+    });
+    return out.join("");
+  };
+  try {
+    const out = await run(["/authorisation"], { flags: { authorisation: "6" } });
+    assert.match(out, /authorisation: 6 trusted/, "the flag must reach this host's level");
+    assert.equal(
+      existsSync(authFile),
+      false,
+      "a launch flag is a one-off override, not a stored preference",
+    );
+    // the name form works too, and so does the `--auth` short spelling
+    assert.match(
+      await run(["/authorisation"], { flags: { auth: "runall" } }),
+      /authorisation: 7 runall/,
+    );
+    // an unparseable value is REPORTED, not silently ignored
+    assert.match(await run([], { flags: { authorisation: "nope" } }), /unknown --authorisation/);
+  } finally {
+    rmSync(configHome, { recursive: true, force: true });
+  }
+});
+
+/**
+ * `--permission-mode` reached this host but could not survive it: the launch block set the mode,
+ * then the elevation clamp three lines below UNCONDITIONALLY re-derived it from the numeric level.
+ * mode → level → mode is lossy (plan pins the level to 0, and level 0 maps back to "default"), so
+ * `plan` — the one mode whose whole purpose is a read-only DENY, and the only thing enforcing it
+ * on this host — was thrown away on every launch. With `--authorisation 7` alongside, the same
+ * line produced "yolo".
+ */
+test("readline host: --permission-mode plan SURVIVES the elevation clamp (and never becomes yolo)", async () => {
+  const run = async (argsOver: Partial<ParsedArgs>): Promise<string> => {
+    const out: string[] = [];
+    const rl = new FakeReadline(["/permission-mode", "/quit"]);
+    await launchSession(args(argsOver), {
+      isTty: true,
+      makeReadline: () => {
+        setImmediate(() => rl.drive());
+        return rl as unknown as never;
+      },
+      write: (s) => out.push(s),
+      backends: {
+        liveRunners: [],
+        paidClis: [],
+        startedRunners: new Set<string>(),
+        unavailableRunners: [],
+      },
+      home: TMP_HOME,
+      configHome: TMP_HOME,
+      handlers: { runMessageTurn: async () => turnResult("done") },
+    });
+    return out.join("");
+  };
+
+  assert.match(
+    await run({ flags: { "permission-mode": "plan" } }),
+    /permission mode: plan/,
+    "the flag must still be in force after the clamp",
+  );
+  // The escalation half: an explicit read-only mode must not be rewritten by the level flag.
+  const both = await run({ flags: { "permission-mode": "plan", authorisation: "7" } });
+  assert.match(both, /permission mode: plan/);
+  assert.doesNotMatch(both, /permission mode: yolo/, "plan must never come out as run-all");
+  // the modes that DO round-trip keep working, so the guard did not break the normal path
+  assert.match(await run({ flags: { "permission-mode": "acceptEdits" } }), /permission mode: acceptEdits/);
+});
+
+/**
+ * The `[keymap]` table the CLI's own `config set` writes must actually be READ.
+ *
+ * `loadKeymap` was handed `home` — `prometheusHome()`, the `~/.prometheus` STATE tree — while
+ * the config it parses lives in the CONFIG tree, so it resolved a path nothing ever creates and
+ * fell into its own fail-soft branch on every launch. A rebind saved, printed success, and did
+ * nothing. Identical config-tree-vs-state-tree confusion to the one that lost the saved
+ * authorisation level, in a second place.
+ */
+test("readline host: a [keymap] rebind in config.toml reaches /keys", async () => {
+  const configHome = mkdtempSync(join(tmpdir(), "prom-host-keymap-"));
+  const stateHome = mkdtempSync(join(tmpdir(), "prom-host-keymap-state-"));
+  try {
+    const cfgDir = join(configHome, ".prometheus", "config");
+    mkdirSync(cfgDir, { recursive: true });
+    writeFileSync(join(cfgDir, "config.toml"), '[keymap]\nnewline = "alt+enter"\n');
+
+    const out: string[] = [];
+    const rl = new FakeReadline(["/keys"]);
+    await launchSession(args(), {
+      isTty: true,
+      makeReadline: () => {
+        setImmediate(() => rl.drive());
+        return rl as unknown as never;
+      },
+      write: (s) => out.push(s),
+      backends: {
+        liveRunners: [],
+        paidClis: [],
+        startedRunners: new Set<string>(),
+        unavailableRunners: [],
+      },
+      // deliberately DIFFERENT trees, which is the whole point: passing the state tree here is
+      // what made the read miss, and a test that reused one dir for both could not see it.
+      home: stateHome,
+      configHome,
+      handlers: { runMessageTurn: async () => turnResult("done") },
+    });
+    assert.match(
+      out.join(""),
+      /alt\+enter/,
+      "the [keymap] table was not read — the rebind is cosmetic again",
+    );
+  } finally {
+    rmSync(configHome, { recursive: true, force: true });
+    rmSync(stateHome, { recursive: true, force: true });
+  }
+});
+
+/**
+ * The readline host's twin of the effort restart journey. The two hosts do not share this
+ * wiring — each seeds its own tuning and owns its own setter — so a fix proven on one proves
+ * nothing about the other. They have drifted before.
+ */
+test("readline host: /think survives a restart; a flag overrides it without rewriting it", async () => {
+  const configHome = mkdtempSync(join(tmpdir(), "prom-host-effort-"));
+  const tierFile = join(configHome, ".prometheus", "config", "effort.json");
+  const saved = (): string | null => {
+    try {
+      return JSON.parse(readFileSync(tierFile, "utf8")).tier;
+    } catch {
+      return null;
+    }
+  };
+  const run = async (lines: string[], argsOver: Partial<ParsedArgs> = {}): Promise<string> => {
+    const out: string[] = [];
+    const rl = new FakeReadline(lines);
+    await launchSession(args(argsOver), {
+      isTty: true,
+      makeReadline: () => {
+        setImmediate(() => rl.drive());
+        return rl as unknown as never;
+      },
+      write: (s) => out.push(s),
+      backends: {
+        liveRunners: [],
+        paidClis: [],
+        startedRunners: new Set<string>(),
+        unavailableRunners: [],
+      },
+      home: TMP_HOME,
+      configHome,
+      handlers: { runMessageTurn: async () => turnResult("done") },
+    });
+    return out.join("");
+  };
+  try {
+    await run([]);
+    assert.equal(saved(), null, "opening a session must not create the store");
+
+    await run(["/think xhigh"]);
+    assert.equal(saved(), "xhigh", "an explicit /think is written");
+
+    // "restart": /think with no argument reports the tier the new session started at
+    assert.match(await run(["/think"]), /think: xhigh/, "the saved tier must survive a restart");
+
+    // a launch flag wins for THIS session and leaves the preference alone
+    assert.match(await run(["/think"], { effort: "low" }), /think: low/);
+    assert.equal(saved(), "xhigh", "a flag is a one-off override, not a stored preference");
+  } finally {
+    rmSync(configHome, { recursive: true, force: true });
+  }
 });

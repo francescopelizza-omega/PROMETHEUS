@@ -95,7 +95,16 @@ export function parseAccountingFile(text: string): DesktopSpendRecord[] {
  * only destroy the user's answer after the money was spent. (The READ side is fail-CLOSED, so
  * a store that cannot be read still blocks the NEXT turn.)
  */
-export function appendSpendRecord(userDataPath: string, rec: DesktopSpendRecord): void {
+export function appendSpendRecord(
+  userDataPath: string,
+  rec: DesktopSpendRecord,
+  sharedDir: string = ai.sharedAccountingDir(),
+): void {
+  // The SHARED daily ledger first: `budget.dailyUsd` is one number and must be counted from
+  // one place, or a user running Studio and the terminal on the same day gets the cap twice.
+  // `sharedDir` is a parameter, not a hidden default lookup, so a test can point it at a temp
+  // directory instead of appending to the developer's real spend log.
+  ai.appendSharedSpend(sharedDir, rec);
   try {
     const dir = accountingDir(userDataPath);
     mkdirSync(dir, { recursive: true });
@@ -105,8 +114,34 @@ export function appendSpendRecord(userDataPath: string, rec: DesktopSpendRecord)
   }
 }
 
-/** Read every record written on the local day containing `nowIso`. Throws if unreadable. */
-export function readDayRecords(userDataPath: string, nowIso: string): DesktopSpendRecord[] {
+/**
+ * Every record written on the local day containing `nowIso`. Throws if unreadable.
+ *
+ * Reads the SHARED ledger AND this app's private day file: the daily cap counts every metered
+ * call the user made today on any surface, and the private file is still read so a user who
+ * upgrades mid-day does not have this morning's spend vanish out of the window. Rows appended
+ * since the shared ledger landed are in both files and are counted once.
+ */
+export function readDayRecords(
+  userDataPath: string,
+  nowIso: string,
+  sharedDir: string = ai.sharedAccountingDir(),
+): DesktopSpendRecord[] {
+  const shared = ai.readSharedDay(sharedDir, nowIso) as DesktopSpendRecord[];
+  const key = (r: DesktopSpendRecord): string =>
+    `${r.atIso}|${r.model}|${r.promptTokens}|${r.completionTokens}`;
+  const seen = new Set(shared.map(key));
+  return [...shared, ...readPrivateDayRecords(userDataPath, nowIso).filter((r) => !seen.has(key(r)))];
+}
+
+/**
+ * This app's OWN rows for the local day. Throws if the file exists but cannot be read.
+ *
+ * Kept separate from `readDayRecords` because the SESSION window must not see another
+ * surface's rows: "this launch" is per-surface by definition, and folding the shared ledger
+ * into it would charge a terminal session's spend against Studio's session cap.
+ */
+function readPrivateDayRecords(userDataPath: string, nowIso: string): DesktopSpendRecord[] {
   const file = join(accountingDir(userDataPath), dayFileName(nowIso));
   try {
     statSync(file);
@@ -130,7 +165,7 @@ export function readSessionRecords(
   nowIso: string,
   sinceMs: number,
 ): DesktopSpendRecord[] {
-  return readDayRecords(userDataPath, nowIso).filter((r) => {
+  return readPrivateDayRecords(userDataPath, nowIso).filter((r) => {
     const t = Date.parse(r.atIso);
     return Number.isFinite(t) && t >= sinceMs;
   });
@@ -201,14 +236,17 @@ export class DesktopBudgetGate {
   private readonly warned = new Set<string>();
   private readonly startedMs: number;
   private readonly userDataPath: string;
+  /** where the SHARED daily ledger lives; injectable so a test never touches the real home. */
+  private readonly sharedDir: string;
   private pricing: ai.Pricing = {};
   private settings: coreSettings.Settings | undefined;
 
   // NOTE: plain fields, not TS parameter properties — the repo's test runner strips types
   // rather than compiling them, and `constructor(private x)` is unsupported in strip-only mode.
-  constructor(userDataPath: string, opts: { startedMs?: number } = {}) {
+  constructor(userDataPath: string, opts: { startedMs?: number; sharedDir?: string } = {}) {
     this.userDataPath = userDataPath;
     this.startedMs = opts.startedMs ?? Date.now();
+    this.sharedDir = opts.sharedDir ?? ai.sharedAccountingDir();
   }
 
   /** Adopt resolved settings (startup + every change), exactly like the security posture. */
@@ -243,7 +281,7 @@ export class DesktopBudgetGate {
     try {
       const sessionRecords = readSessionRecords(this.userDataPath, nowIso, this.startedMs);
       const dayRecords =
-        config.dailyUsd !== undefined ? readDayRecords(this.userDataPath, nowIso) : undefined;
+        config.dailyUsd !== undefined ? readDayRecords(this.userDataPath, nowIso, this.sharedDir) : undefined;
       return ai.decideBudget({
         sessionRecords,
         ...(dayRecords ? { dayRecords } : {}),
@@ -288,7 +326,7 @@ export class DesktopBudgetGate {
       /* unreadable store ⇒ an honest empty snapshot, never a crashed Settings page */
     }
     try {
-      dayRecords = readDayRecords(this.userDataPath, nowIso);
+      dayRecords = readDayRecords(this.userDataPath, nowIso, this.sharedDir);
     } catch {
       /* same */
     }
@@ -314,13 +352,17 @@ export class DesktopBudgetGate {
     nowIso?: string;
   }): void {
     if (opts.locality === "local") return;
-    appendSpendRecord(this.userDataPath, {
-      atIso: opts.nowIso ?? new Date().toISOString(),
-      model: opts.model,
-      promptTokens: opts.promptTokens,
-      completionTokens: opts.completionTokens,
-      estimated: opts.estimated === true,
-    });
+    appendSpendRecord(
+      this.userDataPath,
+      {
+        atIso: opts.nowIso ?? new Date().toISOString(),
+        model: opts.model,
+        promptTokens: opts.promptTokens,
+        completionTokens: opts.completionTokens,
+        estimated: opts.estimated === true,
+      },
+      this.sharedDir,
+    );
   }
 }
 

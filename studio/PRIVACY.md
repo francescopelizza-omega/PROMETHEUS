@@ -13,9 +13,11 @@
    **locally, on disk, in plain JSONL you can read**:
    - `~/.nemesis/gate-audit.jsonl` — the engine's append-only, signed gate-decision log
      (installs, verdicts; written by the engine, reused by Studio).
-   - `~/.config/prometheus-studio/events.jsonl` — UI-side actions (panels opened,
-     downloads started). **Never auto-sent.** Settings → Privacy → *Open my data
-     folder* / *Export* / *Wipe*.
+   - `~/.prometheus/config/events.jsonl` — UI-side actions (panels opened, downloads
+     started). **Never auto-sent.** Settings → Privacy → *Open my data folder* /
+     *Export* / *Wipe*. NOTE: no shipping surface writes this file yet — the recorder
+     exists but nothing is wired to it, so today this path is where UI events *will*
+     be written, not a file you will find. The gate-audit log above is real and live.
 3. **Crash reporting is opt-in and scrubbed.** If you enable it, reports are scrubbed
    before leaving: `$HOME` paths → `~`, URLs → `[url]`, and any field whose name looks
    secret (repo/url/path/model/token/secret/key/email/…) → `[redacted]`. PII budget = 0.
@@ -32,7 +34,7 @@
 | Data | Location | Sent anywhere? |
 |---|---|---|
 | Gate decisions / verdicts | `~/.nemesis/gate-audit.jsonl` (signed) | No (local) |
-| UI events | `~/.config/prometheus-studio/events.jsonl` | No unless you opt in (then scrubbed) |
+| UI events | `~/.prometheus/config/events.jsonl` (not yet written by any surface) | No unless you opt in (then scrubbed) |
 | Secrets (API keys, tokens) | OS keychain (`com.prometheus.studio`) | No — never written to a settings file |
 | Settings / profiles | `~/.prometheus-studio/settings.json`, `.prometheus/settings.json` | No |
 | Crash reports (opt-in) | your chosen vendor | Only if enabled; scrubbed first |

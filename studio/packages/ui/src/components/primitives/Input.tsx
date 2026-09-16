@@ -48,7 +48,7 @@ function fieldStyle(invalid: boolean, mono: boolean): CSSProperties {
 }
 
 export const Input = forwardRef<HTMLInputElement, InputProps>(function Input(
-  { invalid = false, mono = false, size = "md", className, style, ...rest },
+  { invalid = false, mono = false, size = "md", className, style, onFocus, onBlur, ...rest },
   ref,
 ) {
   const ring = focusRingHandlers();
@@ -64,15 +64,19 @@ export const Input = forwardRef<HTMLInputElement, InputProps>(function Input(
         fontSize: size === "sm" ? fs("small") : fs("body"),
         ...style,
       }}
+      // `{...rest}` FIRST. Spread last, a caller's own onFocus/onBlur silently replaced
+      // the composed prop and the tokenized focus ring stopped being drawn on that
+      // control. Spreading first lets the handlers below win; they chain the caller's,
+      // destructured out of `rest` so the spread cannot reintroduce it.
+      {...rest}
       onFocus={(e) => {
         ring.onFocus(e);
-        rest.onFocus?.(e);
+        onFocus?.(e);
       }}
       onBlur={(e) => {
         ring.onBlur(e);
-        rest.onBlur?.(e);
+        onBlur?.(e);
       }}
-      {...rest}
     />
   );
 });
@@ -94,7 +98,7 @@ export interface TextareaProps extends TextareaHTMLAttributes<HTMLTextAreaElemen
 }
 
 export const Textarea = forwardRef<HTMLTextAreaElement, TextareaProps>(function Textarea(
-  { invalid = false, mono = false, rows = 4, className, style, ...rest },
+  { invalid = false, mono = false, rows = 4, className, style, onFocus, onBlur, ...rest },
   ref,
 ) {
   const ring = focusRingHandlers();
@@ -112,15 +116,19 @@ export const Textarea = forwardRef<HTMLTextAreaElement, TextareaProps>(function 
         resize: "vertical",
         ...style,
       }}
+      // `{...rest}` FIRST. Spread last, a caller's own onFocus/onBlur silently replaced
+      // the composed prop and the tokenized focus ring stopped being drawn on that
+      // control. Spreading first lets the handlers below win; they chain the caller's,
+      // destructured out of `rest` so the spread cannot reintroduce it.
+      {...rest}
       onFocus={(e) => {
         ring.onFocus(e);
-        rest.onFocus?.(e);
+        onFocus?.(e);
       }}
       onBlur={(e) => {
         ring.onBlur(e);
-        rest.onBlur?.(e);
+        onBlur?.(e);
       }}
-      {...rest}
     />
   );
 });

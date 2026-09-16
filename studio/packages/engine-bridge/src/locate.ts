@@ -17,6 +17,7 @@
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { type EngineConfig, resolveEngine } from "./config.js";
+import { expandHomeValue } from "./prom-home.js";
 
 export interface EnginePaths {
   py: string;
@@ -81,7 +82,11 @@ function bundledPaths(
  */
 export function enginePaths(opts: EnginePathsOptions = {}): EnginePaths {
   const res = opts.resourcesPath ?? electronResourcesPath();
-  const home = opts.promHome ?? process.env.PROMETHEUS_HOME;
+  // Through the shared resolver: a `~`-prefixed or relative value used to be passed through
+  // verbatim here, so `PROMETHEUS_HOME=~/prom` looked for the engine under a directory literally
+  // named `~`. `expandHomeValue` keeps "unset" as undefined, which this lane needs — no home
+  // means fall through to the sibling checkout / PATH, not to `~/.prometheus`.
+  const home = expandHomeValue(opts.promHome ?? process.env.PROMETHEUS_HOME);
   const bundled = bundledPaths(res, home);
 
   const fallback = resolveEngine(opts);
@@ -108,7 +113,11 @@ export function engineLanes(opts: EnginePathsOptions = {}): {
   python: EngineLane;
 } {
   const res = opts.resourcesPath ?? electronResourcesPath();
-  const home = opts.promHome ?? process.env.PROMETHEUS_HOME;
+  // Through the shared resolver: a `~`-prefixed or relative value used to be passed through
+  // verbatim here, so `PROMETHEUS_HOME=~/prom` looked for the engine under a directory literally
+  // named `~`. `expandHomeValue` keeps "unset" as undefined, which this lane needs — no home
+  // means fall through to the sibling checkout / PATH, not to `~/.prometheus`.
+  const home = expandHomeValue(opts.promHome ?? process.env.PROMETHEUS_HOME);
   const bundled = bundledPaths(res, home);
   const bundledLane: EngineLane = res ? "resources" : "prom-home";
   const laneOf = (envValue: string | undefined, bundledPath: string | undefined): EngineLane => {

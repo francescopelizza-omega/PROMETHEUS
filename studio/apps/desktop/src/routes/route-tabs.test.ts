@@ -23,12 +23,35 @@ test("a request LATCHES for a route that has not mounted yet", () => {
   assert.equal(takeRouteTab("workspace"), "docs");
 });
 
-test("takeRouteTab CLEARS — a segment is a one-shot handoff, not a sticky preference", () => {
+test("takeRouteTab CLEARS — a segment is a one-shot handoff, not a sticky preference", async () => {
   requestRouteTab("workspace", "environments");
   assert.equal(takeRouteTab("workspace"), "environments");
   // Navigating away and back must land on the route's own default, not re-apply a redirect
-  // that happened three navigations ago.
+  // that happened three navigations ago. "Away and back" is at minimum a new tick.
+  await Promise.resolve();
   assert.equal(takeRouteTab("workspace"), null);
+});
+
+test("takeRouteTab is STABLE within one tick — React StrictMode calls it twice", async () => {
+  // Every caller reads this from a `useState` initializer, which StrictMode double-invokes
+  // in development, KEEPING THE SECOND value. When the first call cleared the latch, the
+  // second returned null and a persisted `docs` deep link landed on Workspace→Repos in
+  // `vite dev` while the production build was correct.
+  requestRouteTab("workspace", "docs");
+  assert.equal(takeRouteTab("workspace"), "docs", "pass 1 (discarded by React)");
+  assert.equal(takeRouteTab("workspace"), "docs", "pass 2 — the one React keeps");
+  await Promise.resolve();
+  assert.equal(takeRouteTab("workspace"), null, "and it is still one-shot across ticks");
+});
+
+test("a fresh request within the same tick is not masked by the memo", async () => {
+  requestRouteTab("catalog", "skills");
+  assert.equal(takeRouteTab("catalog"), "skills");
+  // a later navigation in the SAME tick must win over what was just taken
+  requestRouteTab("catalog", "extensions");
+  assert.equal(takeRouteTab("catalog"), "extensions");
+  await Promise.resolve();
+  assert.equal(takeRouteTab("catalog"), null);
 });
 
 test("a request NOTIFIES a route that is already mounted", () => {
@@ -78,4 +101,30 @@ test("unsubscribing one listener leaves the others intact", () => {
   requestRouteTab("workspace", "docs");
   assert.deepEqual(a, []);
   assert.deepEqual(b, ["docs"]);
+});
+
+test("a request to a MOUNTED route leaves no latch behind", () => {
+  // Latching and notifying both left a permanent latch whenever the target was already up,
+  // and only a mount consumes a latch - so it hijacked a navigation the user made much
+  // later. Repro: on Workspace/Repos, a python.* command notifies the live route AND latches
+  // "environments"; the next time Workspace mounts, the user lands on Environments.
+  const seen = [];
+  const off = onRouteTab("workspace", (t) => seen.push(t));
+  requestRouteTab("workspace", "environments");
+  assert.deepEqual(seen, ["environments"], "the mounted route was notified");
+  off();
+  assert.equal(takeRouteTab("workspace"), null, "…and nothing was stranded for a later mount");
+});
+
+test("a request with NO listener still latches for the coming mount", () => {
+  requestRouteTab("catalog", "skills");
+  assert.equal(takeRouteTab("catalog"), "skills");
+});
+
+test("unsubscribing restores latching for the next request", () => {
+  const off = onRouteTab("workspace", () => undefined);
+  requestRouteTab("workspace", "docs");
+  off();
+  requestRouteTab("workspace", "environments");
+  assert.equal(takeRouteTab("workspace"), "environments", "the post-unmount request latched");
 });

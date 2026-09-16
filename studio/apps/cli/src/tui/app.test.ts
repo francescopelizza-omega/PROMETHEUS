@@ -206,3 +206,155 @@ test("CLOCK DRIFT GUARD: the turn clock is painted by elapsed time, never as `mu
   assert.doesNotMatch(line, /"muted"/, "the clock went back to the near-invisible grey");
   assert.match(line, /elapsedMs/, "the clock is not passing the elapsed span to the painter");
 });
+
+/**
+ * The TUI's startup write, driven through the REAL `launchTui`.
+ *
+ * The previous guard in this file exercised `resolveStartAuthLevel` — a pure function — while
+ * the defect lived in the call site next to it, so reverting app.ts to the exact bug its own
+ * docblock describes left every test in this file green. This one opens the actual TUI over
+ * injected streams, which is the only thing that can tell "the level is restored" from "the
+ * level is restored and then written back over".
+ */
+async function driveTui(configHome: string, over: Record<string, unknown> = {}): Promise<number> {
+  const { EventEmitter } = await import("node:events");
+  class FakeIn extends EventEmitter {
+    isTTY = true;
+    setRawMode(): this {
+      return this;
+    }
+    resume(): this {
+      return this;
+    }
+    pause(): this {
+      return this;
+    }
+    setEncoding(): this {
+      return this;
+    }
+  }
+  class FakeOut extends EventEmitter {
+    columns = 100;
+    rows = 30;
+    isTTY = true;
+    write(): boolean {
+      return true;
+    }
+  }
+  const stdin = new FakeIn();
+  // Ctrl-D closes the session the way a real one does; `end` is the belt-and-braces backstop.
+  setTimeout(() => stdin.emit("data", Buffer.from("\x04")), 400);
+  setTimeout(() => stdin.emit("end"), 2_000);
+  const { launchTui } = await import("./app.js");
+  return launchTui(
+    {
+      command: [],
+      positionals: [],
+      json: false,
+      noColor: true,
+      help: false,
+      version: false,
+      repl: true,
+      dryRun: false,
+      yes: false,
+      strict: false,
+      force: false,
+      noGate: false,
+      verbose: false,
+      quiet: false,
+      flags: {},
+      cwd: configHome,
+      ...over,
+    } as never,
+    {
+      stdin: stdin as never,
+      stdout: new FakeOut() as never,
+      isTty: true,
+      configHome,
+      home: configHome,
+      backends: {
+        liveRunners: [],
+        paidClis: [],
+        startedRunners: new Set<string>(),
+        unavailableRunners: [],
+      },
+    },
+  );
+}
+
+test("opening the TUI neither creates the authorisation store nor rewrites a saved level", async () => {
+  const { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync } = await import(
+    "node:fs"
+  );
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const authFile = (h: string): string => join(h, ".prometheus", "config", "authorisation.json");
+
+  // (a) a machine that has never set a level: opening a session must write NOTHING. The startup
+  // call used to persist unconditionally, so a first launch stamped the default onto disk —
+  // and every later read miss or safety clamp became permanent the same way.
+  const fresh = mkdtempSync(join(tmpdir(), "prom-tui-fresh-"));
+  await driveTui(fresh);
+  assert.equal(existsSync(authFile(fresh)), false, "a launch must not create the store");
+
+  // (b) a saved level survives a launch untouched — same bytes, not merely the same number.
+  const seeded = mkdtempSync(join(tmpdir(), "prom-tui-seeded-"));
+  mkdirSync(join(seeded, ".prometheus", "config"), { recursive: true });
+  writeFileSync(authFile(seeded), '{"level":7}');
+  await driveTui(seeded);
+  assert.equal(readFileSync(authFile(seeded), "utf8"), '{"level":7}', "the launch rewrote it");
+});
+
+test("logCrash persists the ACTUAL error to <home>/logs/crashes (crash-log regression)", async () => {
+  /**
+   * `onCrash` used to be declared with ZERO parameters, yet was registered directly as the
+   * process's `uncaughtException`/`unhandledRejection` listener. Node hands that listener the
+   * actual error — dropped on the floor by the missing parameter. The terminal was restored and
+   * the process exited clean, but there was no log file, no stderr line, no trace anywhere of
+   * what threw. A session that died this way was undiagnosable after the fact.
+   *
+   * This drives `logCrash` directly rather than emitting a real `uncaughtException` on
+   * `process`: that event is global, and node:test's own runner listens for it too, so a
+   * synthetic emit gets treated as a real test-process crash by the harness itself.
+   */
+  const { mkdtempSync, readdirSync, readFileSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const { logCrash } = await import("./app.js");
+
+  const home = mkdtempSync(join(tmpdir(), "prom-crash-log-"));
+  const logPath = logCrash(home, new Error("boom from a test"));
+
+  assert.ok(logPath, "logCrash must return the path it wrote");
+  const files = readdirSync(join(home, "logs", "crashes"));
+  assert.equal(files.length, 1, "expected exactly one crash log written");
+  assert.match(
+    readFileSync(logPath, "utf8"),
+    /boom from a test/,
+    "the crash log must contain the real error, not drop it",
+  );
+
+  // a non-Error rejection reason (a thrown string/object) must still be captured, not `String`-ed
+  // into "[object Object]" or dropped for lacking a `.stack`.
+  const logPath2 = logCrash(home, "a raw rejection reason, not an Error");
+  assert.match(
+    readFileSync(logPath2, "utf8"),
+    /a raw rejection reason, not an Error/,
+    "a non-Error crash reason must be captured too",
+  );
+});
+
+test("SOURCE GUARD: onCrash takes the error Node hands it and threads it through logCrash", async () => {
+  // The defect was structural — a zero-arg `onCrash` registered as the crash listener — so this
+  // guards the wiring itself, the same way CLOCK DRIFT GUARD above guards app.ts's call site
+  // rather than only the pure helper.
+  const { readFileSync } = await import("node:fs");
+  const { fileURLToPath } = await import("node:url");
+  const src = readFileSync(fileURLToPath(new URL("./app.ts", import.meta.url)), "utf8");
+  assert.match(
+    src,
+    /function onCrash\(err: unknown\)/,
+    "onCrash must take the error as a parameter, not silently drop it",
+  );
+  assert.match(src, /logCrash\(home, err\)/, "onCrash must persist the real error via logCrash");
+});

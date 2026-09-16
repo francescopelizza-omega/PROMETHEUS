@@ -140,7 +140,13 @@ function RefPill({ label }: { label: string }): ReactElement {
         borderRadius: "var(--radius-sm, 3px)",
         fontSize: "0.65rem",
         fontFamily: "var(--font-mono, monospace)",
-        color: isHead ? "var(--bg-app)" : "var(--text-primary)",
+        // The tag branch paints on solid --warn amber; --text-primary over it measured 1.45:1.
+        // --bg-app is what the sibling isHead branch already uses over --accent. The third
+        // (--bg-inset) branch keeps --text-primary: that ground is dark, not a role fill.
+        // `--on-warn` is the computed label colour for the `--warn` FILL (tokens/contrast.ts `onFill`).
+        // The old `--brand-fg` here was WHITE on the dark scheme over a saturated light fill (~2:1),
+        // and a plain `--bg-app` would be near-white over the same fill on the LIGHT scheme.
+        color: isHead ? "var(--on-accent)" : isTag ? "var(--on-warn)" : "var(--text-primary)",
         background: isHead ? "var(--accent)" : isTag ? "var(--warn)" : "var(--bg-inset)",
         border: isHead || isTag ? "none" : "1px solid var(--border-strong)",
       }}
@@ -304,6 +310,7 @@ function HunkStager({
                 fontSize: "0.68rem",
                 overflow: "hidden",
                 textOverflow: "ellipsis",
+                minWidth: 0, // flex/grid floor — without it the ellipsis is unreachable
                 whiteSpace: "nowrap",
               }}
             >
@@ -755,6 +762,7 @@ function PullRequests({ root }: { root: string }): ReactElement | null {
                       flex: 1,
                       overflow: "hidden",
                       textOverflow: "ellipsis",
+                      minWidth: 0, // flex/grid floor — without it the ellipsis is unreachable
                       whiteSpace: "nowrap",
                     }}
                   >
@@ -1592,6 +1600,7 @@ export function GitPanel({ root }: { root: string }): ReactElement {
                   color: "var(--text-primary)",
                   overflow: "hidden",
                   textOverflow: "ellipsis",
+                  minWidth: 0, // flex/grid floor — without it the ellipsis is unreachable
                   whiteSpace: "nowrap",
                 }}
               >
@@ -1670,6 +1679,7 @@ export function GitPanel({ root }: { root: string }): ReactElement {
                         padding: 0,
                         overflow: "hidden",
                         textOverflow: "ellipsis",
+                        minWidth: 0, // flex/grid floor — without it the ellipsis is unreachable
                         whiteSpace: "nowrap",
                       }}
                     >
@@ -1754,7 +1764,7 @@ export function GitPanel({ root }: { root: string }): ReactElement {
               </p>
             )}
             {genPaused && (
-              <p style={{ margin: "4px 0 0", color: "var(--warning)", fontSize: "0.72rem" }}>
+              <p style={{ margin: "4px 0 0", color: "var(--warn)", fontSize: "0.72rem" }}>
                 ⏸ the model went idle — paused, nothing lost. Edit the draft above, or retry.
               </p>
             )}
@@ -2247,7 +2257,10 @@ export function GitPanel({ root }: { root: string }): ReactElement {
           role="alert"
           style={{
             position: "fixed",
-            top: 8,
+            // 44, not 8: the merge-conflict banner above already owns top:8 at the same
+            // Z.toast rung, and two fixed banners at identical coordinates print on top of
+            // each other. Stacked, both stay readable when a rebase fails mid-merge.
+            top: 44,
             left: "50%",
             transform: "translateX(-50%)",
             // Z.toast, not Z.modal: this banner exists to say WHY the operation failed, and

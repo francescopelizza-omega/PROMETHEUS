@@ -6,14 +6,18 @@
  * plausible pills, and a reversed history looks completely normal.
  */
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { test } from "node:test";
 
 import {
   type AuditRowLike,
   ageLabel,
   findingsSummary,
+  gateBanner,
   gateCounts,
+  gateModeOf,
   historyRows,
+  remediationLineLevel,
   remediationProgress,
 } from "./security-console-view.js";
 
@@ -112,14 +116,20 @@ test("source falls back from label to tier to a dash", () => {
 test("a non-allow verdict with no reasons is NOT reported as clean", () => {
   // "clean" beside a BLOCK would contradict the verdict chip in the same row.
   assert.equal(findingsSummary({ at: at(1), target: "x", verdict: "block" }), "no reason recorded");
-  assert.equal(findingsSummary({ at: at(1), target: "x", verdict: "allow" }), "clean");
+  // NOT "clean": that is a SEVERITY word (packages/ui/src/tokens.ts says so verbatim), and
+  // deriving it from the TIER `allow` restates the decision as a second, corroborating
+  // measurement — the §4 conflation, in the row beside the verdict chip.
+  assert.equal(
+    findingsSummary({ at: at(1), target: "x", verdict: "allow" }),
+    "no findings recorded",
+  );
   assert.equal(
     findingsSummary({ at: at(1), target: "x", verdict: "warn", blocking_reasons: ["a", "b"] }),
-    "2 findings",
+    "2 reasons",
   );
   assert.equal(
     findingsSummary({ at: at(1), target: "x", verdict: "warn", blocking_reasons: ["a"] }),
-    "1 finding",
+    "1 reason",
   );
 });
 
@@ -138,4 +148,153 @@ test("progress is resolved out of resolved+unresolved", () => {
     total: 3,
   });
   assert.deepEqual(remediationProgress({ resolved: ["a"], unresolved: [] }), { done: 1, total: 1 });
+});
+
+/* ── §4: "✓ done green, … active amber" ──────────────────────────────────────────── */
+
+test("remediationLineLevel: the engine's markers decide the tint", () => {
+  assert.equal(remediationLineLevel("✓ removed postinstall script"), "success");
+  assert.equal(remediationLineLevel("✔ pinned dependency hashes"), "success");
+  assert.equal(remediationLineLevel("… rewriting fetch calls (2 of 3)"), "warn");
+  assert.equal(remediationLineLevel("... still working"), "warn");
+  assert.equal(remediationLineLevel("✗ could not rewrite"), "error");
+  assert.equal(remediationLineLevel("⚠ partial"), "warn");
+});
+
+test("remediationLineLevel: outcome words are honoured without a marker", () => {
+  assert.equal(remediationLineLevel("disinfect failed for 1 item"), "error");
+  assert.equal(remediationLineLevel("2 findings unresolved"), "warn");
+  assert.equal(remediationLineLevel("Unable to open quarantine dir"), "error");
+});
+
+test("remediationLineLevel: an unrecognised line stays neutral, never a guessed ✓", () => {
+  // a green tick beside a line that never claimed success is a lie the user will trust
+  assert.equal(remediationLineLevel("remediate shadow-fetch → strip network hooks"), "info");
+  assert.equal(remediationLineLevel(""), "info");
+  assert.equal(remediationLineLevel("scanning 41 files"), "info");
+});
+
+test("remediationLineLevel: leading whitespace does not defeat the marker", () => {
+  assert.equal(remediationLineLevel("   ✓ done"), "success");
+  assert.equal(remediationLineLevel("\t… working"), "warn");
+});
+
+/* ── §4: the banner must describe the gate's ACTUAL mode ─────────────────────────── */
+
+test("gateModeOf normalises the engine's string; anything else is unknown", () => {
+  assert.equal(gateModeOf("enforce"), "enforce");
+  assert.equal(gateModeOf(" WARN "), "warn");
+  assert.equal(gateModeOf("off"), "off");
+  assert.equal(gateModeOf("permissive"), "unknown", "an unrecognised mode is not a pass");
+  assert.equal(gateModeOf(undefined), "unknown");
+  assert.equal(gateModeOf(null), "unknown");
+  assert.equal(gateModeOf(""), "unknown");
+});
+
+test("PROMETHEUS_GATE=off must never render as armed, and never green", () => {
+  // the defect: the console asserted "nemesis gate — armed, fail-closed" under a green
+  // shield while the engine was running with the gate switched off entirely.
+  const b = gateBanner([{ gate_mode: "off" }]);
+  assert.equal(b.mode, "off");
+  assert.match(b.title, /OFF/);
+  assert.doesNotMatch(b.title, /armed/i);
+  assert.equal(b.role, "danger");
+});
+
+test("warn mode says plainly that nothing is blocked", () => {
+  const b = gateBanner([{ gate_mode: "warn" }]);
+  assert.equal(b.role, "warn");
+  assert.match(b.title, /nothing is blocked/i);
+  assert.doesNotMatch(b.title, /fail-closed/i);
+});
+
+test("only enforce earns the armed claim and the green shield", () => {
+  const b = gateBanner([{ gate_mode: "enforce" }]);
+  assert.equal(b.mode, "enforce");
+  assert.equal(b.role, "ok");
+  assert.match(b.title, /armed, fail-closed/);
+});
+
+test("the NEWEST row wins among the rows considered (newest-first ordering)", () => {
+  // auditLog() returns newest-first, and the mode is a property of the run that wrote the
+  // row, not of the installation. NOTE: ordering alone does not bound the row to this session —
+  // that is what `sinceMs` is for; see the test below.
+  const b = gateBanner([{ gate_mode: "off" }, { gate_mode: "enforce" }, { gate_mode: "enforce" }]);
+  assert.equal(b.mode, "off");
+  // rows without a mode are skipped rather than treated as unknown-and-stop
+  assert.equal(gateBanner([{}, { gate_mode: "warn" }]).mode, "warn");
+});
+
+test("the LIVE configured mode outranks the history entirely", () => {
+  /**
+   * `$PROMETHEUS_GATE` in main's env is what `safeChildEnv()` hands the next engine spawn, so it
+   * is a fact about this session rather than an inference from what some earlier one did. A log
+   * full of `enforce` rows must not paint green over a process configured `off`.
+   */
+  const rows = [{ gate_mode: "enforce", at: "2026-09-06T09:30:00.000Z" }];
+  const off = gateBanner(rows, { configured: "off", sinceMs: 0 });
+  assert.equal(off.mode, "off");
+  assert.equal(off.role, "danger");
+  assert.doesNotMatch(off.title, /armed/i);
+  // it wins in the reassuring direction too — a fresh enforce needs no corroborating row
+  assert.equal(gateBanner([], { configured: "enforce" }).mode, "enforce");
+  assert.equal(gateBanner(null, { configured: "warn" }).mode, "warn");
+  // an unrecognised or absent value is NOT a mode: fall through to the bounded history
+  assert.equal(gateBanner(rows, { configured: "banana", sinceMs: 0 }).mode, "enforce");
+  assert.equal(gateBanner(rows, { configured: null, sinceMs: 0 }).mode, "enforce");
+  assert.equal(gateBanner([], { configured: "banana" }).mode, "unknown");
+});
+
+test("a row older than this session cannot vouch for it — never a stale green", () => {
+  /**
+   * The real defect the "newest row" rule does not cover: with no gated action yet performed by
+   * THIS app, the newest row in the log is whatever the last run wrote — so an `enforce` row
+   * from a previous session painted `role: "ok"` over a session started with
+   * `PROMETHEUS_GATE=off`. That is the same false-green claim, one step removed.
+   */
+  const start = Date.parse("2026-09-06T09:00:00.000Z");
+  const stale = { gate_mode: "enforce", at: "2026-09-01T12:00:00.000Z" };
+  const fresh = { gate_mode: "enforce", at: "2026-09-06T09:30:00.000Z" };
+
+  const b = gateBanner([stale], { sinceMs: start });
+  assert.equal(b.mode, "unknown", "a pre-session row is not evidence about this session");
+  assert.notEqual(b.role, "ok");
+  assert.doesNotMatch(b.title, /armed/i);
+
+  // a row written by THIS session still counts
+  assert.equal(gateBanner([fresh], { sinceMs: start }).mode, "enforce");
+  // …and an in-session `off` still wins over an older enforce
+  assert.equal(
+    gateBanner([{ gate_mode: "off", at: "2026-09-06T10:00:00.000Z" }, fresh], { sinceMs: start })
+      .mode,
+    "off",
+  );
+  // an unparseable/absent timestamp is not treated as recent
+  assert.equal(gateBanner([{ gate_mode: "enforce" }], { sinceMs: start }).mode, "unknown");
+  // with no bound at all the old behaviour stands (the other tests in this file rely on it)
+  assert.equal(gateBanner([stale]).mode, "enforce");
+});
+
+test("an empty or unreadable log is UNKNOWN, not armed", () => {
+  // the bridge fails soft to [] for both, so the honest banner in both cases is "we cannot
+  // see our own evidence" — never a reassurance.
+  for (const rows of [[], null, undefined]) {
+    const b = gateBanner(rows);
+    assert.equal(b.mode, "unknown");
+    assert.notEqual(b.role, "ok", "an unknown gate mode must not paint green");
+    assert.doesNotMatch(b.title, /armed/i);
+  }
+});
+
+test("DRIFT GUARD: the console renders the derived banner, not the constants", () => {
+  const src = readFileSync(new URL("./security.tsx", import.meta.url), "utf8");
+  assert.match(src, /const banner = gateBanner\(auditLog, \{/);
+  assert.match(src, /sinceMs: APP_START_MS/);
+  // the LIVE mode from main must be threaded in — history alone cannot describe this session
+  assert.match(src, /configured: gateMode/);
+  assert.match(src, /\{banner\.title\}/);
+  assert.match(src, /\{banner\.note\}/);
+  assert.doesNotMatch(src, /\{GATE_BANNER_TITLE\}/, "the hardcoded claim is back on screen");
+  // the shield chip must follow the mode too, or an OFF gate keeps its green badge
+  assert.match(src, /var\(--\$\{banner\.role\}\)/);
 });

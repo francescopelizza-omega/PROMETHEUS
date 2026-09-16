@@ -55,7 +55,7 @@ import { loadHooksDetailed } from "./hooks-config.js";
 import { makeBudgetGuard, seedTuningWithNotes } from "./host.js";
 import { createKeyResolver, keychainProviders } from "./key-resolver.js";
 import { type McpSession, openMcpSession, withMcpTools } from "./mcp-session.js";
-import { type Backends, detectBackends } from "./onboarding.js";
+import { type Backends, detectBackends, emptyBackends } from "./onboarding.js";
 import { assembleSteering, discoverSteering } from "./steering.js";
 import { execVarsFromEnv } from "./system-tools.js";
 
@@ -159,9 +159,7 @@ export async function runOneShot(
   const client = createEngineClient();
 
   const { tuning, budget } = seedTuningWithNotes(parsed);
-  const backends: Backends = await detect({ client }).catch(
-    () => ({ liveRunners: [], paidClis: [] }) as Backends,
-  );
+  const backends: Backends = await detect({ client }).catch(() => emptyBackends());
   /**
    * Cloud endpoints, discovered exactly as the two interactive hosts discover them.
    *

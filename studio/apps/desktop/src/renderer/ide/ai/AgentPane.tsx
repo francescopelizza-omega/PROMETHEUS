@@ -86,6 +86,7 @@ import type {
   IdeTreeNode,
 } from "../../../shared/ipc-contract.js";
 import { commandPaletteRows } from "../../commands/registry.js";
+import { readStoredOverrides } from "../../settings/keymap-overrides.js";
 import { useAuthorisationStore } from "../../stores/authorisation.js";
 import { useSecurityStore } from "../../stores/features.js";
 
@@ -121,7 +122,7 @@ async function notebookCardResult(
 }
 import { expandCommandFile, matchCommandFileInvocation } from "./command-files.js";
 import { effortFor, useEffortStore } from "./effort-store.js";
-import { useActiveEndpoint } from "./endpoint-hook.js";
+import { ensureLocalServerStarted, useActiveEndpoint } from "./endpoint-hook.js";
 import {
   type CatalogModelLite,
   contextWindowOf,
@@ -369,9 +370,33 @@ export function AgentPane({
   onRunCommand?: (id: string) => void;
 } = {}): ReactElement {
   // shared endpoint resolution (privacy-classified, auto-select first) — see endpoints.ts.
-  const { endpoints, active, neverSendToCloud } = useActiveEndpoint();
+  const { endpoints, active, neverSendToCloud, loaded } = useActiveEndpoint();
   const endpointId = useAiSessionStore((s) => s.endpointId);
   const selectEndpoint = useAiSessionStore((s) => s.selectEndpoint);
+  /**
+   * Auto-start a previously-served-but-now-stopped local model when chat has no endpoint at all
+   * — "it must start automatically when prompting" (the user's own words). Tried ONCE per mount.
+   *
+   * `loaded` is the real precondition and is not optional. The endpoint list starts EMPTY and is
+   * filled by an async effect, so `!active && endpoints.length === 0` is true on the first commit
+   * of every mount no matter how many local endpoints exist — the two conditions meant to express
+   * "there is no endpoint" were dead, the single attempt was consumed unconditionally, and this
+   * spawned a real llama.cpp/vLLM runner on every AgentPane mount. It is not a safe no-op either:
+   * with nothing to restart it starts the ollama daemon and reassigns the selected endpoint.
+   *
+   * The `.catch` is not optional either: `ensureLocalServerStarted` awaits `svc.serving()` /
+   * `svc.library()` unguarded, and a rejection would escape `.finally` as an unhandled rejection.
+   */
+  const autoStartAttempted = useRef(false);
+  const [autoStarting, setAutoStarting] = useState(false);
+  useEffect(() => {
+    if (!loaded || active || endpoints.length > 0 || autoStartAttempted.current) return;
+    autoStartAttempted.current = true;
+    setAutoStarting(true);
+    void ensureLocalServerStarted(selectEndpoint)
+      .catch(() => false)
+      .finally(() => setAutoStarting(false));
+  }, [loaded, active, endpoints.length, selectEndpoint]);
   const setNeverSendToCloud = useAiSessionStore((s) => s.setNeverSendToCloud);
   const replaceTurns = useAiSessionStore((s) => s.replaceTurns);
   const ghostText = useAiSessionStore((s) => s.ghostText);
@@ -428,7 +453,7 @@ export function AgentPane({
   // executing immediately (a custom command isn't an action, it's a prompt template).
   const commandRows = useMemo(
     () => [
-      ...commandPaletteRows(),
+      ...commandPaletteRows(undefined, readStoredOverrides()),
       ...customCommands.map((c) => ({
         id: `custom:${c.file.name}`,
         title: `/${c.file.name}${c.file.description ? ` — ${c.file.description}` : ""}`,
@@ -473,7 +498,17 @@ export function AgentPane({
     } catch {
       /* sessionStorage blocked — the rail still opens, just unseeded. */
     }
-    const onSeed = (e: Event): void => seed((e as CustomEvent<string>).detail ?? "");
+    const onSeed = (e: Event): void => {
+      // The home route writes HOME_PROMPT_KEY *and* dispatches this event, so a rail that is
+      // already mounted must clear the key here too — otherwise the mount-time read above
+      // replays a stale prompt the next time a pane or the chat route mounts.
+      try {
+        sessionStorage.removeItem(HOME_PROMPT_KEY);
+      } catch {
+        /* sessionStorage blocked — nothing to clear. */
+      }
+      seed((e as CustomEvent<string>).detail ?? "");
+    };
     window.addEventListener("prometheus:seed-agent-prompt", onSeed);
     return () => window.removeEventListener("prometheus:seed-agent-prompt", onSeed);
   }, []);
@@ -1679,7 +1714,14 @@ export function AgentPane({
                   }}
                 />
               ) : null}
-              <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+              <span
+                style={{
+                  overflow: "hidden",
+                  textOverflow: "ellipsis",
+                  minWidth: 0,
+                  whiteSpace: "nowrap",
+                }}
+              >
                 {s.title}
               </span>
               {order.length > 1 && (
@@ -1812,6 +1854,7 @@ export function AgentPane({
                       fontSize: "0.8rem",
                       overflow: "hidden",
                       textOverflow: "ellipsis",
+                      minWidth: 0, // flex/grid floor — without it the ellipsis is unreachable
                       whiteSpace: "nowrap",
                       maxWidth: "100%",
                     }}
@@ -2084,14 +2127,16 @@ export function AgentPane({
           }}
         >
           <strong style={{ fontSize: "0.82rem", color: "var(--text-primary)" }}>
-            ⚠ No model backend connected
+            {autoStarting ? "⏳ Starting your local model server…" : "⚠ No model backend connected"}
           </strong>
           <span style={{ fontSize: "0.76rem", color: "var(--text-secondary)" }}>
-            {endpoints.length === 0
-              ? "This chat needs a local model, an API endpoint, or an agent CLI — none is installed or served yet. Pick a path:"
-              : "A model is available but none is selected. Choose one from the selector above to start chatting."}
+            {autoStarting
+              ? "It was served before and just needs a moment to come back up — send your prompt again shortly."
+              : endpoints.length === 0
+                ? "This chat needs a local model, an API endpoint, or an agent CLI — none is installed or served yet. Pick a path:"
+                : "A model is available but none is selected. Choose one from the selector above to start chatting."}
           </span>
-          {endpoints.length === 0 && (
+          {endpoints.length === 0 && !autoStarting && (
             <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
               <Button size="sm" variant="primary" onClick={() => onNavigate?.("models")}>
                 ⬇ Install a local model
@@ -2136,6 +2181,7 @@ export function AgentPane({
               borderRadius: 6,
               fontSize: "0.8rem",
               whiteSpace: "pre-wrap",
+              overflowWrap: "break-word", // long paths/URLs/shas must break inside the bubble, not widen it
               // user bubble = a soft accent TINT (distinct from the assistant) with normal
               // text — solid --accent + --brand-fg (a different token's fg) was a loud,
               // low-contrast combo.
@@ -2278,6 +2324,7 @@ export function AgentPane({
               borderRadius: 6,
               fontSize: "0.8rem",
               whiteSpace: "pre-wrap",
+              overflowWrap: "break-word", // long paths/URLs/shas must break inside the bubble, not widen it
               background: "var(--bg-surface-2)",
               color: "var(--text-primary)",
             }}
@@ -2711,7 +2758,10 @@ export function AgentPane({
               borderRadius: "var(--radius-md)",
               border: "none",
               background: "var(--gradient-brand)",
-              color: "var(--brand-fg)",
+              // `--on-brand` is the computed label colour for the `--brand` FILL (tokens/contrast.ts `onFill`).
+              // The old `--brand-fg` here was WHITE on the dark scheme over a saturated light fill (~2:1),
+              // and a plain `--bg-app` would be near-white over the same fill on the LIGHT scheme.
+              color: "var(--on-brand)",
               fontSize: 13,
               lineHeight: 1,
               cursor: !active || busy || !input.trim() ? "default" : "pointer",
@@ -2836,6 +2886,7 @@ export function AgentPane({
                           flex: 1,
                           overflow: "hidden",
                           textOverflow: "ellipsis",
+                          minWidth: 0, // flex/grid floor — without it the ellipsis is unreachable
                           whiteSpace: "nowrap",
                         }}
                       >

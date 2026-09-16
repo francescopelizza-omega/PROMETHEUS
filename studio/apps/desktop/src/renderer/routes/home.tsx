@@ -56,9 +56,10 @@ import { usePathCompletion } from "../shared/path-completion/usePathCompletion.j
 import { PrometheusMark } from "../shell/PrometheusMark.js";
 import { useEngineStore } from "../stores/engine.js";
 import { useSecurityStore } from "../stores/features.js";
-import { ageLabel, useRecentsStore } from "../stores/recents.js";
+import { ageLabel, agoLabel, useRecentsStore } from "../stores/recents.js";
 import { useTelemetryStore } from "../stores/telemetry.js";
 import { serverRowViews } from "./home-servers-view.js";
+import { homeModelRows, homeModelsHeader, meterPct } from "./home-view.js";
 
 function api(): Window["prometheus"] | undefined {
   return typeof window !== "undefined" ? window.prometheus : undefined;
@@ -154,8 +155,33 @@ export function HomeRoute({
     queryFn: () => api()!.models.serving(),
     enabled: hasBridge,
   });
+  // …and the LIBRARY, because a serve profile is not the same thing as an installed model.
+  // §2.3 asks this island for "serving/installed rows"; `model:serving` answers only the
+  // first half, so a downloaded model with no profile was invisible and the island's empty
+  // state told a user with a full library that nothing was installed.
+  const library = useQuery({
+    queryKey: qk.modelLibrary("text"),
+    queryFn: () => api()!.models.library("text"),
+    enabled: hasBridge,
+  });
 
-  const shield = deriveShield(lastVerdict?.verdict ?? null);
+  // ARMED is the question this chip actually answers, and it is not the same question
+  // as "what did the last scan say". Before this probe was passed, a launch with nemesis
+  // entirely absent still painted a green "gate clean", because a null verdict falls to
+  // deriveShield's benign placeholder. `health === null` (no probe yet) stays undefined
+  // so the chip says nothing rather than accusing a scanner we have not looked for.
+  const shield = deriveShield(lastVerdict?.verdict ?? null, {
+    ...(health ? { armed: health.nemesisPresent === true } : {}),
+  });
+  const verdictAge = agoLabel(lastVerdict?.scannedAt);
+  const modelRows = homeModelRows(
+    models.data?.ok ? models.data.profiles : [],
+    library.data?.ok && Array.isArray(library.data.models)
+      ? (library.data.models as { id?: unknown }[]).filter(
+          (m): m is { id: string } => typeof m?.id === "string",
+        )
+      : [],
+  );
   const engineDown = pill === "down";
   // count only RUNNING servers — the snapshot includes stopped/errored, so a bare
   // `.length` would report "3 serving" for 3 stopped servers (a status lie).
@@ -188,6 +214,12 @@ export function HomeRoute({
   });
   const inflightServerId = serverAction.isPending ? (serverAction.variables?.id ?? null) : null;
   const catalogRows = catalog.data?.ok ? rowsFrom(catalog.data.data) : [];
+  // "we could not ask" is not "zero" — the At-a-glance rows key off the ENVELOPE, not the
+  // count, so a failed query omits its row instead of reporting a confident 0.
+  const envKnown = envs.data?.ok === true;
+  const catalogKnown = catalog.data?.ok === true;
+  const glanceRowCount =
+    (envKnown ? 1 : 0) + (catalogKnown ? 1 : 0) + (onOpenTokens && savers > 0 ? 1 : 0);
   const envCount = envs.data?.ok ? rowsFrom(envs.data.data).length : 0;
 
   /** Cloned repos + picker-opened folders, newest first, de-duplicated by path. */
@@ -292,7 +324,8 @@ export function HomeRoute({
             </div>
           </div>
           <div style={{ marginTop: 4, color: "var(--text-muted)", fontSize: 13 }}>
-            Your AI coding workspace — every install gated by nemesis, fail-closed.
+            Your AI coding workspace — catalog, repo and extension installs are gated by nemesis,
+            fail-closed.
           </div>
         </div>
         <div
@@ -388,7 +421,7 @@ export function HomeRoute({
       <div
         style={{
           display: "grid",
-          gridTemplateColumns: "repeat(auto-fit, minmax(210px, 1fr))",
+          gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 210px), 1fr))",
           gap: 10,
         }}
       >
@@ -432,7 +465,9 @@ export function HomeRoute({
       <div
         style={{
           display: "grid",
-          gridTemplateColumns: "repeat(auto-fit, minmax(330px, 1fr))",
+          // min(100%, N): a bare minmax(N, 1fr) cannot go below N, so the grid holds the page
+          // open past its own padding at narrow widths and the row overflows.
+          gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 330px), 1fr))",
           gap: 12,
           alignItems: "start",
         }}
@@ -460,6 +495,9 @@ export function HomeRoute({
                       fontSize: 11,
                       color: "var(--text-muted)",
                       whiteSpace: "nowrap",
+                      overflow: "hidden",
+                      textOverflow: "ellipsis",
+                      minWidth: 0,
                     }}
                   >
                     {c.detail}
@@ -493,8 +531,8 @@ export function HomeRoute({
               background: "var(--bg-inset)",
             }}
           >
-            <MeterBar label="CPU" pct={telemetry?.cpu?.usedPct ?? null} tone="--ok" />
-            <MeterBar label="RAM" pct={telemetry?.ram?.usedPct ?? null} tone="--warn" />
+            <MeterBar label="CPU" pct={meterPct(telemetry?.cpu)} tone="--ok" />
+            <MeterBar label="RAM" pct={meterPct(telemetry?.ram)} tone="--warn" />
             <button
               type="button"
               onClick={() => {
@@ -510,18 +548,11 @@ export function HomeRoute({
         </Island>
 
         {/* Last gate verdict — the §4 card contract, compact */}
-        <Island
-          title="Last gate verdict"
-          right={
-            lastVerdict?.scannedAt ? (
-              <span>{ageLabel(Date.parse(lastVerdict.scannedAt))} ago</span>
-            ) : null
-          }
-        >
+        <Island title="Last gate verdict" right={verdictAge ? <span>{verdictAge}</span> : null}>
           {!lastVerdict ? (
             <IslandEmpty
               glyph="🛡"
-              line="Nothing scanned yet. The gate runs before any install."
+              line="Nothing scanned yet. The gate runs before a catalog, repo or extension install."
               actionLabel="Open Security"
               onAction={() => onNavigate("security")}
             />
@@ -544,9 +575,10 @@ export function HomeRoute({
           title="Models"
           right={
             <span>
-              {engineDown
-                ? "last known · stale"
-                : `${servingCount} serving · ${catalogRows.length} in catalog`}
+              {/* counted from the ROWS below it — the old header read `servingCount` from
+                  the C8 server supervisor, a different payload, so it could say "0 serving"
+                  above a row whose own status said serving. */}
+              {engineDown ? "last known · stale" : homeModelsHeader(modelRows)}
             </span>
           }
         >
@@ -555,14 +587,19 @@ export function HomeRoute({
               error={health?.error ?? "the engine did not answer the health probe"}
               onRunDoctor={runDoctor}
             />
-          ) : models.isLoading ? (
+          ) : models.isLoading || library.isLoading ? (
+            // BOTH queries gate the skeleton: the island merges serve profiles with the
+            // library, so a library still in flight over an empty serving list painted
+            // "No model installed yet." at someone with a full library.
             <IslandSkeleton rows={2} />
-          ) : !models.data?.ok ? (
+          ) : !models.data?.ok && !(library.data?.ok && modelRows.length > 0) ? (
+            // …and a failed SERVING envelope no longer discards a library that answered:
+            // "the supervisor is down" and "you have no models" are different statements.
             <IslandDegraded
               error={models.data?.error ?? "the model supervisor did not answer"}
               onRunDoctor={runDoctor}
             />
-          ) : (models.data.profiles ?? []).length === 0 ? (
+          ) : modelRows.length === 0 ? (
             <IslandEmpty
               glyph="◴"
               line="No model installed yet."
@@ -570,24 +607,21 @@ export function HomeRoute({
               onAction={() => onNavigate("models")}
             />
           ) : (
-            (models.data.profiles ?? []).map((p: ModelServeRow) => {
-              const ready = p.status === "ready";
-              return (
-                <IslandRow key={p.id ?? p.modelId}>
-                  <Dot tone={ready ? "--ok" : "--text-disabled"} />
-                  <Mono>{p.modelId}</Mono>
-                  <span style={{ flex: 1 }} />
-                  <span
-                    style={{
-                      fontSize: 11,
-                      color: ready ? "var(--ok)" : "var(--text-disabled)",
-                    }}
-                  >
-                    {ready ? "serving" : (p.status ?? "installed")}
-                  </span>
-                </IslandRow>
-              );
-            })
+            modelRows.map((m) => (
+              <IslandRow key={m.id}>
+                <Dot tone={m.serving ? "--ok" : "--text-disabled"} />
+                <Mono>{m.id}</Mono>
+                <span style={{ flex: 1 }} />
+                <span
+                  style={{
+                    fontSize: 11,
+                    color: m.serving ? "var(--ok)" : "var(--text-muted)",
+                  }}
+                >
+                  {m.state}
+                </span>
+              </IslandRow>
+            ))
           )}
         </Island>
 
@@ -628,11 +662,12 @@ export function HomeRoute({
                     style={{
                       display: "block",
                       fontSize: 11,
-                      color: "var(--text-disabled)",
+                      color: "var(--text-muted)",
                       fontFamily: "var(--font-mono)",
                       whiteSpace: "nowrap",
                       overflow: "hidden",
                       textOverflow: "ellipsis",
+                      minWidth: 0, // flex/grid floor — without it the ellipsis is unreachable
                     }}
                   >
                     {r.path}
@@ -707,23 +742,34 @@ export function HomeRoute({
           </Island>
         )}
 
-        {/* At a glance — the counts that don't warrant their own island */}
-        <Island title="At a glance">
-          <IslandRow>
-            <span style={{ flex: 1, fontSize: 12.5 }}>Environments</span>
-            <Mono>{envCount}</Mono>
-          </IslandRow>
-          <IslandRow>
-            <span style={{ flex: 1, fontSize: 12.5 }}>Catalog items</span>
-            <Mono>{catalogRows.length}</Mono>
-          </IslandRow>
-          {onOpenTokens && savers > 0 && (
-            <IslandRow onClick={onOpenTokens}>
-              <span style={{ flex: 1, fontSize: 12.5 }}>Save tokens</span>
-              <span style={{ color: "var(--accent)", fontSize: 12 }}>{savers} proposed →</span>
-            </IslandRow>
-          )}
-        </Island>
+        {/* At a glance — the counts that don't warrant their own island.
+            §2.3: "nothing renders unless it has content". This island had no gate at all and
+            no §6 states, so with no bridge or a failed query it painted a permanent
+            "Environments 0 · Catalog items 0" — which is not an empty island, it is a WRONG
+            one: 0 and "we could not ask" are different answers. Each row now appears only
+            when its own query actually succeeded, and the island only when a row does. */}
+        {glanceRowCount > 0 && (
+          <Island title="At a glance">
+            {envKnown && (
+              <IslandRow>
+                <span style={{ flex: 1, fontSize: 12.5 }}>Environments</span>
+                <Mono>{envCount}</Mono>
+              </IslandRow>
+            )}
+            {catalogKnown && (
+              <IslandRow>
+                <span style={{ flex: 1, fontSize: 12.5 }}>Catalog items</span>
+                <Mono>{catalogRows.length}</Mono>
+              </IslandRow>
+            )}
+            {onOpenTokens && savers > 0 && (
+              <IslandRow onClick={onOpenTokens}>
+                <span style={{ flex: 1, fontSize: 12.5 }}>Save tokens</span>
+                <span style={{ color: "var(--accent)", fontSize: 12 }}>{savers} proposed →</span>
+              </IslandRow>
+            )}
+          </Island>
+        )}
       </div>
     </div>
   );
@@ -805,7 +851,12 @@ function IslandRow({
     font: "inherit",
     cursor: onClick ? "pointer" : "default",
   };
-  if (!onClick) return <div style={style}>{children}</div>;
+  if (!onClick)
+    return (
+      <div style={style} title={title}>
+        {children}
+      </div>
+    );
   return (
     <button
       type="button"
@@ -886,7 +937,7 @@ function IslandDegraded({
       </span>
       <span
         style={{
-          color: "var(--text-disabled)",
+          color: "var(--text-secondary)",
           fontSize: 11.5,
           fontFamily: "var(--font-mono)",
           // engine errors carry absolute paths — break them inside the island rather
@@ -1014,6 +1065,14 @@ function QuickAction({
   );
 }
 
+/**
+ * A reading is a number only when the probe SAID it measured one.
+ *
+ * `errorTelemetry` (main/telemetry-ipc.ts) fails soft with `{usedPct: 0, measured: false}`,
+ * so keying the bar off `Number.isFinite(pct)` alone painted a confident "0%" over a probe
+ * that had told us it knew nothing. The contract's own comment on that field reads
+ * "`measured:false` ⇒ the figure is n/a" — this is the consumer honouring it.
+ */
 /** A CPU/RAM occupancy bar with the gradient fill (§2.3.4). `null` = not measured. */
 function MeterBar({
   label,
@@ -1130,7 +1189,10 @@ function gradientCta(): CSSProperties {
     borderRadius: "var(--radius-lg)",
     border: "none",
     background: "var(--gradient-brand)",
-    color: "var(--brand-fg)",
+    // `--on-brand` is the computed label colour for the `--brand` FILL (tokens/contrast.ts `onFill`).
+    // The old `--brand-fg` here was WHITE on the dark scheme over a saturated light fill (~2:1),
+    // and a plain `--bg-app` would be near-white over the same fill on the LIGHT scheme.
+    color: "var(--on-brand)",
     fontFamily: "var(--font-ui)",
     fontSize: 13,
     fontWeight: 600,

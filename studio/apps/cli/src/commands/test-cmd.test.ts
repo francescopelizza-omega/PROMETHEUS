@@ -631,7 +631,7 @@ test("CLI-094 --retry-failed: genuine stays FAIL, flaky/fixed distinct bucket + 
     assert.match(text, /passed every retry\) t::fixed\s+\[✓✓✓\]/);
     // persisted flaky memory: flaky + fixed accumulate, genuine does NOT.
     const store = JSON.parse(
-      readFileSync(pathJoin(tmp, ".config", "prometheus-studio", "flaky-tests.json"), "utf8"),
+      readFileSync(pathJoin(tmp, ".prometheus", "config", "flaky-tests.json"), "utf8"),
     );
     assert.equal(store["t::flaky"]?.count, 1);
     assert.equal(store["t::fixed"]?.count, 1);
@@ -660,7 +660,7 @@ test("CLI-094 flaky memory ACCUMULATES across invocations (count bumps)", async 
     await run();
     await run(); // second invocation of the same flaky test
     const store = JSON.parse(
-      readFileSync(pathJoin(tmp, ".config", "prometheus-studio", "flaky-tests.json"), "utf8"),
+      readFileSync(pathJoin(tmp, ".prometheus", "config", "flaky-tests.json"), "utf8"),
     );
     assert.equal(store["t::flaky"]?.count, 2, "recurrence is visible over time");
   } finally {

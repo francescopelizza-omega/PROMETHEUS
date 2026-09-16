@@ -144,7 +144,10 @@ function gradientBtn(): CSSProperties {
     borderRadius: 7,
     border: "none",
     background: "var(--gradient-brand)",
-    color: "var(--brand-fg)",
+    // `--on-brand` is the computed label colour for the `--brand` FILL (tokens/contrast.ts `onFill`).
+    // The old `--brand-fg` here was WHITE on the dark scheme over a saturated light fill (~2:1),
+    // and a plain `--bg-app` would be near-white over the same fill on the LIGHT scheme.
+    color: "var(--on-brand)",
     fontFamily: "var(--font-ui)",
     fontSize: 11.5,
     fontWeight: 600,

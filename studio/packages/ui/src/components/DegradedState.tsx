@@ -91,7 +91,14 @@ export function DegradedState({
       {children && (
         // stale, but still yours: dimmed and non-interactive so nothing here is mistaken
         // for live state or acted on by accident.
-        <div style={{ opacity: 0.45, pointerEvents: "none" }} aria-label="last known state">
+        //
+        // 0.45 carried that signal by making the copy unreadable: --text-body composited at
+        // 45% over --bg-surface measures 3.6:1, under the 4.5:1 body-text floor the whole
+        // token ramp is built to hold. Stale data is still data — a user reads it precisely
+        // when the live source is down. 0.70 measures ~7:1 and is still visibly quieter than
+        // the live content beside it, and `pointerEvents:none` + the aria-label (not the
+        // contrast) are what actually stop it being mistaken for live state.
+        <div style={{ opacity: 0.7, pointerEvents: "none" }} aria-label="last known state">
           {children}
         </div>
       )}

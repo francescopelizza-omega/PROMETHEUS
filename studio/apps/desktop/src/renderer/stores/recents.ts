@@ -95,6 +95,25 @@ export const useRecentsStore = create<RecentsStore>((set, get) => ({
   },
 }));
 
+/**
+ * "2 h ago" · "now" — never "now ago", never "NaN d ago".
+ *
+ * `ageLabel` already returns the WHOLE phrase for the under-a-minute case, so a caller
+ * cannot blindly suffix it. And an unparseable timestamp must not reach it at all:
+ * `Date.parse` yields NaN, which falls through every comparison in `ageLabel` and renders
+ * the literal string "NaN d". Returns null when there is nothing honest to say, so the
+ * caller can omit the element rather than print a placeholder.
+ *
+ * Lives beside `ageLabel` on purpose: a second copy of this arithmetic in a route file is
+ * exactly the local twin that makes a fix to one of them invisible to the other.
+ */
+export function agoLabel(iso: string | null | undefined, now = Date.now()): string | null {
+  const t = iso ? Date.parse(iso) : Number.NaN;
+  if (!Number.isFinite(t)) return null;
+  const label = ageLabel(t, now);
+  return label === "now" ? "now" : `${label} ago`;
+}
+
 /** "now" · "5 m" · "2 h" · "3 d" — the island's right-aligned age column. */
 export function ageLabel(openedAt: number, now = Date.now()): string {
   const ms = Math.max(0, now - openedAt);

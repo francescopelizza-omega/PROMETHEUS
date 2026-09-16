@@ -34,7 +34,13 @@ export function ExtensionCard({ ext, onInstall, onToggle }: ExtensionCardProps):
     >
       <header style={{ display: "flex", alignItems: "center", gap: "var(--space-4, 8px)" }}>
         <strong
-          style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
+          style={{
+            flex: 1,
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+            minWidth: 0,
+            whiteSpace: "nowrap",
+          }}
         >
           {inert(ext.name)}
           {ext.publisher && (
@@ -102,7 +108,11 @@ export function ExtensionCard({ ext, onInstall, onToggle }: ExtensionCardProps):
             onClick={() => onInstall(ext)}
             style={{
               background: "var(--brand)",
-              color: "var(--brand-fg)",
+              // The label sits ON the `--brand` fill, so it needs the computed `--on-brand`.
+              // `--brand-fg` is #ffffff on the dark scheme and measures 3.96:1 over `--brand` —
+              // under the 4.5:1 a label carries. It stays in use where it is a FILL, not a label
+              // (the Toggle knob), which is why this is a call-site change and not a token change.
+              color: "var(--on-brand)",
               border: "none",
               borderRadius: "var(--radius-md, 6px)",
               padding: "var(--space-2, 4px) var(--space-6, 12px)",

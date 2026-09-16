@@ -4,7 +4,7 @@
  * A security IDE's telemetry posture is a feature, not an afterthought:
  *   - OFF by default. Nothing leaves the machine until the user opts in (§8.1).
  *   - LOCAL audit log always: every event is appended to a user-readable JSONL on
- *     disk (~/.config/prometheus-studio/events.jsonl), never auto-sent (§8.2).
+ *     disk (~/.prometheus/config/events.jsonl), never auto-sent (§8.2).
  *   - If (and only if) opted in, a SCRUBBED copy is queued for upload — `scrub`
  *     strips $HOME paths, repo URLs, and sensitive-named fields. PII budget = 0 (§8.3).
  *
@@ -13,6 +13,8 @@
  */
 import { homedir } from "node:os";
 import { join } from "node:path";
+
+import { configDir } from "./cli-profiles/paths.js";
 
 export interface StudioEvent {
   /** event name, e.g. "install", "gate.block", "model.download". */
@@ -24,9 +26,16 @@ export interface StudioEventRecord extends StudioEvent {
   at: string; // ISO timestamp
 }
 
-/** The on-disk, user-readable, never-auto-sent event log path (§8.2). */
-export function eventsLogPath(home: string = homedir()): string {
-  return join(home, ".config", "prometheus-studio", "events.jsonl");
+/**
+ * The on-disk, user-readable, never-auto-sent event log path (§8.2).
+ *
+ * Routed through `configDir()` rather than re-spelling the root: this file hard-coded
+ * `~/.config/prometheus-studio` and would have been left behind in the OLD tree when the config
+ * root moved to `~/.prometheus/config` — with its own test still passing, because the test
+ * re-spelled the same literal.
+ */
+export function eventsLogPath(home?: string): string {
+  return join(configDir(home), "events.jsonl");
 }
 
 /** Field names whose values are redacted wholesale before any upload (§8.3). */

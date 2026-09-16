@@ -30,6 +30,9 @@ export interface ServingPanelProps {
   onStart?: (id: string) => void;
   /** stop a starting/ready profile (SIGTERM the runner via the supervisor). */
   onStop?: (id: string) => void;
+  /** force-kill a starting/ready/errored profile (SIGKILL now, no grace wait) —
+   *  "if something is not responding properly". */
+  onKill?: (id: string) => void;
   /** retry a failed launch. */
   onRetry?: (id: string) => void;
   /** "Use in IDE" → repoint the IDE agent pane at this profile's base-URL (§6). */
@@ -65,6 +68,7 @@ function Row({
   p,
   onStart,
   onStop,
+  onKill,
   onRetry,
   onUseInIde,
   onEndpoint,
@@ -73,6 +77,7 @@ function Row({
   p: ServeProfileData;
   onStart?: (id: string) => void;
   onStop?: (id: string) => void;
+  onKill?: (id: string) => void;
   onRetry?: (id: string) => void;
   onUseInIde?: (profile: ServeProfileData) => void;
   onEndpoint?: (profile: ServeProfileData) => void;
@@ -159,6 +164,16 @@ function Row({
             Stop
           </button>
         )}
+        {actions.includes("kill") && onKill && (
+          <button
+            type="button"
+            onClick={() => onKill(p.id)}
+            style={dangerBtn}
+            title="Force-kill: SIGKILL now, skips the graceful-stop wait"
+          >
+            Kill
+          </button>
+        )}
         {onLogs && !p.external && (
           <button type="button" onClick={() => onLogs(p.id)} style={ghostBtn}>
             Logs
@@ -193,6 +208,7 @@ export function ServingPanel({
   profiles,
   onStart,
   onStop,
+  onKill,
   onRetry,
   onUseInIde,
   onEndpoint,
@@ -220,6 +236,7 @@ export function ServingPanel({
               p={p}
               onStart={onStart}
               onStop={onStop}
+              onKill={onKill}
               onRetry={onRetry}
               onUseInIde={onUseInIde}
               onEndpoint={onEndpoint}
@@ -239,7 +256,10 @@ export function ServingPanel({
 const primaryBtn: React.CSSProperties = {
   border: "1px solid var(--accent)",
   background: "var(--accent)",
-  color: "var(--brand-fg)",
+  // `--on-accent` is the computed label colour for the `--accent` FILL (tokens/contrast.ts `onFill`).
+  // The old `--brand-fg` here was WHITE on the dark scheme over a saturated light fill (~2:1),
+  // and a plain `--bg-app` would be near-white over the same fill on the LIGHT scheme.
+  color: "var(--on-accent)",
   borderRadius: "var(--radius-md, 6px)",
   padding: "4px 10px",
   fontSize: "0.8rem",
@@ -250,6 +270,16 @@ const ghostBtn: React.CSSProperties = {
   border: "1px solid var(--border-subtle)",
   background: "transparent",
   color: "var(--text-primary)",
+  borderRadius: "var(--radius-md, 6px)",
+  padding: "4px 10px",
+  fontSize: "0.8rem",
+  cursor: "pointer",
+};
+
+const dangerBtn: React.CSSProperties = {
+  border: "1px solid var(--danger)",
+  background: "transparent",
+  color: "var(--danger-fg, var(--danger))",
   borderRadius: "var(--radius-md, 6px)",
   padding: "4px 10px",
   fontSize: "0.8rem",

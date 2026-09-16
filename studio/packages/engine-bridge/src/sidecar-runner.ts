@@ -62,6 +62,16 @@ export interface SidecarOptions {
    * Absent → no line parsing (unchanged one-shot behavior).
    */
   onEvent?: (event: Record<string, unknown>) => void;
+  /**
+   * optional per-line sink for the sidecar's STDERR.
+   *
+   * The long-running fetches (`modelhub download`, an `ollama pull`) stream their progress
+   * as JSON-lines on stderr. There was no hook for it, so the client tried to read a
+   * `_stderr` blob off the envelope — a field nothing in this repo ever sets — and the
+   * Models pull bar and the chat's "Live download %" could not move at all, for any download,
+   * ever. Line-buffered like `onEvent`, so a chunk boundary never splits a progress record.
+   */
+  onStderr?: (line: string) => void;
 }
 
 const DEFAULT_TIMEOUT_MS = 120_000;
@@ -288,8 +298,19 @@ export function runSidecar<T extends SidecarEnvelope = SidecarEnvelope>(
     // same StringDecoder reason as stdout above — this tail is shown to the user verbatim
     // when the sidecar produces no JSON object.
     child.stderr?.setEncoding("utf8");
+    let stderrLineBuf = "";
     child.stderr?.on("data", (chunk: string) => {
       stderr += chunk;
+      if (opts.onStderr) {
+        stderrLineBuf += chunk;
+        let nl = stderrLineBuf.indexOf("\n");
+        while (nl !== -1) {
+          const line = stderrLineBuf.slice(0, nl).replace(/\r$/, "");
+          stderrLineBuf = stderrLineBuf.slice(nl + 1);
+          if (line) opts.onStderr(line);
+          nl = stderrLineBuf.indexOf("\n");
+        }
+      }
     });
 
     if (opts.input !== undefined) {
@@ -567,9 +588,11 @@ export function spawnKernelSidecar(opts: KernelSidecarOptions = {}): KernelSidec
 
   const dispose = (): void => {
     if (disposed) return;
-    disposed = true;
-    // Ask the kernel to shut its own ipykernel down cleanly first.
+    // Ask the kernel to shut its own ipykernel down cleanly first. This MUST precede the
+    // latch: `write` itself early-returns on `disposed`, so setting the flag first made the
+    // graceful shutdown a no-op and every kernel was killed by signal instead.
     write({ op: "shutdown" });
+    disposed = true;
     const pid = child?.pid;
     const killGroup = (signal: NodeJS.Signals): void => {
       // `pid > 1`, not just non-null: `process.kill(-1, …)` is kill(2)'s broadcast — every process

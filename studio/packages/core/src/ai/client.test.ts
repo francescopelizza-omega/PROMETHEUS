@@ -116,10 +116,15 @@ test("chat() streams OpenAI SSE deltas and stops on [DONE]", async () => {
     // CLI-029: the terminal usage frame is requested on CLOUD only. Unconditional was wrong —
     // a strict local server 400s on the unknown field, and this client is what the text
     // tool-call transport runs on, so that 400 kills the whole turn rather than losing a
-    // token count. Local instead gets `keep_alive`, so a multi-round agentic turn does not
-    // pay a cold model reload between rounds.
+    // token count.
+    //
+    // `keep_alive` is no longer pinned at "30m" — that held model weights resident for half an
+    // hour after the last prompt. It is now a bound Prometheus puts on ITS OWN requests
+    // (DEFAULT_LOCAL_KEEP_ALIVE), which caps what Prometheus causes a runner to hold without
+    // touching a runner the user drives from their own terminal. Multi-round turns stay warm
+    // regardless: the runner restarts its idle timer on every request.
     assert.equal(body.stream_options, undefined);
-    assert.equal((body as { keep_alive?: string }).keep_alive, "30m");
+    assert.equal((body as { keep_alive?: string }).keep_alive, "60s");
   } finally {
     stub.server.close();
   }

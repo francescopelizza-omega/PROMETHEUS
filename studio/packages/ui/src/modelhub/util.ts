@@ -307,15 +307,22 @@ export function serveLabel(status: ServeRowStatus): string {
   }
 }
 
-/** The verbs legal as serve-row actions in a given status (§7 Start/Stop/Use). */
+/**
+ * The verbs legal as serve-row actions in a given status (§7 Start/Stop/Use).
+ * "kill" rides alongside "stop" everywhere a child process might still be alive to
+ * signal — it's stop's force-escalation (SIGKILL now, no SIGTERM grace wait), not a
+ * separate lifecycle state, so it's legal in exactly the same statuses as "stop".
+ * "starting" is the status this matters most for: that's what "not responding
+ * properly" looks like from the row's point of view.
+ */
 export function serveActions(status: ServeRowStatus): string[] {
   switch (status) {
     case "ready":
-      return ["stop", "use", "endpoint"];
+      return ["stop", "kill", "use", "endpoint"];
     case "starting":
-      return ["stop"];
+      return ["stop", "kill"];
     case "error":
-      return ["retry", "stop"];
+      return ["retry", "stop", "kill"];
     default:
       return ["start", "endpoint"];
   }

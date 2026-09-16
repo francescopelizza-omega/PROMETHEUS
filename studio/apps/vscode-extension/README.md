@@ -104,6 +104,13 @@ into `.vscode-test/` (cached after the first run) and never touches your real VS
 - **`remember: "session"` grants.** The confirm result carries the field, but core reads it in
   `withRememberedGrants`, which is not wired here — so the dialog offers only Allow/Deny rather
   than an affordance that would not stick.
+- **Spend caps and accounting.** This extension makes metered cloud calls and records none of
+  them: it never sees a `usage` payload, so it appends nothing to the shared daily ledger
+  (`$PROMETHEUS_HOME/accounting/<date>.jsonl`) and calls no budget gate. A `budget.sessionUsd`
+  or `budget.dailyUsd` set for the CLI or Studio is enforced in those two surfaces and IGNORED
+  here, and spend made in the editor does not count toward them. Wiring it means plumbing token
+  usage out of core's `createAiClient` first — a feature, not a config change. Until then,
+  treat editor spend as unmetered.
 - **Multi-root workspaces.** Scoped to the first folder. Guessing which root a bare relative
   path belongs to means sometimes editing the wrong project.
 - **Checkpoints, diff-review staging, session persistence.** Edits apply straight to the buffer

@@ -5,7 +5,8 @@ import { randomUUID } from "node:crypto";
  * so can't be loaded by node:test — mirrors the mcp/store.ts + store.test.ts split) so
  * this stays unit-testable: node:fs/promises + @prometheus/core only, no Electron.
  *
- * Two atomic JSON layers — global (`<userData>/settings.json`) and workspace
+ * Two atomic JSON layers — global (the SHARED `$PROMETHEUS_HOME/config/settings.json`,
+ * the same file the CLI reads — see main/settings-path.ts) and workspace
  * (`<root>/.prometheus/settings.json`) — merge through core's `layerSettings()` with
  * the active BUILT-IN profile (a fixed bundle, not user-editable here) selected by the
  * global layer's `profileId`.

@@ -77,6 +77,8 @@ export interface EnvLike {
   packageCount?: unknown;
   active?: unknown;
   broken?: unknown;
+  /** 'ok' | 'degraded' | 'broken' | 'unknown' — the field rows actually carry. */
+  health?: unknown;
   path?: unknown;
 }
 
@@ -115,13 +117,24 @@ export function envRow(e: EnvLike): EnvRowView {
   const kind = str(e.kind);
   if (kind) parts.push(kind);
 
-  const broken = e.broken === true;
+  /**
+   * The status comes from `health`, not from a `broken` boolean that no row carries.
+   *
+   * `EnvRow.health` is `'ok'|'degraded'|'broken'|'unknown'` (packages/ui/src/env/types.ts).
+   * This probed `e.broken`, which is never set, so the broken branch — and the Recreate
+   * action `envAction` derives from it — could not fire on any row, and a degraded env was
+   * indistinguishable from a healthy idle one.
+   */
+  const health = str(e.health);
+  const broken = health === "broken" || e.broken === true;
   const active = e.active === true;
   const status: RowCell = broken
     ? { text: "broken", role: "danger" }
-    : active
-      ? { text: "active", role: "ok" }
-      : { text: "idle", role: "muted" };
+    : health === "degraded"
+      ? { text: "degraded", role: "warn" }
+      : active
+        ? { text: "active", role: "ok" }
+        : { text: "idle", role: "muted" };
 
   return { id, name: str(e.name) ?? id, detail: parts.join(" · "), status, active };
 }

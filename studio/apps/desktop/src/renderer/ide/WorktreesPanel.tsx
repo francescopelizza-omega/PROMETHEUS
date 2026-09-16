@@ -145,19 +145,43 @@ export function WorktreesPanel({ root }: WorktreesPanelProps): ReactElement {
                 style={{
                   display: "flex",
                   alignItems: "center",
+                  flexWrap: "wrap",
                   gap: 6,
                   padding: "3px 0",
                   fontSize: "0.75rem",
+                  minWidth: 0,
                 }}
               >
-                <span style={{ color: here ? "var(--accent)" : "var(--text-primary)" }}>
+                <span
+                  title={w.path}
+                  style={{
+                    color: here ? "var(--accent)" : "var(--text-primary)",
+                    flex: "1 1 120px",
+                    minWidth: 0,
+                    overflow: "hidden",
+                    textOverflow: "ellipsis",
+                    whiteSpace: "nowrap",
+                    fontFamily: "var(--font-mono)",
+                  }}
+                >
                   {here ? "● " : "  "}
                   {w.path}
                 </span>
-                <span style={{ color: "var(--text-secondary)" }}>{ref}</span>
-                {w.locked && <span style={{ color: "var(--warn)" }}>locked</span>}
-                {w.prunable && <span style={{ color: "var(--warn)" }}>prunable</span>}
-                <span style={{ flex: 1 }} />
+                <span
+                  style={{ color: "var(--text-secondary)", whiteSpace: "nowrap", flexShrink: 0 }}
+                >
+                  {ref}
+                </span>
+                {w.locked && (
+                  <span style={{ color: "var(--warn)", whiteSpace: "nowrap", flexShrink: 0 }}>
+                    locked
+                  </span>
+                )}
+                {w.prunable && (
+                  <span style={{ color: "var(--warn)", whiteSpace: "nowrap", flexShrink: 0 }}>
+                    prunable
+                  </span>
+                )}
                 {!here && (
                   <Button size="sm" variant="ghost" onClick={() => switchTo(w)}>
                     switch
@@ -177,6 +201,7 @@ export function WorktreesPanel({ root }: WorktreesPanelProps): ReactElement {
                         color: "var(--text-primary)",
                         border: "1px solid var(--border-strong)",
                         width: 140,
+                        flexShrink: 0,
                       }}
                     />
                     <Button

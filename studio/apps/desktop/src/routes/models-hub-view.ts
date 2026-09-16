@@ -17,6 +17,8 @@
  * absent ones are absent rather than zeroed. A dash is honest; `0 tok/s` is not.
  */
 
+import { NETWORK_AUTH_LEVEL } from "@prometheus/core/agent-authorization";
+
 /* ── sizes ───────────────────────────────────────────────────────────────────*/
 
 /**
@@ -137,8 +139,34 @@ export function parsePullProgress(
   return { pct, bytes };
 }
 
-/** The §3 note under the pull bar. Kept here so the copy has one home. */
-export const PULL_SCAN_NOTE = "manifest scanned by nemesis · will not auto-serve";
+/**
+ * The §3 note under the pull bar. Kept here so the copy has one home.
+ *
+ * §3 asks this to read "manifest scanned by nemesis · clean · will not auto-serve", and it
+ * used to. BOTH HALVES OF THAT SENTENCE WERE FALSE on this path, which makes it worse than
+ * no note at all: it is a security claim, in the one place a user looks for one.
+ *
+ *  - No scan runs. `v_pull` (python/sidecar/modelhub.py:777-840) hands the tag to
+ *    `ollama pull` and never touches `nemesis_gate`. The gate IS wired — but on the HF/GGUF
+ *    spine (`modelhub.py:595,623`), which stages bytes locally and therefore has something
+ *    to scan. `v_pull`'s own docstring says so: "Ollama's own signed registry is the trust
+ *    boundary for these bytes — there is no local stage dir to nemesis-sign."
+ *  - It does auto-serve. `_ensure_ollama_daemon` (`modelhub.py:735-772`) spawns
+ *    `ollama serve` detached before the pull, and the success envelope reports the model
+ *    "served at the ollama OpenAI-compatible endpoint".
+ *
+ * So the note now states the trust boundary that actually applies. Restoring the spec's
+ * wording is a real project — a manifest-level scan via ollama's `/api/show` before the
+ * blobs land — not a copy change, and until that exists this is the honest sentence.
+ *
+ * It deliberately does NOT name ollama's registry. The first correction did, and that was
+ * its own smaller lie: the Pull island takes free text (placeholder "org/model or ollama
+ * tag") and the Hugging Face fast path builds `hf.co/<source>` — both reach `ollama pull`
+ * unvalidated, so the registry a tag resolves to is whatever the tag says. "The registry it
+ * names" is true for every tag; "ollama's signed registry" is true only for some.
+ */
+export const PULL_SCAN_NOTE =
+  "not scanned by nemesis — a pulled tag has no local staging directory, so the registry it names is the trust boundary · the local daemon serves the model when the pull finishes";
 
 /* ── the Endpoints island ────────────────────────────────────────────────────*/
 
@@ -149,7 +177,7 @@ export const PULL_SCAN_NOTE = "manifest scanned by nemesis · will not auto-serv
  * includes `install`/network work, which is what a cloud endpoint is. Cloud rows below it are
  * shown but greyed, because hiding them would make "why can't I use my key" unanswerable.
  */
-export const CLOUD_MIN_AUTH = 5;
+export const CLOUD_MIN_AUTH = NETWORK_AUTH_LEVEL;
 
 /** One row of the Endpoints island. */
 export interface EndpointRow {

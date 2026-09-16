@@ -19,7 +19,7 @@
 import type { ActivityId } from "@prometheus/ui";
 
 import { requestDocsTab } from "../../routes/docs-view.js";
-import { requestRouteTab } from "../../routes/route-tabs.js";
+import { type RouteTab, requestRouteTab } from "../../routes/route-tabs.js";
 import type { BottomTab } from "../shell/BottomPanel.js";
 
 /** Which OS modifier glyphs/keys to use (⌘ on macOS, Ctrl elsewhere). */
@@ -397,6 +397,12 @@ export const SHELL_COMMANDS: readonly Command[] = [
   },
   // Run toolbar + Run-Anything picker (APP-034). ⌘⇧R deliberately — ⌘⇧B stays
   // with the Run-Build-Task default (tasks-config.ts).
+  //
+  // The TopBar used to call `debug.start` for BOTH Run and Debug — a handler that only opens the
+  // debug panel — and `debug.stop`, which was never registered at all, so Stop returned false and
+  // did nothing, silently. App.tsx dispatches these three ids instead. They have always lived
+  // HERE: a second copy added higher up in this array shipped every one of them twice, which is
+  // two palette rows and a duplicate React key per id (CommandPalette keys by `item.id`).
   {
     id: "run.config",
     title: "Run: Selected Configuration",
@@ -606,12 +612,49 @@ export interface CommandPaletteRow {
   keybind: string;
 }
 
-/** Build the palette rows from the registry (keybindings included for display). */
-export function commandPaletteRows(plat: Platform = detectPlatform()): CommandPaletteRow[] {
+/**
+ * Build the palette rows from the registry (keybindings included for display).
+ *
+ * `overrides` is the APP-057 user rebind layer (command id → keys). The hint must come from
+ * `effectiveKeybinding`, the same merge the live matcher uses — otherwise a rebound or
+ * unbound command keeps advertising its frozen default in every palette.
+ */
+export function commandPaletteRows(
+  plat: Platform = detectPlatform(),
+  overrides?: Record<string, string>,
+): CommandPaletteRow[] {
   return SHELL_COMMANDS.map((c) => ({
     id: c.id,
     title: c.title,
     category: c.category,
-    keybind: chordLabel(c.keybinding, plat),
+    keybind: chordLabel(effectiveKeybinding(c, overrides), plat),
   }));
+}
+
+/**
+ * Where a palette command that the shell CANNOT execute should send the user instead.
+ *
+ * `executeCommandId` returns false for ids surfaced by other routes (the editor's own
+ * palette contributes `python.*`, `models.*`, …). Rather than silently no-op, the shell
+ * navigates to the surface where that command actually works.
+ *
+ * `tab` exists because handoff_3 §1 turned four rail nouns into SEGMENTS. Naming only the
+ * activity is not enough any more: `python.selectInterpreter` lives in Workspace's
+ * *Environments* segment, and a bare `setActivity("workspace")` lands the user on Repos —
+ * the exact failure the §1 redirects were written to prevent, on a live code path.
+ */
+export interface CommandTarget {
+  activity: ActivityId;
+  /** the merged route's segment, when the command lives inside one. */
+  tab?: RouteTab;
+}
+
+/** Route a palette command id to the surface where it works. null ⇒ handled inline. */
+export function commandTarget(id: string): CommandTarget | null {
+  if (id.startsWith("panel.")) return null;
+  if (id.startsWith("models.")) return { activity: "models" };
+  if (id.startsWith("prometheus.") || id.startsWith("gate.")) return { activity: "security" };
+  if (id.startsWith("python.")) return { activity: "workspace", tab: "environments" };
+  // ai.* / git.* / debug.* / search.* / editor.* all live in the Editor workbench.
+  return { activity: "editor" };
 }

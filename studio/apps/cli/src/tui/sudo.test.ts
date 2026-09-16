@@ -2,7 +2,9 @@
  * sudo.test.ts — elevation detection, the exact ack prompt, and the decision matrix.
  */
 import assert from "node:assert/strict";
+
 import { test } from "node:test";
+import { DEFAULT_AUTH_LEVEL, MAX_AUTH_LEVEL } from "@prometheus/core/agent-authorization";
 
 import {
   SUDO_ACK_PROMPT,
@@ -61,13 +63,30 @@ test("resolveSudoDecision: decline → force default + lock bypass (still procee
   assert.equal(d.proceed, true);
   assert.equal(d.startMode, "default");
   assert.equal(d.bypassLocked, true);
-  assert.match(d.note, /ask-before-everything/);
+  assert.match(d.note, /asking before every change/);
+});
+
+test("resolveSudoDecision: a DECLINE caps autonomy at the level its own note promises", () => {
+  // The cap used to be level 5 ("installs") written by hand in each host, under a note saying
+  // the session was in ask-before-everything mode: a declined root session auto-approved reads,
+  // edits, config changes, shell commands AND installs. The promise and the ceiling now come
+  // from one object, so they cannot disagree again.
+  const declined = resolveSudoDecision("sudo", "n");
+  assert.equal(declined.maxAuthLevel, DEFAULT_AUTH_LEVEL);
+  assert.ok(declined.maxAuthLevel < 5, "a declined gate must not still auto-approve installs");
+  // an ACKNOWLEDGED gate imposes no ceiling at all — the operator said yes
+  assert.equal(resolveSudoDecision("root", "").maxAuthLevel, MAX_AUTH_LEVEL);
+  // and a session that was never elevated is not capped either
+  assert.equal(resolveSudoDecision(null, null).maxAuthLevel, MAX_AUTH_LEVEL);
 });
 
 test("resolveSudoDecision: authorize → bypass reachable", () => {
   const d = resolveSudoDecision("root", "");
   assert.equal(d.bypassLocked, false);
   assert.match(d.note, /acknowledged/);
+  // it must not send the user to a command that does not exist
+  assert.doesNotMatch(d.note, /\/permissions\b/);
+  assert.match(d.note, /\/permission-mode/);
 });
 
 test("resolveSudoDecision: a null answer when elevated is treated as decline (fail-safe)", () => {

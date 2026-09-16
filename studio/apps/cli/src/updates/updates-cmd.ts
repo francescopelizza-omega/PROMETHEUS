@@ -12,6 +12,7 @@ import type { EngineClient } from "@prometheus/engine-bridge";
 
 import { c } from "../render.js";
 import { type CheckDeps, type CheckResult, checkUpdates } from "./check.js";
+import { loadSettings } from "../home.js";
 
 export interface UpdatesDeps {
   home: string;
@@ -24,12 +25,29 @@ export interface UpdatesDeps {
   now?: () => Date;
   /** test seam — the checker (default the real throttled check). */
   check?: (deps: CheckDeps) => Promise<CheckResult>;
+  /** package/repo overrides; `channel` is resolved from settings and always set. */
+  selfConfig?: Partial<u.SelfUpdateConfig>;
+}
+
+/**
+ * The dist-tag the user asked for, from the shared global settings layer.
+ *
+ * `settings.updateChannel` had a schema entry, a default and a validator, and NO reader —
+ * every proposed command hardcoded `@latest`, so choosing "beta" was accepted and then
+ * ignored. Read here rather than threaded through every caller because this is the one place
+ * that builds the update plan, and `home` is already on `UpdatesDeps`. Fail-soft: `loadSettings`
+ * returns `{}` on anything unreadable, and an unrecognised value falls back to "latest".
+ */
+function resolveChannel(home: string): "latest" | "beta" | "alpha" {
+  const v = loadSettings(home).updateChannel;
+  return v === "beta" || v === "alpha" ? v : "latest";
 }
 
 function baseCheckDeps(deps: UpdatesDeps): CheckDeps {
   return {
     home: deps.home,
     promVersion: deps.promVersion,
+    selfConfig: { ...deps.selfConfig, channel: resolveChannel(deps.home) },
     ...(deps.client ? { client: deps.client } : {}),
     ...(deps.env ? { env: deps.env } : {}),
     ...(deps.scriptPath ? { scriptPath: deps.scriptPath } : {}),

@@ -62,7 +62,7 @@ const LABEL = {
 } as const;
 const CODE = {
   fontFamily: "var(--font-mono)",
-  fontSize: "var(--text-code-size, 0.875rem)",
+  fontSize: "var(--text-code-size, 0.78125rem)",
   background: "var(--bg-inset)",
   border: "1px solid var(--border-subtle)",
   borderRadius: "var(--radius-md, 6px)",

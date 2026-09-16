@@ -84,6 +84,7 @@ import {
 } from "./catalog-uninstall-view.js";
 import ExtensionsRoute from "./extensions.js";
 import { type CatalogTab, onRouteTab, takeRouteTab } from "./route-tabs.js";
+import { classifyStreamLine } from "./stream-line-level.js";
 
 /** Resolve a semantic role → its CSS var. Local, as elsewhere in the app: `roleVar` is not
  *  exported from the @prometheus/ui barrel, and raw hex is a build failure (08 §6). */
@@ -901,9 +902,12 @@ export function CatalogRoute(): ReactElement {
                         letterSpacing: "0.03em",
                       }}
                     >
+                      {/* `reasons` are the gate's sentences; the VerdictCard 350 lines below
+                          carefully separates them from findings, and this header was
+                          undoing that by counting them as findings. */}
                       {CATALOG_VERDICT_CHIP[catalogVerdictOf(pendingGate.gate.verdict)].label} ·{" "}
                       {pendingGate.gate.reasons.length}{" "}
-                      {pendingGate.gate.reasons.length === 1 ? "finding" : "findings"}
+                      {pendingGate.gate.reasons.length === 1 ? "reason" : "reasons"}
                     </div>
                     <div
                       style={{
@@ -1076,9 +1080,9 @@ export function CatalogRoute(): ReactElement {
                     <StreamLog
                       lines={
                         logLines.length > 0
-                          ? logLines.map((text, i) => ({
+                          ? logLines.map((raw, i) => ({
                               id: `${activeRun?.runId ?? "log"}:${i}`,
-                              text,
+                              ...classifyStreamLine(raw, "lifecycle"),
                             }))
                           : [
                               {
@@ -1140,7 +1144,8 @@ export function CatalogRoute(): ReactElement {
             alignItems: "center",
             justifyContent: "center",
             background: "color-mix(in srgb, var(--bg-app) 65%, transparent)",
-            zIndex: Z.dropdown,
+            // Rollback is a decision the user must answer — the modal rung, not the dropdown one.
+            zIndex: Z.modal,
           }}
         >
           <section
@@ -1217,6 +1222,61 @@ export function CatalogRoute(): ReactElement {
       )}
 
       {/* the install/audit gate decision is the ENGINE's — rendered in the shared sheet. */}
+      {/* "Learn more" — the deep tutorial (dossier) for the selected item. Rendered
+          BEFORE the decision surfaces below: all three sit on Z.modal, and a tie on that
+          rung is settled by DOM order, so a force-gate or a verdict stays answerable on
+          top of an open tutorial rather than underneath it. */}
+      {tutorial && (
+        // biome-ignore lint/a11y/useSemanticElements: full-screen tutorial reader is the WAI-ARIA dialog pattern; the app does not use native <dialog>.
+        <div
+          role="dialog"
+          aria-label={`Tutorial: ${tutorial.id}`}
+          style={{
+            position: "fixed",
+            inset: 0,
+            background: "var(--bg-app)",
+            display: "flex",
+            flexDirection: "column",
+            // A full-screen reader is a surface the user must dismiss — the modal rung.
+            // At Z.dropdown it sat UNDER nothing, but it also could not cover the page it
+            // replaces; and it must still lose to the decision overlays, which is why the
+            // block itself is rendered BEFORE them (a tie at Z.modal is settled by DOM
+            // order, so "later wins" is what keeps a force-gate answerable on top of it).
+            zIndex: Z.modal,
+          }}
+        >
+          <div
+            style={{
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "space-between",
+              padding: "var(--space-3, 6px) var(--space-8, 16px)",
+              borderBottom: "1px solid var(--border-subtle)",
+            }}
+          >
+            <strong>Learn more — {tutorial.id}</strong>
+            <Button variant="ghost" onClick={() => setTutorial(null)}>
+              ✕ close
+            </Button>
+          </div>
+          <pre
+            style={{
+              flex: 1,
+              margin: 0,
+              overflow: "auto",
+              padding: "var(--space-8, 16px)",
+              fontFamily: "var(--font-mono)",
+              fontSize: "var(--text-code-size, 0.78125rem)",
+              whiteSpace: "pre-wrap",
+              wordBreak: "break-word",
+              color: "var(--text-primary)",
+            }}
+          >
+            {tutorial.text}
+          </pre>
+        </div>
+      )}
+
       {pendingGate && (
         // Fixed-overlay modal (mirrors the sibling dialogs). WITHOUT this the sheet was an
         // in-flow child appended below the catalog grid, inside <main overflow:auto> —
@@ -1248,11 +1308,11 @@ export function CatalogRoute(): ReactElement {
                 artifact={pendingGate.name}
                 sourceKind="catalog item"
                 riskScore={pendingGate.gate.score}
-                findings={pendingGate.gate.reasons.map((r, i) => ({
-                  rule: `R-${i + 1}`,
-                  description: r,
-                  severity: pendingGate.gate.verdict === "warn" ? "medium" : "high",
-                }))}
+                // `reasons` are the gate's SENTENCES, not findings: they have no rule id
+                // and no severity of their own. Synthesising `R-{n}` and deriving a
+                // severity from the tier put invented identifiers in the mono,
+                // severity-coloured slot — exactly the conflation §4 forbids.
+                reasons={pendingGate.gate.reasons}
                 actions={false}
               />
             </div>
@@ -1293,52 +1353,6 @@ export function CatalogRoute(): ReactElement {
       {/* §9: the typed confirm that gates every deep-red override on this route. */}
       <ForceGate gate={force} />
 
-      {/* "Learn more" — the deep tutorial (dossier) for the selected item. */}
-      {tutorial && (
-        // biome-ignore lint/a11y/useSemanticElements: full-screen tutorial reader is the WAI-ARIA dialog pattern; the app does not use native <dialog>.
-        <div
-          role="dialog"
-          aria-label={`Tutorial: ${tutorial.id}`}
-          style={{
-            position: "fixed",
-            inset: 0,
-            background: "var(--bg-app)",
-            display: "flex",
-            flexDirection: "column",
-            zIndex: Z.dropdown,
-          }}
-        >
-          <div
-            style={{
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "space-between",
-              padding: "var(--space-3, 6px) var(--space-8, 16px)",
-              borderBottom: "1px solid var(--border-subtle)",
-            }}
-          >
-            <strong>Learn more — {tutorial.id}</strong>
-            <Button variant="ghost" onClick={() => setTutorial(null)}>
-              ✕ close
-            </Button>
-          </div>
-          <pre
-            style={{
-              flex: 1,
-              margin: 0,
-              overflow: "auto",
-              padding: "var(--space-8, 16px)",
-              fontFamily: "var(--font-mono)",
-              fontSize: "var(--text-code-size, 0.875rem)",
-              whiteSpace: "pre-wrap",
-              wordBreak: "break-word",
-              color: "var(--text-primary)",
-            }}
-          >
-            {tutorial.text}
-          </pre>
-        </div>
-      )}
     </div>
   );
 }
@@ -1598,6 +1612,7 @@ function BrowseRow(props: {
               color: "var(--text-secondary)",
               overflow: "hidden",
               textOverflow: "ellipsis",
+              minWidth: 0, // flex/grid floor — without it the ellipsis is unreachable
               whiteSpace: "nowrap",
             }}
           >

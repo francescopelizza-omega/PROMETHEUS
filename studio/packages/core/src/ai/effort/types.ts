@@ -15,11 +15,52 @@
  * PURE types + PURE helpers. No IO.
  */
 
-/** The user-facing ladder. `off` means "answer directly, no deliberation". */
-export type EffortTier = "off" | "low" | "medium" | "high" | "max";
+/**
+ * The user-facing ladder. `off` means "answer directly, no deliberation".
+ *
+ * ## Why seven rungs and not five
+ *
+ * The ladder was five, and the module header still explains why: five is what a person holds in
+ * their head, and every backend can be mapped onto it. That reasoning holds for the BOTTOM of
+ * the ladder and it is why `minimal` (OpenAI) has no rung here — it is a shade of `low`.
+ *
+ * It does not hold at the top, because two of the three biggest providers grew a rung that is
+ * not a shade of anything below it, and a user who is paying for it cannot ask for it:
+ *
+ *   - Anthropic `output_config.effort`: low < medium < high < **xhigh** < max. `xhigh` is
+ *     documented as the recommended starting point for coding and agentic work on Opus 4.7/4.8,
+ *     and `max` above it as "absolute maximum capability with no constraints on token spending".
+ *   - OpenAI `reasoning.effort`: none, minimal, low, medium, high, **xhigh**, max.
+ *   - The Ollama `/v1` shim, measured live: minimal|low|medium|high|**xhigh**|**ultra**|max|none.
+ *
+ * `ultra` is the odd one: it is real, it is accepted, and so far only the local daemon takes it.
+ * It gets a rung because the alternative is a value the machine accepts and the ladder cannot
+ * name; on the two cloud vendors it clamps to a neighbour and `resolveEffort` says so out loud.
+ *
+ * The old objection — "adding a rung for one provider pushes the strongest backend's vocabulary
+ * onto every other one" — is answered by `supported` + `nearestTier`, not by keeping the rung
+ * out: a backend declares what it accepts, anything else clamps, and the clamp is reported.
+ * What made the objection true in practice was three rules spelled `supported: ALL`; those now
+ * name their measured sets (see `CLASSIC_FIVE` in rules.ts).
+ */
+export type EffortTier = "off" | "low" | "medium" | "high" | "xhigh" | "ultra" | "max";
 
-/** Ascending. Index order is the clamp order — see `nearestTier`. */
-export const EFFORT_TIERS: readonly EffortTier[] = ["off", "low", "medium", "high", "max"];
+/**
+ * Ascending. Index order is the clamp order — see `nearestTier`.
+ *
+ * `max` stays LAST. Both vendors put it at the top of their own tables, so a ladder that ranked
+ * `xhigh`/`ultra` above it would clamp a request for `max` DOWNWARD on a model that supports
+ * exactly the value asked for.
+ */
+export const EFFORT_TIERS: readonly EffortTier[] = [
+  "off",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "ultra",
+  "max",
+];
 
 export function isEffortTier(v: unknown): v is EffortTier {
   return typeof v === "string" && (EFFORT_TIERS as readonly string[]).includes(v);
@@ -260,14 +301,45 @@ export function nearestTier(want: EffortTier, supported: readonly EffortTier[]):
   return best;
 }
 
-/** Set a dotted path on a plain object, creating intermediate objects. Returns the same ref. */
+/**
+ * Path segments that must never be written through. `__proto__` on a plain object resolves to
+ * `Object.prototype`, which is an object and non-null — so the "create intermediate objects"
+ * branch below WOULD NOT replace it, and the final assignment would land on the prototype,
+ * process-wide.
+ *
+ * This is reachable from untrusted input: a rule's `field` is read from a project-local
+ * `.prometheus/effort-capabilities.json`, which `apps/cli/src/session/effort-rules.ts`
+ * discovers by walking up from cwd. Cloning a hostile repo and running one model request in it
+ * was enough to poison `Object.prototype` for the CLI, the Electron main process, and the
+ * renderer (which imports this module). Rejected here at the sink AND validated in
+ * `rule-store.ts::parseRule` at the source, because either alone is one refactor from silent.
+ */
+const FORBIDDEN_PATH_SEGMENTS = new Set(["__proto__", "constructor", "prototype"]);
+
+/** Is every segment of this dotted path safe to write through? */
+export function isSafeSetPath(path: string): boolean {
+  const parts = path.split(".");
+  return parts.length > 0 && parts.every((p) => p !== "" && !FORBIDDEN_PATH_SEGMENTS.has(p));
+}
+
+/**
+ * Set a dotted path on a plain object, creating intermediate objects. Returns the same ref.
+ * A path containing a prototype-chain segment is IGNORED, not thrown on: this runs while
+ * assembling a model request, and a poisoned rule must degrade to "effort not applied",
+ * never to a crashed turn or a polluted prototype.
+ */
 export function setPath(obj: Record<string, unknown>, path: string, value: unknown): void {
+  if (!isSafeSetPath(path)) return;
   const parts = path.split(".");
   let cur: Record<string, unknown> = obj;
   for (let i = 0; i < parts.length - 1; i++) {
     const k = parts[i] as string;
     const next = cur[k];
-    if (typeof next !== "object" || next === null) cur[k] = {};
+    // `Object.hasOwn` matters as much as the type check: an inherited property would otherwise
+    // be walked into and mutated on whatever object actually owns it.
+    if (!Object.hasOwn(cur, k) || typeof next !== "object" || next === null) {
+      cur[k] = {};
+    }
     cur = cur[k] as Record<string, unknown>;
   }
   cur[parts[parts.length - 1] as string] = value;

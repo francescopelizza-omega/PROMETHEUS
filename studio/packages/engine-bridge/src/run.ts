@@ -49,6 +49,13 @@ export interface EngineEnvelope {
  *  fail-closed before it can OOM the host (the JSON envelope is always tiny). */
 const MAX_ENGINE_STDOUT_BYTES = 64 * 1024 * 1024;
 
+/**
+ * Grace between SIGINT and SIGKILL on the abort/timeout path. Long enough for CPython to
+ * unwind a `KeyboardInterrupt` through `Popen.__exit__` and a `shutil.rmtree`, short enough
+ * that a wedged interpreter is still reaped promptly. Matches sidecar-runner.ts's kernel grace.
+ */
+const KILL_GRACE_MS = 3_000;
+
 const looksLikeEnvelope = (o: unknown): o is Record<string, unknown> =>
   !!o &&
   typeof o === "object" &&
@@ -162,11 +169,41 @@ export function runPrometheus<T extends EngineEnvelope = EngineEnvelope>(
       if (settled) return;
       settled = true;
       cleanup();
+      /**
+       * SIGINT first, SIGKILL only if that is ignored.
+       *
+       * A bare SIGKILL here leaked real state. prometheus.py runs blocking subprocesses — the
+       * hardened `git clone` into a `.<name>.staging-XXXX` tree, the `_adapt_shell` steps — and
+       * it cleans up after itself in an `except BaseException: shutil.rmtree(staging)`. SIGKILL
+       * cannot be caught, so that cleanup never ran: an UNSCANNED, never-gated staging tree was
+       * left on disk with an orphaned `git` still writing into it and still holding the network
+       * connection. This is the everyday path, not an edge case — every in-flight op's
+       * controller fires on cancel.
+       *
+       * SIGINT raises KeyboardInterrupt instead. CPython's `Popen.__exit__` kills the blocking
+       * grandchild while unwinding, and the engine's own `except BaseException` removes the
+       * staging tree. So signalling the direct pid is sufficient — Python propagates for us.
+       *
+       * Deliberately NOT `detached: true` + `process.kill(-pid, …)`, the pattern
+       * sidecar-runner.ts uses for the kernel: the CLI passes no AbortSignal, so a terminal
+       * Ctrl-C reaches python3 today ONLY because it shares the CLI's foreground process group.
+       * Owning a separate group would trade this leak for a Ctrl-C leak.
+       */
       try {
-        child.kill("SIGKILL");
+        child.kill("SIGINT");
       } catch {
         /* already dead */
       }
+      const hard = setTimeout(() => {
+        try {
+          child.kill("SIGKILL");
+        } catch {
+          /* already dead */
+        }
+      }, KILL_GRACE_MS);
+      // never keep the event loop alive for the escalation, and never outlive the child
+      if (typeof hard.unref === "function") hard.unref();
+      child.once("close", () => clearTimeout(hard));
       reject(e);
     };
 
@@ -183,8 +220,28 @@ export function runPrometheus<T extends EngineEnvelope = EngineEnvelope>(
 
     if (opts.signal) opts.signal.addEventListener("abort", onAbort, { once: true });
 
-    child.stdout?.on("data", (b: Buffer) => {
-      stdout += b.toString();
+    // `setEncoding`, not per-chunk `Buffer.toString()`: prometheus.py's `--json` payload is
+    // not ASCII-escaped, so a multi-byte character straddling a chunk boundary would decode as
+    // two U+FFFD halves and break `parseEngineObject` on an otherwise valid envelope.
+    child.stdout?.setEncoding("utf8");
+    child.stdout?.on("data", (chunk: string) => {
+      /**
+       * The bound is ENFORCED, not advisory.
+       *
+       * It used to be backed by an immediate SIGKILL; `finishReject` now sends SIGINT and only
+       * escalates after a 3 s grace, and nothing here stopped appending — so past the bound the
+       * string kept growing for the whole window, and a flood from one of prometheus.py's
+       * grandchildren (which inherit this same pipe) survives both signals and keeps filling it
+       * until that grandchild exits.
+       *
+       * So: stop ACCUMULATING once settled, but keep DRAINING — the child must never block on a
+       * full pipe, and `close` has to fire so the SIGKILL escalation timer gets cleared.
+       * Destroying the stream instead would hand prometheus.py `BrokenPipeError` on its next
+       * write, including inside its `except BaseException: shutil.rmtree(staging)` handler — which
+       * would skip the cleanup that the SIGINT grace was added to make possible.
+       */
+      if (settled) return;
+      stdout += chunk;
       // bound the buffer: a runaway engine must not OOM the host before the timeout.
       if (stdout.length > MAX_ENGINE_STDOUT_BYTES) {
         finishReject(
@@ -195,12 +252,17 @@ export function runPrometheus<T extends EngineEnvelope = EngineEnvelope>(
         );
       }
     });
-    child.stderr?.on("data", (b: Buffer) => {
-      const chunk = b.toString();
-      stderr += chunk;
+    child.stderr?.setEncoding("utf8"); // same StringDecoder reason as stdout above
+    child.stderr?.on("data", (chunk: string) => {
+      // Progress forwarding continues past a settle — it is what the operator is watching during
+      // the SIGINT grace, and destroying stderr would silence it.
       if (opts.onStderr) {
         stderrLineBuf = pumpLines(stderrLineBuf + chunk, opts.onStderr);
       }
+      // …but the accumulation is bounded, same shape as stdout above. stderr had no bound at all.
+      if (settled) return;
+      if (stderr.length > MAX_ENGINE_STDOUT_BYTES) return;
+      stderr += chunk;
     });
 
     child.stdin?.end();

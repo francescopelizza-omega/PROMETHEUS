@@ -138,6 +138,23 @@ export const restoreSchema = z.object({
   op: z.enum(["restore"]),
   id: QUARANTINE_ID,
   quarantineDir: PATH,
+  /**
+   * The EXACT string the human typed in the restore confirm (§4).
+   *
+   * Restore had a renderer-side dialog and nothing else, while its irreversible sibling
+   * purge was gated in three places. Restore lifts an artifact nemesis refused back into the
+   * workspace, executable again — one renderer bug, or one caller that arms the target and
+   * immediately calls the restore, and the artifact is back with no independent check.
+   */
+  typedName: z.string().optional(),
+  /**
+   * The item's PATH, so the confirm can be keyed to the filename the human was shown.
+   *
+   * A vault `id` is opaque (`nemesis restore --list` prints `id [kind] path`), and asking
+   * someone to retype an opaque id is a confirmation nobody reads. The dialog shows the
+   * path; main verifies against the same path.
+   */
+  path: PATH.optional(),
 });
 
 export const purgeSchema = z.object({
@@ -191,6 +208,8 @@ export const trustAuditLogSchema = z.object({
   forcedDanger: z.boolean().optional(),
   blocks: z.boolean().optional(),
   last24h: z.boolean().optional(),
+  /** opt IN to the heavyweight signed verdict blob — see the handler for why. */
+  includeVerdictFull: z.boolean().optional(),
 });
 
 export const trustVerifySchema = z.object({ op: z.enum(["verify"]), file: PATH });
@@ -274,7 +293,7 @@ export function validateSecurityInstall(arg: unknown): GuardResult<SecurityInsta
 export type RemediateArgs =
   | { op: "disinfect"; target: string; out: string; runId?: string }
   | { op: "quarantineList"; target?: string; quarantineDir?: string }
-  | { op: "restore"; id: string; quarantineDir: string }
+  | { op: "restore"; id: string; quarantineDir: string; typedName?: string; path?: string }
   | {
       op: "purge";
       target: string;
@@ -318,10 +337,16 @@ export function validateRemediate(arg: unknown): GuardResult<RemediateArgs> {
     case "restore": {
       const r = runSchema(restoreSchema, o);
       if (!r.ok) return r;
-      return {
-        ok: true,
-        value: { op: "restore", id: r.value.id, quarantineDir: r.value.quarantineDir },
+      // field-by-field on purpose (nothing unvalidated reaches the handler) — which also
+      // means a field missing from THIS list is dropped silently, schema or no schema.
+      const v: RemediateArgs = {
+        op: "restore",
+        id: r.value.id,
+        quarantineDir: r.value.quarantineDir,
       };
+      if (r.value.typedName !== undefined) v.typedName = r.value.typedName;
+      if (r.value.path !== undefined) v.path = r.value.path;
+      return { ok: true, value: v };
     }
     case "purge": {
       const r = runSchema(purgeSchema, o);
@@ -394,7 +419,13 @@ export function validateThreatDb(arg: unknown): GuardResult<ThreatDbArgs> {
 export type TrustArgs =
   | { op: "list" }
   | { op: "revoke"; name: string }
-  | { op: "auditLog"; forcedDanger?: boolean; blocks?: boolean; last24h?: boolean }
+  | {
+      op: "auditLog";
+      forcedDanger?: boolean;
+      blocks?: boolean;
+      last24h?: boolean;
+      includeVerdictFull?: boolean;
+    }
   | { op: "verify"; file: string };
 
 const TRUST_OPS = new Set(["list", "revoke", "auditLog", "verify"]);
@@ -424,6 +455,11 @@ export function validateTrust(arg: unknown): GuardResult<TrustArgs> {
       if (r.value.forcedDanger !== undefined) v.forcedDanger = r.value.forcedDanger;
       if (r.value.blocks !== undefined) v.blocks = r.value.blocks;
       if (r.value.last24h !== undefined) v.last24h = r.value.last24h;
+      // this allowlist is rebuilt field-by-field on purpose (nothing unvalidated reaches
+      // the handler) — which also means a new field that is not listed here is silently
+      // dropped, schema or no schema.
+      if (r.value.includeVerdictFull !== undefined)
+        v.includeVerdictFull = r.value.includeVerdictFull;
       return { ok: true, value: v };
     }
     default: {

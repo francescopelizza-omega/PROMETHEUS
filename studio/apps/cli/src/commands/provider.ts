@@ -244,13 +244,23 @@ function maskedReadKey(): Promise<string> {
     let key = "";
     stdin.setRawMode(true);
     stdin.resume();
+    // Idempotent and wired to stdin dying. `finish` was only reachable from a keystroke, so
+    // a closed pipe or a ^C during the prompt left the terminal in RAW mode — no echo, no
+    // line editing — and the promise never settled, so the command hung as well.
+    let done = false;
     const finish = (): void => {
+      if (done) return;
+      done = true;
       stdin.setRawMode(false); // ALWAYS restore cooked mode
       stdin.pause();
       stdin.off("data", onData);
+      stdin.off("end", finish);
+      stdin.off("error", finish);
       process.stderr.write("\n");
       resolve(key);
     };
+    stdin.once("end", finish);
+    stdin.once("error", finish);
     const onData = (b: Buffer): void => {
       for (const ch of b) {
         if (ch === 0x0d || ch === 0x0a) {

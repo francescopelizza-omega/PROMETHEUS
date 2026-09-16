@@ -551,7 +551,11 @@ export async function runModelCommand(
 
     case "serve": {
       const id = pos[0];
-      if (!id) return usageError("model serve", "<id> [--quant Q] [--runner R] [--port N] [--yes]");
+      if (!id)
+        return usageError(
+          "model serve",
+          "<id> [--quant Q] [--runner R] [--port N] [--yes] [--force]",
+        );
       if (id.startsWith("-")) {
         return { text: c.red(`model serve: refusing option-shaped id: ${id}`), exitCode: 2 };
       }
@@ -567,6 +571,14 @@ export async function runModelCommand(
       const ctxLen = flagStr(ctx, "ctx");
       if (ctxLen) argv.push("--ctx", ctxLen);
       if (flagSet(ctx, "autostart")) argv.push("--autostart");
+      // The sidecar's OVERFLOW RAM guard refuses with "…or re-run with --force to override".
+      // `serve` is the one modelhub verb that does NOT go through `runMutation`, so nothing
+      // appended the flag and that instruction could not be followed from any surface.
+      // `forceBlocked` first, exactly as `runMutation` does, so serve does not become the one
+      // verb that can force under the `ci` profile (where there is no human to confirm).
+      const forceDenied = forceBlocked(ctx, "model serve");
+      if (forceDenied) return forceDenied;
+      if (ctx.args.force) argv.push("--force");
 
       // 1) ALWAYS build the (pure) ServeProfile via the sidecar first.
       const env = await deps.runSidecar(SCRIPT, argv);

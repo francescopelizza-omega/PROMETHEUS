@@ -46,6 +46,18 @@ export function overridesToMap(overrides: readonly KeyBinding[]): Record<string,
   return map;
 }
 
+/**
+ * The persisted override map as the palettes read it (id → keys). Fail-soft: a blocked or
+ * empty localStorage reads as "no rebinds", never as an exception in a render path.
+ */
+export function readStoredOverrides(): Record<string, string> {
+  try {
+    return overridesToMap(parseOverrides(window.localStorage.getItem(KEYMAP_OVERRIDES_STORAGE)));
+  } catch {
+    return {};
+  }
+}
+
 /** Parse a persisted override JSON blob → KeyBinding[] (fail-soft: bad JSON → empty). */
 export function parseOverrides(raw: string | null): KeyBinding[] {
   if (!raw) return [];

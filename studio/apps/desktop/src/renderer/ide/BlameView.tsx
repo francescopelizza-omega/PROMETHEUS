@@ -99,6 +99,7 @@ export function BlameView({ root }: { root: string }): ReactElement {
             fontFamily: "var(--font-mono, monospace)",
             overflow: "hidden",
             textOverflow: "ellipsis",
+            minWidth: 0, // flex/grid floor — without it the ellipsis is unreachable
             whiteSpace: "nowrap",
           }}
         >
@@ -219,6 +220,7 @@ export function BlameView({ root }: { root: string }): ReactElement {
                 width: 150,
                 overflow: "hidden",
                 textOverflow: "ellipsis",
+                minWidth: 0, // flex/grid floor — without it the ellipsis is unreachable
                 whiteSpace: "nowrap",
                 color: sameCommit ? "transparent" : "var(--accent)",
               }}
@@ -230,6 +232,7 @@ export function BlameView({ root }: { root: string }): ReactElement {
                 flex: 1,
                 overflow: "hidden",
                 textOverflow: "ellipsis",
+                minWidth: 0, // flex/grid floor — without it the ellipsis is unreachable
                 whiteSpace: "nowrap",
                 color: "var(--text-secondary)",
               }}

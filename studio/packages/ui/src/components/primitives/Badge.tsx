@@ -33,9 +33,20 @@ export const badgeVariants = cva(
 );
 
 /** Resolve a role to its CSS-var color (neutral → text-secondary/border-strong). */
-function roleColor(role: BadgeRole): { color: string; border: string } {
-  if (role === "neutral") return { color: v("text-secondary"), border: v("border-strong") };
-  return { color: v(role), border: v(role) };
+/**
+ * The three colours a badge needs: the role tint, its border, and — for `solid` — the LABEL
+ * colour that sits ON the fill.
+ *
+ * `on` cannot be one fixed token. A solid badge fills with the ROLE colour, and the roles are
+ * saturated light tones on the dark scheme (`--ok` #8be04a, `--warn` #f5c944), so the white
+ * `--brand-fg` this used measured 1.63:1 and 1.58:1. Each role therefore carries its own
+ * computed `--on-<role>` (tokens/contrast.ts `onFill`). `neutral` fills with
+ * `--text-secondary`, which is a text tone rather than a role, so it takes the ground.
+ */
+function roleColor(role: BadgeRole): { color: string; border: string; on: string } {
+  if (role === "neutral")
+    return { color: v("text-secondary"), border: v("border-strong"), on: v("bg-app") };
+  return { color: v(role), border: v(role), on: v(`on-${role}`) };
 }
 
 export interface BadgeProps extends Omit<VariantProps<typeof badgeVariants>, "role"> {
@@ -51,7 +62,7 @@ export const Badge = forwardRef<HTMLSpanElement, BadgeProps>(function Badge(
   { role = "neutral", mono = false, solid = false, className, children, title },
   ref,
 ) {
-  const { color, border } = roleColor(role);
+  const { color, border, on } = roleColor(role);
   return (
     <span
       ref={ref}
@@ -66,7 +77,7 @@ export const Badge = forwardRef<HTMLSpanElement, BadgeProps>(function Badge(
         paddingBlock: sp(1),
         borderRadius: rad("full"),
         border: `1px solid ${border}`,
-        color: solid ? v("brand-fg") : color,
+        color: solid ? on : color,
         background: solid ? color : `color-mix(in srgb, ${color} 14%, transparent)`,
         fontFamily: mono ? v("font-mono") : v("font-ui"),
         fontSize: fs("small"),

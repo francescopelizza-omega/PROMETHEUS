@@ -1,8 +1,9 @@
 /**
  * routes/editor.tsx — the IDE shell route (file 07 §2/§3/§6/§7/§8).
  *
- * Assembles the file-07 IDE surface into the App's "editor" tab: an activity bar
- * (explorer/search/git/debug) → the primary side panel, the editor group(s)
+ * Assembles the file-07 IDE surface into the App's "editor" tab: the primary side panel —
+ * driven by the SHELL's activity rail, not an icon nav of its own (this route deliberately
+ * paints none; see editor-rail.test.ts) — the editor group(s)
  * (EditorPane: Monaco, multi-tab, split), the bottom panel (terminal / problems), and
  * the right Agent/Chat pane. The command palette (Cmd-Shift-P) + quick-open (Cmd-P)
  * mount on top; Cmd-K opens the inline-edit overlay anchored to the editor.
@@ -17,7 +18,7 @@
  * window.prometheus only. NO node/electron/engine-bridge.
  */
 
-import { ActivityIcon, type ActivityId, EmptyState } from "@prometheus/ui";
+import { ActivityIcon, type ActivityId, EmptyState, Z, elevation } from "@prometheus/ui";
 import { type ReactElement, useCallback, useEffect, useRef, useState } from "react";
 
 import { BlameView } from "../renderer/ide/BlameView.js";
@@ -105,23 +106,10 @@ type Palette =
   | "text"
   | "git";
 
-// APP-071: SVG ActivityIcon names (shell/icons.tsx PATHS) — NOT unicode glyphs. Every `icon`
-// here is asserted present via hasActivityIcon in the ui shell test so a typo can't ship a
-// blank rail button (ActivityIcon falls back silently). The `id` union is unchanged.
-const ACTIVITY: { id: Activity; icon: string; label: string }[] = [
-  { id: "explorer", icon: "Files", label: "Explorer" },
-  { id: "search", icon: "Search", label: "Search" },
-  { id: "git", icon: "GitBranch", label: "Source Control" },
-  { id: "debug", icon: "Bug", label: "Run & Debug" },
-  { id: "test", icon: "FlaskConical", label: "Tests" },
-  { id: "todo", icon: "ListChecks", label: "TODO" },
-  { id: "outline", icon: "ListTree", label: "Structure" },
-  { id: "callhierarchy", icon: "CallHierarchy", label: "Call Hierarchy" },
-  { id: "typehierarchy", icon: "TypeHierarchy", label: "Type Hierarchy" },
-  { id: "methodhierarchy", icon: "CallHierarchy", label: "Method Hierarchy" },
-  { id: "blame", icon: "History", label: "Blame" },
-  { id: "coverage", icon: "FlaskConical", label: "Coverage" },
-];
+// The tool-panel list moved to `@prometheus/ui` (shell/subpanels.ts) when the route's own icon
+// strip was fused into the shell rail's lower half. It lives there because the SHELL renders it
+// now, and because a list the route kept privately could not be shown by the component that
+// paints it. `Activity` (the id union) stays here: it is what this route switches its body on.
 
 // APP-072: the editor's bottom-panel tab subset (shell BottomTab ids) — passed to the shared
 // BottomPanel `tabs` prop so it reuses the canonical tabStyle + badge/collapse/maximize chrome.
@@ -168,14 +156,41 @@ function flattenToIndexed(syms: NormalizedSymbol[], uri: string, parent: string)
 export function EditorRoute({
   onNavigate,
   onOpenShellPanel,
+  treeOverlay = false,
+  subPanel,
+  onSubPanel,
 }: {
   /** jump to another shell activity (Model Hub / Chat) — threaded to the AgentPane CTAs. */
   onNavigate?: (id: ActivityId) => void;
   /** open a SHELL bottom-panel tab (App owns that state) — the `panel.*` palette seam
    *  (APP-004). Editor→shell prop direction only; never re-dispatched on the window bus. */
   onOpenShellPanel?: (tab: ShellBottomTab) => void;
+  /**
+   * §2's second collapse step: on a narrow viewport the side panel FLOATS over the editor
+   * instead of taking a column from it. The shell owns the breakpoint (shell/responsive.ts)
+   * because it also owns the first step — traying the chat rail — and the two have to
+   * happen in that order.
+   */
+  treeOverlay?: boolean;
+  /**
+   * Which tool panel is open — now owned by the SHELL, because the buttons that switch it
+   * moved into the shell's activity rail (its lower half). Uncontrolled when omitted, so the
+   * route still stands up on its own in tests and in isolation.
+   */
+  subPanel?: string;
+  onSubPanel?: (id: string) => void;
 } = {}): ReactElement {
-  const [activity, setActivity] = useState<Activity>("explorer");
+  // Controlled-or-not, the standard pattern: the shell drives this in the app, and the route
+  // keeps working with no props at all.
+  const [ownActivity, setOwnActivity] = useState<Activity>("explorer");
+  const activity = (subPanel ?? ownActivity) as Activity;
+  const setActivity = useCallback(
+    (a: Activity): void => {
+      if (onSubPanel) onSubPanel(a);
+      else setOwnActivity(a);
+    },
+    [onSubPanel],
+  );
   const [bottom, setBottom] = useState<BottomTab>("terminal");
   const [bottomCollapsed, setBottomCollapsed] = useState(false);
   const [bottomMax, setBottomMax] = useState(false);
@@ -888,61 +903,54 @@ export function EditorRoute({
     // handoff §2/§2.4: 8px-gapped ISLANDS on the inset ground — no full-bleed panels,
     // no shared hairlines. The agent rail is NOT here: it is the shell's global
     // RightRail (§2.5), so the editor never mounts a second AgentPane.
-    <div style={{ display: "flex", height: "100%", minHeight: 0, gap: 8 }}>
-      {/* activity bar */}
-      <nav
-        aria-label="activity bar"
-        style={{
-          display: "flex",
-          flexDirection: "column",
-          gap: 4,
-          padding: "8px 4px",
-          borderRadius: "var(--radius-island)",
-          border: "1px solid var(--border-subtle)",
-          background: "var(--bg-surface)",
-          // scroll instead of clipping the lower activities off a short window
-          overflowY: "auto",
-          minHeight: 0,
-        }}
-      >
-        {ACTIVITY.map((a) => (
-          <button
-            key={a.id}
-            type="button"
-            aria-label={a.label}
-            title={a.label}
-            aria-pressed={activity === a.id}
-            onClick={() => setActivity(a.id)}
-            style={{
-              background: "transparent",
-              border: "none",
-              // active tints via the ActivityIcon brand→accent gradient; inactive inherits
-              // the secondary color via currentColor (mirrors the shell ActivityBar treatment).
-              color: activity === a.id ? "var(--accent)" : "var(--text-secondary)",
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "center",
-              cursor: "pointer",
-              padding: "6px 8px",
-            }}
-          >
-            <ActivityIcon name={a.icon} size={20} active={activity === a.id} />
-          </button>
-        ))}
-      </nav>
+    <div
+      style={{
+        display: "flex",
+        height: "100%",
+        minHeight: 0,
+        gap: 8,
+        // the containing block for §2-j's overlaid file tree; harmless when inline
+        position: "relative",
+      }}
+    >
+      {/* The editor's own icon strip USED to be here — a second vertical rail sitting
+          immediately right of the shell's, identical in size and styling, meaning something
+          completely different. It now renders as the LOWER HALF of the shell's one rail
+          (renderer/shell/ActivityBar.tsx), driven by `subPanel`/`onSubPanel` above. */}
 
-      {/* primary side panel */}
+      {/* primary side panel — in-flow, or floated over the editor on a narrow window (§2) */}
       <aside
         style={{
-          position: "relative",
+          position: treeOverlay ? "absolute" : "relative",
           width: sidePane.size,
           flexShrink: 0,
+          // The aside cannot shrink and <main> is `flex: 1` (basis 0%), so at a narrow
+          // window the tree kept its full dragged width and Monaco was squeezed to 0px.
+          // A percentage cap clamps the aside's hypothetical size so the remainder still
+          // flows to main; it is inert at any normal window width.
+          maxWidth: "55%",
           borderRadius: "var(--radius-island)",
           border: "1px solid var(--border-subtle)",
           display: "flex",
           flexDirection: "column",
           background: "var(--bg-surface)",
           overflow: "hidden",
+          ...(treeOverlay
+            ? {
+                // It floats over the editor rather than out of the window; the shadow is what
+                // makes it read as ABOVE the content instead of a column that lost its border.
+                //
+                // `left: 0`, not 52: the 52px cleared the editor's OWN icon nav, which no longer
+                // exists (editor-rail.test.ts now asserts the route must never re-grow one). The
+                // positioning context is the route root, so the offset had become a dead band of
+                // editor showing to the left of the floating tree.
+                left: 0,
+                top: 0,
+                bottom: 0,
+                zIndex: Z.dropdown,
+                boxShadow: elevation.e2,
+              }
+            : {}),
         }}
       >
         <ResizeHandle axis="x" edge="right" rz={sidePane} label="Resize side panel" min={200} />
@@ -965,11 +973,16 @@ export function EditorRoute({
               borderRadius: 4,
               color: "var(--text-primary)",
               cursor: "pointer",
-              fontSize: "0.72rem",
-              padding: "2px 6px",
+              fontSize: "var(--text-small-size)",
+              padding: "3px 8px",
               display: "inline-flex",
               alignItems: "center",
               gap: 4,
+              // A button is its LABEL. Without these two it was a shrinkable flex item next to a
+              // sibling that would not shrink, so the row balanced itself by squeezing the
+              // buttons until "Open Folder" wrapped onto two lines INSIDE its own border.
+              flexShrink: 0,
+              whiteSpace: "nowrap",
             }}
           >
             <ActivityIcon name="FileText" size={13} /> Open File
@@ -984,11 +997,16 @@ export function EditorRoute({
               borderRadius: 4,
               color: "var(--text-primary)",
               cursor: "pointer",
-              fontSize: "0.72rem",
-              padding: "2px 6px",
+              fontSize: "var(--text-small-size)",
+              padding: "3px 8px",
               display: "inline-flex",
               alignItems: "center",
               gap: 4,
+              // A button is its LABEL. Without these two it was a shrinkable flex item next to a
+              // sibling that would not shrink, so the row balanced itself by squeezing the
+              // buttons until "Open Folder" wrapped onto two lines INSIDE its own border.
+              flexShrink: 0,
+              whiteSpace: "nowrap",
             }}
           >
             <ActivityIcon name="FolderOpen" size={13} /> Open Folder
@@ -996,11 +1014,17 @@ export function EditorRoute({
           <span
             title={root ?? undefined}
             style={{
-              fontSize: "0.7rem",
+              fontSize: "var(--text-small-size)",
               color: "var(--text-secondary)",
               overflow: "hidden",
               textOverflow: "ellipsis",
               whiteSpace: "nowrap",
+              // THE flexbox trap. `overflow:hidden` + `text-overflow:ellipsis` do nothing on a
+              // flex item until it is allowed to shrink: a flex item's floor is its min-content
+              // width, so this span held the row open at the full folder name and pushed the
+              // cost onto its siblings. `minWidth: 0` is what makes the ellipsis reachable.
+              minWidth: 0,
+              flex: "1 1 auto",
             }}
           >
             {root === null
@@ -1037,7 +1061,20 @@ export function EditorRoute({
       </aside>
 
       {/* center: editor + bottom panel */}
-      <main style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", gap: 8 }}>
+      {/* minHeight:0 + overflow:hidden: without a height floor a flex column child refuses
+          to go below its content height, so maximizing the bottom panel pushed the column
+          past the window instead of taking room from the editor above it. */}
+      <main
+        style={{
+          flex: 1,
+          minWidth: 0,
+          minHeight: 0,
+          overflow: "hidden",
+          display: "flex",
+          flexDirection: "column",
+          gap: 8,
+        }}
+      >
         <RunToolbar
           configs={runConfigs}
           selectedIdx={runCfgIdx}
@@ -1049,7 +1086,9 @@ export function EditorRoute({
         <div
           style={{
             flex: 1,
-            minHeight: 80,
+            // 0, not 80: an 80px floor here is what overflowed the column when the bottom
+            // panel is maximized. The island already clips its own content.
+            minHeight: 0,
             display: "flex",
             flexDirection: "column",
             borderRadius: "var(--radius-island)",

@@ -1,3 +1,4 @@
+import type { agent } from "@prometheus/core";
 /**
  * tui/sudo.ts — the elevated-privilege (sudo / root) startup gate.
  *
@@ -8,7 +9,7 @@
  * the ask-before-everything posture. PURE: detection seams (`getuid`, `env`) are
  * injected; the app owns the actual prompt + the red paint.
  */
-import type { agent } from "@prometheus/core";
+import { DEFAULT_AUTH_LEVEL, MAX_AUTH_LEVEL } from "@prometheus/core/agent-authorization";
 
 type PermissionModeId = agent.PermissionModeId;
 
@@ -75,6 +76,17 @@ export interface SudoDecision {
   startMode: PermissionModeId;
   /** when true, the user may NOT switch into bypassPermissions this session. */
   bypassLocked: boolean;
+  /**
+   * The highest authorisation level this session may run at.
+   *
+   * Lives on the DECISION rather than in each host, because it used to live in neither one
+   * place nor the other: both hosts wrote their own `if (bypassLocked && level > 5) level = 5`,
+   * so a session where the operator had just DECLINED elevated autonomy still auto-approved
+   * reads, edits, config changes, shell commands and installs — as root — while the note below
+   * told them they were in ask-before-everything mode. The cap now comes from the same object
+   * that produces the note, so the promise and the posture cannot disagree again.
+   */
+  maxAuthLevel: number;
   /** a one-line note to print after the decision. */
   note: string;
 }
@@ -86,7 +98,13 @@ export interface SudoDecision {
  */
 export function resolveSudoDecision(elevation: Elevation, answer: string | null): SudoDecision {
   if (elevation === null) {
-    return { proceed: true, startMode: "default", bypassLocked: false, note: "" };
+    return {
+      proceed: true,
+      startMode: "default",
+      bypassLocked: false,
+      maxAuthLevel: MAX_AUTH_LEVEL,
+      note: "",
+    };
   }
   const verdict = answer === null ? "decline" : interpretSudoAnswer(answer);
   if (verdict === "decline") {
@@ -94,14 +112,21 @@ export function resolveSudoDecision(elevation: Elevation, answer: string | null)
       proceed: true,
       startMode: "default",
       bypassLocked: true,
-      note: "Elevated autonomy declined — running in ask-before-everything mode; bypass is locked.",
+      // A DECLINE means the saved posture does not apply to this root session at all. The old cap
+      // was level 5 ("installs"), which auto-approves everything short of destructive — the exact
+      // autonomy the operator had just refused.
+      maxAuthLevel: DEFAULT_AUTH_LEVEL,
+      note: "Elevated autonomy declined — asking before every change this session; bypass is locked.",
     };
   }
   return {
     proceed: true,
     startMode: "default",
     bypassLocked: false,
-    note: "Elevated privileges acknowledged — you may switch modes (incl. bypass) with Shift-Tab / /permissions.",
+    maxAuthLevel: MAX_AUTH_LEVEL,
+    // `/permissions` is not a command — it has never been registered. The working paths are
+    // Shift-Tab and `/permission-mode`.
+    note: "Elevated privileges acknowledged — you may switch modes (incl. bypass) with Shift-Tab / /permission-mode.",
   };
 }
 

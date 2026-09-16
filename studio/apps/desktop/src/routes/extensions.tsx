@@ -415,7 +415,14 @@ function McpManager(): ReactElement {
                   color: "var(--text-secondary)",
                 }}
               >
-                The launch command is scanned by nemesis before the server can connect.
+                {fKind === "stdio"
+                  ? "The launch command is scanned by nemesis before the server can connect."
+                  : // An http connector has no command and no source to read, so nemesis
+                    // never runs on it: engine-bridge's MCP gate short-circuits `kind:
+                    // "endpoint"` to a hardcoded allow. The real check is the host's
+                    // SSRF/allow-list validation of the URL — saying "scanned by nemesis"
+                    // here claimed a scan that does not happen.
+                    "The URL is checked against the SSRF and allow-list rules before the server can connect. Remote endpoints are not scanned by nemesis — there is no command or source to read."}
               </span>
             </div>
           )}

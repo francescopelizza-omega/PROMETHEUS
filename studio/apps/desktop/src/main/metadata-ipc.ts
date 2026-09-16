@@ -1,3 +1,4 @@
+import { stat } from "node:fs/promises";
 import { isAbsolute } from "node:path";
 /**
  * main/metadata-ipc.ts — the typed `metadata:*` + `file:open` ipcMain handlers (file 0C).
@@ -141,6 +142,31 @@ export function registerMetadataIpcHandlers(wiring: MetadataIpcWiring = {}): () 
     }
   });
 
+  // ── path:reveal (SHOW a file in the OS file manager — never run it) ──────────
+  // `shell.showItemInFolder`, not `shell.openPath`. The quarantine vault's Inspect uses
+  // this: the operator must be able to look at an artifact the gate refused, and "open"
+  // would hand that exact artifact to whatever application claims its extension.
+  ipcMain.handle(IPC.revealPath, async (_evt, arg: unknown): Promise<OpenPathResult> => {
+    const path = arg && typeof arg === "object" ? (arg as { path?: unknown }).path : undefined;
+    if (typeof path !== "string" || !path || !isAbsolute(path)) {
+      return { ok: false, error: "an absolute path is required" };
+    }
+    try {
+      // `showItemInFolder` is VOID: handed a path that does not exist it does nothing at all and
+      // reports nothing, so `{ok:true}` here was a claim this handler had no basis for. The
+      // caller (the quarantine vault's Inspect) turns that into "revealed <path>" on screen.
+      await stat(path);
+    } catch {
+      return { ok: false, error: `no such path: ${path}` };
+    }
+    try {
+      shell.showItemInFolder(path); // void; selects the item in Finder/Explorer
+      return { ok: true };
+    } catch (e) {
+      return { ok: false, error: errString(e) };
+    }
+  });
+
   return () => {
     for (const channel of [
       IPC.metadataInspect,
@@ -149,6 +175,7 @@ export function registerMetadataIpcHandlers(wiring: MetadataIpcWiring = {}): () 
       IPC.metadataTimestomp,
       IPC.fileOpen,
       IPC.openPath,
+      IPC.revealPath,
     ]) {
       ipcMain.removeHandler(channel);
     }

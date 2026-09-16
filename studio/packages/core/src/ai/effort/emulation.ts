@@ -48,6 +48,17 @@ const PROMPT_MAP: Record<EmulatableTier, string> = {
   high:
     "Think carefully before you answer: consider edge cases, check your own reasoning, and " +
     "only respond once you are confident it is correct. Do not shortcut this.",
+  // `xhigh` and `ultra` sit between `high` and `max`, and the prose has to sit between them too.
+  // Reusing the `high` text would make three distinct rungs indistinguishable to a knobless
+  // model, which is the one class of model where the prompt IS the whole mechanism.
+  xhigh:
+    "Work through this thoroughly before answering: explore the problem, consider the " +
+    "alternatives, verify each step of your reasoning, and only then give your answer. Take " +
+    "the time this needs.",
+  ultra:
+    "Treat this as a hard problem. Explore it from more than one angle, enumerate the " +
+    "alternatives and say why you rejected the ones you rejected, check your reasoning against " +
+    "the edge cases, and only give a final answer once you have verified it holds.",
   max:
     "Reason through this as thoroughly as you can before answering: enumerate the alternatives, " +
     "check your logic step by step, and only give your final answer once you have verified it. " +

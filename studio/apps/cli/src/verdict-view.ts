@@ -17,6 +17,7 @@ import type {
 import { normalizeSeverity, parseNemesisVerdict } from "@prometheus/engine-bridge";
 
 import { bgBanner, c, kv, table } from "./render.js";
+import { clipToWidth } from "./tui/width.js";
 
 /** Map a VerdictTier to the process exit code the CLI must use. */
 export function exitCodeForTier(tier: VerdictTier): number {
@@ -187,7 +188,10 @@ function cardFromSecurity(v: SecurityVerdict): CardModel {
     })),
     totalFindings: v.findings.length,
     recommendation: null,
-    blockingReasons: [],
+    // NOT `[]`. A command gate's whole answer lives here, and the card already has a
+    // renderer for it (`for (const r of m.blockingReasons)` below) that was dead for every
+    // SecurityVerdict because this mapper threw the prose away.
+    blockingReasons: [...(v.blockingReasons ?? [])],
   };
 }
 
@@ -243,8 +247,10 @@ function cardFromForcedDanger(fd: ForcedDangerFull[], fallbackTarget: string): C
 /** Collapse whitespace and truncate an excerpt to `max` DISPLAY columns (adds an ellipsis). */
 function truncateExcerpt(s: string, max: number): string {
   const clean = s.replace(/\s+/g, " ").trim();
-  if (clean.length <= max) return clean;
-  return `${clean.slice(0, Math.max(1, max - 1))}…`;
+  // `clipToWidth`, not `.slice`: the doc comment says DISPLAY columns and `.length`/`.slice`
+  // count UTF-16 units, so a CJK or emoji excerpt was cut at the wrong place and could also
+  // be sliced through a surrogate pair. Identical output for ASCII.
+  return clipToWidth(clean, max);
 }
 
 function termWidth(): number {

@@ -226,7 +226,7 @@ export function ThreatDbPanel({
               borderRadius: "var(--radius-md, 6px)",
               color: "var(--text-primary)",
               fontFamily: "var(--font-mono)",
-              fontSize: "var(--text-code-size, 0.875rem)",
+              fontSize: "var(--text-code-size, 0.78125rem)",
               lineHeight: 1.5,
               whiteSpace: "pre-wrap",
             }}

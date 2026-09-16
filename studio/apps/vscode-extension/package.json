@@ -69,8 +69,14 @@
           "type": "number",
           "default": 1,
           "minimum": 0,
-          "maximum": 1,
-          "description": "0 = confirm every tool call; 1 = read-only tools auto-approve. Destructive tools ALWAYS reach a human regardless."
+          "maximum": 7,
+          "description": "Autonomy 0-7 on the SAME ladder as the prometheus CLI and the desktop app, shared through ~/.prometheus/config/authorisation.json — leave it unset to follow the level saved there. The level governs how often you are asked: 0 confirms every tool call, 1 auto-approves read-only tools, and each higher rung unlocks one more category (edits, config, commands, installs, and at 6-7 destructive actions such as delete/move). A write whose target lands OUTSIDE the folder you opened always asks, below level 6. Nemesis still hard-stops danger at every level. A long turn that hits the step cap stops and asks — run-to-done is not wired in the editor."
+        },
+        "prometheus.effort": {
+          "type": "string",
+          "enum": ["off", "low", "medium", "high", "xhigh", "ultra", "max"],
+          "description": "Reasoning effort on the SAME ladder as the prometheus CLI and the desktop app. Leave it unset to follow the tier saved in ~/.prometheus/config/effort.json, shared with every other surface. A model that does not support the chosen rung is clamped to its nearest one rather than being sent a value it would reject.",
+          "scope": "resource"
         },
         "prometheus.baseUrl": {
           "type": "string",

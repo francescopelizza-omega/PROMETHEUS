@@ -18,6 +18,15 @@ export interface SelfUpdateConfig {
   repo: string;
   /** the python engine entry (for the git/pipx note). */
   engineEntry: string;
+  /**
+   * The npm dist-tag to install.
+   *
+   * `settings.updateChannel` has been declared, defaulted and VALIDATED since it was added,
+   * and nothing ever read it: every command here hardcoded `@latest`, so a user who set
+   * "beta" was told their choice was accepted and then handed the stable install command.
+   * A setting with no reader is worse than a missing one — it reports success.
+   */
+  channel: "latest" | "beta" | "alpha";
 }
 
 /** Defaults — overridable by the host (e.g. from package.json / a config). */
@@ -25,6 +34,7 @@ export const DEFAULT_SELF_UPDATE: SelfUpdateConfig = Object.freeze({
   npmPackage: "@prometheus/cli",
   repo: "prometheus-studio/prometheus",
   engineEntry: "prometheus.py",
+  channel: "latest",
 });
 
 export interface SelfUpdatePlan {
@@ -50,7 +60,7 @@ export function buildSelfUpdatePlan(input: BuildSelfUpdateInput): SelfUpdatePlan
   const restart = "Then start Prometheus again.";
   switch (input.method) {
     case "npm-global": {
-      const command = `npm install -g ${cfg.npmPackage}@latest`;
+      const command = `npm install -g ${cfg.npmPackage}@${cfg.channel}`;
       return {
         method: input.method,
         command,
@@ -93,13 +103,13 @@ export function buildSelfUpdatePlan(input: BuildSelfUpdateInput): SelfUpdatePlan
     }
     default: {
       // Unknown install — present the two most likely paths.
-      const command = `npm install -g ${cfg.npmPackage}@latest    # or, from a git checkout:  git pull --ff-only`;
+      const command = `npm install -g ${cfg.npmPackage}@${cfg.channel}    # or, from a git checkout:  git pull --ff-only`;
       return {
         method: "unknown",
         command,
         steps: [
           "Close Prometheus.",
-          `If you installed via npm:  npm install -g ${cfg.npmPackage}@latest`,
+          `If you installed via npm:  npm install -g ${cfg.npmPackage}@${cfg.channel}`,
           "If you run from a git checkout:  git -C <prometheus-dir> pull --ff-only",
           restart,
         ],

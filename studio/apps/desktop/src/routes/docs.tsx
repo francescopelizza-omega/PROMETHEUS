@@ -10,7 +10,7 @@
  * Renderer-SANDBOXED (C5): react + @prometheus/ui + pure view-models + window event bus.
  */
 import { COMMAND_SPECS } from "@prometheus/core/commands";
-import { Panel } from "@prometheus/ui";
+import { EmptyState, Panel, Skeleton } from "@prometheus/ui";
 import { type ReactElement, useEffect, useMemo, useState } from "react";
 
 import { SHELL_COMMANDS } from "../renderer/commands/registry.js";
@@ -50,13 +50,23 @@ export function DocsRoute(): ReactElement {
   const workspaceRoot = useTabsStore((s) => s.workspaceRoot);
   const [docs, setDocs] = useState<DocRowView[]>([]);
   const [docsError, setDocsError] = useState<string | null>(null);
+  /**
+   * §6 separates LOADING from EMPTY, and the difference is the whole point of the state.
+   *
+   * Without this flag the first paint of a large workspace said "No documents found under
+   * this folder" — a definite, wrong answer to a question we had not finished asking. It is
+   * the same defect `repos.tsx` was already fixed for.
+   */
+  const [docsLoading, setDocsLoading] = useState(false);
   useEffect(() => {
     if (!workspaceRoot) {
       setDocs([]);
       setDocsError(null);
+      setDocsLoading(false);
       return;
     }
     let live = true;
+    setDocsLoading(true);
     void window.prometheus?.ide
       ?.workspaceIndex(workspaceRoot)
       .then((r) => {
@@ -71,6 +81,9 @@ export function DocsRoute(): ReactElement {
       })
       .catch((e: unknown) => {
         if (live) setDocsError(e instanceof Error ? e.message : String(e));
+      })
+      .finally(() => {
+        if (live) setDocsLoading(false);
       });
     return () => {
       live = false;
@@ -126,10 +139,20 @@ export function DocsRoute(): ReactElement {
           <p role="alert" style={{ color: "var(--danger)", margin: 0, fontSize: "0.85rem" }}>
             Couldn't list documents: {docsError}
           </p>
+        ) : docsLoading ? (
+          // §6 LOADING: skeleton rows, not an answer we do not have yet
+          <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+            <Skeleton height={14} />
+            <Skeleton height={14} width="82%" />
+            <Skeleton height={14} width="66%" />
+            <Skeleton height={14} width="74%" />
+          </div>
         ) : docs.length === 0 ? (
-          <p style={{ color: "var(--text-secondary)", margin: 0, fontSize: "0.85rem" }}>
-            No documents found under this folder.
-          </p>
+          <EmptyState
+            icon="▤"
+            title="No documents here"
+            hint="Markdown and text files in this folder will appear here."
+          />
         ) : (
           <ul style={{ listStyle: "none", margin: 0, padding: 0 }}>
             {docs.map((d) => (
@@ -150,9 +173,12 @@ export function DocsRoute(): ReactElement {
                     cursor: "pointer",
                     textAlign: "left",
                     minWidth: 0, // §7
+                    flexWrap: "wrap", // §7: the row must wrap, not overflow, at ~900px
                   }}
                 >
-                  <span aria-hidden="true" style={{ flex: "none", color: "var(--accent)" }}>
+                  {/* handoff_3 §5: "▤ (accent-purple)". `--accent` is the CYAN accent;
+                      the prototype's purple is already a token — `--brand-3`. */}
+                  <span aria-hidden="true" style={{ flex: "none", color: "var(--brand-3)" }}>
                     ▤
                   </span>
                   <span
@@ -234,7 +260,7 @@ export function DocsRoute(): ReactElement {
                 border: "1px solid var(--border-subtle)",
                 cursor: "pointer",
                 fontSize: "0.8rem",
-                background: tab === t.id ? "var(--bg-surface-3)" : "transparent",
+                background: tab === t.id ? "var(--bg-elevated)" : "transparent",
                 color: tab === t.id ? "var(--text-primary)" : "var(--text-secondary)",
               }}
             >

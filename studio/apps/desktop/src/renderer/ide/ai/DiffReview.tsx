@@ -132,6 +132,7 @@ function FileNode({ file, locked }: { file: ReviewFile; locked: boolean }): Reac
                 fontSize: "0.72rem",
                 fontFamily: "var(--font-mono, monospace)",
                 whiteSpace: "pre-wrap",
+                overflowWrap: "break-word",
               }}
             >
               {h.oldLines.map((l, i) => (

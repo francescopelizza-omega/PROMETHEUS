@@ -80,7 +80,7 @@ export function RiskGauge({
           fontWeight: 700,
           fontSize: compact
             ? "var(--text-small-size, 0.8125rem)"
-            : "var(--text-code-size, 0.875rem)",
+            : "var(--text-code-size, 0.78125rem)",
           minWidth: "2.4em",
           textAlign: "right",
         }}

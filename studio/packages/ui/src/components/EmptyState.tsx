@@ -54,7 +54,7 @@ export function EmptyState({
         </div>
       )}
       <strong
-        style={{ color: "var(--text-primary)", fontSize: "var(--text-body-size, 0.9375rem)" }}
+        style={{ color: "var(--text-primary)", fontSize: "var(--text-body-size, 0.875rem)" }}
       >
         {title}
       </strong>

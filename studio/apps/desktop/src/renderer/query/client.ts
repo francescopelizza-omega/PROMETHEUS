@@ -57,6 +57,10 @@ export const qk = {
     ["model", "search", q, modality, source, freeOnly] as const,
   modelFit: (id: string) => ["model", "fit", id] as const,
   modelLibrary: (modality: string) => ["model", "library", modality] as const,
+  /** The PREFIX — invalidates every modality at once. Models registers its query under
+   *  "all" and Home under "text", so invalidating `modelLibrary("all")` after a pull left
+   *  Home showing a stale library until a reload. */
+  modelLibraryAll: () => ["model", "library"] as const,
   modelServing: () => ["model", "serving"] as const,
   modelEndpoints: () => ["model", "endpoints"] as const,
   // ── Home "Recent projects" (file 06 repos read) ─────────────────────────

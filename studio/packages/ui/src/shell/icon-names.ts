@@ -33,6 +33,13 @@ export const ACTIVITY_ICON_NAMES = [
   "ListTree",
   "CallHierarchy",
   "TypeHierarchy",
+  // Method Hierarchy and Coverage each had NO icon of their own and borrowed a neighbour's:
+  // Method Hierarchy drew `CallHierarchy` and Coverage drew `FlaskConical`, so the editor's
+  // icon rail showed the same glyph twice in two different places. An icon rail is a
+  // by-shape index — two entries with one shape means one of them can only be found by
+  // hovering every button, which is the whole affordance gone.
+  "MethodHierarchy",
+  "Coverage",
   "History",
   "FileText",
   "FolderOpen",

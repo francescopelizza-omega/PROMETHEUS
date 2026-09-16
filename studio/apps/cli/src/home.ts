@@ -47,6 +47,8 @@ export const HOME_TREE: readonly string[] = [
   "records/audits",
   "records/quarantine",
   "state/sessions",
+  // one file per live instance — the fleet bar's presence store (fleet/heartbeat.ts).
+  "run",
   "tmp",
 ];
 

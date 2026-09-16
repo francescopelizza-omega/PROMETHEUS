@@ -57,11 +57,24 @@ export function Tabs({
   const activeIndex = items.findIndex((t) => t.id === value);
 
   function onKeyDown(e: KeyboardEvent<HTMLDivElement>): void {
-    const ni = nextTabIndex(e.key, activeIndex, items.length);
-    if (ni !== activeIndex && ni >= 0) {
-      e.preventDefault();
-      const target = items[ni];
-      if (target && !target.disabled) onValueChange(target.id);
+    const first = nextTabIndex(e.key, activeIndex, items.length);
+    if (first === activeIndex || first < 0) return;
+    e.preventDefault();
+    // KEEP GOING past a disabled tab instead of stopping on it. The old code moved one step
+    // and then simply did nothing if that tab was disabled, so a disabled tab was a wall:
+    // every arrow press from its neighbour was swallowed and the tabs beyond it could not be
+    // reached by keyboard at all. `nextTabIndex` is left alone — Segmented.tsx imports it and
+    // depends on its wrap arithmetic — so the skipping is done here, bounded by items.length
+    // so an all-disabled list terminates instead of spinning.
+    const forward = e.key === "ArrowRight" || e.key === "ArrowDown" || e.key === "Home";
+    let ni = first;
+    for (let n = 0; n < items.length; n++) {
+      const t = items[ni];
+      if (t && !t.disabled) {
+        onValueChange(t.id);
+        return;
+      }
+      ni = forward ? (ni + 1) % items.length : (ni - 1 + items.length) % items.length;
     }
   }
 

@@ -88,7 +88,7 @@ export function VerdictBadge({
         // 14% tint of the role color behind the pill (color-mix keeps it tokenized).
         background: `color-mix(in srgb, ${color} 14%, transparent)`,
         fontFamily: "var(--font-mono)",
-        fontSize: "var(--text-code-size, 0.875rem)",
+        fontSize: "var(--text-code-size, 0.78125rem)",
         fontWeight: 600,
         lineHeight: 1,
         letterSpacing: "0.02em",

@@ -67,7 +67,6 @@ export function OnboardingWizard({
   const [step, setStep] = useState<OnboardingStep>("welcome");
   const [interpreter, setInterpreter] = useState("");
   const [modelChoice, setModelChoice] = useState<ModelChoice>("later");
-  const [tokensOptIn, setTokensOptIn] = useState(false);
   const [bins, setBins] = useState<Record<string, boolean>>({});
   const [applyNote, setApplyNote] = useState<string | null>(null);
 
@@ -84,7 +83,6 @@ export function OnboardingWizard({
     ...(interpreter ? { interpreter } : {}),
     modelChoice,
     ...(activeSchemeId ? { theme: activeSchemeId } : {}),
-    tokensOptIn,
   });
 
   const finish = (skipped: boolean): void => onComplete(collect(), skipped);
@@ -260,14 +258,13 @@ export function OnboardingWizard({
             <p style={{ color: "var(--text-secondary)" }}>
               Curated tricks to cut token spend (prompt trimming, caching, local-first routing).
             </p>
-            <label style={{ display: "flex", alignItems: "center", gap: "var(--space-2, 4px)" }}>
-              <input
-                type="checkbox"
-                checked={tokensOptIn}
-                onChange={(e) => setTokensOptIn(e.target.checked)}
-              />
-              Enable the token-economy toolkit
-            </label>
+            {/* The "Enable the token-economy toolkit" checkbox lived here and enabled
+                nothing. Its value was recorded into the onboarding blob and no code anywhere
+                read it back, so ticking it was a promise the app never kept — the toolkit was
+                reached only through the button below, whether it was ticked or not. A control
+                that reports success and does nothing is worse than no control, so it is gone
+                rather than left as a placeholder. `tokensOptIn` stays in OnboardingResult and
+                its tolerant parse so blobs already in localStorage still load. */}
             {onOpenTokens && (
               <button
                 type="button"
@@ -312,7 +309,11 @@ export function OnboardingWizard({
           <button
             type="button"
             onClick={advance}
-            style={{ ...btn, background: "var(--brand)", color: "var(--brand-fg)" }}
+            // The label sits ON the `--brand` fill, so it needs the computed `--on-brand`.
+            // `--brand-fg` is #ffffff on the dark scheme and measures 3.96:1 over `--brand` —
+            // under the 4.5:1 a label carries. It stays in use where it is a FILL, not a label
+            // (the Toggle knob), which is why this is a call-site change and not a token change.
+            style={{ ...btn, background: "var(--brand)", color: "var(--on-brand)" }}
           >
             {step === "tokens" ? "Finish" : "Next"}
           </button>

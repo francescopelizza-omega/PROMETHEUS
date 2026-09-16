@@ -160,6 +160,7 @@ export function ClipboardHistory({ onClose }: { onClose: () => void }): ReactEle
                   fontFamily: "var(--font-mono, monospace)",
                   overflow: "hidden",
                   textOverflow: "ellipsis",
+                  minWidth: 0, // flex/grid floor — without it the ellipsis is unreachable
                   whiteSpace: "nowrap",
                 }}
               >

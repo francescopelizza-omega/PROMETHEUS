@@ -104,6 +104,7 @@ export function DataSourcePanel({
                   fontFamily: "var(--font-mono, monospace)",
                   overflow: "hidden",
                   textOverflow: "ellipsis",
+                  minWidth: 0, // flex/grid floor — without it the ellipsis is unreachable
                   whiteSpace: "nowrap",
                 }}
               >

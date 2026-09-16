@@ -99,6 +99,7 @@ export function FindingRow({ finding, onOpenLocation, className }: FindingRowPro
             textDecoration: "underline",
             overflow: "hidden",
             textOverflow: "ellipsis",
+            minWidth: 0, // flex/grid floor — without it the ellipsis is unreachable
             whiteSpace: "nowrap",
             maxWidth: "34%",
             textAlign: "left",
@@ -115,6 +116,7 @@ export function FindingRow({ finding, onOpenLocation, className }: FindingRowPro
             fontSize: "var(--text-small-size, 0.8125rem)",
             overflow: "hidden",
             textOverflow: "ellipsis",
+            minWidth: 0, // flex/grid floor — without it the ellipsis is unreachable
             whiteSpace: "nowrap",
             maxWidth: "34%",
           }}
@@ -132,6 +134,7 @@ export function FindingRow({ finding, onOpenLocation, className }: FindingRowPro
             fontSize: "var(--text-small-size, 0.8125rem)",
             overflow: "hidden",
             textOverflow: "ellipsis",
+            minWidth: 0, // flex/grid floor — without it the ellipsis is unreachable
             whiteSpace: "nowrap",
             flex: 1,
           }}

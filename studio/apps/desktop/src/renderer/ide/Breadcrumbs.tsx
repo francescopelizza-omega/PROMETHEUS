@@ -191,6 +191,7 @@ export function Breadcrumbs({ group }: { group: number }): ReactElement | null {
     fontSize: "0.72rem",
     overflow: "hidden",
     textOverflow: "ellipsis",
+    minWidth: 0, // flex/grid floor — without it the ellipsis is unreachable
     whiteSpace: "nowrap" as const,
     maxWidth: 220,
   };

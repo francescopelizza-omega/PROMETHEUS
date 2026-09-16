@@ -63,6 +63,22 @@ export interface VerdictCardProps {
   /** the overall risk score, when the engine reported one. */
   riskScore?: number;
   findings?: readonly VerdictCardFinding[];
+  /**
+   * The gate's free-text BLOCKING REASONS — sentences, not findings.
+   *
+   * A gate result carries two different things: `findings`, which the scanner produced
+   * with a real rule id and its own severity, and `reasons`, which are the sentences the
+   * gate wrote to explain its decision. They are not interchangeable, and rendering the
+   * second as the first is how §4's "never conflate" rule gets broken in practice: two
+   * call sites used to invent `R-1`, `R-2`… rule ids and DERIVE a severity from the
+   * decision tier (`verdict === "warn" ? "medium" : "high"`), which put fabricated
+   * identifiers in the mono, severity-coloured slot and restated the tier as if it were a
+   * second, corroborating measurement.
+   *
+   * So reasons render in their own block: no rule id, no severity colour, tinted by the
+   * TIER they belong to — which is the only thing they actually say.
+   */
+  reasons?: readonly string[];
   /** cap the rendered findings; the rest collapse into a "+N more" line. */
   maxFindings?: number;
   onDetails?(): void;
@@ -83,6 +99,7 @@ export function VerdictCard({
   sourceKind,
   riskScore,
   findings = [],
+  reasons = [],
   maxFindings = 4,
   onDetails,
   onInstallAnyway,
@@ -228,6 +245,25 @@ export function VerdictCard({
               +{hidden} more finding{hidden === 1 ? "" : "s"}
             </span>
           )}
+        </div>
+      )}
+
+      {reasons.length > 0 && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+          {reasons.map((r) => (
+            <div key={r} style={findingRow()}>
+              {/* the tier's own glyph, NOT a rule id — there is no rule behind a reason */}
+              <span
+                aria-hidden="true"
+                style={{ color: `var(${TIER_VAR[verdict]})`, fontSize: 11, flex: "none" }}
+              >
+                {CARD_GLYPH[verdict]}
+              </span>
+              <span style={{ fontSize: 12, color: "var(--text-body)", flex: 1, minWidth: 0 }}>
+                {r}
+              </span>
+            </div>
+          ))}
         </div>
       )}
 

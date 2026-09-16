@@ -224,13 +224,44 @@ const docsTabListeners = new Set<(tab: DocsTab) => void>();
  *  from another activity) AND notifies live listeners (for a DocsRoute already mounted). Pure
  *  pub-sub — no DOM — so registry.ts stays DOM-free and this stays node-testable. */
 export function requestDocsTab(tab: DocsTab): void {
+  // a NEW request must not be masked by this tick's memo of the previous answer
+  docsTabTaken = undefined;
+  // LATCH **or** NOTIFY, never both — same reasoning as routes/route-tabs.ts. Doing both
+  // stranded a latch whenever DocsRoute was already mounted, and only a later mount could
+  // consume it, so a `help.*` command hijacked a navigation the user made much later.
+  if (docsTabListeners.size > 0) {
+    for (const l of docsTabListeners) l(tab);
+    pendingDocsTab = null;
+    return;
+  }
   pendingDocsTab = tab;
-  for (const l of docsTabListeners) l(tab);
 }
+
+/**
+ * This tick's already-given answer — same StrictMode hazard as `routes/route-tabs.ts`.
+ *
+ * `takeDocsTab()` is read from a `useState` initializer (docs.tsx), which React StrictMode
+ * double-invokes in development while KEEPING THE SECOND value. Clearing on the first call
+ * handed the route null on the pass that counts, so a `help.*` command landed on the default
+ * tab under `vite dev`. Memoised for the rest of the tick, then dropped, so the latch is
+ * still a one-shot across navigations. `undefined` = not yet taken this tick.
+ */
+let docsTabTaken: DocsTab | null | undefined;
+let docsFlushQueued = false;
+
 /** Read + clear the latched tab (the route's initial tab); null when none pending. */
 export function takeDocsTab(): DocsTab | null {
+  if (docsTabTaken !== undefined) return docsTabTaken;
   const t = pendingDocsTab;
   pendingDocsTab = null;
+  docsTabTaken = t;
+  if (!docsFlushQueued) {
+    docsFlushQueued = true;
+    queueMicrotask(() => {
+      docsFlushQueued = false;
+      docsTabTaken = undefined;
+    });
+  }
   return t;
 }
 /** Subscribe to tab requests while mounted; returns an unsubscribe. */

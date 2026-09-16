@@ -30,6 +30,11 @@ const capture = (outcome: Outcome, stdout = "", stderr = ""): CaptureResult => (
   outcome,
 });
 
+/** A fake, always-clear machine sample — the real sampleLaunchGuard sleeps ~120ms and reads
+ *  THIS machine's live CPU/RAM, which would make every cli-backend test slow and, on a loaded
+ *  box, flaky. A test exercising the ceiling itself overrides this. */
+const FAST_LAUNCH_GUARD = { launchGuardFn: async () => ({ cpuPct: 10, ramPct: 10 }) };
+
 test("fake backend → a canned reply", async () => {
   const invoke = makeInvoker({ client: fakeEngine({}) });
   const r = await invoke(req({ name: "x", role: "tester", backend: { kind: "fake" } }));
@@ -43,6 +48,7 @@ test("cli backend → uses the verified recipe + returns captured stdout", async
   const deps: InvokerDeps = {
     client: fakeEngine({}),
     which: () => true,
+    ...FAST_LAUNCH_GUARD,
     spawn: async (bin, opts) => {
       spawnedBin = bin;
       spawnedArgs = opts.args;
@@ -73,6 +79,7 @@ test("cli backend → a bad outcome (rate-limit) throws (coordinator records it)
   const invoke = makeInvoker({
     client: fakeEngine({}),
     which: () => true,
+    ...FAST_LAUNCH_GUARD,
     spawn: async () => capture("rate_limited", "", "Error: 429 too many requests"),
   });
   await assert.rejects(
@@ -86,6 +93,7 @@ test("cli backend → cursor uses its fallback bin + text format + --trust", asy
   const invoke = makeInvoker({
     client: fakeEngine({}),
     which: (b) => b === "cursor", // primary cursor-agent missing → fallback cursor
+    ...FAST_LAUNCH_GUARD,
     spawn: async (_bin, opts) => {
       args = opts.args;
       return capture("ok", "ok");
@@ -94,6 +102,96 @@ test("cli backend → cursor uses its fallback bin + text format + --trust", asy
   await invoke(req({ name: "c", role: "x", backend: { kind: "cli", service: "cursor" } }));
   assert.ok(args.includes("--trust"));
   assert.ok(args.join(" ").includes("--output-format text"));
+});
+
+test("cli backend → a saturated machine refuses the launch, never spawns", async () => {
+  let spawned = false;
+  let samples = 0;
+  const invoke = makeInvoker({
+    client: fakeEngine({}),
+    which: () => true,
+    launchGuardFn: async () => {
+      samples += 1;
+      return { cpuPct: 12, ramPct: 96 };
+    },
+    sleep: async () => {},
+    spawn: async () => {
+      spawned = true;
+      return capture("ok");
+    },
+  });
+  await assert.rejects(
+    invoke(req({ name: "a", role: "r", backend: { kind: "cli", service: "opencode" } })),
+    // "temporarily unavailable" deliberately: it is the token `isTransientBackendError`
+    // recognises, so the coordinator re-issues the agent instead of failing the turn outright
+    // with `[backend error]`. The old "refused — …" wording matched nothing.
+    /opencode: temporarily unavailable — RAM at 96%/,
+  );
+  assert.equal(spawned, false, "must never spawn a fresh agent-CLI process under critical pressure");
+  assert.equal(samples, 4, "the ceiling is re-sampled (1 + 3 waits) before the launch is refused");
+});
+
+test("cli backend → a ceiling that CLEARS lets the launch through instead of losing the agent", async () => {
+  // The self-inflicted case: a swarm saturates the machine, so the first sample refuses agent 4.
+  // One read used to be final, which meant the guard killed the rest of the swarm it was
+  // reading the load of.
+  let spawned = false;
+  let samples = 0;
+  const invoke = makeInvoker({
+    client: fakeEngine({}),
+    which: () => true,
+    launchGuardFn: async () => {
+      samples += 1;
+      return samples === 1 ? { cpuPct: 94, ramPct: 40 } : { cpuPct: 30, ramPct: 40 };
+    },
+    sleep: async () => {},
+    spawn: async () => {
+      spawned = true;
+      return capture("ok", "agent ran");
+    },
+  });
+  const out = await invoke(req({ name: "a", role: "r", backend: { kind: "cli", service: "opencode" } }));
+  assert.equal(spawned, true, "the second sample was clear — the agent must run");
+  assert.equal(samples, 2);
+  assert.match(out.text, /agent ran/);
+});
+
+test("cli backend → launchGuardWaits: 0 restores the single-sample behaviour", async () => {
+  let samples = 0;
+  const invoke = makeInvoker({
+    client: fakeEngine({}),
+    which: () => true,
+    launchGuardWaits: 0,
+    launchGuardFn: async () => {
+      samples += 1;
+      return { cpuPct: 12, ramPct: 96 };
+    },
+    spawn: async () => capture("ok"),
+  });
+  await assert.rejects(
+    invoke(req({ name: "a", role: "r", backend: { kind: "cli", service: "opencode" } })),
+    /temporarily unavailable/,
+  );
+  assert.equal(samples, 1);
+});
+
+test("cli backend → the resource ceiling applies uniformly (hermes too, not just opencode)", async () => {
+  let spawned = false;
+  const invoke = makeInvoker({
+    client: fakeEngine({}),
+    which: () => true,
+    launchGuardFn: async () => ({ cpuPct: 96, ramPct: 10 }),
+    sleep: async () => {}, // the guard re-samples with backoff — never really wait in a test
+    spawn: async () => {
+      spawned = true;
+      return capture("ok");
+    },
+  });
+  await assert.rejects(
+    invoke(req({ name: "a", role: "r", backend: { kind: "cli", service: "hermes" } })),
+    /hermes: temporarily unavailable — CPU at 96%/,
+  );
+  assert.equal(spawned, false);
 });
 
 test("gate block aborts the cli launch before spawning", async () => {
@@ -130,6 +228,7 @@ test("cli backend → retries a rate-limit with backoff, then succeeds", async (
     which: () => true,
     sleep: async (ms) => void sleeps.push(ms),
     random: () => 0.5,
+    ...FAST_LAUNCH_GUARD,
     spawn: async () => {
       calls += 1;
       return calls < 3 ? capture("rate_limited", "", "429") : capture("ok", "finally done");
@@ -150,6 +249,7 @@ test("cli backend → an auth error is NOT retried (no lockout hammering)", asyn
     client: fakeEngine({}),
     which: () => true,
     sleep: async () => {},
+    ...FAST_LAUNCH_GUARD,
     spawn: async () => {
       calls += 1;
       return capture("auth_error", "", "not logged in");

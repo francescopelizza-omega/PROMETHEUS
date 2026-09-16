@@ -160,7 +160,9 @@ export function BookmarksPanel({ onNavigate, onClose }: BookmarksPanelProps): Re
                   >
                     {b.mnemonic ?? "•"}
                   </span>
-                  <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis" }}>
+                  <span
+                    style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", minWidth: 0 }}
+                  >
                     line {b.line}
                     {b.label ? ` · ${b.label}` : ""}
                   </span>

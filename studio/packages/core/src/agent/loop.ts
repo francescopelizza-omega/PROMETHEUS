@@ -1,5 +1,6 @@
 import { brokerDecision } from "../agents/toolBroker.js";
 import type { ModelRef } from "../agents/types.js";
+import { type EffortTier, tierIndex } from "../ai/effort/types.js";
 /**
  * agent/loop.ts — the universal, tunable agent turn loop (file 11 §3.2).
  *
@@ -51,10 +52,18 @@ export interface AgentTuning {
   dryRun: boolean;
   verbosity: "quiet" | "normal" | "debug";
   yes: boolean;
-  /** reasoning effort for the bound worker model (the `/think` command). Optional.
-   *  Translated per-backend by `ai/effort` — NOT forwarded raw, because the same intent is
-   *  `reasoning_effort` on one endpoint, `think` on another, and unsendable on a third. */
-  effort?: "off" | "low" | "medium" | "high" | "max";
+  /**
+   * Reasoning effort for the bound worker model (the `/think` command). Optional.
+   *
+   * Translated per-backend by `ai/effort` — NOT forwarded raw, because the same intent is
+   * `reasoning_effort` on one endpoint, `think` on another, and unsendable on a third.
+   *
+   * `EffortTier`, not a hand-written union. This WAS a copy of the five rungs, and a copy of a
+   * ladder is a ladder that drifts: adding `xhigh`/`ultra` widened the real one and left this
+   * one behind, so a tier the user could select was not a tier the tuning could carry. The
+   * import is type-only, so it costs the loop nothing at runtime.
+   */
+  effort?: EffortTier;
   /**
    * Send the effort knob even when `ai/effort/rules.ts` says this model has none
    * (`--force-effort`, `[agent] effortForce`).
@@ -136,7 +145,7 @@ export interface AgentTuning {
 export const DEFAULT_MAX_ROUNDS = 32;
 
 /**
- * The round ceiling at `effort: "max"`.
+ * The round ceiling at the TOP of the effort ladder.
  *
  * The ONE resource-shaped thing an effort tier may legitimately move. A higher step budget
  * wins only where the extra steps GATHER NEW INFORMATION — another file read, another grep,
@@ -155,12 +164,19 @@ export const MAX_EFFORT_MAX_ROUNDS = 48;
  * `agent.maxIterations`) always wins over this — a user who pinned a ceiling asked for that
  * ceiling, and `/think max` must not quietly raise it back up.
  *
- * Only `max` moves. Lowering the ceiling for `off`/`low` would be the wrong shape entirely:
- * those tiers ask for less DELIBERATION, not for less work, and a turn that runs out of rounds
- * fails to finish rather than answering more briefly.
+ * Only the TOP rungs move it. Lowering the ceiling for `off`/`low` would be the wrong shape
+ * entirely: those tiers ask for less DELIBERATION, not for less work, and a turn that runs out
+ * of rounds fails to finish rather than answering more briefly.
+ *
+ * `xhigh` and `ultra` count as top rungs. The comparison was `effort === "max"`, so when the
+ * ladder grew they landed on the DEFAULT ceiling — the same budget as `off` — and the vendor's
+ * own description of `xhigh` is "long-running agentic and coding tasks (over 30 minutes)",
+ * i.e. precisely the turns that need the extra rounds. A tier-index comparison cannot fall
+ * behind the ladder the way an equality check did.
  */
 export function roundsForEffort(effort: AgentTuning["effort"]): number {
-  return effort === "max" ? MAX_EFFORT_MAX_ROUNDS : DEFAULT_MAX_ROUNDS;
+  if (!effort) return DEFAULT_MAX_ROUNDS;
+  return tierIndex(effort) >= tierIndex("xhigh") ? MAX_EFFORT_MAX_ROUNDS : DEFAULT_MAX_ROUNDS;
 }
 
 /** Byte budget for a single tool output folded back into the thread (head+tail, CLI-032). */

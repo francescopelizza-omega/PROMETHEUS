@@ -20,6 +20,7 @@
  * PURE: no node, no IO, no randomness. A per-round volatile need (see `agent/canary.ts`) is
  * deliberately NOT expressible here — see that module's doc comment for why.
  */
+import type { EffortTier } from "../../ai/effort/types.js";
 import type { PermissionModeId } from "../permission-modes.js";
 import type { ToolDef } from "../tools.js";
 import type { ToolTransport } from "./negotiate.js";
@@ -50,7 +51,7 @@ export interface PreambleCtx {
   contextWindow?: number;
 
   /** the `/think`-style tier in force, if any. */
-  effortTier?: "off" | "low" | "medium" | "high" | "max";
+  effortTier?: EffortTier;
   /**
    * The RESOLVED request-parameter mechanism for this model (`ai/effort/types.ts`'s
    * `EffortMechanism`), when known. `undefined` ⇒ not yet resolved — treated conservatively

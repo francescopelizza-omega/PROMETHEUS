@@ -89,7 +89,7 @@ export function PurgeDialog({
           <span aria-hidden="true" style={{ color: "var(--danger)", fontSize: "1.4rem" }}>
             ⚠
           </span>
-          <strong style={{ color: "var(--danger)", fontSize: "var(--text-h2-size, 1.125rem)" }}>
+          <strong style={{ color: "var(--danger)", fontSize: "var(--text-h2-size, 1rem)" }}>
             {title}
           </strong>
         </header>
@@ -129,7 +129,7 @@ export function PurgeDialog({
               borderRadius: "var(--radius-md, 6px)",
               color: "var(--text-primary)",
               fontFamily: "var(--font-mono)",
-              fontSize: "var(--text-code-size, 0.875rem)",
+              fontSize: "var(--text-code-size, 0.78125rem)",
             }}
           />
         </label>

@@ -171,11 +171,13 @@ test("serveRole/Glyph/Label: ready=ok●READY, starting=accent◐, error=danger�
   assert.equal(serveRole("stopped"), "muted");
 });
 
-test("serveActions gates Start/Stop/Use per status", () => {
+test("serveActions gates Start/Stop/Kill/Use per status", () => {
+  // "kill" rides alongside "stop" in every status where a child process might still be
+  // alive to signal — it's stop's force-escalation, not a separate lifecycle state.
   assert.deepEqual(serveActions("stopped"), ["start", "endpoint"]);
-  assert.deepEqual(serveActions("starting"), ["stop"]);
-  assert.deepEqual(serveActions("ready"), ["stop", "use", "endpoint"]);
-  assert.deepEqual(serveActions("error"), ["retry", "stop"]);
+  assert.deepEqual(serveActions("starting"), ["stop", "kill"]);
+  assert.deepEqual(serveActions("ready"), ["stop", "kill", "use", "endpoint"]);
+  assert.deepEqual(serveActions("error"), ["retry", "stop", "kill"]);
 });
 
 /* ── formatting ────────────────────────────────────────────────────────────── */

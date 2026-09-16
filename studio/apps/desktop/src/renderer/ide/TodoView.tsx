@@ -218,9 +218,9 @@ export function TodoView({ root }: { root: string }): ReactElement {
             onChange={(e) => setScopeKind(e.target.value as ScopeKind)}
             style={{
               fontSize: "0.7rem",
-              background: "var(--surface-2)",
+              background: "var(--bg-surface-2)",
               color: "inherit",
-              border: "1px solid var(--border)",
+              border: "1px solid var(--border-subtle)",
               borderRadius: 4,
             }}
           >
@@ -260,8 +260,8 @@ export function TodoView({ root }: { root: string }): ReactElement {
                   padding: "1px 7px",
                   borderRadius: 10,
                   cursor: "pointer",
-                  border: "1px solid var(--border)",
-                  background: on ? "var(--surface-3)" : "transparent",
+                  border: "1px solid var(--border-subtle)",
+                  background: on ? "var(--bg-elevated)" : "transparent",
                   color: on ? "inherit" : "var(--text-secondary)",
                   opacity: on ? 1 : 0.55,
                 }}
@@ -324,6 +324,7 @@ export function TodoView({ root }: { root: string }): ReactElement {
                     padding: 0,
                     overflow: "hidden",
                     textOverflow: "ellipsis",
+                    minWidth: 0, // flex/grid floor — without it the ellipsis is unreachable
                     whiteSpace: "nowrap",
                   }}
                 >
@@ -360,9 +361,9 @@ function PatternEditor({
 
   const fieldStyle = {
     fontSize: "0.7rem",
-    background: "var(--surface-2)",
+    background: "var(--bg-surface-2)",
     color: "inherit",
-    border: "1px solid var(--border)",
+    border: "1px solid var(--border-subtle)",
     borderRadius: 4,
     padding: "1px 4px",
   } as const;
@@ -370,11 +371,11 @@ function PatternEditor({
   return (
     <div
       style={{
-        border: "1px solid var(--border)",
+        border: "1px solid var(--border-subtle)",
         borderRadius: 6,
         padding: 8,
         marginBottom: 8,
-        background: "var(--surface-1)",
+        background: "var(--bg-surface)",
       }}
     >
       {!editable && (
@@ -397,7 +398,7 @@ function PatternEditor({
             value={p.regex}
             disabled={!editable}
             onChange={(e) => edit(i, { regex: e.target.value })}
-            style={{ ...fieldStyle, flex: 1, fontFamily: "var(--font-mono, monospace)" }}
+            style={{ ...fieldStyle, flex: 1, minWidth: 0, fontFamily: "var(--font-mono, monospace)" }}
           />
           <label
             style={{ display: "flex", alignItems: "center", gap: 2, fontSize: "0.64rem" }}

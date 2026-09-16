@@ -15,13 +15,18 @@
 import * as vscode from "vscode";
 
 import type { AiEndpoint } from "@prometheus/core";
+import { ai } from "@prometheus/core";
+import { authLevelToMode } from "@prometheus/core/agent-authorization";
 import type { ConfirmResult, LLMClient, ToolCall } from "@prometheus/core/agent-loop";
 
+import { resolveAuthLevel } from "./auth-level.js";
 import { CHAT_VIEW_ID, ChatViewProvider, confirmToolCall } from "./chat-view.js";
+import { resolveEffortTier } from "./effort-pref.js";
 import { createEndpointLlmClient } from "./llm.js";
+import { touchModelActivity } from "./model-activity-store.js";
 import { ChatSession, vscodeTuning } from "./session.js";
 import { createVsCodeToolRunner } from "./tool-runner.js";
-import { createVsCodeWorkspaceIo } from "./workspace-io.js";
+import { createVsCodeWorkspaceIo, normalizeWorkspaceRelPath } from "./workspace-io.js";
 
 /**
  * The object `activate` resolves to.
@@ -120,7 +125,11 @@ export function activate(context: vscode.ExtensionContext): PrometheusApi {
       unavailable = "Open a folder to chat with Prometheus about your workspace.";
       return;
     }
-    const cfg = vscode.workspace.getConfiguration("prometheus");
+    // Resolved AGAINST THE FOLDER: `inspect()` only reports `workspaceFolderValue` when the
+    // configuration was resolved against a resource, so without this a per-folder
+    // `prometheus.effort` (the one setting declaring `"scope": "resource"`) was silently ignored.
+    // Harmless for the window-scoped reads on `cfg` — VS Code ignores folder values for those.
+    const cfg = vscode.workspace.getConfiguration("prometheus", folder.uri);
     const io = createVsCodeWorkspaceIo(folder);
 
     /**
@@ -139,6 +148,8 @@ export function activate(context: vscode.ExtensionContext): PrometheusApi {
      * it lazily also means a probe only happens when a turn actually needs one.
      */
     const model = (cfg.get<string>("model") ?? "").trim();
+    // Resolved once: it feeds the tuning, the permission mode AND the session's own ladder.
+    const authLevel = resolveAuthLevel(cfg);
 
     session = new ChatSession({
       llm:
@@ -148,6 +159,11 @@ export function activate(context: vscode.ExtensionContext): PrometheusApi {
           // read lazily: `session` is assigned just below, and this is only ever called
           // mid-turn, long after that.
           getSignal: () => session?.currentSignal,
+          // Real activation opts INTO the autostart gates; llm.ts's own tests never do — see
+          // EndpointLlmOptions.ensureOllamaRunningFn's doc for why that split exists.
+          ensureOllamaRunningFn: ai.ensureOllamaRunning,
+          ensureLmStudioRunningFn: ai.ensureLmStudioRunning,
+          onLocalActivity: touchModelActivity,
         }),
       runTool: createVsCodeToolRunner({
         io,
@@ -156,7 +172,32 @@ export function activate(context: vscode.ExtensionContext): PrometheusApi {
       confirm: (call) => (confirmOverride ?? confirmToolCall)(call),
       // the SAME resolved id the endpoint got — keying the tuning to a different (phantom)
       // model was half of what made the old default so confusing to diagnose.
-      tuning: vscodeTuning(model, cfg.get<number>("authLevel") ?? 1),
+      // The autonomy level AND the reasoning-effort tier, both resolved from the same
+      // precedence: an explicit VS Code setting, else the store shared with the CLI and the app.
+      //
+      // `authLevelToMode(level)` rather than `undefined` for the permission mode: the two knobs
+      // are two views of one posture, and leaving the mode unset let them disagree (the loop
+      // honours the mode matrix's `deny` verdict, so an unset mode simply forfeits that check).
+      // It cannot WIDEN anything — the matrix only ever denies.
+      tuning: vscodeTuning(
+        model,
+        authLevel,
+        authLevelToMode(authLevel),
+        resolveEffortTier(cfg),
+      ),
+      // The level as a NUMBER too, so the session can apply the whole ladder rather than the
+      // single bit `tuning.yes` collapses it to — see `SessionDeps.authLevel`.
+      authLevel,
+      /**
+       * The scope test for a write the level would otherwise auto-approve.
+       *
+       * `normalizeWorkspaceRelPath` IS the containment rule this host already enforces at the
+       * runner: it returns null for an absolute path, a `file://` URI, a `~` path, or anything
+       * that climbs out with `..`. Non-null therefore means "inside the folder the user opened",
+       * which is exactly this surface's working set (a multi-root workspace is scoped to the
+       * first folder — see the README).
+       */
+      insideWorkingSet: (p) => normalizeWorkspaceRelPath(p) !== null,
       // so the session can warn before the window it will be rejected at — see `SessionDeps`.
       contextWindow: cfg.get<number>("contextWindow") ?? 8192,
     });

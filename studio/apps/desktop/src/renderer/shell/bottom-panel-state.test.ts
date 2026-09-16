@@ -53,4 +53,3 @@ test("shouldShowBadge: only a positive number shows (0 / undefined hide)", () =>
   assert.equal(shouldShowBadge(0), false); // connected + clean → no badge
   assert.equal(shouldShowBadge(undefined), false); // not connected → no badge
 });
-

@@ -120,7 +120,10 @@ export function createMarkdownRenderer(caps: ColorCaps, width: number): Markdown
       };
       const label = fence.lang ? ` ${fence.lang} ` : "─";
       const dash = "─".repeat(Math.max(1, Math.min(boxW - 4 - stringWidth(label), 36)));
-      return [p.muted(`╭─${p.accent(label)}${dash}`)];
+      // Painted in three pieces rather than nesting `p.accent(...)` inside `p.muted(...)`:
+      // the inner painter emits its own reset, which ends the OUTER muted run, so everything
+      // after the label — the whole trailing dash rule — rendered un-tinted.
+      return [`${p.muted("╭─")}${p.accent(label)}${p.muted(dash)}`];
     }
 
     const h = HEADING.exec(line);

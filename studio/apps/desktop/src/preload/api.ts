@@ -29,6 +29,7 @@ import {
   type AiProgressEvent,
   type AiStreamRequest,
   type AiStreamResult,
+  type AuthLevelResult,
   type BudgetApi,
   type BudgetStatusResult,
   type CatalogApi,
@@ -49,6 +50,7 @@ import {
   type CudaInfoResult,
   type CudaInstallRequest,
   type CudaTorchRequest,
+  type EffortPrefResult,
   type EnvApi,
   type EnvCloneRequest,
   type EnvCreateRequest,
@@ -195,6 +197,8 @@ import {
   type ModelInstallConverterResult,
   type ModelInstallHfCliResult,
   type ModelInstallRunnerRequest,
+  type ModelLmstudioStartResult,
+  type ModelOllamaStartResult,
   type ModelInstallRunnerResult,
   type ModelInstallTargetRequest,
   type ModelInstallTargetResult,
@@ -584,7 +588,12 @@ function createModelApi(): ModelApi {
       ipcRenderer.invoke(IPC.modelServe, req),
     unserve: (profileId: string): Promise<ModelServeResult> =>
       ipcRenderer.invoke(IPC.modelUnserve, { profileId }),
+    kill: (profileId: string): Promise<ModelServeResult> =>
+      ipcRenderer.invoke(IPC.modelKill, { profileId }),
     serving: (): Promise<ModelServeResult> => ipcRenderer.invoke(IPC.modelServing),
+    ollamaStart: (): Promise<ModelOllamaStartResult> => ipcRenderer.invoke(IPC.modelOllamaStart),
+    lmstudioStart: (): Promise<ModelLmstudioStartResult> =>
+      ipcRenderer.invoke(IPC.modelLmstudioStart),
     endpoints: (): Promise<ModelEndpointsResult> => ipcRenderer.invoke(IPC.modelEndpoints),
     repoint: (req: ModelRepointRequest): Promise<ModelRepointResult> =>
       ipcRenderer.invoke(IPC.modelRepoint, req),
@@ -1272,6 +1281,17 @@ export function createPrometheusApi(): PrometheusApi {
     mcp: createMcpApi(),
     settingsSync: createSettingsSyncApi(),
     settings: createSettingsApi(),
+    // The ONE saved autonomy level — the same file `prometheus` reads on the terminal.
+    authLevel: {
+      get: (): Promise<AuthLevelResult> => ipcRenderer.invoke(IPC.authLevelGet),
+      set: (level: number): Promise<AuthLevelResult> =>
+        ipcRenderer.invoke(IPC.authLevelSet, { level }),
+    },
+    // The ONE saved thinking-effort tier — the same file `/think` writes on the terminal.
+    effort: {
+      get: (): Promise<EffortPrefResult> => ipcRenderer.invoke(IPC.effortGet),
+      set: (tier: string): Promise<EffortPrefResult> => ipcRenderer.invoke(IPC.effortSet, { tier }),
+    },
     pathCompletion: createPathCompletionApi(),
     modelHealth: createModelHealthApi(),
     schedule: createScheduleApi(),
@@ -1291,6 +1311,8 @@ export function createPrometheusApi(): PrometheusApi {
     folderOpen: (opts?: { title?: string }): Promise<FolderOpenResult> =>
       ipcRenderer.invoke(IPC.folderOpen, opts ?? {}),
     openPath: (path: string): Promise<OpenPathResult> => ipcRenderer.invoke(IPC.openPath, { path }),
+    revealPath: (path: string): Promise<OpenPathResult> =>
+      ipcRenderer.invoke(IPC.revealPath, { path }),
     spectacular: createSpectacularApi(),
   };
   return Object.freeze(api);

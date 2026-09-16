@@ -174,9 +174,10 @@ export function MarketplaceView(props: MarketplaceViewProps): ReactElement {
                     border: "none",
                     color: "var(--text-primary)",
                     cursor: "pointer",
-                    fontSize: "var(--text-body-size, 0.9375rem)",
+                    fontSize: "var(--text-body-size, 0.875rem)",
                     overflow: "hidden",
                     textOverflow: "ellipsis",
+                    minWidth: 0, // flex/grid floor — without it the ellipsis is unreachable
                     whiteSpace: "nowrap",
                   }}
                 >
@@ -220,7 +221,11 @@ export function MarketplaceView(props: MarketplaceViewProps): ReactElement {
                     onClick={() => props.onInstall(row)}
                     style={{
                       background: "var(--brand)",
-                      color: "var(--brand-fg)",
+                      // The label sits ON the `--brand` fill, so it needs the computed `--on-brand`.
+                      // `--brand-fg` is #ffffff on the dark scheme and measures 3.96:1 over `--brand` —
+                      // under the 4.5:1 a label carries. It stays in use where it is a FILL, not a label
+                      // (the Toggle knob), which is why this is a call-site change and not a token change.
+                      color: "var(--on-brand)",
                       border: "none",
                       borderRadius: "var(--radius-md, 6px)",
                       padding: "var(--space-2, 4px) var(--space-6, 12px)",

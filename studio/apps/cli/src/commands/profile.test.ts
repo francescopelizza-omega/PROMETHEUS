@@ -13,7 +13,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { test } from "node:test";
 
 import { cliProfiles } from "@prometheus/core";
@@ -107,6 +107,32 @@ test("profile use persists across a fresh read; list marks it; unknown → exit 
     const env = list.json as { active: string; profiles: { name: string; active: boolean }[] };
     assert.equal(env.active, "ci");
     assert.ok(env.profiles.some((p) => p.name === "ci" && p.active));
+  } finally {
+    if (prev !== undefined) process.env.HOME = prev;
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("getActiveProfileName falls back to the legacy config root when the new one has nothing (CLI-044)", () => {
+  // Mirrors `readSavedAuthLevel`'s own current-root-wins-else-legacy fallback (packages/core/src/
+  // cli-profiles/authorisation-store.ts) — an install that never ran (or that skipped) the
+  // one-home migration must not have its chosen profile silently revert to the default.
+  const home = mkdtempSync(join(tmpdir(), "prom-prof-legacy-"));
+  const prev = process.env.HOME;
+  process.env.HOME = home;
+  try {
+    const legacyPath = cliProfiles.legacyConfigPath();
+    mkdirSync(dirname(legacyPath), { recursive: true });
+    writeFileSync(legacyPath, '[profile]\nactive = "local-safe"\n');
+
+    assert.equal(getActiveProfileName(), "local-safe");
+
+    // The CURRENT root wins once something is actually written there — a migration or an
+    // explicit `profile use` must not be shadowed by a stale legacy file forever.
+    const newPath = cliProfiles.configPath();
+    mkdirSync(dirname(newPath), { recursive: true });
+    writeFileSync(newPath, '[profile]\nactive = "ci"\n');
+    assert.equal(getActiveProfileName(), "ci");
   } finally {
     if (prev !== undefined) process.env.HOME = prev;
     rmSync(home, { recursive: true, force: true });

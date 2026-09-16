@@ -304,3 +304,60 @@ test("validateTrust REJECTS an unknown sub-op + missing op", () => {
   assertInvalidArgs(validateTrust({}));
   assertInvalidArgs(validateTrust(42));
 });
+
+/* ── auditLog payload projection (the 38 MB-per-mount read) ─────────────────────── */
+
+test("trust auditLog accepts includeVerdictFull, and defaults to omitting it", () => {
+  const off = validateTrust({ op: "auditLog" });
+  assert.equal(off.ok, true);
+  assert.equal(
+    (off as { value: Record<string, unknown> }).value.includeVerdictFull,
+    undefined,
+    "absent means OFF — the blob is opt-in, not opt-out",
+  );
+  const on = validateTrust({ op: "auditLog", includeVerdictFull: true });
+  assert.equal(on.ok, true);
+  assert.equal((on as { value: Record<string, unknown> }).value.includeVerdictFull, true);
+});
+
+test("trust auditLog rejects a non-boolean includeVerdictFull", () => {
+  assert.equal(validateTrust({ op: "auditLog", includeVerdictFull: "yes" }).ok, false);
+});
+
+/* -- section 4: restore's typed confirm is a CONTRACT field, not renderer-only -- */
+
+test("restore forwards typedName and path through the field-by-field allowlist", () => {
+  // The allowlist rebuilds its value key by key, so a field present in the zod schema but
+  // absent from that list is dropped SILENTLY. That trap has now bitten twice in this file
+  // (includeVerdictFull, then this) - hence a test per field, not per schema.
+  const r = validateRemediate({
+    op: "restore",
+    id: "abc123",
+    quarantineDir: "/v/quarantine",
+    typedName: "setup.sh",
+    path: "/tmp/pkg/setup.sh",
+  });
+  assert.equal(r.ok, true);
+  const v = (r as { value: Record<string, unknown> }).value;
+  assert.equal(v.typedName, "setup.sh");
+  assert.equal(v.path, "/tmp/pkg/setup.sh");
+});
+
+test("restore still validates without the confirm fields (main refuses, not the parser)", () => {
+  // The parser's job is shape; the REFUSAL belongs in security-ipc.ts so the error message
+  // can say why. A schema-level `required` here would report "invalid arguments" instead.
+  const r = validateRemediate({ op: "restore", id: "abc", quarantineDir: "/v/q" });
+  assert.equal(r.ok, true);
+  assert.equal((r as { value: Record<string, unknown> }).value.typedName, undefined);
+});
+
+test("restore rejects a control-char path and a non-string typedName", () => {
+  assert.equal(
+    validateRemediate({ op: "restore", id: "a", quarantineDir: "/v/q", path: "bad\u0001path" }).ok,
+    false,
+  );
+  assert.equal(
+    validateRemediate({ op: "restore", id: "a", quarantineDir: "/v/q", typedName: 7 }).ok,
+    false,
+  );
+});

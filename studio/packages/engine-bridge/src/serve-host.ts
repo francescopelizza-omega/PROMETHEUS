@@ -266,7 +266,12 @@ export function createServeHost(deps: ServeHostDeps = {}): ServeHostApi {
     const servers = load();
     const rec = servers.find((r) => r.profileId === profileId);
     if (!rec) return { ok: true, found: false }; // not CLI-recorded ⇒ nothing we own to kill
-    const prune = () => save(servers.filter((r) => r.profileId !== profileId));
+    // RE-READ inside the prune rather than filtering the snapshot taken above. The SIGTERM
+    // grace below is an await, and another process (the desktop, a second terminal) can
+    // record a new server inside that window — writing back a filtered pre-grace snapshot
+    // would erase it from serve-state.json while the process itself keeps running, leaving an
+    // untracked server nothing can stop.
+    const prune = () => save(load().filter((r) => r.profileId !== profileId));
     if (!isAlive(rec.pid)) {
       prune(); // stale/dead pid ⇒ self-heal, honest success
       return { ok: true, found: true, wasStale: true };
@@ -306,7 +311,14 @@ export function createServeHost(deps: ServeHostDeps = {}): ServeHostApi {
         uptimeSec: Math.max(0, Math.round((now() - Date.parse(rec.startedAt)) / 1000)),
       });
     }
-    if (survivors.length !== servers.length) save(survivors); // prune stale
+    // Same race, same fix: `survivors` was computed BEFORE the awaited port probes, so
+    // writing it wholesale would drop any server recorded during them. Only the entries this
+    // pass actually examined are removed.
+    if (survivors.length !== servers.length) {
+      const keep = new Set(survivors.map((r) => r.profileId));
+      const examined = new Set(servers.map((r) => r.profileId));
+      save(load().filter((r) => keep.has(r.profileId) || !examined.has(r.profileId)));
+    }
     return live;
   };
 

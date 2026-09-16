@@ -48,7 +48,7 @@ import { localityOf } from "../renderer/ide/ai/endpoints.js";
 import { qk } from "../renderer/query/client.js";
 import { DecisionOverlay } from "../renderer/shell/DecisionOverlay.js";
 import { ForceGate, useForceGate } from "../renderer/shell/ForceGate.js";
-import { useAuthorisationStore } from "../renderer/stores/authorisation.js";
+import { effectiveAuthLevel, useAuthorisationStore } from "../renderer/stores/authorisation.js";
 import { useModelsStore } from "../renderer/stores/models.js";
 import type {
   ModelDownloadResult,
@@ -210,7 +210,18 @@ export function ModelsRoute(): ReactElement {
   // the one authorisation store every surface reads — the cloud rows gate on it (§3).
   const libraryQ = useLibrary();
   const endpointsQ = useEndpoints();
-  const authLevel = useAuthorisationStore((s) => s.level);
+  /**
+   * The EFFECTIVE level — what main will actually enforce, not what the dial shows.
+   *
+   * The Hub's cloud rows print "key in keychain · A5+ only" and grey themselves below the
+   * network rung, and `main/ai-ipc.ts` decides the real refusal from the PERSISTED level
+   * min'd with the session's. Rendering the session level alone made the label wrong in both
+   * directions: a `yolo` dial over a stored A1 advertised a row that would be refused, and a
+   * `plan` posture over a stored A6 greyed a row that would have gone through.
+   */
+  const sessionAuthLevel = useAuthorisationStore((s) => s.level);
+  const savedAuthLevel = useAuthorisationStore((s) => s.savedLevel);
+  const authLevel = effectiveAuthLevel(sessionAuthLevel, savedAuthLevel);
   const [rescanning, setRescanning] = useState(false);
   const fitQ = useFit(selectedId);
   const servingQ = useServing();
@@ -326,6 +337,12 @@ export function ModelsRoute(): ReactElement {
     },
     [refetchServing],
   );
+  const onKill = useCallback(
+    (profileId: string): void => {
+      void modelsApi().kill(profileId).then(refetchServing);
+    },
+    [refetchServing],
+  );
   const onUseInIde = useCallback((profile: ServeProfileData): void => {
     // a serve row from the supervisor may lack an endpoint → don't deref undefined.
     const baseUrl = profile.endpoint?.baseUrl;
@@ -413,7 +430,7 @@ export function ModelsRoute(): ReactElement {
       const r = await modelsApi().pull({ id: target });
       if (r.ok && r.installed) {
         setPullMsg(`✓ installed ${target} — served at ${r.endpoint ?? "localhost:11434"}`);
-        void qc.invalidateQueries({ queryKey: qk.modelLibrary("all") });
+        void qc.invalidateQueries({ queryKey: qk.modelLibraryAll() });
         refetchServing();
       } else if (r.installable) {
         // don't hand the user a command — offer to install the runner on their behalf.
@@ -431,6 +448,66 @@ export function ModelsRoute(): ReactElement {
       setPullBar({ pct: null, bytes: null });
     }
   }, [pullTarget, selectedId, pulling, refetchServing, qc]);
+
+  /**
+   * Start a local model DAEMON (`ollama serve` / `lms server start`) on request.
+   *
+   * `model:ollamaStart` / `model:lmstudioStart` were plumbed end to end — channels, result
+   * types, preload bindings, two main modules, both bootstrap paths — with no caller anywhere,
+   * so the Endpoints panel's "Start a local runner" was advice the app could have acted on
+   * itself. This is that caller.
+   *
+   * NOT a `ServingPanel` row action: that panel's callbacks are all keyed by a ServeProfile id,
+   * and a raw daemon is not a ServeProfile. It belongs to the Endpoints island, which is the
+   * surface that reports the daemon missing.
+   *
+   * Refetches ENDPOINTS, not serving: main's ServeSupervisor never contains a daemon started
+   * this way — it shows up in `model:endpoints`.
+   */
+  const [startingDaemon, setStartingDaemon] = useState<"ollama" | "lmstudio" | null>(null);
+  const [daemonMsg, setDaemonMsg] = useState<string | null>(null);
+  const startDaemon = useCallback(
+    async (which: "ollama" | "lmstudio"): Promise<void> => {
+      const api = modelsApi();
+      const fn = which === "ollama" ? api.ollamaStart : api.lmstudioStart;
+      // Same guard shape as `installRunner`: a renderer running against an older preload has
+      // no such method, and calling it would throw rather than report anything.
+      if (typeof fn !== "function") {
+        setDaemonMsg("Fully quit + relaunch Prometheus to load the local-runner controls.");
+        return;
+      }
+      if (startingDaemon) return;
+      const label = which === "ollama" ? "Ollama" : "LM Studio";
+      setStartingDaemon(which);
+      setDaemonMsg(`Starting ${label}…`);
+      try {
+        const r = await fn();
+        if (r.ok) {
+          setDaemonMsg(
+            r.started
+              ? `${label} is serving${r.model ? ` ${r.model}` : ""}.`
+              : `${label} was already running${r.model ? ` (${r.model})` : ""}.`,
+          );
+          await endpointsQ.refetch();
+          return;
+        }
+        // `resource-ceiling` is a deliberate refusal by the launch guard, not a failure — say
+        // which resource, because "could not start" would send the user looking at the install.
+        setDaemonMsg(
+          r.reason === "resource-ceiling"
+            ? `Not starting ${label}: this machine is at its resource ceiling${
+                r.resourceReason ? ` (${r.resourceReason})` : ""
+              }. Free memory and try again.`
+            : `Could not start ${label}: ${r.reason ?? "unknown reason"}.`,
+        );
+      } catch (e) {
+        setDaemonMsg(`Could not start ${label}: ${e instanceof Error ? e.message : String(e)}`);
+      } finally {
+        setStartingDaemon(null);
+      }
+    },
+    [startingDaemon, endpointsQ],
+  );
 
   // Install the ollama RUNNER on the user's behalf (OS-aware, in main) then, on
   // success, transparently retry the model pull — no copy-paste command, ever.
@@ -505,7 +582,7 @@ export function ModelsRoute(): ReactElement {
         const r = await modelsApi().pull({ id: modelId, tag: `hf.co/${source}` });
         if (r.ok && r.installed) {
           setHugMessage(`✓ hugged ${modelId} → ollama${r.endpoint ? ` — ${r.endpoint}` : ""}`);
-          void qc.invalidateQueries({ queryKey: qk.modelLibrary("all") });
+          void qc.invalidateQueries({ queryKey: qk.modelLibraryAll() });
         } else if (r.installable) {
           setHugMessage(
             "⚠ Ollama isn't installed yet — use the Pull island's installer, then retry.",
@@ -581,7 +658,7 @@ export function ModelsRoute(): ReactElement {
             install.path ? ` (${install.path})` : ""
           }`,
         );
-        void qc.invalidateQueries({ queryKey: qk.modelLibrary("all") });
+        void qc.invalidateQueries({ queryKey: qk.modelLibraryAll() });
       } else {
         setHugMessage(`✗ ${install.error ?? "install failed"}`);
       }
@@ -621,7 +698,9 @@ export function ModelsRoute(): ReactElement {
       <div
         style={{
           display: "grid",
-          gridTemplateColumns: "repeat(auto-fit, minmax(360px, 1fr))",
+          // min(100%, N) lets the track collapse below N instead of holding the page open
+          // and forcing a horizontal scrollbar. Same idiom as routes/security.tsx:762.
+          gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 360px), 1fr))",
           gap: "var(--space-8, 16px)",
           alignItems: "start",
         }}
@@ -662,6 +741,9 @@ export function ModelsRoute(): ReactElement {
           endpoints={endpoints}
           authLevel={authLevel}
           loading={endpointsQ.isPending}
+          startingDaemon={startingDaemon}
+          onStartDaemon={(which) => void startDaemon(which)}
+          {...(daemonMsg ? { daemonMsg } : {})}
         />
         <HugIsland
           source={hugSource}
@@ -726,6 +808,7 @@ export function ModelsRoute(): ReactElement {
             profiles={serveList}
             onStart={onStart}
             onStop={onStop}
+            onKill={onKill}
             onRetry={onStart}
             onUseInIde={onUseInIde}
             onEndpoint={(profile) => {
@@ -1273,8 +1356,13 @@ function EndpointsIsland(props: {
   }[];
   authLevel: number;
   loading: boolean;
+  /** which daemon is mid-start, so both buttons disable together */
+  startingDaemon: "ollama" | "lmstudio" | null;
+  onStartDaemon: (which: "ollama" | "lmstudio") => void;
+  /** the outcome of the last start attempt — a refusal reason is as important as a success */
+  daemonMsg?: string;
 }): ReactElement {
-  const { endpoints, authLevel, loading } = props;
+  const { endpoints, authLevel, loading, startingDaemon, onStartDaemon, daemonMsg } = props;
   return (
     <Panel
       elevation="e1"
@@ -1295,9 +1383,33 @@ function EndpointsIsland(props: {
       {loading ? (
         <p style={{ color: "var(--text-secondary)", margin: 0 }}>discovering endpoints…</p>
       ) : endpoints.length === 0 ? (
-        <p style={{ color: "var(--text-secondary)", margin: 0 }}>
-          No endpoints are reachable. Start a local runner, or pull a model.
-        </p>
+        <div style={{ display: "flex", flexDirection: "column", gap: "var(--space-3, 6px)" }}>
+          <p style={{ color: "var(--text-secondary)", margin: 0 }}>
+            No endpoints are reachable. Start a local runner, or pull a model.
+          </p>
+          {/* The panel that reports the daemon missing is the one that can start it. */}
+          <div style={{ display: "flex", gap: "var(--space-3, 6px)", flexWrap: "wrap" }}>
+            <Button
+              variant="secondary"
+              disabled={startingDaemon !== null}
+              onClick={() => onStartDaemon("ollama")}
+            >
+              {startingDaemon === "ollama" ? "Starting Ollama…" : "Start Ollama"}
+            </Button>
+            <Button
+              variant="secondary"
+              disabled={startingDaemon !== null}
+              onClick={() => onStartDaemon("lmstudio")}
+            >
+              {startingDaemon === "lmstudio" ? "Starting LM Studio…" : "Start LM Studio"}
+            </Button>
+          </div>
+          {daemonMsg && (
+            <p style={{ color: "var(--text-secondary)", margin: 0, fontSize: "0.85rem" }}>
+              {daemonMsg}
+            </p>
+          )}
+        </div>
       ) : (
         <ul style={{ listStyle: "none", margin: 0, padding: 0 }}>
           {endpoints.map((e) => (

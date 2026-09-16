@@ -62,6 +62,7 @@ function Cell({
         whiteSpace: "nowrap",
         overflow: "hidden",
         textOverflow: "ellipsis",
+        minWidth: 0, // flex/grid floor — without it the ellipsis is unreachable
       }}
     >
       {children}
@@ -224,7 +225,10 @@ export function FitScorePanel({
 const primaryBtn: React.CSSProperties = {
   border: "1px solid var(--accent)",
   background: "var(--accent)",
-  color: "var(--brand-fg)",
+  // `--on-accent` is the computed label colour for the `--accent` FILL (tokens/contrast.ts `onFill`).
+  // The old `--brand-fg` here was WHITE on the dark scheme over a saturated light fill (~2:1),
+  // and a plain `--bg-app` would be near-white over the same fill on the LIGHT scheme.
+  color: "var(--on-accent)",
   borderRadius: "var(--radius-md, 6px)",
   padding: "5px 10px",
   fontSize: "0.82rem",

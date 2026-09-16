@@ -17,6 +17,7 @@
  */
 import { COMMAND_SPECS, agent, ai, tokenEconomy } from "@prometheus/core";
 
+import type { CwdMove } from "../cwd-guard.js";
 import {
   CATEGORY_LABEL,
   PATH_CATEGORIES,
@@ -63,7 +64,7 @@ type ToolDef = ReturnType<typeof agent.exposedTools>[number];
 type ToolFieldSpec = ToolDef["schema"][string];
 type EffortTier = ai.EffortTier;
 type EffortResolution = ai.EffortResolution;
-const { isEffortTier } = ai;
+const { isEffortTier, EFFORT_TIERS } = ai;
 
 /**
  * One configured hook, resolved for display (CLI-102's `/hooks`): the event/matcher/command the
@@ -244,6 +245,24 @@ export function renderHooksTest(
 }
 
 /** The imperative capabilities the host hands every slash handler. */
+/**
+ * WHY an authorisation level is changing — the difference between a preference and a posture.
+ *
+ * `user`    the operator said so, explicitly and by number (`/authorisation 6`, the GUI picker).
+ *           This is a PREFERENCE: it is written to disk and becomes the next session's default.
+ * `session` something else moved the level for THIS session only — restoring the saved value at
+ *           startup, a `--authorisation` launch flag, a Shift-Tab through the coarse permission
+ *           modes, a safety clamp after a declined sudo gate. NEVER written to disk.
+ *
+ * The distinction is the whole bug. `setPermMode` used to re-derive the level from the coarse
+ * mode and persist it, and mode→level is LOSSY (five modes, eight levels): a user who set
+ * `/authorisation 7` and then pressed Shift-Tab once had 7 replaced on disk by 2, and one more
+ * cycle back to `default` replaced it by 1 — which is exactly the value found in a real user's
+ * `authorisation.json` after their choice "was not saved across sessions". It was saved; it was
+ * then overwritten by a keystroke that was never meant to be a preference at all.
+ */
+export type AuthLevelOrigin = "user" | "session";
+
 export interface SlashCtx {
   /** write a line to the transcript/stdout (already colored). */
   write: (line: string) => void;
@@ -253,6 +272,14 @@ export interface SlashCtx {
   tuning: () => AgentTuning;
   /** the working directory. */
   cwd: () => string;
+  /**
+   * `/fleet` — the per-window table + the exact resource split behind the fleet bar.
+   *
+   * Optional so a host with no presence ticker (a one-shot verb run, a fixture) says so plainly
+   * instead of printing an empty table that reads as "you are the only window" when the truth is
+   * "this surface never looked". Returns already-formatted lines.
+   */
+  fleet?: () => Promise<string[]>;
   /** run a CLI verb through the parity router + print its outcome. */
   runVerb: (tokens: string[]) => Promise<void>;
   /** feed a templated prompt to the agent (a macro command). */
@@ -266,10 +293,31 @@ export interface SlashCtx {
    *  report "not available" instead of echoing a success it cannot deliver. Optional so
    *  existing fake SlashCtx fixtures keep compiling. */
   effortResolution?: (tier: EffortTier) => EffortResolution | undefined;
+  /**
+   * Set the reasoning-effort tier the user ASKED for, and make it the next session's default.
+   *
+   * REQUIRED, and separate from the generic `tune({ effort })` for the same reason
+   * `setAuthLevel` is separate from a tuning patch: persistence needs to know that this change
+   * came from a person. `/think` used to write through `tune`, so the tier survived until the
+   * process exited and no further — while the trait rail, which called the host's own setter,
+   * was the only surface whose choice was remembered. One setting, two paths, one of them
+   * forgetful.
+   *
+   * Pass the REQUESTED tier, never a resolved one — a clamp belongs to the model that is bound
+   * right now, not to the preference.
+   */
+  setEffort: (tier: EffortTier) => void;
   /** the active 0–7 --authorisation level. */
   getAuthLevel: () => number;
-  /** set the 0–7 --authorisation level (persists as the next-session default). */
-  setAuthLevel: (level: number) => void;
+  /**
+   * Set the 0–7 --authorisation level.
+   *
+   * `origin` is REQUIRED, and it decides whether the change reaches disk — see
+   * {@link AuthLevelOrigin}. It has no default on purpose: a new call site must state which
+   * kind of change it is, because every way this setting was ever lost came from a
+   * session-scoped change quietly persisting itself as the user's next-session default.
+   */
+  setAuthLevel: (level: number, origin: AuthLevelOrigin) => void;
   /**
    * The coarse autonomy POSTURE (`default`/`acceptEdits`/`plan`/…), Shift-Tab's dial in the
    * TUI. Optional so existing fake SlashCtx fixtures keep compiling; `/permission-mode`
@@ -288,7 +336,15 @@ export interface SlashCtx {
   /** session controls owned by the host. */
   control: (signal: "clear" | "new" | "quit") => void;
   /** change the working directory. */
-  setCwd: (dir: string) => void;
+  /**
+   * Move the session's working directory IN PLACE (`/cwd`, `/worktree switch`).
+   *
+   * Returns a result rather than void so the command layer can offer to CREATE a directory
+   * that does not exist yet — the host owns the filesystem, the command owns the question.
+   * `create: true` re-runs the same resolve after an `mkdir -p`, so the guard, the tilde
+   * expansion and the relative-path base are applied to the created path too.
+   */
+  setCwd: (dir: string, opts?: { create?: boolean }) => CwdMove;
   /** reclaim context (host clears history, keeps project memory). */
   compact: (focus: string) => void | Promise<void>;
   /** export the transcript to a file; returns the written path (or "" on failure). */
@@ -458,7 +514,10 @@ export interface SlashCtx {
    * points at the equivalent one-shot commands instead.
    */
   focusTraitRail?: () => boolean;
-  changeProjectDirectory?: (dir: string) =>
+  changeProjectDirectory?: (
+    dir: string,
+    opts?: { create?: boolean },
+  ) =>
     | {
         ok: true;
         movedTo: string;
@@ -468,7 +527,14 @@ export interface SlashCtx {
          *  user's home directory instead — the ORIGINAL path that triggered the redirect. */
         redirectedFromOwnRepo?: string;
       }
-    | { ok: false; error: string };
+    | {
+        ok: false;
+        error: string;
+        /** the target does not exist yet — the only failure `/cd` may offer to create. */
+        missing?: boolean;
+        /** the fully resolved, guard-applied target a `create` would mkdir. */
+        path?: string;
+      };
 }
 
 export type SlashGroup =
@@ -487,6 +553,26 @@ export type SlashGroup =
   | "apps"
   | "config"
   | "info";
+
+/**
+ * "It does not exist — create it?" — the shared prompt for `/cwd` and `/cd`.
+ *
+ * Both commands refuse a directory that is not there, which is correct but is a dead end when
+ * the directory is simply one the user has not made yet. Asking turns a refusal into an
+ * obstacle you can step over.
+ *
+ * DEFAULT NO (`[y/N]`). Creating directories is a side effect on the user's disk, and the
+ * common cause of this prompt is a typo — `/cd BUMBLBEE` for `BUMBLEBEE` — where the helpful
+ * answer is to decline and retype, not to scatter a misspelled folder across the filesystem.
+ */
+async function offerToCreate(
+  ctx: { confirm: (p: string) => Promise<boolean>; write: (s: string) => void },
+  path: string,
+): Promise<boolean> {
+  const yes = await ctx.confirm(`${path} does not exist. Create it? [y/N]`);
+  if (!yes) ctx.write(c.dim("not created"));
+  return yes;
+}
 
 export interface SlashCmd {
   name: string;
@@ -795,8 +881,18 @@ async function runWorktree(rest: string, ctx: SlashCtx): Promise<void> {
       ctx.write(c.red(`no worktree matches "${target}"`));
       return;
     }
-    ctx.setCwd(match.path);
-    ctx.write(c.dim(`cwd → ${match.path}${match.branch ? ` (${match.branch})` : ""}`));
+    // `setCwd` RETURNS a result now, and this arm is one of the two its docblock names. A
+    // worktree can be listed by git and still be unusable — pruned, deleted, or on an unmounted
+    // volume — and `resolveCwdMove`'s existence check refuses those. Ignoring the answer turned
+    // "moves somewhere wrong" into "does not move at all while reporting that it did".
+    const moved = ctx.setCwd(match.path);
+    if (!moved.ok) {
+      ctx.write(c.red(`/worktree switch: ${moved.error}`));
+      return;
+    }
+    // Read the destination BACK off the result: the own-repo guard can redirect the move, and
+    // echoing `match.path` would then name a directory the session is not in.
+    ctx.write(c.dim(`cwd → ${moved.cwd}${match.branch ? ` (${match.branch})` : ""}`));
     return;
   }
 
@@ -1007,19 +1103,45 @@ export const SLASH_REGISTRY: readonly SlashCmd[] = Object.freeze([
     run: (_r, ctx) => ctx.applyFromLastReply(),
   },
   {
+    name: "fleet",
+    group: "session",
+    summary: "List every Prometheus window on this machine + the exact CPU/RAM/GPU split.",
+    /**
+     * The expansion of the one-line fleet bar.
+     *
+     * The bar is deliberately lossy — it drops the GB, the pids, the cwds and every caveat to
+     * fit one row. All of that lands here, which is why the bar can afford to be terse: nothing
+     * is hidden, it is one command away.
+     */
+    run: async (_rest, ctx) => {
+      if (!ctx.fleet) {
+        ctx.write(c.dim("this surface does not track other Prometheus windows"));
+        return;
+      }
+      for (const line of await ctx.fleet()) ctx.write(line);
+    },
+  },
+  {
     name: "cwd",
     group: "session",
     summary: "Show or change the working directory in place (tab-completes; keeps the session).",
     args: "[path]",
     run: async (rest, ctx) => {
       const dir = rest.trim() || (await ctx.askPath("Change directory to:", ctx.cwd()));
-      if (dir) {
-        ctx.setCwd(dir);
-        // Read back the REAL resulting cwd rather than echoing the raw argument: `setCwd`
-        // silently redirects away from Prometheus's own repo (printing its own warning first),
-        // so echoing `dir` verbatim here could show a path Prometheus never actually moved to.
-        ctx.write(c.dim(`cwd → ${ctx.cwd()}`));
+      if (!dir) return;
+      let move = ctx.setCwd(dir);
+      if (!move.ok && move.missing && move.path) {
+        move = (await offerToCreate(ctx, move.path)) ? ctx.setCwd(dir, { create: true }) : move;
       }
+      if (!move.ok) {
+        ctx.write(c.red(move.error));
+        ctx.write(c.dim(`still in ${ctx.cwd()}`));
+        return;
+      }
+      // Read back the REAL resulting cwd rather than echoing the raw argument: `setCwd`
+      // silently redirects away from Prometheus's own repo (printing its own warning first),
+      // so echoing `dir` verbatim could show a path Prometheus never actually moved to.
+      ctx.write(c.dim(`cwd → ${move.cwd}`));
     },
   },
   {
@@ -1039,12 +1161,30 @@ export const SLASH_REGISTRY: readonly SlashCmd[] = Object.freeze([
       const dir = rest.trim() || (await ctx.askPath("Move to project:", ctx.cwd()));
       if (!dir) return;
       if (!ctx.changeProjectDirectory) {
-        // Graceful degrade on a surface that hasn't wired the rotation: still move, in place.
-        ctx.setCwd(dir);
-        ctx.write(c.dim(`cwd → ${dir} (this surface can't start a fresh session — context kept)`));
+        // Graceful degrade on a surface that hasn't wired the rotation: still move, in place —
+        // through the SAME missing-directory offer, so the fallback path is not the one that
+        // silently refuses.
+        let m = ctx.setCwd(dir);
+        if (!m.ok && m.missing && m.path) {
+          m = (await offerToCreate(ctx, m.path)) ? ctx.setCwd(dir, { create: true }) : m;
+        }
+        if (!m.ok) {
+          ctx.write(c.red(`/cd: ${m.error}`));
+          return;
+        }
+        ctx.write(
+          c.dim(`cwd → ${m.cwd} (this surface can't start a fresh session — context kept)`),
+        );
         return;
       }
-      const res = ctx.changeProjectDirectory(dir);
+      let res = ctx.changeProjectDirectory(dir);
+      // A directory the user has not made yet is an obstacle, not an answer — offer to create
+      // it, exactly as `/cwd` does, so the two commands behave the same way at the same wall.
+      if (!res.ok && res.missing && res.path) {
+        res = (await offerToCreate(ctx, res.path))
+          ? ctx.changeProjectDirectory(dir, { create: true })
+          : res;
+      }
       if (!res.ok) {
         ctx.write(c.red(`/cd: ${res.error}`));
         return;
@@ -1380,12 +1520,13 @@ export const SLASH_REGISTRY: readonly SlashCmd[] = Object.freeze([
     name: "think",
     aliases: ["effort"],
     group: "model",
-    summary: "Set the worker's reasoning effort (off/low/medium/high/max).",
-    args: "[off|low|medium|high|max]",
+    summary: "Set the worker's reasoning effort (off/low/medium/high/xhigh/ultra/max).",
+    args: "[off|low|medium|high|xhigh|ultra|max]",
     run: (rest, ctx) => {
       const v = rest.trim().toLowerCase();
       if (isEffortTier(v)) {
-        ctx.tune({ effort: v });
+        // The host's setter, not a bare tuning patch: this is where the choice reaches disk.
+        ctx.setEffort(v);
         // Report what the ACTIVE model will actually do with it, not just what was stored —
         // `/effort max` on a model with no reasoning mode used to echo success and send
         // nothing, which is the exact failure this feature exists to remove.
@@ -1410,7 +1551,7 @@ export const SLASH_REGISTRY: readonly SlashCmd[] = Object.freeze([
         }
       } else {
         ctx.write(
-          c.dim(`think: ${ctx.tuning().effort ?? "default"} (use off|low|medium|high|max)`),
+          c.dim(`think: ${ctx.tuning().effort ?? "default"} (use ${EFFORT_TIERS.join("|")})`),
         );
       }
     },
@@ -1544,7 +1685,8 @@ export const SLASH_REGISTRY: readonly SlashCmd[] = Object.freeze([
         ctx.write(c.dim(`levels: ${agent.authLevelLegend()}`));
         return;
       }
-      ctx.setAuthLevel(lvl);
+      // an explicit, numbered choice — the one act that rewrites the saved default
+      ctx.setAuthLevel(lvl, "user");
       const m = agent.authLevelMeta(lvl);
       ctx.write(
         c.dim(`authorisation → ${m.level} ${m.name} — ${m.description} (saved as default)`),
@@ -1716,7 +1858,11 @@ export const SLASH_REGISTRY: readonly SlashCmd[] = Object.freeze([
     // spawn/parallel/batch) already owns that identifier. BY_NAME's build loop has no
     // duplicate-key guard, so declaring it here too would silently lose to whichever of the
     // two is registered last, while this alias list kept claiming it worked.
-    aliases: ["swarm", "fleet"],
+    // `fleet` was an alias here and is now a command of its own — the per-window presence
+    // table the fleet bar's legend tells the user to run. Two different nouns had claimed the
+    // same word: a swarm of AGENTS, and the fleet of terminal WINDOWS. `swarm` says the first
+    // one better, and the bar cannot point at a command that resolves to something else.
+    aliases: ["swarm"],
     group: "agents",
     summary:
       "Multi-CLI agent swarm: orchestrator + dedicated subagents (claude/codex/gemini/…) that talk + spawn children.",

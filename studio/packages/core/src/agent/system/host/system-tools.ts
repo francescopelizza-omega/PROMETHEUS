@@ -28,7 +28,7 @@ import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { defangFrameMarkers } from "../../protocol/frame-body.js";
 
 import type { SecurityVerdict } from "@prometheus/engine-bridge";
-import { type ExecCaptureResult, execCapture } from "@prometheus/engine-bridge";
+import { type ExecCaptureResult, execCapture, verdictReasons } from "@prometheus/engine-bridge";
 import {
   classifyCommand,
   describeCommand,
@@ -1007,7 +1007,10 @@ async function runCommandTool(
           decision: "blocked",
           authLevel: deps.authLevel ?? -1,
           argv: parsed.command.parts.flatMap((p) => p.pipeline.stages.map((st) => st.argv)),
-          reason: verdict.findings.map((f) => f.where).join("; ") || verdict.verdict,
+          // verdictReasons, NOT findings: a COMMAND gate answers in prose (blockingReasons)
+          // and carries no findings at all, so reading findings recorded the bare word
+          // "block" as the reason a command was refused — an audit trail that cannot say why.
+          reason: verdictReasons(verdict).join("; ") || verdict.verdict,
         }),
       );
     }
@@ -1018,7 +1021,7 @@ async function runCommandTool(
       ok: false,
       summary: [
         `refused by the nemesis gate (${verdict.verdict}): ${rendered}`,
-        ...verdict.findings.map((f) => `  - ${f.where}`),
+        ...verdictReasons(verdict).map((r) => `  - ${r}`),
       ].join("\n"),
       verdict: { verdict: verdict.verdict as "block" | "error", riskScore: verdict.risk_score },
     };
@@ -1145,15 +1148,23 @@ async function runCommandTool(
         } catch {
           existed = false;
         }
+        // Bytes that do not round-trip through utf8 are NOT a pre-image: `readFile(…, "utf8")`
+        // does not throw on binary, it substitutes U+FFFD, and writing that back on /revert
+        // destroys the file. Same rule as `readTextExact` (fs-mutate-host.ts:45), async here.
+        // A non-round-tripping file emits NO pre-image, so revert correctly does nothing.
         let preImage = "";
+        let capturable = true;
         if (existed) {
           try {
-            preImage = await readFile(abs, "utf8");
+            const buf = await readFile(abs);
+            const text = buf.toString("utf8");
+            if (Buffer.from(text, "utf8").equals(buf)) preImage = text;
+            else capturable = false;
           } catch {
-            preImage = "";
+            capturable = false;
           }
         }
-        deps.onPreImage({ path: abs, preImage, existed });
+        if (capturable) deps.onPreImage({ path: abs, preImage, existed });
       }
     }
   }
@@ -1476,7 +1487,10 @@ async function proposeElevatedTool(
             decision: "blocked",
             authLevel: deps.authLevel ?? -1,
             argv: [[...proposal.argv]],
-            reason: verdict.findings.map((f) => f.where).join("; ") || verdict.verdict,
+            // verdictReasons, NOT findings: a COMMAND gate answers in prose (blockingReasons) and
+            // carries no findings at all, so reading findings recorded the bare word "block"
+            // as the reason a command was refused — an audit trail that cannot say why.
+            reason: verdictReasons(verdict).join("; ") || verdict.verdict,
           }),
         );
       }
@@ -1484,7 +1498,7 @@ async function proposeElevatedTool(
         ok: false,
         summary: [
           `refused by the nemesis gate (${verdict.verdict}): ${line}`,
-          ...verdict.findings.map((f) => `  - ${f.where}`),
+          ...verdictReasons(verdict).map((r) => `  - ${r}`),
         ].join("\n"),
         verdict: { verdict: verdict.verdict as "block" | "error", riskScore: verdict.risk_score },
       };

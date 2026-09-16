@@ -374,6 +374,13 @@ export interface ServeOptions {
   port?: number;
   hw?: unknown;
   autostart?: boolean;
+  /**
+   * Override the sidecar's OVERFLOW RAM refusal, which itself says "re-run with --force".
+   * `download()` and `remove()` have always plumbed this; `serve` did not, so the hint the
+   * user was shown could not be acted on from any surface. A GUI must only set this behind an
+   * explicit "serve anyway" confirmation — an unconfirmed force defeats the guard silently.
+   */
+  force?: boolean;
 }
 
 export interface RepointOptions {
@@ -737,18 +744,25 @@ export class ModelHubClient {
     if (opts.sha256) argv.push("--sha256", JSON.stringify(opts.sha256));
     if (opts.force) argv.push("--force");
     // The sidecar streams `{"event":"progress",...}` JSON-lines on stderr during a real
-    // multi-GB fetch. `runSidecar` buffers stderr (no per-line hook today); `onProgress`
-    // is honored when the runner surfaces the stderr blob on the envelope (`_stderr`),
-    // and the line parser is exported + tested so wiring an onStderr hook is a one-liner.
-    // ENV LIMIT: no real fetch runs in this sandbox, so no progress lines are produced;
-    // the gate DECISION over `--staged` bytes is what is exercised.
-    const env = await this.run(argv);
-    if (opts.onProgress && typeof env._stderr === "string") {
-      for (const line of env._stderr.split("\n")) {
-        const p = parseDownloadProgressLine(line);
-        if (p) opts.onProgress(p);
-      }
-    }
+    // multi-GB fetch, and they are consumed AS THEY ARRIVE via the runner's `onStderr` hook.
+    //
+    // This used to scan `env._stderr` after the run instead — a field nothing in this repo
+    // ever sets. So `onProgress` could not fire even once, for any download: the Models
+    // pull readout and the chat's "Live download %" sat at their initial "starting" state
+    // through a multi-GB fetch and then jumped straight to done. Reading it post-hoc would
+    // also have been useless for a progress bar even if the field had existed.
+    const onProgress = opts.onProgress;
+    const env = await this.run(
+      argv,
+      onProgress
+        ? {
+            onStderr: (line: string): void => {
+              const p = parseDownloadProgressLine(line);
+              if (p) onProgress(p);
+            },
+          }
+        : undefined,
+    );
     return toDownloadResult(env);
   }
 
@@ -762,17 +776,28 @@ export class ModelHubClient {
   async pull(opts: {
     id: string;
     tag?: string;
+    /** Override the OVERFLOW RAM refusal — see `ServeOptions.force`. The CLI already sends
+     *  this through `runMutation`/`execArgv`; without it here the desktop could not. */
+    force?: boolean;
     onProgress?: (p: DownloadProgress) => void;
   }): Promise<PullResult> {
     const argv = ["pull", "--id", opts.id];
     if (opts.tag) argv.push("--tag", opts.tag);
-    const env = await this.run(argv);
-    if (opts.onProgress && typeof env._stderr === "string") {
-      for (const line of env._stderr.split("\n")) {
-        const p = parseDownloadProgressLine(line);
-        if (p) opts.onProgress(p);
-      }
-    }
+    if (opts.force) argv.push("--force");
+    // Live, via the runner's per-line stderr hook — see `download` above for why the old
+    // `env._stderr` scan could never fire.
+    const onProgress = opts.onProgress;
+    const env = await this.run(
+      argv,
+      onProgress
+        ? {
+            onStderr: (line: string): void => {
+              const p = parseDownloadProgressLine(line);
+              if (p) onProgress(p);
+            },
+          }
+        : undefined,
+    );
     return toPullResult(env);
   }
 
@@ -787,13 +812,20 @@ export class ModelHubClient {
     onProgress?: (p: DownloadProgress) => void;
   }): Promise<InstallRunnerResult> {
     const argv = ["install-runner", "--runner", opts?.runner ?? "ollama"];
-    const env = await this.run(argv);
-    if (opts?.onProgress && typeof env._stderr === "string") {
-      for (const line of env._stderr.split("\n")) {
-        const p = parseDownloadProgressLine(line);
-        if (p) opts.onProgress(p);
-      }
-    }
+    // Live, via the runner's per-line stderr hook — see `download` above for why the old
+    // `env._stderr` scan could never fire.
+    const onProgress = opts?.onProgress;
+    const env = await this.run(
+      argv,
+      onProgress
+        ? {
+            onStderr: (line: string): void => {
+              const p = parseDownloadProgressLine(line);
+              if (p) onProgress(p);
+            },
+          }
+        : undefined,
+    );
     return toInstallRunnerResult(env);
   }
 
@@ -867,13 +899,47 @@ export class ModelHubClient {
     if (typeof opts.port === "number") argv.push("--port", String(opts.port));
     if (opts.hw !== undefined) argv.push("--hw", JSON.stringify(opts.hw));
     if (opts.autostart) argv.push("--autostart");
+    if (opts.force) argv.push("--force");
     const env = await this.run(argv);
+    /**
+     * FAIL CLOSED, exactly as `hardware()` above does — this is the seam every surface but
+     * the CLI crosses.
+     *
+     * `runSidecar` RESOLVES a failure envelope (`{ok:false, command, error, _exit}`, with no
+     * `profile` key) — it never throws — and `toServeProfile` defaults every field it cannot
+     * find. So a REFUSAL turned into a GHOST profile: `id: ""`, `modelId: ""`, `argv: []`,
+     * `runner: "llamacpp"`, `port: 8080`, `status: "starting"`. The desktop then handed that
+     * to the C8 supervisor and answered `ok: true`, which means §8's OVERFLOW RAM guard
+     * ("… serving it risks exhausting RAM/swap") and the "unknown model id" refusal — the two
+     * things standing between a 70B q4 on a 16 GB machine and a swap-thrash — were discarded
+     * before anyone could read them.
+     *
+     * The throw is caught by each host's existing `catch` (desktop model-ipc returns
+     * `{ok:false, error: errString(e)}`), so the sidecar's own prose reaches the user and no
+     * runner is spawned.
+     */
+    assertScanSucceeded(env, "serve");
+    if (!env.profile || typeof env.profile !== "object") {
+      throw new Error("serve failed: the sidecar returned no serve profile");
+    }
     return toServeProfile(env.profile);
   }
 
   /** Stop a served runner (SIGTERM the pid via the supervisor). */
   unserve(profileId: string): Promise<MutationResult> {
     return this.run(["unserve", "--profile", profileId]).then(toMutationResult);
+  }
+
+  /**
+   * Stop the ollama background daemon — but ONLY if Prometheus itself started it (a marker
+   * `_ensure_ollama_daemon` records on the ONE code path that actually spawns it — see
+   * modelhub.py). A daemon the user started by hand, via `brew services`, or that some
+   * other app also needs is never touched: `stopped:false` with a `reason` is the normal,
+   * expected result whenever this session didn't wake it up itself. Best-effort, called on
+   * app quit — "we woke it, we let it rest" — never a hard requirement to succeed.
+   */
+  releaseOllama(): Promise<MutationResult> {
+    return this.run(["ollama.release"]).then(toMutationResult);
   }
 
   /** LIVE local + open-weight endpoints (`prometheus.py localai endpoints` passthrough). */
@@ -1029,6 +1095,7 @@ export const remove = (
 export const serve = (opts: ServeOptions): Promise<ServeProfile> => defaultClient.serve(opts);
 export const unserve = (profileId: string): Promise<MutationResult> =>
   defaultClient.unserve(profileId);
+export const releaseOllama = (): Promise<MutationResult> => defaultClient.releaseOllama();
 export const endpoints = (): Promise<EndpointsResult> => defaultClient.endpoints();
 export const repoint = (opts: RepointOptions): Promise<RepointResult> =>
   defaultClient.repoint(opts);

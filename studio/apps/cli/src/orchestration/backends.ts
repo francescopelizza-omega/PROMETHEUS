@@ -25,7 +25,8 @@ import {
   orchestration,
   secrets,
 } from "@prometheus/core";
-import type { EngineClient } from "@prometheus/engine-bridge";
+import type { EngineClient, LaunchGuardSample } from "@prometheus/engine-bridge";
+import { launchGuardVerdict, sampleLaunchGuard } from "@prometheus/engine-bridge";
 
 import { KeyedSemaphore, defaultProviderLimit } from "./concurrency.js";
 import { CLI_RECIPES, type CliRecipe, launchFor } from "./recipes.js";
@@ -69,6 +70,25 @@ export interface InvokerDeps {
    * the real CLI wires `createCliSecretsStore().get`.
    */
   secretsGet?: (service: string, account: string) => Promise<string | undefined>;
+  /**
+   * The shared 90% CPU/RAM launch ceiling (engine-bridge's launch-guard.ts — the same one
+   * `ensureOllamaRunning`/`model pull` already refuse a cold start on) — consulted right
+   * before every NEW agent-CLI subprocess spawn (`opencode`, `hermes`, and every other CLI_
+   * RECIPES service alike; the risk of piling more load onto an already-saturated machine
+   * isn't specific to any one vendor). Injected for tests; defaults to the real
+   * `sampleLaunchGuard`.
+   */
+  launchGuardFn?: () => Promise<LaunchGuardSample>;
+  /**
+   * How many times to re-sample the launch ceiling before giving up, with full-jitter backoff
+   * between samples (default 3).
+   *
+   * The ceiling used to be read ONCE and turned into a hard failure. A swarm saturates the
+   * machine by design, so that made the guard refuse the swarm's own remaining agents on a single
+   * 120 ms reading. Waiting converts one noisy sample into a sustained one. Injected for tests;
+   * `0` restores the single-sample behaviour.
+   */
+  launchGuardWaits?: number;
 }
 
 /** Default PATH lookup: is `bin` an executable on $PATH? */
@@ -304,9 +324,43 @@ async function cliInvoke(
     if (!g.ok) throw new Error(`nemesis blocked ${bin}: ${g.reason ?? "denied"}`);
   }
 
+  // The machine-wide 90% CPU/RAM ceiling — the same one already refused on a cold Ollama/LM
+  // Studio start. A fresh agent-CLI subprocess (claude/codex/opencode/hermes/…) is exactly the
+  // kind of NEW load this exists to block when the machine is already under heavy pressure;
+  // checked once per call, not per retry attempt (a retry re-uses an already-accepted decision).
   const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
   const random = deps.random ?? Math.random;
   const maxRetries = deps.maxRetries ?? 2;
+
+  /**
+   * WAIT for the ceiling to clear, then refuse in RETRYABLE terms.
+   *
+   * A single 120 ms sample was read once and turned straight into a hard error, and that error's
+   * wording ("refused — …") matches none of `isTransientBackendError`'s patterns — so the
+   * coordinator broke the turn loop with `[backend error] …` and the agent was simply lost. On a
+   * swarm run that is self-inflicted: `defaultProviderLimit` admits several concurrent agent CLIs
+   * per service, so agents 1-3 saturating the machine made the guard refuse agent 4 — the guard
+   * reading the swarm's own load and killing the rest of the swarm, while telling the user to
+   * "free resources and retry" when nothing would.
+   *
+   * Re-sampling with backoff turns the one noisy reading into a sustained one (the same principle
+   * as `nextCriticalStreak`), and "temporarily unavailable" is the token the coordinator's
+   * `isTransientBackendError` recognises, so a genuinely loaded machine gets re-issued instead of
+   * failing the agent outright.
+   *
+   * Deliberately its OWN small budget rather than sharing `maxRetries`: those attempts exist for
+   * spawn outcomes, and this wait happens before anything has been spawned at all.
+   */
+  const launchGuardFn = deps.launchGuardFn ?? sampleLaunchGuard;
+  const guardWaits = deps.launchGuardWaits ?? 3;
+  let guardVerdict = launchGuardVerdict(await launchGuardFn());
+  for (let i = 0; !guardVerdict.ok && i < guardWaits; i++) {
+    await sleep(Math.round(random() * Math.min(8000, 500 * 2 ** i)));
+    guardVerdict = launchGuardVerdict(await launchGuardFn());
+  }
+  if (!guardVerdict.ok) {
+    throw new Error(`${service}: temporarily unavailable — ${guardVerdict.reason}`);
+  }
   // rate-limits + transient crashes are RETRYABLE with full-jitter backoff; an auth error
   // or a timeout is NOT (retrying would just re-hit the lockout / re-burn the budget).
   const retryable = new Set(["rate_limited", "crashed"]);

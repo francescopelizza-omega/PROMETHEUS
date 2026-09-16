@@ -10,6 +10,8 @@
 import { settings as coreSettings } from "@prometheus/core";
 import { ipcMain } from "electron";
 
+import { assertNotSensitivePath } from "./ide/path-guard.js";
+
 import {
   IPC,
   type SettingsGetResult,
@@ -35,7 +37,8 @@ function stringField(a: Record<string, unknown>, key: string): string | undefine
 }
 
 export interface SettingsIpcOptions {
-  /** where the global layer persists (defaults to `<userData>/settings.json`). */
+  /** where the global layer persists — the shared `$PROMETHEUS_HOME/config/settings.json`
+   *  (main/settings-path.ts), NOT Electron's private userData. */
   globalPath: string;
   /**
    * Fired with the resolved settings whenever they are read or written.
@@ -146,12 +149,24 @@ export function registerSettingsIpcHandlers(opts: SettingsIpcOptions): () => voi
       if (scope === "workspace" && !workspaceRoot) {
         return { ok: false, error: "workspaceRoot is required for scope=workspace" };
       }
+      // `workspaceRoot` is renderer-supplied and reaches `workspaceSettingsPath` unnormalised,
+      // so a relative or `~/.ssh`-shaped root would have a settings file written under it.
+      // Denylist ONLY: this is a real project directory the user chose, not a granted
+      // working-set path, and `assertNotSensitivePath` also resolves it to an absolute path.
+      let safeRoot = workspaceRoot;
+      if (scope === "workspace") {
+        try {
+          safeRoot = assertNotSensitivePath(workspaceRoot as string);
+        } catch (e) {
+          return { ok: false, error: errString(e) };
+        }
+      }
       const { global, workspace } = await loadEffective(globalPath, workspaceRoot);
       if (scope === "global") {
         await writeLayerAtomic(globalPath, coreSettings.setInLayer(global, key, a.value));
       } else {
         await writeLayerAtomic(
-          workspaceSettingsPath(workspaceRoot as string),
+          workspaceSettingsPath(safeRoot as string),
           coreSettings.setInLayer(workspace, key, a.value),
         );
       }
@@ -180,12 +195,24 @@ export function registerSettingsIpcHandlers(opts: SettingsIpcOptions): () => voi
       if (scope === "workspace" && !workspaceRoot) {
         return { ok: false, error: "workspaceRoot is required for scope=workspace" };
       }
+      // `workspaceRoot` is renderer-supplied and reaches `workspaceSettingsPath` unnormalised,
+      // so a relative or `~/.ssh`-shaped root would have a settings file written under it.
+      // Denylist ONLY: this is a real project directory the user chose, not a granted
+      // working-set path, and `assertNotSensitivePath` also resolves it to an absolute path.
+      let safeRoot = workspaceRoot;
+      if (scope === "workspace") {
+        try {
+          safeRoot = assertNotSensitivePath(workspaceRoot as string);
+        } catch (e) {
+          return { ok: false, error: errString(e) };
+        }
+      }
       const { global, workspace } = await loadEffective(globalPath, workspaceRoot);
       if (scope === "global") {
         await writeLayerAtomic(globalPath, coreSettings.resetInLayer(global, key));
       } else {
         await writeLayerAtomic(
-          workspaceSettingsPath(workspaceRoot as string),
+          workspaceSettingsPath(safeRoot as string),
           coreSettings.resetInLayer(workspace, key),
         );
       }

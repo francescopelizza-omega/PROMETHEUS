@@ -32,6 +32,12 @@ export interface McpGateVerdict {
   riskScore?: number;
   target: string;
   findings: number;
+  /**
+   * A command gate's free-text blocking reasons. Its own axis, because such a verdict carries
+   * no findings — `findings: 0` is the honest count, and without this a blocked connector had
+   * no way at all to say why it was blocked.
+   */
+  reasons?: readonly string[];
 }
 
 /** Mirrors core's `GateTargetKind` without importing core (engine-bridge stays below it). */
@@ -68,6 +74,12 @@ export function createMcpGateRunner(
         riskScore: v.risk_score,
         target,
         findings: v.findings.length,
+        // A command gate answers in PROSE and carries no findings, so a blocked connector's
+        // card reported "0 findings" with no cause. Carry the reasons on their own axis
+        // rather than inflating a count that is honestly zero.
+        ...(v.blockingReasons && v.blockingReasons.length > 0
+          ? { reasons: [...v.blockingReasons] }
+          : {}),
       };
     } catch {
       // the scan itself failed — treat as "error" (blocks the connector), never as allow.

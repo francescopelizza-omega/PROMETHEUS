@@ -14,6 +14,7 @@ import { type ActivityId, sidebarTitle } from "@prometheus/ui";
 import type { ReactElement, ReactNode } from "react";
 
 import { ResizeHandle, useResizable } from "./Resizable.js";
+import { paneMaxWidth, readPaneWidth } from "./responsive.js";
 
 const SIDEBAR_DEFAULT = 240;
 const SIDEBAR_MIN = 180;
@@ -41,7 +42,15 @@ export function Sidebar({
     // 0.35 so sidebar_max + rail_max (0.42) + the 46px activity bar + the 8px island gaps
     // can never exceed the viewport and push the workbench/rail off-screen at the
     // 1100px window minimum (paired with RightRail 0.42).
-    max: () => Math.max(SIDEBAR_MIN, Math.round(window.innerWidth * 0.35)),
+    // Budgeted against the RAIL, not just the viewport: two independent fraction caps left
+    // the editor ~175px at the 1100px minimum window. See responsive.ts WORKBENCH_MIN.
+    max: () =>
+      paneMaxWidth({
+        viewportWidth: window.innerWidth,
+        ownMin: SIDEBAR_MIN,
+        fraction: 0.35,
+        siblingWidth: readPaneWidth("prometheus.layout.rightRailWidth", 330),
+      }),
     storageKey: "prometheus.layout.sidebarWidth",
   });
   if (collapsed) return null;

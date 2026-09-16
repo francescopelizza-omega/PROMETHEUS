@@ -195,6 +195,9 @@ export const modelServeSchema = z.object({
 /** model:unserve — the serve-profile id. */
 export const modelUnserveSchema = z.object({ profileId: MODEL_ID });
 
+/** model:kill — same shape as unserve, distinct verb (skips the graceful-stop wait). */
+export const modelKillSchema = z.object({ profileId: MODEL_ID });
+
 /** model:repoint — tool + base-url (§6). */
 export const modelRepointSchema = z.object({
   tool: FACET,
@@ -424,6 +427,10 @@ export function validateModelServe(arg: unknown): GuardResult<ModelServeArgs> {
 
 export function validateModelUnserve(arg: unknown): GuardResult<{ profileId: string }> {
   return runSchema(modelUnserveSchema, asObject(arg));
+}
+
+export function validateModelKill(arg: unknown): GuardResult<{ profileId: string }> {
+  return runSchema(modelKillSchema, asObject(arg));
 }
 
 export interface ModelRepointArgs {

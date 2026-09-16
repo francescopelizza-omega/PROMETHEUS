@@ -19,8 +19,15 @@ import {
   type VerdictTier,
 } from "../tokens.js";
 
-/** The five shield states the status bar can show (file 08 §4.2). */
-export type ShieldState = "clean" | "warn" | "block" | "error" | "stale";
+/**
+ * The shield states the chrome can show (file 08 §4.2).
+ *
+ * `armed`/`unarmed` answer a different question from the verdict tiers: not "what did
+ * the last scan say" but "is there a scanner at all". A build with nemesis absent can
+ * never produce a verdict, so without these two the shield would sit on its benign
+ * `clean` placeholder forever — green, while nothing whatsoever was being gated.
+ */
+export type ShieldState = "clean" | "warn" | "block" | "error" | "stale" | "armed" | "unarmed";
 
 /** The fully-resolved shield presentation the StatusBar renders. */
 export interface ShieldView {
@@ -41,21 +48,39 @@ const STALE_GLYPH = "⟳";
  * Derive the shield view from the latest verdict tier + DB freshness.
  *
  * Priority (fail-toward-attention):
+ *   0. unarmed → the SCANNER ITSELF is absent; nothing is being gated at all.
  *   1. error  → SCAN FAILED (fail-closed; the scanner couldn't speak).
  *   2. block  → a blocking verdict outranks staleness (a real danger now).
  *   3. warn   → an active warning.
  *   4. stale  → DB is stale (signatures old) — only when the verdict is clean.
- *   5. clean  → allow, fresh DB.
+ *   5. armed  → a CONFIRMED-present scanner that has not scanned anything yet.
+ *   6. clean  → allow, fresh DB.
  *
  * `verdict` may be null before the first gate ran; with a fresh DB that reads as
  * a benign "clean" placeholder, with a stale DB as "stale" (nudges a refresh).
+ *
+ * `opts.armed` is deliberately THREE-valued. `false` means the host has looked and the
+ * scanner is missing — that outranks every verdict, because a `block` recorded by a
+ * scanner that is now gone says nothing about what would happen next. `true` means the
+ * host has looked and found it, which is what lets a null verdict read as the honest
+ * "armed" rather than the ambiguous "clean". `undefined` means the caller has no probe
+ * to offer and gets exactly the pre-existing behaviour.
  */
 export function deriveShield(
   verdict: VerdictTier | null | undefined,
-  opts: { dbStale?: boolean } = {},
+  opts: { dbStale?: boolean; armed?: boolean } = {},
 ): ShieldView {
   const dbStale = opts.dbStale === true;
 
+  if (opts.armed === false) {
+    return {
+      state: "unarmed",
+      role: "danger",
+      glyph: VERDICT_GLYPH.block,
+      label: "unarmed",
+      aria: "nemesis scanner is absent — nothing is being gated",
+    };
+  }
   if (verdict === "error") return view("error", "error", VERDICT_GLYPH.error, "scan failed");
   if (verdict === "block") return view("block", "block", VERDICT_GLYPH.block, "blocked");
   if (verdict === "warn") return view("warn", "warn", VERDICT_GLYPH.warn, "warnings");
@@ -68,6 +93,15 @@ export function deriveShield(
       glyph: STALE_GLYPH,
       label: "stale",
       aria: "nemesis threat database is stale — run a refresh",
+    };
+  }
+  if (opts.armed === true && (verdict === null || verdict === undefined)) {
+    return {
+      state: "armed",
+      role: "ok",
+      glyph: VERDICT_GLYPH.allow,
+      label: "armed",
+      aria: "nemesis gate is armed — nothing scanned yet",
     };
   }
   return view("clean", "allow", VERDICT_GLYPH.allow, "clean");

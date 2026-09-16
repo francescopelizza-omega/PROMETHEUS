@@ -10,6 +10,7 @@ import { test } from "node:test";
 
 import {
   CLOUD_MIN_AUTH,
+  PULL_SCAN_NOTE,
   endpointRow,
   formatBytes,
   installedRows,
@@ -149,4 +150,33 @@ test("size, ctx and served pass through when the payload has them", () => {
     quant: "Q4_K_M",
     served: true,
   });
+});
+
+/* ── the pull note is a SECURITY claim; it must match what the pull path does ────── */
+
+test("PULL_SCAN_NOTE does not claim a nemesis scan the ollama pull path never runs", () => {
+  // python/sidecar/modelhub.py::v_pull hands the tag straight to `ollama pull`; the only
+  // `nemesis_gate` calls in that file are on the HF/GGUF spine, which stages bytes locally.
+  // the POSITIVE claim, not the substring — the honest note says "NOT scanned by nemesis",
+  // and a guard that cannot tell an assertion from its negation forces vaguer wording.
+  assert.doesNotMatch(
+    PULL_SCAN_NOTE,
+    /(?<!not )scanned by nemesis/i,
+    "the note claims a scan that does not happen on this path",
+  );
+  assert.match(PULL_SCAN_NOTE, /not scanned by nemesis/i, "it must say plainly that none ran");
+  assert.doesNotMatch(PULL_SCAN_NOTE, /\bclean\b/i, "no scan ran, so nothing was found clean");
+});
+
+test("PULL_SCAN_NOTE does not claim the pull will not auto-serve", () => {
+  // `_ensure_ollama_daemon` spawns `ollama serve` detached before the pull, and the
+  // success envelope reports the model served at the ollama endpoint.
+  assert.doesNotMatch(PULL_SCAN_NOTE, /will not auto-serve/i);
+});
+
+test("PULL_SCAN_NOTE still tells the user where the trust actually comes from", () => {
+  // the guards above would also pass on an empty string, which would be a silent
+  // downgrade rather than a correction.
+  assert.match(PULL_SCAN_NOTE, /registry/i);
+  assert.ok(PULL_SCAN_NOTE.length > 40, "the note must still say something");
 });

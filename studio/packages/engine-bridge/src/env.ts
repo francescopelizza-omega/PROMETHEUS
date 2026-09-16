@@ -217,7 +217,11 @@ function toEnv(row: Record<string, unknown>, active: boolean): Env {
     pythonVersion: typeof row.python_version === "string" ? row.python_version : "",
     active,
     managedBy: managedByFor(kind),
-    packageCount: typeof count === "number" && count >= 0 ? count : 0,
+    // UNMEASURED stays unmeasured. The sidecar reports `packages_count: None` for anything
+    // it cannot count cheaply (conda, system pythons — envmgr.py), and coercing that to 0
+    // printed "0 packages" beside a populated conda env. Every consumer already handles the
+    // absent case; this one line was defeating all of them.
+    ...(typeof count === "number" && count >= 0 ? { packageCount: count } : {}),
     health: (typeof row.health === "string" ? row.health : "unknown") as EnvHealth,
   };
 }

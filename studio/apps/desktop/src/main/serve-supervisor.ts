@@ -36,6 +36,15 @@
 import { EventEmitter } from "node:events";
 
 import type { ServeProfile as DomainServeProfile, ServerSupervisor } from "@prometheus/core";
+import {
+  CRITICAL_POLLS_REQUIRED,
+  CRITICAL_RAM_CEILING_PCT,
+  type EvictionEvent,
+  nextCriticalStreak,
+  ramCeilingVerdict,
+  ramPctNow,
+  recordEvictionEvent,
+} from "@prometheus/engine-bridge";
 
 /** The §2.4 serve status the Serving panel renders. */
 export type ServeStatus = "stopped" | "starting" | "ready" | "error";
@@ -87,6 +96,10 @@ export type PollModelsFn = (baseUrl: string) => Promise<PollResult>;
 export interface ServeSupervisorEvents {
   /** a profile's §2.4 status changed (the Serving panel re-renders from this). */
   status: [ServeRow];
+  /** a served (`ready`) recipe was force-killed under SUSTAINED critical RAM pressure — a
+   *  distinct signal from a normal status change so the shell can raise a system notification
+   *  ("Prometheus stopped X to prevent a machine freeze") rather than a routine status update. */
+  evicted: [EvictionEvent];
 }
 
 export interface ServeSupervisorOptions {
@@ -105,6 +118,37 @@ export interface ServeSupervisorOptions {
   clearTimeoutFn?: (h: unknown) => void;
   /** the wall clock (ms) — injectable so the deadline check is deterministic. */
   now?: () => number;
+  /**
+   * The shared 90% RAM launch ceiling (engine-bridge's launch-guard.ts — the same one
+   * `ensureOllamaRunning` and the CLI's autostart already refuse a cold Ollama start on).
+   * `start()` is synchronous, so this stays synchronous too (RAM% alone, not the CPU-delta
+   * sample that needs a real sleep) — checked ONCE per actual spawn, never per poll tick.
+   * Injectable for tests; defaults to the real, live machine reading.
+   */
+  resourceGuardFn?: () => { ok: boolean; reason?: string };
+  /**
+   * ACTIVE EVICTION: how often, while ≥1 recipe is `starting` or `ready`, to check for SUSTAINED
+   * critical RAM pressure and force-kill every currently-served recipe if found — the same
+   * mechanism (and the same shared eviction-log) as ollama-watchdog-entry.ts's idle-shutdown
+   * watchdog, for the heavier launch path (real model weights, not just the lightweight
+   * `ollama serve` daemon).
+   * Default 2s, matching POLL_MS in ollama-watchdog-entry.ts — a 30s poll with
+   * CRITICAL_POLLS_REQUIRED=2 cannot react for 60-90s to a collapse measured at two seconds.
+   * The timer is armed ONLY while something is live (see syncCriticalCheck): each tick is a
+   * `vm_stat` fork+exec on darwin, so an always-on 2s poll would block the Electron main thread
+   * ~43,200 times a day in a session that never serves a model. Injectable for tests.
+   */
+  criticalCheckIntervalMs?: number;
+  /** the RAM% ceiling that triggers eviction (default engine-bridge's CRITICAL_RAM_CEILING_PCT,
+   *  deliberately stricter than `resourceGuardFn`'s launch ceiling — eviction of an ACTIVE,
+   *  in-use server is a last resort, never the same bar as merely refusing a new one). */
+  criticalRamCeilingPct?: number;
+  /** raw RAM% reader for the critical-pressure streak — injectable for tests (never the real
+   *  live machine reading in a unit test). Defaults to the real `ramPctNow`. */
+  ramSampleFn?: () => number;
+  /** records one eviction notice to the shared cross-surface log. Injectable for tests so they
+   *  never touch a real path on disk; defaults to the real `recordEvictionEvent`. */
+  recordEvictionFn?: (event: Omit<EvictionEvent, "id" | "at">) => EvictionEvent;
 }
 
 interface Entry {
@@ -158,6 +202,15 @@ export class ServeSupervisor extends EventEmitter {
   private readonly setTimeoutFn: (fn: () => void, ms: number) => unknown;
   private readonly clearTimeoutFn: (h: unknown) => void;
   private readonly now: () => number;
+  private readonly resourceGuardFn: () => { ok: boolean; reason?: string };
+  private readonly criticalCheckIntervalMs: number;
+  private readonly criticalRamCeilingPct: number;
+  private readonly ramSampleFn: () => number;
+  private readonly recordEvictionFn: (event: Omit<EvictionEvent, "id" | "at">) => EvictionEvent;
+  private criticalStreak = 0;
+  private criticalCheckHandle: unknown = null;
+  /** once `disposeCriticalCheck()` has run (app shutdown), no status change may re-arm the poll. */
+  private criticalCheckDisposed = false;
   private readonly entries = new Map<string, Entry>();
 
   constructor(opts: ServeSupervisorOptions) {
@@ -194,6 +247,116 @@ export class ServeSupervisor extends EventEmitter {
       });
     this.clearTimeoutFn = opts.clearTimeoutFn ?? ((h) => clearTimeout(h as NodeJS.Timeout));
     this.now = opts.now ?? Date.now;
+    this.resourceGuardFn = opts.resourceGuardFn ?? (() => ramCeilingVerdict(ramPctNow()));
+    // 2 s, not 30 s — see POLL_MS in engine-bridge/ollama-watchdog-entry.ts. A 30 s poll
+    // with CRITICAL_POLLS_REQUIRED=2 cannot react for 60-90 s to a collapse measured at
+    // two seconds, which made this guard decorative on the machine it was written for.
+    this.criticalCheckIntervalMs = opts.criticalCheckIntervalMs ?? 2_000;
+    this.criticalRamCeilingPct = opts.criticalRamCeilingPct ?? CRITICAL_RAM_CEILING_PCT;
+    this.ramSampleFn = opts.ramSampleFn ?? ramPctNow;
+    this.recordEvictionFn = opts.recordEvictionFn ?? recordEvictionEvent;
+    // NOT armed here. `ramSampleFn` defaults to engine-bridge's `ramPctNow`, whose 250ms
+    // available-bytes cache is always cold at a 2s cadence, so on darwin — the platform this
+    // repo targets — every tick reaches `execFileSync("/usr/bin/vm_stat")`: a BLOCKING fork+exec
+    // on the Electron main thread, which stalls every ipcMain handler, paint and streaming-token
+    // relay for its duration. This supervisor is constructed at module scope in main/index.ts,
+    // so arming in the constructor cost a session that never serves a model ~43,200 forks/day.
+    // `syncCriticalCheck()` arms it on the first `starting`/`ready` entry and disarms it when the
+    // last one goes away, so the poll exists exactly while there is something to evict.
+  }
+
+  /**
+   * ACTIVE EVICTION tick: sample RAM, and once SUSTAINED critical pressure is confirmed (never a
+   * single spike — see nextCriticalStreak), force-kill every currently `ready` recipe and record
+   * one eviction notice per kill. Multiple simultaneously-served recipes are ALL evicted together
+   * — this supervisor has no reliable per-process RAM attribution to single out "the" offender,
+   * and letting even one of several heavy servers keep running would not resolve the pressure
+   * that triggered this in the first place.
+   */
+  private checkCriticalPressure(): void {
+    // This runs from a timer in the Electron MAIN process. Anything that escapes here is an
+    // uncaught exception on the main thread, which takes the whole app down — and the failure
+    // would be invisible, because the only thing that fires this tick is memory pressure the
+    // user is already suffering. `recordEvictionFn` writes to disk and can throw (EACCES, ENOSPC,
+    // a lock timeout); a guard that crashes the app it is guarding is worse than no guard.
+    try {
+      this.checkCriticalPressureInner();
+    } catch {
+      /* swallow: the next tick re-samples. Never let a timer callback kill the main process. */
+    }
+  }
+
+  private checkCriticalPressureInner(): void {
+    const ramPct = this.ramSampleFn();
+    this.criticalStreak = nextCriticalStreak(this.criticalStreak, ramPct, this.criticalRamCeilingPct);
+    if (this.criticalStreak < CRITICAL_POLLS_REQUIRED) return;
+    this.criticalStreak = 0; // reset regardless of outcome — never re-fire every tick in a row
+    const ready = [...this.entries.values()].filter((e) => e.row.status === "ready");
+    for (const entry of ready) {
+      const reason = `RAM at ${ramPct}% ≥ ${this.criticalRamCeilingPct}% for ${CRITICAL_POLLS_REQUIRED} consecutive checks — stopped to prevent a machine-wide freeze`;
+      const event = this.recordEvictionFn({
+        runnerId: entry.row.id,
+        name: `${entry.row.modelId} (${entry.row.quant})`,
+        pid: entry.row.pid,
+        ramPct,
+        ceiling: this.criticalRamCeilingPct,
+        reason,
+      });
+      // `.catch` is not optional: a rejecting kill() here is an unhandled rejection every
+      // eviction, in the main process, under memory pressure. The eviction is still recorded —
+      // `recordEvictionFn` already ran — so a failed kill stays visible in the log.
+      void this.kill(entry.row.id).then(
+        () => {
+          this.emit("evicted", event);
+        },
+        () => {
+          /* kill failed; the entry stays and the next critical streak retries it */
+        },
+      );
+    }
+  }
+
+  /**
+   * Arm or disarm the critical-pressure poll to match reality: it runs exactly while at least one
+   * entry is `starting` or `ready`, i.e. while there is something an eviction could actually free.
+   * `starting` counts — a model's weights are being paged in during `starting`, which is when
+   * pressure climbs fastest and when the guard is most needed.
+   *
+   * Idempotent, and called after every status transition and removal.
+   */
+  private syncCriticalCheck(): void {
+    // `disposeCriticalCheck()` is a one-way latch: without this, a status transition after
+    // shutdown (a queued kill resolving, say) would silently re-arm the poll we just tore down.
+    if (this.criticalCheckDisposed) return;
+    const live = [...this.entries.values()].some(
+      (e) => e.row.status === "starting" || e.row.status === "ready",
+    );
+    if (live && this.criticalCheckHandle === null) {
+      // Reset the streak on arm as well as disarm: a streak of 1 left over from a previous serve
+      // session would otherwise survive the idle gap and let the FIRST critical tick after
+      // re-arming evict on a single sample, breaking nextCriticalStreak's "never a lone spike".
+      this.criticalStreak = 0;
+      this.criticalCheckHandle = this.setIntervalFn(() => {
+        this.checkCriticalPressure();
+      }, this.criticalCheckIntervalMs);
+      return;
+    }
+    if (!live && this.criticalCheckHandle !== null) {
+      this.clearIntervalFn(this.criticalCheckHandle);
+      this.criticalCheckHandle = null;
+      this.criticalStreak = 0;
+    }
+  }
+
+  /** Stop the critical-pressure monitor — call on app shutdown alongside `stopAll()`. */
+  disposeCriticalCheck(): void {
+    // Null-safe: index.ts calls this on every quit path, including sessions that never served
+    // anything and so never armed the timer.
+    this.criticalCheckDisposed = true;
+    if (this.criticalCheckHandle === null) return;
+    this.clearIntervalFn(this.criticalCheckHandle);
+    this.criticalCheckHandle = null;
+    this.criticalStreak = 0;
   }
 
   // --- typed EventEmitter overrides ------------------------------------- //
@@ -251,6 +414,18 @@ export class ServeSupervisor extends EventEmitter {
     }
     entry.row = { ...entry.row, ...recipe };
     entry.startedAt = this.now();
+
+    // The shared 90% RAM launch ceiling — a served recipe loads real model weights into memory,
+    // the single most direct way a "start one more thing" decision turns into the exact
+    // black-screen-freeze failure mode this exists to prevent. Refused BEFORE the core spawns
+    // anything: no child, no poll loop, no listeners registered.
+    const resourceVerdict = this.resourceGuardFn();
+    if (!resourceVerdict.ok) {
+      this.transition(recipe.id, "error", {
+        lastError: `refused — ${resourceVerdict.reason}. Free resources and retry.`,
+      });
+      return { ...this.entries.get(recipe.id)!.row };
+    }
 
     // 1) spawn the child via the core C8 supervisor.
     const profile = toDomainProfile(recipe);
@@ -355,10 +530,35 @@ export class ServeSupervisor extends EventEmitter {
     return Promise.all([...this.entries.keys()].map((id) => this.stop(id)));
   }
 
+  /**
+   * Force-kill a profile: same teardown as `stop()`, but with `graceMs:0` so
+   * `core.stop()`'s SIGTERM→SIGKILL escalation fires SIGKILL on the next tick
+   * instead of waiting out the usual 5s grace window — "if something is not
+   * responding properly" (the user's own words for this control) means it has
+   * already ignored SIGTERM once; waiting another 5s to confirm that again
+   * before escalating is the whole problem being reported, not a safety net.
+   */
+  async kill(id: string): Promise<ServeRow> {
+    const entry = this.entries.get(id);
+    if (!entry) {
+      return { ...syntheticStopped(id) };
+    }
+    this.teardownPoll(id);
+    this.transition(id, "stopped", { lastError: undefined });
+    try {
+      await this.core.stop(id, 0);
+    } catch {
+      /* a missing/already-dead child is fine — the row is already stopped. */
+    }
+    return { ...(this.entries.get(id)?.row ?? syntheticStopped(id)) };
+  }
+
   /** Remove a (stopped) profile entirely from the registry. */
   remove(id: string): void {
     this.teardownPoll(id);
     this.entries.delete(id);
+    // dropping the last live entry must disarm the eviction poll — `transition` never runs here.
+    this.syncCriticalCheck();
   }
 
   /**
@@ -391,6 +591,8 @@ export class ServeSupervisor extends EventEmitter {
     entry.row = { ...entry.row, ...patch, status };
     // leaving error clears the stale message unless the patch set one.
     if (status !== "error" && patch.lastError === undefined) entry.row.lastError = undefined;
+    // Every status change is a candidate arm/disarm point for the eviction poll.
+    this.syncCriticalCheck();
     this.emit("status", { ...entry.row });
   }
 }

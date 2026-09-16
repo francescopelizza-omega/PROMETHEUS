@@ -233,8 +233,14 @@ export function RadioGroupItem({ value, label, disabled, id }: RadioGroupItemPro
     }
   }
   return (
+    // `htmlFor` is dropped and the click handled here instead. The control is a
+    // `role="radio"` SPAN, not an <input>, and `htmlFor` only activates real form controls —
+    // so clicking the visible label text (the part most people aim at) did nothing at all.
+    // The span keeps role/id/aria-checked/tabIndex/onKeyDown because focus lands on it; only
+    // the pointer path moves up here, so the click is handled exactly once.
+    // biome-ignore lint/a11y/noLabelWithoutControl: the labelled control is the role="radio" span below, not a form element
     <label
-      htmlFor={itemId}
+      onClick={() => !isDisabled && ctx?.onValueChange?.(value)}
       style={{
         display: "inline-flex",
         alignItems: "center",
@@ -251,7 +257,6 @@ export function RadioGroupItem({ value, label, disabled, id }: RadioGroupItemPro
         aria-checked={selected}
         tabIndex={isDisabled ? -1 : 0}
         onKeyDown={onKey}
-        onClick={() => !isDisabled && ctx?.onValueChange?.(value)}
         style={{
           display: "inline-flex",
           alignItems: "center",

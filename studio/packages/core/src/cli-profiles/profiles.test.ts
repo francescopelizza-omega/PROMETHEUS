@@ -142,8 +142,8 @@ test("the 4 shipped profiles + ci forbids force", () => {
 });
 
 test("profilesDir / profilePath", () => {
-  assert.equal(profilesDir("/home/u"), "/home/u/.config/prometheus-studio/profiles");
-  assert.equal(profilePath("ci", "/home/u"), "/home/u/.config/prometheus-studio/profiles/ci.toml");
+  assert.equal(profilesDir("/home/u"), "/home/u/.prometheus/config/profiles");
+  assert.equal(profilePath("ci", "/home/u"), "/home/u/.prometheus/config/profiles/ci.toml");
 });
 
 test("stringifyToml round-trips parseToml for the value types profiles use (CLI-005)", () => {
@@ -179,9 +179,9 @@ test("getPath / setPath walk + create dotted key paths (CLI-005)", () => {
 });
 
 test("configDir / configPath locate the shared user config (CLI-005)", () => {
-  assert.equal(configDir("/home/u"), "/home/u/.config/prometheus-studio");
-  assert.equal(configPath("/home/u"), "/home/u/.config/prometheus-studio/config.toml");
-  assert.equal(profilesDir("/home/u"), "/home/u/.config/prometheus-studio/profiles");
+  assert.equal(configDir("/home/u"), "/home/u/.prometheus/config");
+  assert.equal(configPath("/home/u"), "/home/u/.prometheus/config/config.toml");
+  assert.equal(profilesDir("/home/u"), "/home/u/.prometheus/config/profiles");
 });
 
 test("serializeProfile round-trips every builtin through parseProfile (CLI-044)", () => {
@@ -552,4 +552,132 @@ test("the PROJECT layer may pin a tier but NOT force past the capability table",
 
   const fromUser = resolveEffectiveProfile({ builtin, user, project });
   assert.equal(fromUser.agent.effortForce, true, "the user's own machine still may");
+});
+
+/* ── one home: the config root move + its migration ────────────────────────── */
+
+test("configDir hangs off the ONE Prometheus home, and the twin agrees with prometheusHome()", async () => {
+  // `paths.ts` cannot import the agent host layer, so it carries a local copy of the
+  // `$PROMETHEUS_HOME` → `~/.prometheus` rule. Two copies of a path rule is exactly how the
+  // config tree and the state tree came to disagree in the first place; this pins them together.
+  const { prometheusHome } = await import("../agent/system/host/home.js");
+  const { join } = await import("node:path");
+  const { homedir } = await import("node:os");
+  const saved = process.env.PROMETHEUS_HOME;
+  try {
+    process.env.PROMETHEUS_HOME = "";
+    assert.equal(configDir(), join(prometheusHome({}), "config"));
+    assert.equal(configDir(), join(homedir(), ".prometheus", "config"));
+
+    // $PROMETHEUS_HOME sandboxes the config tree too — it used to have ZERO effect on it, so one
+    // variable moved the state tree and left the settings pointing at the real machine.
+    process.env.PROMETHEUS_HOME = "/tmp/sandbox-home";
+    assert.equal(configDir(), join("/tmp/sandbox-home", "config"));
+    assert.equal(configDir(), join(prometheusHome(process.env), "config"));
+
+    // an EXPLICIT home still wins over the env — that is the DI seam every host and test uses
+    assert.equal(configDir("/home/u"), "/home/u/.prometheus/config");
+  } finally {
+    // Reflect.deleteProperty, not `delete` — biome flags the operator, and the fix it suggests
+    // (`= undefined`) is wrong for process.env: Node coerces it to the STRING "undefined".
+    if (saved === undefined) Reflect.deleteProperty(process.env, "PROMETHEUS_HOME");
+    else process.env.PROMETHEUS_HOME = saved;
+  }
+});
+
+test("a $PROMETHEUS_HOME sandbox does NOT read the real ~/.config — the legacy fallback is off", async () => {
+  // The read side used to undo what the migration refuses: an EMPTY sandbox tree still inherited
+  // the developer's real saved autonomy level, effort tier and active profile, because the legacy
+  // root resolves to the OS home whatever $PROMETHEUS_HOME says. A CI run with an old
+  // `{"level":7}` on the machine started at full autonomy instead of the safe default.
+  const { mkdirSync, mkdtempSync, writeFileSync, rmSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const { readSavedAuthLevel } = await import("./authorisation-store.js");
+  const { readSavedEffort } = await import("./effort-store.js");
+  const { hasLegacyConfigDir } = await import("./paths.js");
+
+  const fakeHome = mkdtempSync(join(tmpdir(), "prom-fakehome-"));
+  const sandbox = mkdtempSync(join(tmpdir(), "prom-sandbox-"));
+  const savedHome = process.env.HOME;
+  const savedProm = process.env.PROMETHEUS_HOME;
+  try {
+    // a real machine with settings from an old install
+    const legacy = join(fakeHome, ".config", "prometheus-studio");
+    mkdirSync(legacy, { recursive: true });
+    writeFileSync(join(legacy, "authorisation.json"), '{"level":7}');
+    writeFileSync(join(legacy, "effort.json"), '{"tier":"max"}');
+    process.env.HOME = fakeHome;
+
+    // with no sandbox, the legacy values ARE the fallback — that path must keep working
+    process.env.PROMETHEUS_HOME = "";
+    assert.equal(hasLegacyConfigDir(), true);
+    assert.equal(readSavedAuthLevel(), 7, "an unmigrated install still finds its saved level");
+    assert.equal(readSavedEffort(), "max");
+
+    // inside a sandbox, nothing leaks in from the real home
+    process.env.PROMETHEUS_HOME = sandbox;
+    assert.equal(hasLegacyConfigDir(), false);
+    assert.equal(readSavedAuthLevel(), null, "a sandbox must not inherit the machine's level");
+    assert.equal(readSavedEffort(), null);
+
+    // an EXPLICIT home is the DI seam and always has a legacy root, sandbox or not
+    assert.equal(hasLegacyConfigDir(fakeHome), true);
+    assert.equal(readSavedAuthLevel(fakeHome), 7);
+  } finally {
+    if (savedHome === undefined) Reflect.deleteProperty(process.env, "HOME");
+    else process.env.HOME = savedHome;
+    if (savedProm === undefined) Reflect.deleteProperty(process.env, "PROMETHEUS_HOME");
+    else process.env.PROMETHEUS_HOME = savedProm;
+    rmSync(fakeHome, { recursive: true, force: true });
+    rmSync(sandbox, { recursive: true, force: true });
+  }
+});
+
+test("migrateLegacyConfigDir copies the old tree once, never clobbers, never deletes", async () => {
+  const { mkdirSync, mkdtempSync, writeFileSync, readFileSync, existsSync, rmSync } = await import(
+    "node:fs"
+  );
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const { migrateLegacyConfigDir } = await import("./migrate.js");
+
+  const home = mkdtempSync(join(tmpdir(), "prom-migrate-"));
+  try {
+    const legacy = join(home, ".config", "prometheus-studio");
+    mkdirSync(join(legacy, "profiles"), { recursive: true });
+    writeFileSync(join(legacy, "authorisation.json"), '{"level":6}');
+    writeFileSync(join(legacy, "config.toml"), "gate = 'warn'\n");
+    writeFileSync(join(legacy, "profiles", "ci.toml"), "name = 'ci'\n");
+
+    const first = migrateLegacyConfigDir(home);
+    assert.deepEqual(first.copied.sort(), [
+      "authorisation.json",
+      "config.toml",
+      "profiles/ci.toml",
+    ]);
+    const now = configDir(home);
+    assert.equal(readFileSync(join(now, "authorisation.json"), "utf8"), '{"level":6}');
+    assert.equal(readFileSync(join(now, "profiles", "ci.toml"), "utf8"), "name = 'ci'\n");
+    // the originals are LEFT IN PLACE — an older build, or a rollback, must still find them
+    assert.equal(existsSync(join(legacy, "authorisation.json")), true);
+
+    // idempotent, and a value the user has since changed is NOT reverted by a second run
+    writeFileSync(join(now, "authorisation.json"), '{"level":2}');
+    const second = migrateLegacyConfigDir(home);
+    assert.deepEqual(second.copied, [], "a second run must copy nothing");
+    assert.equal(second.skipped.length, 3);
+    assert.equal(
+      readFileSync(join(now, "authorisation.json"), "utf8"),
+      '{"level":2}',
+      "migration overwrote a newer value the user had already set",
+    );
+
+    // a home with no legacy tree is a no-op, not an error
+    const fresh = mkdtempSync(join(tmpdir(), "prom-migrate-fresh-"));
+    assert.equal(migrateLegacyConfigDir(fresh).reason, "no-legacy");
+    rmSync(fresh, { recursive: true, force: true });
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
 });

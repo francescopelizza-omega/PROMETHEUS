@@ -19,6 +19,7 @@ import {
   traitRail,
 } from "@prometheus/core/ai-effort";
 
+import { type FleetBarModel, fleetBarLine } from "./fleet-bar.js";
 import { type ColorCaps, type Role, painter } from "./palette.js";
 import { clipToWidth, stringWidth } from "./width.js";
 
@@ -96,6 +97,14 @@ export interface StatusModel {
    * and the runner reported nothing.
    */
   capabilities?: readonly string[];
+  /**
+   * The other Prometheus windows on this machine, and what the machine costs right now.
+   *
+   * Absent, or present with a peer total of 1, ⇒ NO fleet line is painted. A user running a
+   * single session must not spend a permanent row of terminal height on the word `prom 1`, and
+   * the probe that fills this in does not even run until a second instance exists.
+   */
+  fleet?: FleetBarModel;
 }
 
 /**
@@ -321,6 +330,11 @@ export function statusLines(m: StatusModel, width: number, caps: ColorCaps): str
   if (meter) right.push(meter);
 
   const lines = [justify(left, right, width, caps)];
+
+  // the fleet line, directly under the chips it extends. Null on a fleet of one (or none), so
+  // the common case costs nothing.
+  const fleet = m.fleet ? fleetBarLine(m.fleet, width, caps) : null;
+  if (fleet) lines.push(fleet);
 
   // line 2: the permission indicator (only when non-default), clipped + painted.
   const p = painter(caps);

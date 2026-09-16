@@ -80,7 +80,7 @@ export function ModelCard({
               cursor: "pointer",
               color: "var(--text-primary)",
               fontFamily: "var(--font-ui)",
-              fontSize: "var(--text-h2-size, 1.125rem)",
+              fontSize: "var(--text-h2-size, 1rem)",
               fontWeight: 600,
               textAlign: "left",
             }}
@@ -88,7 +88,7 @@ export function ModelCard({
             {name}
           </button>
         ) : (
-          <span style={{ fontSize: "var(--text-h2-size, 1.125rem)", fontWeight: 600 }}>{name}</span>
+          <span style={{ fontSize: "var(--text-h2-size, 1rem)", fontWeight: 600 }}>{name}</span>
         )}
         {license.length > 0 && (
           <span
@@ -264,7 +264,11 @@ function ctaBtn(primary: boolean) {
     fontWeight: 600,
     background: primary ? "var(--brand)" : "transparent",
     border: `1px solid ${primary ? "var(--brand)" : "var(--border-strong)"}`,
-    color: primary ? "var(--brand-fg)" : "var(--text-primary)",
+    // The label sits ON the `--brand` fill, so it needs the computed `--on-brand`.
+    // `--brand-fg` is #ffffff on the dark scheme and measures 3.96:1 over `--brand` —
+    // under the 4.5:1 a label carries. It stays in use where it is a FILL, not a label
+    // (the Toggle knob), which is why this is a call-site change and not a token change.
+    color: primary ? "var(--on-brand)" : "var(--text-primary)",
   } as const;
 }
 

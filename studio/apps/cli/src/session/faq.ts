@@ -49,7 +49,12 @@ export const FAQ_DB: readonly FaqEntry[] = Object.freeze([
   {
     topic: "security",
     q: "What is the security gate (nemesis)?",
-    a: "Every install/clone/download is scanned by nemesis and gets a verdict: allow (0) / warn (10) / block (20) / error (2, fail-closed). Prometheus NEVER decides 'safe' in JS — it renders the engine's verdict. Override a block only with --force behind a typed confirm.",
+    // NOT "every install/clone/download". Catalog installs, repo clones and the HF/GGUF
+    // model spine stage bytes locally and pass them to `nemesis_gate`; `ollama pull` does
+    // not — `v_pull` (python/sidecar/modelhub.py) hands the tag to the runner and there is
+    // no local stage dir to scan, which its own docstring says out loud. A blanket claim
+    // here is the same over-claim that was corrected in Studio's Home hero.
+    a: "Catalog installs, repo clones and staged model downloads are scanned by nemesis and get a verdict: allow (0) / warn (10) / block (20) / error (2, fail-closed). `ollama pull` is NOT scanned — it has no local staging directory, so ollama's own registry is the trust boundary there. Prometheus NEVER decides 'safe' in JS — it renders the engine's verdict. Override a block only with --force behind a typed confirm.",
     keywords: ["nemesis", "gate", "safe", "scan", "verdict", "block", "malware"],
   },
   {

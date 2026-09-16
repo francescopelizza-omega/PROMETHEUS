@@ -246,6 +246,7 @@ function TaskRow({
                 maxWidth: 220,
                 overflow: "hidden",
                 textOverflow: "ellipsis",
+                minWidth: 0, // flex/grid floor — without it the ellipsis is unreachable
                 whiteSpace: "nowrap",
               }}
               title={task.lastResult.summary}
@@ -498,7 +499,7 @@ const linkBtn: CSSProperties = {
 
 const primaryBtn: CSSProperties = {
   background: "var(--accent)",
-  color: "var(--accent-fg, var(--bg-base))",
+  color: "var(--bg-app)",
   border: "none",
   borderRadius: "var(--radius-sm, 4px)",
   padding: "var(--space-2, 4px) var(--space-4, 8px)",

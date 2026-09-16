@@ -18,10 +18,25 @@
  */
 import { createRequire } from "node:module";
 
-import { DEFAULT_CONTEXT_WINDOW } from "@prometheus/core";
+import { DEFAULT_CONTEXT_WINDOW, LOCAL_RUNNERS, type LocalRunnerSpec } from "@prometheus/core";
 import type { AiEndpoint } from "@prometheus/core";
-import type { EngineClient } from "@prometheus/engine-bridge";
+import {
+  type EngineClient,
+  type LaunchGuardSample,
+  acquireRunnerStartLock,
+  canStart,
+  execCapture,
+  launchGuardVerdict,
+  listenersOnPort,
+  modelServerStatus,
+  releaseRunnerStartLock,
+  sampleLaunchGuard,
+  signalPid,
+  spawnWatchdogIfNeeded,
+  startModelServer,
+} from "@prometheus/engine-bridge";
 
+import type { FleetPeer } from "../fleet/heartbeat.js";
 import {
   CATEGORY_LABEL,
   PATH_CATEGORIES,
@@ -33,11 +48,27 @@ import {
 } from "../home.js";
 import { box, c, humanBytes } from "../render.js";
 
-/** The OpenAI-compatible local runners the session can stream from out of the box. */
-const LOCAL_RUNNERS: ReadonlyArray<{ name: string; baseUrl: string }> = [
-  { name: "ollama", baseUrl: "http://localhost:11434/v1" },
-  { name: "lmstudio", baseUrl: "http://localhost:1234/v1" },
-];
+/** A model daemon this session tried to reach but couldn't — installed (or already occupying
+ *  its port) yet not actually serving, so telling the user to "download a model" would be wrong. */
+export interface UnavailableRunner {
+  id: string;
+  name: string;
+  /** the process was already listening on the port but never answered `/models`. */
+  wedged: boolean;
+  /** set when refused by the CPU/RAM launch guard — human-readable, e.g. "RAM at 94% ≥ 90%
+   *  ceiling". `renderOnboarding` shows this verbatim instead of the generic "could not start". */
+  reason?: string;
+}
+
+/** How many times, and how far apart, to re-probe a runner right after starting it. Local model
+ *  daemons answer `/models` almost immediately once up — this bounds the wait to ~1.5s total,
+ *  short enough that session start never visibly stalls on a runner that won't come up. */
+const AUTOSTART_RETRY_ATTEMPTS = 5;
+const AUTOSTART_RETRY_DELAY_MS = 300;
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
 /** Agent CLIs the session can hand a terminal chat to (`chat --cli <svc>`). */
 const CHAT_CLIS = new Set(["claude", "codex", "gemini", "cursor", "opencode"]);
@@ -82,6 +113,18 @@ export interface Backends {
   localEndpoint?: AiEndpoint;
   /** installed agent CLIs that can host a terminal chat. */
   paidClis: string[];
+  /** runner ids THIS detection call started (empty unless an autostart actually happened) —
+   *  the only runners this session is ever allowed to stop later (see `stopSelfStartedRunners`). */
+  startedRunners: ReadonlySet<string>;
+  /** runners that are installed/occupying their port but not currently reachable, even after an
+   *  autostart attempt — "it's broken" is a different message than "you never downloaded one". */
+  unavailableRunners: UnavailableRunner[];
+}
+
+/** The all-empty `Backends` every `detectBackends().catch(...)` fallback needs — one definition
+ *  so the shape can gain a field without every call site's fallback literal falling out of sync. */
+export function emptyBackends(): Backends {
+  return { liveRunners: [], paidClis: [], startedRunners: new Set(), unavailableRunners: [] };
 }
 
 export interface DetectDeps {
@@ -90,6 +133,24 @@ export interface DetectDeps {
   fetchFn?: typeof fetch;
   /** per-runner probe timeout (ms). */
   timeoutMs?: number;
+  /** the autostart primitives — injected for tests; default to the real `engine-bridge` ones
+   *  (no network/spawn in a unit test unless the test explicitly stubs these). */
+  canStartFn?: typeof canStart;
+  listenersOnPortFn?: typeof listenersOnPort;
+  startModelServerFn?: typeof startModelServer;
+  /** skip the retry sleep in tests — a test never needs to actually wait 1.5s wall-clock. */
+  retryDelayMs?: number;
+  /** the idle-shutdown watchdog spawn — injected for tests (default is the real, detached
+   *  spawn; a test that never wants to fork a real `node` process stubs this to a no-op). */
+  spawnWatchdogFn?: typeof spawnWatchdogIfNeeded;
+  /** the cross-process "only one surface may be mid-spawn for this runner" lock — see
+   *  engine-bridge's start-lock.ts. Injected for tests the same way every autostart
+   *  primitive here is; production leaves these at their real defaults. */
+  acquireStartLockFn?: typeof acquireRunnerStartLock;
+  releaseStartLockFn?: typeof releaseRunnerStartLock;
+  /** the shared 90% CPU/RAM launch ceiling (also used by `model pull`/`sidecar-cmd.ts`) —
+   *  refuses a COLD start on an already-saturated machine. Injected for tests. */
+  launchGuardFn?: () => Promise<LaunchGuardSample>;
 }
 
 /** Build a local OpenAI-compatible endpoint from a detected runner (model = first served). */
@@ -131,15 +192,131 @@ async function probeRunner(
 }
 
 /**
- * Detect available chat backends: probe local runners (parallel, fail-soft) + scan for
- * installed paid CLIs. Never throws — a dead runner or a failed scan just yields fewer
- * backends. Returns a ready local endpoint when a runner serves a model.
+ * Probe one runner spec; if it isn't reachable AND nothing else already holds its port AND
+ * Prometheus can start it, start it and give it `AUTOSTART_RETRY_ATTEMPTS` short chances to come
+ * up before giving up. This is the whole fix for "the model is downloaded but the daemon isn't
+ * running" — the one state the old bare-fetch probe could never tell apart from "never
+ * downloaded". A port that's already occupied is left alone: that is model-server.ts's "wedged"
+ * case, and starting a second instance on top of it would only make things worse.
+ */
+interface AutostartOps {
+  canStartFn: typeof canStart;
+  listenersOnPortFn: typeof listenersOnPort;
+  startModelServerFn: typeof startModelServer;
+  retryDelayMs: number;
+  spawnWatchdogFn: typeof spawnWatchdogIfNeeded;
+  acquireStartLockFn: typeof acquireRunnerStartLock;
+  releaseStartLockFn: typeof releaseRunnerStartLock;
+  launchGuardFn: () => Promise<LaunchGuardSample>;
+}
+
+async function probeAndMaybeStart(
+  spec: LocalRunnerSpec,
+  fetchFn: typeof fetch,
+  timeoutMs: number,
+  started: Set<string>,
+  unavailable: UnavailableRunner[],
+  ops: AutostartOps,
+): Promise<LocalRunner | null> {
+  const runner = { name: spec.id, baseUrl: spec.baseUrl };
+  const first = await probeRunner(runner, fetchFn, timeoutMs);
+  if (first) return first;
+
+  const listeners = await ops.listenersOnPortFn(spec.port);
+  if (listeners.processes.length > 0) {
+    // Something is already on the port — a runner Prometheus did not start, or one that is up
+    // but not answering. Never touch it here; report it as wedged rather than pretend it's absent.
+    unavailable.push({ id: spec.id, name: spec.name, wedged: true });
+    return null;
+  }
+  if (!spec.start || !(await ops.canStartFn(spec.start))) return null; // genuinely not installed.
+
+  // The machine-wide 90% CPU/RAM ceiling — the same one `model pull` already refuses on. A cold
+  // start is exactly the kind of NEW load this exists to block; adopting an already-running
+  // runner (the `first` check above) never reaches here because it spawns nothing new.
+  const guardVerdict = launchGuardVerdict(await ops.launchGuardFn());
+  if (!guardVerdict.ok) {
+    unavailable.push({ id: spec.id, name: spec.name, wedged: false, reason: guardVerdict.reason });
+    return null;
+  }
+
+  // Another surface (another CLI shell, or the desktop app) is already mid-spawn for this same
+  // runner — ride along with its attempt instead of racing a second `startModelServer` on top
+  // of it. This is the whole fix for the duplicate-process/RAM-exhaustion failure mode: without
+  // it, every caller that reaches this point concurrently sees an empty port and starts its own.
+  if (!ops.acquireStartLockFn(spec.id)) {
+    for (let attempt = 0; attempt < AUTOSTART_RETRY_ATTEMPTS; attempt++) {
+      await sleep(ops.retryDelayMs);
+      const again = await probeRunner(runner, fetchFn, timeoutMs);
+      if (again) return again; // the lock holder brought it up — adopt it, we didn't start it.
+    }
+    return null; // the other attempt is still working it out (or gave up) — not ours to retry.
+  }
+
+  try {
+    const result = ops.startModelServerFn(spec.start);
+    if (!result.ok) {
+      unavailable.push({ id: spec.id, name: spec.name, wedged: false });
+      return null;
+    }
+    started.add(spec.id);
+    for (let attempt = 0; attempt < AUTOSTART_RETRY_ATTEMPTS; attempt++) {
+      await sleep(ops.retryDelayMs);
+      const again = await probeRunner(runner, fetchFn, timeoutMs);
+      if (again) {
+        // A CLI-autostarted runner must not outlive its usefulness: this is the ONE place the
+        // interactive session, `--plain` host, AND `-p`/`chat` one-shot runs all pass through to
+        // bring a local runner up, so this is also the one place that must arm its own teardown.
+        // Fire-and-forget — a watchdog that fails to start just means "runs until stopped by
+        // hand", same as before this call existed, never a session-start failure. Any runner we
+        // just self-started gets one: the watchdog's poll loop is generic (its `port`/
+        // `processMatch` are passed explicitly here, never left at their Ollama-shaped
+        // defaults), so this is correct for LM Studio's `lms server start` too, not just Ollama.
+        ops.spawnWatchdogFn({
+          port: spec.port,
+          processMatch: spec.processMatch,
+          runnerId: spec.id,
+          displayName: spec.name,
+          stopCmd: spec.stop,
+        });
+        return again;
+      }
+    }
+    // Started, but never answered in time — still worth flagging as "installed", not "missing".
+    unavailable.push({ id: spec.id, name: spec.name, wedged: false });
+    return null;
+  } finally {
+    ops.releaseStartLockFn(spec.id);
+  }
+}
+
+/**
+ * Detect available chat backends: probe local runners (parallel, fail-soft), autostarting one
+ * that's installed but not running, + scan for installed paid CLIs. Never throws — a dead runner
+ * or a failed scan just yields fewer backends. Returns a ready local endpoint when a runner
+ * serves a model.
  */
 export async function detectBackends(deps: DetectDeps): Promise<Backends> {
   const fetchFn = deps.fetchFn ?? fetch;
   const timeoutMs = deps.timeoutMs ?? 900;
+  const ops: AutostartOps = {
+    canStartFn: deps.canStartFn ?? canStart,
+    listenersOnPortFn: deps.listenersOnPortFn ?? listenersOnPort,
+    startModelServerFn: deps.startModelServerFn ?? startModelServer,
+    retryDelayMs: deps.retryDelayMs ?? AUTOSTART_RETRY_DELAY_MS,
+    spawnWatchdogFn: deps.spawnWatchdogFn ?? spawnWatchdogIfNeeded,
+    acquireStartLockFn: deps.acquireStartLockFn ?? acquireRunnerStartLock,
+    releaseStartLockFn: deps.releaseStartLockFn ?? releaseRunnerStartLock,
+    launchGuardFn: deps.launchGuardFn ?? sampleLaunchGuard,
+  };
 
-  const probed = await Promise.all(LOCAL_RUNNERS.map((r) => probeRunner(r, fetchFn, timeoutMs)));
+  const started = new Set<string>();
+  const unavailableRunners: UnavailableRunner[] = [];
+  const probed = await Promise.all(
+    LOCAL_RUNNERS.map((r) =>
+      probeAndMaybeStart(r, fetchFn, timeoutMs, started, unavailableRunners, ops),
+    ),
+  );
   const liveRunners = probed.filter((r): r is LocalRunner => r !== null);
   const localRunner = liveRunners.find((r) => r.models.length > 0);
 
@@ -160,7 +337,69 @@ export async function detectBackends(deps: DetectDeps): Promise<Backends> {
     liveRunners,
     ...(localRunner ? { localRunner, localEndpoint: buildLocalEndpoint(localRunner) } : {}),
     paidClis,
+    startedRunners: started,
+    unavailableRunners,
   };
+}
+
+/**
+ * Stop every runner THIS session started (see `Backends.startedRunners`) — but only the ones no
+ * OTHER live peer still needs, per the fleet's own heartbeat data (`peers`, e.g. `fleet.peers()`
+ * right before `fleet.stop()`). Pure aside from the two engine-bridge probes: no fs, no `readFleet`
+ * of its own — the caller already has a peer snapshot from the ticker it's tearing down anyway.
+ *
+ * A server Prometheus did not start is never in `startedRunners` in the first place, so this can
+ * never reach for a runner some other program (or a terminal from an hour ago) launched — the same
+ * invariant `model-server.ts`'s own docstring states for the manual control panel.
+ */
+export interface StopRunnersDeps {
+  /** injected for tests; default to the real `engine-bridge` probes (no network/signal in a
+   *  unit test unless the test explicitly stubs these). */
+  modelServerStatusFn?: typeof modelServerStatus;
+  signalPidFn?: typeof signalPid;
+  /** runs a runner's OWN graceful `stop` argv (e.g. `lms server stop`) — injected for tests;
+   *  defaults to the real `execCapture`. See `LocalRunnerSpec.stop`'s doc for why this is
+   *  ALWAYS preferred over `signalPidFn` when a spec has one. */
+  execCaptureFn?: typeof execCapture;
+}
+
+export async function stopSelfStartedRunners(
+  startedRunnerIds: ReadonlySet<string> | undefined,
+  peers: readonly FleetPeer[],
+  deps: StopRunnersDeps = {},
+): Promise<void> {
+  if (!startedRunnerIds || startedRunnerIds.size === 0) return;
+  const statusFn = deps.modelServerStatusFn ?? modelServerStatus;
+  const signal = deps.signalPidFn ?? signalPid;
+  const runCmd = deps.execCaptureFn ?? execCapture;
+  const others = peers.filter((p) => !p.self && p.state !== "dead" && p.model);
+  await Promise.all(
+    Array.from(startedRunnerIds).map(async (id) => {
+      const spec = LOCAL_RUNNERS.find((r) => r.id === id);
+      if (!spec) return;
+      try {
+        const status = await statusFn(spec, { timeoutMs: 1500 });
+        if (!status.listening) return; // already gone
+        if (others.some((p) => status.models.includes(p.model))) return; // still in use
+        if (spec.stop && spec.stop.length > 0) {
+          // ALWAYS preferred over signalling — a server that runs INSIDE its vendor's main app
+          // process (verified for LM Studio: its own process reports as "Bionic" in `ps`, not
+          // even "LM Studio") would have the WHOLE app quit by a raw SIGTERM, not just its
+          // server component. Let the vendor's own tool decide how to shut down.
+          const [bin, ...args] = spec.stop;
+          if (bin) await runCmd(bin, args, { timeoutMs: 15_000 });
+          return;
+        }
+        for (const proc of status.processes) {
+          const runningOurBinary =
+            proc.command === spec.processMatch || proc.command.includes(spec.processMatch);
+          if (runningOurBinary) signal(proc.pid, "SIGTERM");
+        }
+      } catch {
+        /* best-effort teardown — a runner Prometheus can't confirm is left running, not killed. */
+      }
+    }),
+  );
 }
 
 /** One-line backend summary for the banner/footer (e.g. "local · qwen2.5-coder"). */
@@ -178,6 +417,19 @@ export function renderOnboarding(backends: Backends): string {
   if (backends.liveRunners.length > 0) {
     const r = backends.liveRunners[0];
     lines.push(`${c.yellow("•")} ${r?.name} is up but serves no model — pull one below.`);
+  } else if (backends.unavailableRunners.length > 0) {
+    // Installed (or occupying its port) but not actually reachable — even after Prometheus
+    // tried to start it. Saying "detected" here would be a lie; saying "download a model"
+    // would send the user to redo something they already did.
+    for (const r of backends.unavailableRunners) {
+      lines.push(
+        r.wedged
+          ? `${c.yellow("•")} ${r.name} is running but not responding — it may need a restart.`
+          : r.reason
+            ? `${c.yellow("•")} ${r.name} was not started — ${r.reason}. Free up resources and retry.`
+            : `${c.yellow("•")} ${r.name} is installed but Prometheus could not start it.`,
+      );
+    }
   } else {
     lines.push(`${c.yellow("•")} no local runner (Ollama / LM Studio) detected.`);
   }
@@ -210,6 +462,16 @@ export interface SetupDeps {
   runChild?: (cmd: string, args: string[]) => Promise<number>;
   /** the ~/.prometheus home root (tests point this at a temp dir). */
   home?: string;
+  /** forwarded to the internal `detectBackends` call — see `DetectDeps`; a test that never
+   *  wants to exercise autostart injects safe no-ops here so it never shells out for real. */
+  canStartFn?: DetectDeps["canStartFn"];
+  listenersOnPortFn?: DetectDeps["listenersOnPortFn"];
+  startModelServerFn?: DetectDeps["startModelServerFn"];
+  retryDelayMs?: number;
+  spawnWatchdogFn?: DetectDeps["spawnWatchdogFn"];
+  acquireStartLockFn?: DetectDeps["acquireStartLockFn"];
+  releaseStartLockFn?: DetectDeps["releaseStartLockFn"];
+  launchGuardFn?: DetectDeps["launchGuardFn"];
 }
 
 /** A minimal child handle — avoids importing node:child_process types (C5 boundary). */
@@ -255,7 +517,18 @@ function defaultRunChild(cmd: string, args: string[]): Promise<number> {
 export async function runSetup(deps: SetupDeps): Promise<{ endpoint?: AiEndpoint }> {
   const { write, ask } = deps;
   const runChild = deps.runChild ?? defaultRunChild;
-  const backends = await detectBackends({ client: deps.client, fetchFn: deps.fetchFn });
+  const backends = await detectBackends({
+    client: deps.client,
+    fetchFn: deps.fetchFn,
+    canStartFn: deps.canStartFn,
+    listenersOnPortFn: deps.listenersOnPortFn,
+    startModelServerFn: deps.startModelServerFn,
+    retryDelayMs: deps.retryDelayMs,
+    spawnWatchdogFn: deps.spawnWatchdogFn,
+    acquireStartLockFn: deps.acquireStartLockFn,
+    releaseStartLockFn: deps.releaseStartLockFn,
+    launchGuardFn: deps.launchGuardFn,
+  });
 
   if (backends.localEndpoint) {
     // More than one model already downloaded (one runner serving several, or several runners

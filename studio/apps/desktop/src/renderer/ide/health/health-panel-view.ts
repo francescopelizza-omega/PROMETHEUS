@@ -50,14 +50,31 @@ export function deriveSystemHealthView(
       status: health.nemesisPresent ? "ok" : "degraded",
       ...(health.nemesisPresent ? {} : { remediation: "install/locate nemesis to enable gating" }),
     });
-    // surface any engine-reported problems as a row (guard: `problems` may be absent on
-    // a partial HealthResult — the only prior guard was `health === null`).
-    if (Array.isArray(health.problems) && health.problems.length > 0) {
+    /**
+     * The diagnostics row is UNCONDITIONAL (handoff §2.3 lists three rows: engine, nemesis,
+     * diagnostics).
+     *
+     * It used to be pushed only when `problems.length > 0`, so a healthy machine saw two
+     * rows and the island's summary advertised "all systems nominal (2)" — a count that
+     * silently became 3 the moment something broke, and a spec'd row the user could never
+     * see report clean. An absent row is not the same statement as "no issues".
+     */
+    const problems = Array.isArray(health.problems) ? health.problems : [];
+    if (problems.length > 0) {
       components.push({
-        id: "problems",
+        // the id IS the mono name the Home island prints (handoff §2.3.5a lists the three
+        // rows as `engine` / `nemesis` / `diagnostics`), so it may not be an internal slug.
+        id: "diagnostics",
         label: "Diagnostics",
         status: "degraded",
-        detail: `${health.problems.length} issue${health.problems.length === 1 ? "" : "s"}`,
+        detail: `${problems.length} issue${problems.length === 1 ? "" : "s"}`,
+      });
+    } else {
+      components.push({
+        id: "diagnostics",
+        label: "Diagnostics",
+        status: "ok",
+        detail: "0 issues",
       });
     }
   }

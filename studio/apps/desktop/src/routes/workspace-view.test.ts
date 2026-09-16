@@ -136,3 +136,36 @@ test("every role resolves to a token, never a hex", () => {
     assert.match(cellVar(role), /^var\(--/);
   }
 });
+
+/* -- section 5 env rows: unmeasured is not zero, and health is not a dead boolean -- */
+
+test("an env with NO package count says nothing, never '0 packages'", () => {
+  // engine-bridge used to coerce the sidecar's `packages_count: None` to 0, which printed
+  // "0 packages" beside a populated conda env - the exact empty-vs-unmeasured confusion the
+  // detail builder was written to avoid.
+  const row = envRow({ id: "conda:torch-mps", pythonVersion: "3.11", kind: "conda" });
+  assert.doesNotMatch(row.detail, /package/);
+  assert.match(row.detail, /python 3\.11/);
+});
+
+test("a real count is still rendered, singular and plural", () => {
+  assert.match(envRow({ id: "a", packageCount: 41 }).detail, /41 packages/);
+  assert.match(envRow({ id: "b", packageCount: 1 }).detail, /1 package\b/);
+  assert.match(envRow({ id: "c", packageCount: 0 }).detail, /0 packages/, "a measured 0 shows");
+});
+
+test("status comes from `health`, the field rows actually carry", () => {
+  // `envRow` probed `e.broken`, which nothing sets - so the broken branch and the Recreate
+  // action derived from it could never fire, and a degraded env looked like a healthy one.
+  assert.equal(envRow({ id: "a", health: "broken" }).status.text, "broken");
+  assert.equal(envRow({ id: "a", health: "broken" }).status.role, "danger");
+  assert.equal(envRow({ id: "b", health: "degraded" }).status.text, "degraded");
+  assert.equal(envRow({ id: "b", health: "degraded" }).status.role, "warn");
+  assert.equal(envRow({ id: "c", health: "ok", active: true }).status.text, "active");
+  assert.equal(envRow({ id: "d", health: "ok" }).status.text, "idle");
+  assert.equal(envRow({ id: "e", health: "unknown" }).status.text, "idle");
+});
+
+test("the legacy `broken` boolean is still honoured if a payload sends one", () => {
+  assert.equal(envRow({ id: "a", broken: true }).status.text, "broken");
+});

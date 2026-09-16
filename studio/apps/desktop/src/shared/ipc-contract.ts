@@ -133,6 +133,18 @@ export const IPC = {
   modelRemove: "model:remove",
   modelServe: "model:serve",
   modelUnserve: "model:unserve",
+  // Start (or confirm already-running) the raw Ollama daemon specifically — distinct from
+  // `model:serve`'s fit-derived HF ServeProfile lifecycle (different argv, different health
+  // check, a model that's already pulled vs. one downloaded on demand). See
+  // packages/core/src/ai/ollama-autostart.ts's docstring for why the two must never be
+  // conflated.
+  modelOllamaStart: "model:ollamaStart",
+  // LM Studio's twin of modelOllamaStart, above — same reasoning, `lms server start` instead of
+  // `ollama serve`.
+  modelLmstudioStart: "model:lmstudioStart",
+  // Distinct from unserve: skips the 5s SIGTERM grace window and SIGKILLs on the next
+  // tick — "kill it with brute force if something is not responding properly."
+  modelKill: "model:kill",
   modelServing: "model:serving",
   modelEndpoints: "model:endpoints",
   modelRepoint: "model:repoint",
@@ -202,6 +214,7 @@ export const IPC = {
   fileOpen: "file:open",
   folderOpen: "folder:open",
   openPath: "path:open",
+  revealPath: "path:reveal",
   // ── SPECTACULAR power-up: catalog cards + chat + models folder + harden ────
   // Read-only/preview engine commands over a PrometheusEngine facade in MAIN.
   // chat is PREVIEW-only here (the engine assembles an injection-safe argv); the
@@ -388,6 +401,14 @@ export const IPC = {
   // ── "@"-path completion (shared with the CLI's @prometheus/core/path-completion) ──
   pathCompletionList: "pathCompletion:list",
   pathCompletionRecordUse: "pathCompletion:recordUse",
+  // ── the ONE saved autonomy level, shared with the CLI (@prometheus/core cliProfiles) ──
+  // The renderer used to keep this in localStorage alone, so a level set in the terminal was
+  // invisible here and clearing the app's data reset the posture with no file to recover from.
+  authLevelGet: "authLevel:get",
+  authLevelSet: "authLevel:set",
+  // ── the ONE saved thinking-effort tier, shared with the CLI (same store, same file) ──
+  effortGet: "effort:get",
+  effortSet: "effort:set",
   // ── model health (shared with the CLI's @prometheus/core ai/model-health) ──
   modelHealthList: "modelHealth:list",
   modelHealthRecord: "modelHealth:record",
@@ -838,7 +859,19 @@ export interface SecurityGateResult {
 export type SecurityRemediateRequest =
   | { op: "disinfect"; target: string; out: string; runId?: string }
   | { op: "quarantineList"; target?: string; quarantineDir?: string }
-  | { op: "restore"; id: string; quarantineDir: string }
+  | {
+      op: "restore";
+      id: string;
+      quarantineDir: string;
+      /**
+       * The exact string the human typed in the restore confirm (§4), plus the `path` it
+       * was keyed to. Main re-checks `typedName === purgeBasename(path ?? id)` and refuses
+       * otherwise — the same two-layer shape purge has always had, because restore puts an
+       * artifact the gate refused back where it was found, executable again.
+       */
+      typedName?: string;
+      path?: string;
+    }
   | {
       op: "purge";
       target: string;
@@ -922,7 +955,25 @@ export interface SecurityUrlAuditResult {
 export type SecurityTrustRequest =
   | { op: "list" }
   | { op: "revoke"; name: string }
-  | { op: "auditLog"; forcedDanger?: boolean; blocks?: boolean; last24h?: boolean }
+  | {
+      op: "auditLog";
+      forcedDanger?: boolean;
+      blocks?: boolean;
+      last24h?: boolean;
+      /**
+       * Include each row's `verdict_full` — the canonical signed verdict object.
+       *
+       * Off by default because it is ~97% of the payload: on this machine the live
+       * `~/.nemesis/gate-audit.jsonl` is 1257 rows / 38 MB, mean row 31 KB, and 1248 of
+       * those rows carry a `verdict_full`. The Security console reads twelve rows and has
+       * no consumer for the blob at all, so every route mount was structured-cloning
+       * ~38 MB across the contextBridge to render a dozen one-line summaries.
+       *
+       * Filtering is unaffected: `AuditLogFilter.rule` matches against `verdict_full`
+       * inside engine-bridge, before this projection is applied.
+       */
+      includeVerdictFull?: boolean;
+    }
   | { op: "verify"; file: string };
 
 /** Response to `security:trust`. */
@@ -933,6 +984,16 @@ export interface SecurityTrustResult {
   trusted?: TrustedSource[];
   /** present for `op:"auditLog"` — newest-first gate-audit rows (§8). */
   auditLog?: AuditLogEntry[];
+  /**
+   * present for `op:"auditLog"` — the gate mode the NEXT engine spawn will actually inherit.
+   *
+   * Read from MAIN's `$PROMETHEUS_GATE`, which `safeChildEnv()` forwards verbatim to
+   * prometheus.py, so this is a LIVE fact rather than an inference. The console previously had
+   * only the audit history to go on, and an `enforce` row written by a previous session vouched
+   * for a session now running `off` — a green "armed, fail-closed" banner over an unguarded
+   * engine. `"unknown"` when the variable holds something unrecognised.
+   */
+  configuredGateMode?: "enforce" | "warn" | "off" | "unknown";
   /** present for `op:"verify"` — true ONLY when nemesis verify exited 0 (§8). */
   valid?: boolean;
   /** the engine's one-line message (revoke/verify). */
@@ -989,6 +1050,16 @@ export interface AiStreamRequest {
   tools?: unknown[];
   /** the resolved reasoning-effort patch (`@prometheus/core/ai-effort`), already resolved. */
   effort?: unknown;
+  /**
+   * The LIVE session authorisation level, if the caller has one.
+   *
+   * Main takes `min(this, the persisted level)`, so a renderer can only ever TIGHTEN the
+   * gate with it — which is why accepting it from the untrusted side is safe. It exists
+   * because the coarse posture dial (`plan`, the GUI twin of Shift-Tab) is deliberately
+   * session-scoped and never written to disk: without this field a read-only `plan` posture
+   * still shipped conversations to a cloud provider, because main could only see the file.
+   */
+  sessionAuthLevel?: number;
   /** the workspace "never send to cloud" policy (§7.5). */
   neverSendToCloud?: boolean;
   /** (A) the user's inactivity-pause threshold in ms (default 10 min). Undefined ⇒ the
@@ -1033,6 +1104,15 @@ export interface AiStreamResult {
    * LLMClient can fold it and surface a resumable `paused` LlmTurn instead of a silent `final`.
    */
   paused?: boolean;
+  /**
+   * WHY `paused` is true — omitted for the original inactivity-watchdog case (treat a missing
+   * value as "idle", the historical/only meaning `paused` had before this field existed).
+   * "resources-critical": the local runner this request needed was refused a restart (or was
+   * itself just force-stopped) by the machine-wide RAM ceiling — ACTIVE EVICTION, see
+   * engine-bridge's eviction-log.ts. Same resumable contract as an idle pause: just send the
+   * message again once resources free up (Prometheus will bring the runner back automatically).
+   */
+  pausedReason?: "idle" | "resources-critical";
   /**
    * True iff the endpoint refused the request BECAUSE it carried tools.
    *
@@ -1678,6 +1758,15 @@ export interface PrometheusApi {
   /** Open a file/folder/app with the OS default handler, OUTSIDE the app (the same as
    *  double-clicking it in Finder/Explorer) — for "open this software/folder externally". */
   openPath(path: string): Promise<OpenPathResult>;
+  /**
+   * REVEAL a path in the OS file manager — show it, never run it.
+   *
+   * Distinct from `openPath` on purpose. The quarantine vault's Inspect action needs to let
+   * an operator LOOK at an artifact nemesis refused, and `openPath` is the OS's "open",
+   * which would hand that artifact to its default application. Revealing is the only
+   * inspect verb that is safe on a file the whole point of which is that it never executes.
+   */
+  revealPath(path: string): Promise<OpenPathResult>;
 
   /** SPECTACULAR power-up: catalog cards + chat + local-models folder + harden. */
   spectacular: SpectacularApi;
@@ -1688,6 +1777,12 @@ export interface PrometheusApi {
 
   /** Keyed/layered settings tree (file 13 §2.1): get/set/reset over the core layering. */
   settings: SettingsApi;
+
+  /** The ONE saved autonomy level, the same file the `prometheus` CLI reads and writes. */
+  authLevel: AuthLevelApi;
+
+  /** The ONE saved thinking-effort tier, likewise shared with the CLI. */
+  effort: EffortPrefApi;
 
   /** The "@"-path fuzzy completion feature (shared logic with the CLI). */
   pathCompletion: PathCompletionApi;
@@ -1857,6 +1952,25 @@ export interface ModelMutationResult {
   error?: string;
   data?: Record<string, unknown>;
 }
+
+/** Response to `model:ollamaStart` — see ipc-contract.ts's docstring on the channel itself
+ *  for why this is separate from `ModelServeRow`/`ModelMutationResult`. */
+export interface ModelOllamaStartResult {
+  /** true when THIS call started it; false means it was already up (still `ok`), or refused. */
+  started: boolean;
+  ok: boolean;
+  /** the model now being served, when one is. */
+  model?: string;
+  /** present only when `ok` is false — the same vocabulary `ensureOllamaRunning` returns. */
+  reason?: "not-installed" | "wedged" | "start-failed" | "no-model-served" | "resource-ceiling";
+  /** set only alongside reason:"resource-ceiling" — which resource, and by how much. */
+  resourceReason?: string;
+}
+
+/** LM Studio's twin of `ModelOllamaStartResult` — identical shape (`ensureLmStudioRunning`
+ *  returns the same `EnsureOllamaResult`-flavoured result as `ensureOllamaRunning`), named for
+ *  its own channel so a caller reading `model:lmstudioStart` isn't holding an "Ollama" type. */
+export type ModelLmstudioStartResult = ModelOllamaStartResult;
 
 /**
  * Response to `model:serve` / `model:serving` / `model:unserve`: the live
@@ -2136,8 +2250,19 @@ export interface ModelApi {
   serve(req: ModelServeRequest): Promise<ModelServeResult>;
   /** Stop a served runner (SIGTERM via the supervisor). */
   unserve(profileId: string): Promise<ModelServeResult>;
+  /** Force-kill a served runner: SIGKILL on the next tick, no SIGTERM grace wait. */
+  kill(profileId: string): Promise<ModelServeResult>;
   /** Snapshot every serve-profile row + its live supervisor status (§7). */
   serving(): Promise<ModelServeResult>;
+  /**
+   * Start (or confirm already-running) the raw Ollama daemon — the same
+   * `ensureOllamaRunning` a chat prompt already triggers automatically. Distinct from
+   * `serve`/`unserve`/`kill` above, which drive fit-derived HF ServeProfiles instead.
+   */
+  ollamaStart(): Promise<ModelOllamaStartResult>;
+  /** LM Studio's twin of `ollamaStart` — the same `ensureLmStudioRunning` a chat prompt against
+   *  an LM Studio endpoint already triggers automatically (`lms server start`). */
+  lmstudioStart(): Promise<ModelLmstudioStartResult>;
   /** LIVE local + open-weight endpoints (localai endpoints passthrough). Read-only. */
   endpoints(): Promise<ModelEndpointsResult>;
   /** LIVE repoint env diff (localai show <tool> passthrough, §6). Non-secret only. */
@@ -2611,6 +2736,36 @@ export interface IdeTreeNode {
   name: string;
   kind: "file" | "dir";
   hasChildren?: boolean;
+}
+
+/**
+ * Response to `authLevel:get` / `authLevel:set`.
+ *
+ * `level` is null from `get` only when nothing has ever been saved — the caller then keeps its
+ * own default rather than being handed one, so "never set" and "set to the default" stay
+ * distinguishable.
+ */
+export interface AuthLevelResult {
+  ok: boolean;
+  level: number | null;
+  /** the file consulted, for the settings UI and for support questions. */
+  path?: string;
+  error?: string;
+}
+
+/**
+ * Response to `effort:get` / `effort:set`.
+ *
+ * `tier` is null from `get` only when nothing has ever been saved, so the caller keeps its own
+ * default rather than being handed one. The tier here is always the REQUESTED one — what a
+ * given model does with it is resolved per request and never stored.
+ */
+export interface EffortPrefResult {
+  ok: boolean;
+  tier: string | null;
+  /** the file consulted, for the settings UI and for support questions. */
+  path?: string;
+  error?: string;
 }
 
 /** Response to `ide:fs.read`. */
@@ -4855,6 +5010,38 @@ export interface SettingsApi {
     scope: SettingsWriteScope,
     workspaceRoot?: string,
   ): Promise<SettingsResetResult>;
+}
+
+/**
+ * `window.prometheus.authLevel.*` — the persisted A0–A7 autonomy level.
+ *
+ * The GUI kept this in `localStorage`, the CLI in a file, and VS Code in a setting on a
+ * different ladder: one name, three settings, none of which could see the others. This surface
+ * is the app's view of the SHARED file (`~/.prometheus/config/authorisation.json`).
+ *
+ * `get` returns `null` when nothing has ever been saved, so the renderer can keep its own safe
+ * default instead of being handed one — "never set" and "deliberately set to 1" are different
+ * facts and only the first may be overwritten silently.
+ */
+export interface AuthLevelApi {
+  /** The saved level, or null when the operator has never chosen one. */
+  get(): Promise<AuthLevelResult>;
+  /** Persist an EXPLICIT choice (the level picker). Clamped to the ladder by the store. */
+  set(level: number): Promise<AuthLevelResult>;
+}
+
+/**
+ * `window.prometheus.effort.*` — the persisted thinking-effort tier.
+ *
+ * The app's view of the SHARED file (`~/.prometheus/config/effort.json`). `get` returns `null`
+ * when nothing has ever been saved, so a never-chosen tier and a deliberately-chosen one stay
+ * distinguishable and only the first is overwritten silently.
+ */
+export interface EffortPrefApi {
+  /** The saved tier, or null when the operator has never chosen one. */
+  get(): Promise<EffortPrefResult>;
+  /** Persist an EXPLICIT choice (the effort chip). Rejected unless it is a real ladder rung. */
+  set(tier: string): Promise<EffortPrefResult>;
 }
 
 /** The "@"-path fuzzy completion feature (shared logic with the CLI). */

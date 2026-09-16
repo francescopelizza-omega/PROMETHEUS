@@ -74,6 +74,18 @@ export {
 // Turning a configured cloud provider into an endpoint an interactive session can select.
 // The CLI's endpoint universe was two hardcoded LOCAL runners; the swarm lane knew all this
 // and kept it to itself.
+export type { LocalRunnerSpec } from "./local-runners.js";
+export {
+  LOCAL_RUNNERS,
+  runnerForBaseUrl,
+  runnerById,
+  portOf,
+  isLocalUrl,
+} from "./local-runners.js";
+
+export type { EnsureOllamaOptions, EnsureOllamaResult } from "./ollama-autostart.js";
+export { ensureLmStudioRunning, ensureOllamaRunning } from "./ollama-autostart.js";
+
 export type { CloudEndpointInfo, KeySource } from "./cloud-endpoints.js";
 export {
   describeCloudEndpoint,

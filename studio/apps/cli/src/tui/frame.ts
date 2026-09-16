@@ -1,9 +1,6 @@
 import { agent } from "@prometheus/core";
 
 import { renderDropdown } from "./autocomplete.js";
-import { layoutComposer, reverseSearchLine } from "./input-box.js";
-import { renderInvokeOverlay } from "./invoke-overlay.js";
-import { renderListOverlay } from "./list-overlay.js";
 /**
  * tui/frame.ts — compose the whole bottom chrome into ONE frame (pure).
  *
@@ -18,6 +15,10 @@ import { renderListOverlay } from "./list-overlay.js";
  * math. On a very narrow terminal the box collapses to a single `›` prompt line. PURE
  * → the app snapshots this for golden-frame tests; no IO here.
  */
+import { fleetBarRows } from "./fleet-bar.js";
+import { layoutComposer, reverseSearchLine } from "./input-box.js";
+import { renderInvokeOverlay } from "./invoke-overlay.js";
+import { renderListOverlay } from "./list-overlay.js";
 import { type ColorCaps, paint, painter } from "./palette.js";
 import { isPathOpen, toAcView } from "./path-mentions.js";
 import type { TuiState } from "./reducer.js";
@@ -112,7 +113,14 @@ export function renderFrame(input: FrameInput): Frame {
    * tall the chrome is.
    */
   const indicatorRows = agent.permissionModeMeta(state.permMode).indicator ? 1 : 0;
-  const overlayRows = rows - 5 - indicatorRows;
+  /**
+   * The fleet line is a FOURTH status row, and every height budget below has to know about it
+   * for the same reason the permission indicator does — see the two comments above, both written
+   * after a status row that nothing counted overran the terminal by exactly its own height.
+   * `fleetBarRows` is the SAME predicate the renderer uses, so the two cannot disagree.
+   */
+  const extraStatusRows = indicatorRows + fleetBarRows(status.fleet, width);
+  const overlayRows = rows - 5 - extraStatusRows;
   /**
    * An overlay draws title + filter + at least one row + hint — four lines, minimum. Below that
    * there is genuinely no room for it beside the chrome, and the old `Math.max(4, …)` floor took
@@ -181,7 +189,7 @@ export function renderFrame(input: FrameInput): Frame {
    * the redraw math depends on — the same class of overrun the comment above describes for
    * overlays.
    */
-  const room = rows - lines.length - 4 - indicatorRows;
+  const room = rows - lines.length - 4 - extraStatusRows;
   /**
    * The rail's compartment: the `├──┤` rule + the rail itself, + the key-hint row while ⌃T
    * focus is open. The old two-row grid cost three lines and spread five short facts across a

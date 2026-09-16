@@ -1,5 +1,5 @@
 /**
- * main/index.ts — the Electron MAIN process entry (Electron 33 / Node 20, C10).
+ * main/index.ts — the Electron MAIN process entry (Electron 44 / Node 24, C10).
  *
  * Responsibilities (and ONLY these — the renderer is a sandboxed view):
  *   - create the BrowserWindow with a HARDENED webPreferences (C5):
@@ -23,6 +23,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   BrowserWindow,
+  Notification,
   type UtilityProcess,
   app,
   dialog,
@@ -33,9 +34,11 @@ import {
   utilityProcess,
 } from "electron";
 
-import { ServerSupervisor, ai, type settings as coreSettings } from "@prometheus/core";
+import { ServerSupervisor, ai, cliProfiles, type settings as coreSettings } from "@prometheus/core";
 import {
   createEngineClient,
+  createModelHubClient,
+  type EvictionEvent,
   gateFull as engineGateFull,
   safeChildEnv,
   safeFetch,
@@ -77,11 +80,13 @@ import {
   registerAiIpc,
   setSecurityPosture,
 } from "./ai-ipc.js";
+import { registerAuthLevelIpcHandlers } from "./auth-level-ipc.js";
 import { destroyAgentBrowser } from "./browser-tool-host.js";
 import { initBudgetGate, setBudgetSettings } from "./budget-gate.js";
 import { registerBudgetIpcHandlers } from "./budget-ipc.js";
 import { registerCatalogIpcHandlers } from "./catalog-ipc.js";
 import { registerCodebaseOverviewIpcHandlers } from "./codebase-overview-ipc.js";
+import { registerEffortIpcHandlers } from "./effort-ipc.js";
 import { registerEnvIpcHandlers } from "./env-ipc.js";
 import { registerExtIpcHandlers } from "./ext-ipc.js";
 import { type RunWorkerTask, registerIdeIpcHandlers } from "./ide-ipc.js";
@@ -112,8 +117,11 @@ import type { TestRunSpawn } from "./ide/test-run-host.js";
 import { registerIpcHandlers } from "./ipc.js";
 import { registerMcpIpcHandlers } from "./mcp-ipc.js";
 import { migrateMcpStore, sharedMcpStorePath } from "./mcp-store-path.js";
+import { migrateGlobalSettings, sharedGlobalSettingsPath } from "./settings-path.js";
 import { registerMetadataIpcHandlers } from "./metadata-ipc.js";
 import { registerModelHealthIpcHandlers } from "./model-health-ipc.js";
+import { registerOllamaIpc } from "./ollama-ipc.js";
+import { registerLmstudioIpc } from "./lmstudio-ipc.js";
 import { migrateModelHealthStore, sharedModelHealthStorePath } from "./model-health-store-path.js";
 import { registerModelIpcHandlers } from "./model-ipc.js";
 import { registerPathCompletionIpcHandlers } from "./path-completion-ipc.js";
@@ -345,10 +353,17 @@ let disposeIdeIpc: (() => void) | null = null;
 let disposeMcpIpc: (() => void) | null = null;
 let disposeSettingsSyncIpc: (() => void) | null = null;
 let disposeSettingsIpc: (() => void) | null = null;
+/** `authLevel:*` — the ONE saved autonomy level, shared with the `prometheus` CLI. */
+let disposeAuthLevelIpc: (() => void) | null = null;
+/** `effort:*` — the ONE saved thinking-effort tier, likewise shared with the CLI. */
+let disposeEffortIpc: (() => void) | null = null;
 /** Removes the registered `pathCompletion:*` ipcMain handlers (the "@"-path feature). */
 let disposePathCompletionIpc: (() => void) | null = null;
 /** Removes the registered `modelHealth:*` ipcMain handlers. */
 let disposeModelHealthIpc: (() => void) | null = null;
+/** Removes the registered `model:ollamaStart` handler. */
+let disposeOllamaIpc: (() => void) | null = null;
+let disposeLmstudioIpc: (() => void) | null = null;
 /** Removes the registered `schedule:*` ipcMain handlers. */
 let disposeScheduleIpc: (() => void) | null = null;
 /** Removes the registered `persona:*` ipcMain handlers. */
@@ -374,6 +389,27 @@ function broadcastModel(event: ModelProgressEvent): void {
     } catch {
       /* a closing window is fine — drop the cosmetic event. */
     }
+  }
+}
+
+/**
+ * ACTIVE EVICTION: an OS-level system notification (macOS Notification Center / Windows toast /
+ * Linux notify-daemon) — the one channel that reaches the user regardless of which panel has
+ * focus, or whether Prometheus is even the frontmost app. `broadcastModel`'s `phase: "evicted"`
+ * event still updates the Serving panel for whoever IS looking at it; this is the belt for
+ * whoever is not. Best-effort: `Notification.isSupported()` is false on some headless/CI
+ * environments, and a notification failing to show must never be the reason the eviction (which
+ * already happened) goes unrecorded — recordEvictionEvent's own log is the source of truth.
+ */
+function notifyEviction(event: EvictionEvent): void {
+  if (!Notification.isSupported()) return;
+  try {
+    new Notification({
+      title: "Prometheus stopped a local service",
+      body: `${event.name} was stopped to prevent a machine-wide freeze (${event.reason}). Some in-progress work may have been paused — it will resume once resources are free.`,
+    }).show();
+  } catch {
+    /* best-effort — the eviction itself already happened regardless. */
   }
 }
 
@@ -762,7 +798,7 @@ async function runHeadlessSmoke(): Promise<void> {
   // window, however brief, in which a model call could be served under the permissive default
   // while a locked-down profile sat on disk. A security control with a startup race is a
   // security control with a bypass.
-  await adoptSecurityPosture(`${app.getPath("userData")}/settings.json`);
+  await adoptSecurityPosture(sharedGlobalSettingsPath());
   /**
    * The SPEND CAP, armed for the same reason and in the same place as the posture.
    *
@@ -786,7 +822,7 @@ async function runHeadlessSmoke(): Promise<void> {
   // The Package & Environment Manager surface (file 04 §1,§3) — its own handler set.
   disposeEnvIpc = registerEnvIpcHandlers();
   // The Model Hub surface (file 05 §1,§7,§8) — discover/fit/download/serve(C8).
-  disposeModelIpc = registerModelIpcHandlers({ serveSupervisor, broadcast: broadcastModel });
+  disposeModelIpc = registerModelIpcHandlers({ serveSupervisor, broadcast: broadcastModel, notifyEviction });
   // The Catalog manager surface (file 06 §4) — plugins/skills/apps/worldsim/models.
   disposeCatalogIpc = registerCatalogIpcHandlers();
   // The GitHub Repo Manager surface (file 06 §3, FEATURE #5a) — staged + gated clones.
@@ -831,6 +867,10 @@ async function runHeadlessSmoke(): Promise<void> {
     );
   }
   disposeModelHealthIpc = registerModelHealthIpcHandlers(sharedModelHealthStorePath());
+  // A manual "Start Ollama" trigger — the same ensureOllamaRunning ai-ipc.ts's runAiStream
+  // already calls automatically on a chat prompt (ollama-ipc.ts's own docstring).
+  disposeOllamaIpc = registerOllamaIpc();
+  disposeLmstudioIpc = registerLmstudioIpc();
   // Scheduled/autonomous runs (cron-triggered agent turns) — one global file, never
   // workspace-scoped, SHARED with the CLI's own store: schedule-runner.ts (the only code that
   // ever executes a due task, via `prometheus tasks run-due`) reads this exact path, so a task
@@ -871,15 +911,35 @@ async function runHeadlessSmoke(): Promise<void> {
       `[mcp] adopted ${adoptedMcp} connector(s) from the old app-private store into ${sharedMcpStorePath()}`,
     );
   }
+  // The global SETTINGS layer had the identical split, so it gets the identical one-time,
+  // additive adoption: leaves the shared file already defines are left alone (the CLI's
+  // `hooks` must not be clobbered by a stale desktop copy), and the old file stays on disk.
+  const adoptedSettings = migrateGlobalSettings(app.getPath("userData"));
+  if (adoptedSettings > 0) {
+    console.info(
+      `[settings] adopted ${adoptedSettings} setting(s) from the old app-private global layer into ${sharedGlobalSettingsPath()}`,
+    );
+  }
   disposeMcpIpc = registerMcpIpcHandlers({ storePath: sharedMcpStorePath() });
   // APP-095: git-backed settings sync (reads the SAME mcp store, redacts secrets).
   disposeSettingsSyncIpc = registerSettingsSyncIpcHandlers({
     mcpStorePath: sharedMcpStorePath(),
   });
-  // Keyed/layered settings tree (file 13 §2.1) — global layer persists to userData;
-  // the workspace layer (if any) is resolved per-call from the renderer's workspaceRoot.
+  // The autonomy level is read from and written to the SAME file the CLI uses, so a posture
+  // chosen in the terminal is the posture the app opens with (and the reverse). It lived in
+  // renderer localStorage before, which made the two disagree silently.
+  disposeAuthLevelIpc?.();
+  disposeAuthLevelIpc = registerAuthLevelIpcHandlers();
+  // …and the thinking-effort tier, from the same shared config root.
+  disposeEffortIpc?.();
+  disposeEffortIpc = registerEffortIpcHandlers();
+  // Keyed/layered settings tree (file 13 §2.1) — the global layer is the SHARED
+  // `$PROMETHEUS_HOME/config/settings.json`, the same file the CLI reads, so a hook or a
+  // gate posture set in Studio is the one a terminal session opens with (and the reverse).
+  // It used to persist to Electron's private `userData`, which meant nothing to the CLI.
+  // The workspace layer (if any) is resolved per-call from the renderer's workspaceRoot.
   disposeSettingsIpc = registerSettingsIpcHandlers({
-    globalPath: `${app.getPath("userData")}/settings.json`,
+    globalPath: sharedGlobalSettingsPath(),
     // The four security settings become ENFORCED here. Without this the profile a user picks
     // ("Local-only", "Security-strict") is a label: `cloudModelsEnabled` and `defaultNetwork`
     // had no consumer anywhere, so selecting a locked-down profile changed nothing at all.
@@ -942,10 +1002,18 @@ async function runHeadlessSmoke(): Promise<void> {
     disposeSettingsSyncIpc = null;
     disposeSettingsIpc?.();
     disposeSettingsIpc = null;
+    disposeAuthLevelIpc?.();
+    disposeAuthLevelIpc = null;
+    disposeEffortIpc?.();
+    disposeEffortIpc = null;
     disposePathCompletionIpc?.();
     disposePathCompletionIpc = null;
     disposeModelHealthIpc?.();
     disposeModelHealthIpc = null;
+    disposeOllamaIpc?.();
+    disposeOllamaIpc = null;
+    disposeLmstudioIpc?.();
+    disposeLmstudioIpc = null;
     disposeScheduleIpc?.();
     disposeScheduleIpc = null;
     disposePersonaIpc?.();
@@ -965,6 +1033,7 @@ async function runHeadlessSmoke(): Promise<void> {
     fsWatchHost.dispose();
     workerHost.dispose();
     await sidecarSupervisor.dispose().catch(() => {});
+    serveSupervisor.disposeCriticalCheck();
     await serveSupervisor.stopAll().catch(() => {});
     await supervisor.stopAll().catch(() => {});
     app.exit(code);
@@ -994,14 +1063,22 @@ if (!gotSingleInstanceLock) {
       if (win.isMinimized()) win.restore();
       win.focus();
     } else {
-      createMainWindow();
+      const win = createMainWindow();
+      void registerUpdater(win).catch(() => {});
     }
   });
 
   // macOS dock re-open — registered at top level so it survives even if the
   // whenReady startup below throws.
   app.on("activate", () => {
-    if (BrowserWindow.getAllWindows().length === 0) createMainWindow();
+    if (BrowserWindow.getAllWindows().length === 0) {
+      // Re-wire the updater against the NEW window. `registerUpdater` retargets its window
+      // on entry and returns early once wired, so this is idempotent — without it, closing
+      // the last window and re-opening from the dock left update toasts pointing at a
+      // destroyed WebContents, i.e. silently gone for the rest of the session.
+      const win = createMainWindow();
+      void registerUpdater(win).catch(() => {});
+    }
   });
 
   // A throw during startup (handler registration / host construction) must surface
@@ -1022,6 +1099,25 @@ if (!gotSingleInstanceLock) {
 
 async function bootstrap(): Promise<void> {
   await app.whenReady();
+  /**
+   * ONE HOME: bring an existing install's config across before ANY store is read.
+   *
+   * The config root moved from `~/.config/prometheus-studio` to `~/.prometheus/config`, and this
+   * migration's own docstring says each host calls it at startup — only the CLI's `bin.ts` ever
+   * did. `authorisation.json` and `effort.json` have reader-side legacy fallbacks, so they
+   * survived the omission; the user `[permissions]` layer and `grants.json` do NOT, which means
+   * a Studio-only user upgrading across the move silently lost both.
+   *
+   * Ahead of the PROM_SMOKE branch so both launch paths get it exactly once, and ahead of every
+   * store read. Copies, never overwrites, never throws — and returns without touching anything
+   * when `$PROMETHEUS_HOME` marks this as a sandbox.
+   */
+  const configMove = cliProfiles.migrateLegacyConfigDir();
+  if (configMove.copied.length > 0) {
+    console.info(
+      `[config] adopted ${configMove.copied.length} file(s) from ${configMove.from} → ${configMove.to}`,
+    );
+  }
   if (process.env.PROM_SMOKE === "1") {
     await runHeadlessSmoke();
     return;
@@ -1078,7 +1174,7 @@ async function bootstrap(): Promise<void> {
   disposeEnvIpc = registerEnvIpcHandlers();
   // The Model Hub surface (file 05 §1,§7,§8) — registered alongside the main ipc
   // so the Models tab finds a live handler from boot (discover/fit/download/serve).
-  disposeModelIpc = registerModelIpcHandlers({ serveSupervisor, broadcast: broadcastModel });
+  disposeModelIpc = registerModelIpcHandlers({ serveSupervisor, broadcast: broadcastModel, notifyEviction });
   // The Catalog manager surface (file 06 §4) — registered alongside the main ipc
   // so the Catalog tab finds a live handler from boot (plugins/skills/apps/…).
   disposeCatalogIpc = registerCatalogIpcHandlers();
@@ -1126,6 +1222,10 @@ async function bootstrap(): Promise<void> {
     );
   }
   disposeModelHealthIpc = registerModelHealthIpcHandlers(sharedModelHealthStorePath());
+  // A manual "Start Ollama" trigger — the same ensureOllamaRunning ai-ipc.ts's runAiStream
+  // already calls automatically on a chat prompt (ollama-ipc.ts's own docstring).
+  disposeOllamaIpc = registerOllamaIpc();
+  disposeLmstudioIpc = registerLmstudioIpc();
   // Scheduled/autonomous runs (cron-triggered agent turns) — one global file, never
   // workspace-scoped, SHARED with the CLI's own store: schedule-runner.ts (the only code that
   // ever executes a due task, via `prometheus tasks run-due`) reads this exact path, so a task
@@ -1164,15 +1264,35 @@ async function bootstrap(): Promise<void> {
       `[mcp] adopted ${adoptedMcp} connector(s) from the old app-private store into ${sharedMcpStorePath()}`,
     );
   }
+  // The global SETTINGS layer had the identical split, so it gets the identical one-time,
+  // additive adoption: leaves the shared file already defines are left alone (the CLI's
+  // `hooks` must not be clobbered by a stale desktop copy), and the old file stays on disk.
+  const adoptedSettings = migrateGlobalSettings(app.getPath("userData"));
+  if (adoptedSettings > 0) {
+    console.info(
+      `[settings] adopted ${adoptedSettings} setting(s) from the old app-private global layer into ${sharedGlobalSettingsPath()}`,
+    );
+  }
   disposeMcpIpc = registerMcpIpcHandlers({ storePath: sharedMcpStorePath() });
   // APP-095: git-backed settings sync (reads the SAME mcp store, redacts secrets).
   disposeSettingsSyncIpc = registerSettingsSyncIpcHandlers({
     mcpStorePath: sharedMcpStorePath(),
   });
-  // Keyed/layered settings tree (file 13 §2.1) — global layer persists to userData;
-  // the workspace layer (if any) is resolved per-call from the renderer's workspaceRoot.
+  // The autonomy level is read from and written to the SAME file the CLI uses, so a posture
+  // chosen in the terminal is the posture the app opens with (and the reverse). It lived in
+  // renderer localStorage before, which made the two disagree silently.
+  disposeAuthLevelIpc?.();
+  disposeAuthLevelIpc = registerAuthLevelIpcHandlers();
+  // …and the thinking-effort tier, from the same shared config root.
+  disposeEffortIpc?.();
+  disposeEffortIpc = registerEffortIpcHandlers();
+  // Keyed/layered settings tree (file 13 §2.1) — the global layer is the SHARED
+  // `$PROMETHEUS_HOME/config/settings.json`, the same file the CLI reads, so a hook or a
+  // gate posture set in Studio is the one a terminal session opens with (and the reverse).
+  // It used to persist to Electron's private `userData`, which meant nothing to the CLI.
+  // The workspace layer (if any) is resolved per-call from the renderer's workspaceRoot.
   disposeSettingsIpc = registerSettingsIpcHandlers({
-    globalPath: `${app.getPath("userData")}/settings.json`,
+    globalPath: sharedGlobalSettingsPath(),
     // The four security settings become ENFORCED here. Without this the profile a user picks
     // ("Local-only", "Security-strict") is a label: `cloudModelsEnabled` and `defaultNetwork`
     // had no consumer anywhere, so selecting a locked-down profile changed nothing at all.
@@ -1247,6 +1367,23 @@ async function bootstrap(): Promise<void> {
     /* boot-resilient: never block window creation on supervisor autostart. */
   }
 
+  // Give an already-installed-but-stopped Ollama a head start: `library()` runs the
+  // sidecar's `model.list`, which now calls `_ensure_ollama_daemon()` before it decides
+  // there's nothing installed (see modelhub.py `_ollama_installed_models`) — a model
+  // pulled straight via `ollama pull` (never through Prometheus's own UI) used to be
+  // genuinely invisible whenever the daemon happened to be stopped, and the chat rail's
+  // OWN endpoint probe (ai:probeModels, main/ai-ipc.ts) has no daemon-starting logic of
+  // its own — it just reads whatever's live when it probes. Firing this NOW, in the
+  // background, before the window (and the chat rail it mounts) even exists, is what
+  // gives that probe a real chance of finding Ollama already up instead of defaulting to
+  // a cloud endpoint because the local one wasn't there YET. Fire-and-forget: a slow or
+  // absent Ollama must never delay the window appearing.
+  void createModelHubClient()
+    .library()
+    .catch(() => {
+      /* best-effort wake-up only — the chat rail's own probe still works standalone */
+    });
+
   const mainWin = createMainWindow();
   // Wire the consent-gated auto-updater (no-op in dev where electron-updater is
   // absent; idempotent so window recreation on `activate` never double-registers).
@@ -1281,12 +1418,24 @@ app.on("before-quit", (event) => {
   // leave several GB resident for the next half hour. Fire-and-forget: it is self-deadlined
   // and must never be able to hold up the quit.
   void freeLocalModels();
+  // "We woke it, we let it rest": stop the Ollama daemon IFF the boot-time `library()` call
+  // (or a later Model Hub visit) is what actually started it — releaseOllama() itself is
+  // the ONE place that decides that safely (a marker file; see modelhub.py
+  // `_release_ollama_daemon`), never touching a daemon the user runs independently.
+  // Fire-and-forget here too: this is resource tidiness, not correctness, so it must never
+  // hold up quit — it also rides the graceful-teardown deadline below when that path runs.
+  void createModelHubClient()
+    .releaseOllama()
+    .catch(() => {
+      /* best-effort — a daemon we can't confirm we own is correctly left alone anyway */
+    });
   // Tear down the IDE hosts (kill LSP/DAP/PTY children + stop the fs watcher).
   lspHost.dispose();
   void dapHost.dispose().catch(() => {});
   ptyHost.dispose();
   runHost.dispose();
   fsWatchHost.dispose();
+  serveSupervisor.disposeCriticalCheck();
 
   if (serversLive || sidecarsLive) {
     event.preventDefault();
@@ -1324,10 +1473,18 @@ app.on("before-quit", (event) => {
       disposeMcpIpc = null;
       disposeSettingsIpc?.();
       disposeSettingsIpc = null;
+      disposeAuthLevelIpc?.();
+      disposeAuthLevelIpc = null;
+      disposeEffortIpc?.();
+      disposeEffortIpc = null;
       disposePathCompletionIpc?.();
       disposePathCompletionIpc = null;
       disposeModelHealthIpc?.();
       disposeModelHealthIpc = null;
+      disposeOllamaIpc?.();
+      disposeOllamaIpc = null;
+      disposeLmstudioIpc?.();
+      disposeLmstudioIpc = null;
       disposeScheduleIpc?.();
       disposeScheduleIpc = null;
       disposePersonaIpc?.();
@@ -1367,10 +1524,18 @@ app.on("before-quit", (event) => {
     disposeSettingsSyncIpc = null;
     disposeSettingsIpc?.();
     disposeSettingsIpc = null;
+    disposeAuthLevelIpc?.();
+    disposeAuthLevelIpc = null;
+    disposeEffortIpc?.();
+    disposeEffortIpc = null;
     disposePathCompletionIpc?.();
     disposePathCompletionIpc = null;
     disposeModelHealthIpc?.();
     disposeModelHealthIpc = null;
+    disposeOllamaIpc?.();
+    disposeOllamaIpc = null;
+    disposeLmstudioIpc?.();
+    disposeLmstudioIpc = null;
     disposeScheduleIpc?.();
     disposeScheduleIpc = null;
     disposePersonaIpc?.();

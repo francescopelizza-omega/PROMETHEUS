@@ -434,9 +434,21 @@ export function createRendererLlmClient(opts: RendererLlmOptions): LLMClient {
       for (const ev of pending) yield ev;
 
       if (result.paused) {
-        // main's own idle watchdog fired — a PAUSE, not a completion. `result.text`'s tail was
-        // already reconciled into the scanner above via the safety net, so nothing is lost;
-        // main doesn't report idleMs on this shape today, so this reports 0 rather than guess.
+        // A PAUSE, not a completion. `result.text`'s tail was already reconciled into the
+        // scanner above via the safety net, so nothing is lost; main doesn't report idleMs on
+        // this shape today, so this reports 0 rather than guess.
+        //
+        // The reason arrives as a STATUS turn rather than a field on `paused`: `LlmTurn`'s
+        // paused variant is `{kind:"paused"; idleMs:number}` and the loop's AgentEvent pins
+        // `reason: "idle-timeout"` as a literal, so widening it is a core-contract change that
+        // touches the CLI and VS Code producers too. A status turn rides the existing union and
+        // reaches the same sink — and without it a RAM-ceiling pause was worded as inactivity.
+        if (result.pausedReason === "resources-critical") {
+          yield {
+            kind: "status",
+            text: "⏸ paused — a local model service was stopped (or refused a restart) to protect machine memory. Nothing was lost: send the message again once memory frees up and Prometheus will restart the runner.",
+          };
+        }
         yield { kind: "paused", idleMs: 0 };
         return;
       }
@@ -1053,8 +1065,15 @@ export async function runCoreAgentTurn(
         sinks.onCapped?.(ev.rounds);
         break;
       case "paused":
+        // The "after Ns of inactivity" clause is only true when there IS an idle measurement.
+        // Main does not report one on the streamed shape (it arrives as 0), so the unconditional
+        // wording read "paused after 0s of inactivity" — and for a RAM-ceiling pause it named
+        // the wrong cause outright. The reason, when it is not inactivity, arrives just before
+        // this as its own status line (see the `resources-critical` branch above).
         sinks.onStatus?.(
-          `⏸ paused after ${Math.round(ev.idleMs / 1000)}s of inactivity — send a message to resume`,
+          ev.idleMs > 0
+            ? `⏸ paused after ${Math.round(ev.idleMs / 1000)}s of inactivity — send a message to resume`
+            : "⏸ paused — send a message to resume",
         );
         break;
       case "done":

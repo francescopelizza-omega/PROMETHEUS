@@ -97,7 +97,7 @@ test("a CLOUD endpoint is unaffected by the probe plumbing", () => {
 
 test("a CLAMPED tier resolves to the level the model will really use", () => {
   // gpt-oss has three levels, so `max` is served as `high`. The chip renders
-  // `EFFORT_SHORT[resolution.applied]`; rendering the requested tier there would be the same
+  // the trait rail's `⚙ <tier>` cell; rendering the requested tier there would be the same
   // misreport the CLI badge was fixed for — a confident "max" for something that was clamped.
   const r = effortFor("max", {
     id: "ollama · gpt-oss:20b",

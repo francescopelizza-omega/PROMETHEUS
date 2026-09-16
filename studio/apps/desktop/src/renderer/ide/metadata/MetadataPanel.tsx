@@ -191,6 +191,7 @@ export function MetadataPanel(): ReactElement {
               display: "block",
               overflow: "hidden",
               textOverflow: "ellipsis",
+              minWidth: 0, // flex/grid floor — without it the ellipsis is unreachable
               whiteSpace: "nowrap",
             }}
           >
@@ -308,7 +309,7 @@ export function MetadataPanel(): ReactElement {
                   style={{
                     margin: 0,
                     flex: 1,
-                    fontSize: "var(--text-h2-size, 1.125rem)",
+                    fontSize: "var(--text-h2-size, 1rem)",
                     color: "var(--danger)",
                   }}
                 >

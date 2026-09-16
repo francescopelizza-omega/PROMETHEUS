@@ -101,3 +101,25 @@ export function blend(fg: string, bg: string, pct: number): string {
     .map((n) => n.toString(16).padStart(2, "0"))
     .join("")}`;
 }
+
+/**
+ * The LABEL colour for a role used as a SOLID FILL (the `on-<role>` tokens).
+ *
+ * Prefers the scheme's own `ground` (`bg-app`) so a filled chip still reads as part of the
+ * scheme rather than as a pasted-on black or white box; falls back to whichever pole
+ * actually carries the ratio when the ground cannot. This is `derivePalette`'s existing
+ * `brandFg` rule, generalised to every role — a label on a fill is TEXT, so the bar is
+ * 4.5:1, not the 3:1 that governs the role colour itself.
+ *
+ * Deliberately NOT "always the ground" and NOT "always white": on the dark scheme white on
+ * `--ok` measures 1.63:1, and on the light scheme the near-white ground on `--accent`
+ * measures 3.38:1. The right answer depends on the fill, which is why it is computed.
+ */
+export function onFill(fill: string, ground: string): string {
+  if (contrastRatio(ground, fill) >= 4.5) return ground;
+  return contrastRatio("#ffffff", fill) >= contrastRatio("#000000", fill) ? "#ffffff" : "#000000";
+}
+
+/** The role tokens that are painted as solid fills carrying a label. */
+export const FILL_ROLES = ["brand", "accent", "ok", "warn", "danger", "info"] as const;
+export type FillRole = (typeof FILL_ROLES)[number];

@@ -58,6 +58,9 @@ nodeLinker: isolated
 shamefullyHoist: false
 
 # engineStrict: true -> refuse to install under a Node/pnpm that violates "engines"
-#   (node >=20, pnpm >=10.4). The Electron native ABI is pinned to Node 20 (.nvmrc);
-#   installing under the wrong runtime is a hard error, not a warning.
+#   (node >=22.6, pnpm >=10.4). Since the Electron 44 upgrade (2026-09-05) the runtime
+#   ABI is Node 24, so native addons (node-pty) must be electron-rebuild'd against THAT,
+#   not against the host node; .nvmrc pins the INSTALL runtime to 22, which is what
+#   `pnpm install` and the type-stripping test runner both need.
+#   Installing under the wrong runtime is a hard error, not a warning.
 engineStrict: true

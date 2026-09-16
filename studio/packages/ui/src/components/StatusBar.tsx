@@ -47,31 +47,29 @@ export interface StatusBarProps {
 
 function Item({ item }: { item: StatusItem }): ReactElement {
   const interactive = typeof item.onClick === "function";
-  return (
-    <button
-      type="button"
-      onClick={item.onClick}
-      title={item.title}
-      aria-label={item.ariaLabel}
-      disabled={!interactive}
-      style={{
-        display: "inline-flex",
-        alignItems: "center",
-        gap: 5,
-        paddingInline: 7,
-        paddingBlock: 0,
-        height: "100%",
-        background: "transparent",
-        border: "none",
-        // §7: the bar is 11px mono. A `tone` (a semantic var NAME) tints the whole entry.
-        color: item.tone ? `var(${item.tone})` : "var(--text-muted)",
-        fontFamily: "var(--font-mono)",
-        fontSize: 11,
-        cursor: interactive ? "pointer" : "default",
-        lineHeight: 1,
-        whiteSpace: "nowrap",
-      }}
-    >
+  // A read-only entry (the model name, a token count, the cwd) is not a broken button — it
+  // is a label. Rendering it as `<button disabled>` made the browser drop its `title`
+  // tooltip and announced it to a screen reader as an unavailable control, so the branch,
+  // git ref and problem counts lost the hover text that is the only thing explaining them.
+  const st = {
+    display: "inline-flex",
+    alignItems: "center",
+    gap: 5,
+    paddingInline: 7,
+    paddingBlock: 0,
+    height: "100%",
+    background: "transparent",
+    border: "none",
+    // §7: the bar is 11px mono. A `tone` (a semantic var NAME) tints the whole entry.
+    color: item.tone ? `var(${item.tone})` : "var(--text-muted)",
+    fontFamily: "var(--font-mono)",
+    fontSize: 11,
+    cursor: interactive ? "pointer" : "default",
+    lineHeight: 1,
+    whiteSpace: "nowrap",
+  } as const;
+  const body = (
+    <>
       {item.glyph != null && (
         <span aria-hidden="true" style={{ flex: "none" }}>
           {item.glyph}
@@ -82,7 +80,31 @@ function Item({ item }: { item: StatusItem }): ReactElement {
       <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis" }}>
         {item.label}
       </span>
-    </button>
+    </>
+  );
+  if (interactive) {
+    return (
+      <button
+        type="button"
+        onClick={item.onClick}
+        title={item.title}
+        aria-label={item.ariaLabel}
+        style={st}
+      >
+        {body}
+      </button>
+    );
+  }
+  // A bare <span> cannot carry an accessible name, so role="note" is added only when the
+  // caller actually supplied one — an empty role on every static entry would be noise.
+  return (
+    <span
+      title={item.title}
+      style={st}
+      {...(item.ariaLabel ? { role: "note", "aria-label": item.ariaLabel } : {})}
+    >
+      {body}
+    </span>
   );
 }
 

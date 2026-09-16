@@ -283,7 +283,7 @@ const labelStyle: CSSProperties = {
 };
 
 const inputStyle: CSSProperties = {
-  background: "var(--surface-1, transparent)",
+  background: "var(--bg-surface)",
   color: "var(--text-primary)",
   border: "1px solid var(--border-strong)",
   borderRadius: "var(--radius-sm, 4px)",

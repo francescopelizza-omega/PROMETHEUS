@@ -29,7 +29,7 @@ import {
 } from "react";
 import type { IdeEvent } from "../shared/ipc-contract.js";
 
-import { Z, resolveActivity } from "@prometheus/ui";
+import { Z, resolveActivity, resolveSubPanel, subPanelsFor } from "@prometheus/ui";
 import { CatalogRoute } from "../routes/catalog.js";
 import { ChatRoute } from "../routes/chat.js";
 import { EditorRoute } from "../routes/editor.js";
@@ -37,7 +37,12 @@ import { ModelsRoute } from "../routes/models.js";
 import { requestRouteTab } from "../routes/route-tabs.js";
 import { SecurityRoute } from "../routes/security.js";
 import { WorkspaceRoute } from "../routes/workspace.js";
-import { type CommandContext, executeCommandId, handleChord } from "./commands/registry.js";
+import {
+  type CommandContext,
+  commandTarget,
+  executeCommandId,
+  handleChord,
+} from "./commands/registry.js";
 import { HardenPanel } from "./ide/HardenPanel.js";
 import { Problems } from "./ide/Problems.js";
 import { TokenEconomyPanel } from "./ide/TokenEconomyPanel.js";
@@ -49,6 +54,7 @@ import { deriveSystemHealthView } from "./ide/health/health-panel-view.js";
 import { MetadataPanel } from "./ide/metadata/MetadataPanel.js";
 import { countDiagnostics } from "./ide/state/diagnostics.js";
 import { detectLanguage } from "./ide/state/lang-detect.js";
+import { useRunSessionStore } from "./ide/state/run-session-store.js";
 import { useDiagnosticsStore, useTabsStore } from "./ide/state/stores.js";
 import { useAiSessionStore } from "./ide/state/stores.js";
 import { TelemetryPanel } from "./ide/telemetry/TelemetryPanel.js";
@@ -89,6 +95,14 @@ import {
   TopBar,
   useTheme,
 } from "./shell/index.js";
+import {
+  type RailState,
+  clearOverrideIfRoomy,
+  toggleRail as nextRailState,
+  openRail,
+  railCollapsedNow,
+  shellCollapse,
+} from "./shell/responsive.js";
 import {
   type SidebarCollapsedMap,
   effectiveSidebarCollapsed,
@@ -157,6 +171,14 @@ interface PersistedLayout {
   rightMode: RightRailMode;
   bottomCollapsed: boolean;
   bottomTab: BottomTab;
+  /**
+   * Which TOOL PANEL is open, per activity — the rail's lower half (APP: rail fusion).
+   *
+   * Per activity rather than one global value, for the same reason `sidebarCollapsedByActivity`
+   * is: "Search" is a sensible thing to be looking at in the Editor and meaningless anywhere
+   * else, so one shared slot would make every route inherit the last route's choice.
+   */
+  subPanelByActivity: Record<string, string>;
 }
 const LAYOUT_KEY = "prometheus.layout";
 const LAYOUT_VERSION = 2;
@@ -187,6 +209,17 @@ function loadLayout(): Partial<PersistedLayout> {
     if (typeof o.bottomCollapsed === "boolean") out.bottomCollapsed = o.bottomCollapsed;
     if (typeof o.bottomTab === "string" && SHELL_BOTTOM_TAB_IDS.has(o.bottomTab as BottomTab))
       out.bottomTab = o.bottomTab as BottomTab;
+    // Values are NOT validated against the panel list here — `resolveSubPanel` does that at
+    // render time, against the activity actually being shown. Validating on load would have to
+    // guess which activity each key belongs to, and a panel renamed between releases would
+    // silently drop the whole map instead of falling back one entry.
+    if (o.subPanelByActivity && typeof o.subPanelByActivity === "object") {
+      const map: Record<string, string> = {};
+      for (const [k, v] of Object.entries(o.subPanelByActivity as Record<string, unknown>)) {
+        if (typeof v === "string") map[k] = v;
+      }
+      out.subPanelByActivity = map;
+    }
     return out;
   } catch {
     return {};
@@ -201,23 +234,13 @@ function saveLayout(layout: PersistedLayout): void {
   }
 }
 
-/** Route a palette command id to the activity where it actually works. The shell can't
- *  execute editor-scoped commands itself, so picking one navigates the user to its home
- *  surface instead of silently no-op'ing. Returns null for `panel.*` (handled inline). */
-function activityForCommand(id: string): ActivityId | null {
-  if (id.startsWith("panel.")) return null;
-  if (id.startsWith("models.")) return "models";
-  if (id.startsWith("prometheus.") || id.startsWith("gate.")) return "security";
-  if (id.startsWith("python.")) return "workspace";
-  // ai.* / git.* / debug.* / search.* / editor.* all live in the Editor workbench.
-  return "editor";
-}
-
 /** Map an activity id → its workbench route (extensions = file 09, placeholder). */
 function renderActivity(
   activity: ActivityId,
   onNavigate: (id: ActivityId) => void,
   onOpenPanel: (tab: BottomTab) => void,
+  /** §2's second collapse step — the editor's file tree floats instead of taking a column. */
+  treeOverlay = false,
 ): ReactElement {
   switch (activity) {
     case "home":
@@ -230,7 +253,13 @@ function renderActivity(
       );
     case "editor":
       // the panel.* palette seam (APP-004): the editor palette opens SHELL bottom tabs.
-      return <EditorRoute onNavigate={onNavigate} onOpenShellPanel={onOpenPanel} />;
+      return (
+        <EditorRoute
+          onNavigate={onNavigate}
+          onOpenShellPanel={onOpenPanel}
+          treeOverlay={treeOverlay}
+        />
+      );
     case "catalog":
       return <CatalogRoute />;
     case "chat":
@@ -311,7 +340,9 @@ function SettingsOverlay({
         alignItems: "flex-start",
         justifyContent: "center",
         paddingTop: "8vh",
-        zIndex: Z.dropdown,
+        // A modal is a DECISION surface: it must outrank the ⌘K palette (Z.palette) and the
+        // auth picker (Z.modal), both of which painted over the open Settings dialog.
+        zIndex: Z.modal,
       }}
     >
       <section
@@ -337,7 +368,7 @@ function SettingsOverlay({
         }}
       >
         <header style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-          <h2 style={{ margin: 0, fontSize: "var(--text-h2-size, 1.125rem)", fontWeight: 600 }}>
+          <h2 style={{ margin: 0, fontSize: "var(--text-h2-size, 1rem)", fontWeight: 600 }}>
             Settings
           </h2>
           <button type="button" onClick={onClose} aria-label="Close settings" style={iconBtn()}>
@@ -415,9 +446,86 @@ function App(): ReactElement {
   );
   const [rightCollapsed, setRightCollapsed] = useState(saved.rightCollapsed ?? true);
   const [rightMode, setRightMode] = useState<RightRailMode>(saved.rightMode ?? "agent");
+  /** the rail's lower half: which tool panel each activity is showing. */
+  const [subPanelByActivity, setSubPanelByActivity] = useState<Record<string, string>>(
+    saved.subPanelByActivity ?? {},
+  );
+
+  /**
+   * §2's collapse order: below 1100px the chat rail trays, below ~900 the file tree floats.
+   *
+   * Tracked here because the shell owns the rail. `rightCollapsed` remains the USER's
+   * choice and is what gets persisted; the narrow-window tray is unioned in at render time
+   * (`railCollapsed`), so widening the window restores exactly what they last chose and a
+   * resize never rewrites a preference.
+   */
+  const [viewportWidth, setViewportWidth] = useState(() =>
+    typeof window === "undefined" ? 0 : window.innerWidth,
+  );
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const onResize = (): void => setViewportWidth(window.innerWidth);
+    onResize();
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, []);
+  const collapse = shellCollapse(viewportWidth);
+  /**
+   * §2-j's escape hatch. `rightCollapsed` stays the persisted preference; `narrowOverride`
+   * records "the user opened the rail anyway while the window was narrow", and is retired
+   * the moment the window is roomy again so the auto-tray default survives a resize.
+   */
+  const [narrowOverride, setNarrowOverride] = useState(false);
+  useEffect(() => {
+    setNarrowOverride(
+      (o) =>
+        clearOverrideIfRoomy({ userCollapsed: rightCollapsed, narrowOverride: o }, viewportWidth)
+          .narrowOverride,
+    );
+  }, [viewportWidth, rightCollapsed]);
+  const railState: RailState = { userCollapsed: rightCollapsed, narrowOverride };
+  const railIsCollapsed = railCollapsedNow(railState, viewportWidth);
+  /**
+   * The live rail state + viewport width, read through a ref so the two callbacks below can be
+   * `useCallback([])`-stable — the same pattern as `activityRef` further down.
+   *
+   * This is load-bearing, not tidiness. Both callbacks are captured by consumers that never
+   * re-subscribe: `toggleRail` by `cmdCtx` (a `useMemo` on `[toggleSidebarForActivity]`, which
+   * never changes) and `forceOpenRail` by the `prometheus:open-agent` effect (`[]`). As plain
+   * per-render arrows they froze the render-1 snapshot, so `nextRailState`/`openRail` — pure
+   * functions of that snapshot — kept returning the same answer forever: ⌥⌘B and the palette's
+   * "Toggle AI Panel" became one-way, and on a window narrowed after mount `forceOpenRail`
+   * computed `narrowOverride: false` from the stale wide width, leaving the rail trayed and the
+   * AgentPane unmounted so Home's seeded prompt was dispatched at a listener that did not exist.
+   */
+  const railRef = useRef({ state: railState, width: viewportWidth });
+  railRef.current = { state: railState, width: viewportWidth };
+  /** Every rail toggle goes through this, so none of them can be inert below 1100px. */
+  const toggleRail = useCallback((): void => {
+    const { state, width } = railRef.current;
+    const next = nextRailState(state, width);
+    setRightCollapsed(next.userCollapsed);
+    setNarrowOverride(next.narrowOverride);
+  }, []);
+  /** Force the rail open — used by anything about to hand the agent work to do. */
+  const forceOpenRail = useCallback((): void => {
+    const next = openRail(railRef.current.width);
+    setRightCollapsed(next.userCollapsed);
+    setNarrowOverride(next.narrowOverride);
+  }, []);
   // APP-056: background agent-run count for the ✦ rail badge — sourced from the MODULE-LEVEL
   // run controller (NOT any pane), so it stays correct while the AI pane is collapsed/unmounted.
   const [aiRunningCount, setAiRunningCount] = useState(0);
+  /**
+   * A RUN or DEBUG session is live — what the toolbar's Stop button acts on.
+   *
+   * `running` used to be `aiRunningCount > 0`, so the Run/Debug/Stop cluster lit up while
+   * the AGENT was thinking and stayed dark through an actual debug session. Two different
+   * kinds of "busy" sharing one indicator, next to a button that only stops one of them.
+   */
+  const runSessionActive = useRunSessionStore(
+    (st) => st.runId !== null || st.dapSessionId !== null,
+  );
   useEffect(() => agentRuns.subscribe(() => setAiRunningCount(agentRuns.runningIds().length)), []);
   // §2.5: the rail header's session chip + the tray's status dot. Both read the SAME
   // module-level run controller the ✦ badge does, so a minimised rail still tells the
@@ -484,8 +592,17 @@ function App(): ReactElement {
       rightMode,
       bottomCollapsed,
       bottomTab,
+      subPanelByActivity,
     });
-  }, [activity, sidebarCollapsedMap, rightCollapsed, rightMode, bottomCollapsed, bottomTab]);
+  }, [
+    activity,
+    sidebarCollapsedMap,
+    rightCollapsed,
+    rightMode,
+    bottomCollapsed,
+    bottomTab,
+    subPanelByActivity,
+  ]);
 
   // one poll loop for the live PC telemetry (bottom-bar strip + System panel share it).
   useTelemetryPolling();
@@ -616,7 +733,7 @@ function App(): ReactElement {
       navigate: (id) => setActivity(id),
       togglePalette: () => setPaletteOpen((v) => !v),
       toggleSidebar: toggleSidebarForActivity,
-      toggleRightRail: () => setRightCollapsed((v) => !v),
+      toggleRightRail: () => toggleRail(),
       toggleBottomPanel: () => setBottomCollapsed((v) => !v),
       openBottomPanel: (tab) => {
         setBottomTab(tab);
@@ -638,7 +755,9 @@ function App(): ReactElement {
       focusNext: () => cycleShellFocus(1),
       focusPrev: () => cycleShellFocus(-1),
     }),
-    [toggleSidebarForActivity],
+    // `toggleRail` is `useCallback([])`-stable, so listing it costs no re-memo and makes the
+    // dependency explicit instead of relying on a reader to verify the identity by hand.
+    [toggleSidebarForActivity, toggleRail],
   );
 
   // Global keybindings driven by the registry (⌘K palette · ⌘B sidebar · ⌥⌘B right rail ·
@@ -684,7 +803,7 @@ function App(): ReactElement {
   useEffect(() => {
     const onOpenAgent = (e: Event): void => {
       const prompt = (e as CustomEvent<{ prompt?: string }>).detail?.prompt;
-      setRightCollapsed(false);
+      forceOpenRail();
       setRightMode("agent");
       if (prompt) {
         // defer past the commit so the (possibly just-mounted) pane is listening.
@@ -695,7 +814,9 @@ function App(): ReactElement {
     };
     window.addEventListener("prometheus:open-agent", onOpenAgent);
     return () => window.removeEventListener("prometheus:open-agent", onOpenAgent);
-  }, []);
+    // `forceOpenRail` is `useCallback([])`-stable, so this still subscribes exactly once —
+    // listing it is what makes that a checked fact rather than a comment.
+  }, [forceOpenRail]);
 
   // Open-resource bus: any surface can dispatch prometheus:open-file / open-folder and
   // we route it to the editor (a tab for a file, the workspace root for a folder) — so a
@@ -761,6 +882,42 @@ function App(): ReactElement {
   // An activity with no registered sidebar body shows no empty column (#6); otherwise
   // honor the per-route preference (editor defaults collapsed — it owns its own tools,
   // but a registered body means the user CAN open it deliberately, APP-002).
+  /**
+   * The rail's lower half for the CURRENT activity.
+   *
+   * `resolveSubPanel` falls back to the activity's first panel when the persisted id names a
+   * panel that no longer exists — an operator who quit on "Coverage" after that panel was
+   * renamed would otherwise reopen to a rail with nothing selected and a blank side pane.
+   */
+  const railSubPanels = subPanelsFor(activity);
+  const activeSubPanel = resolveSubPanel(activity, subPanelByActivity[activity]);
+  const selectSubPanel = useCallback(
+    (id: string): void => {
+      setSubPanelByActivity((m) => (m[activity] === id ? m : { ...m, [activity]: id }));
+    },
+    [activity],
+  );
+  /**
+   * The KEEP-ALIVE editor's own panel selection — bound to the `editor` key, never to whichever
+   * activity happens to be showing.
+   *
+   * The pair above is activity-relative, which is right for the rail and wrong for the editor:
+   * the editor subtree stays mounted across navigations (`editorEverVisited`) and is now
+   * CONTROLLED, so its internal `setActivity` calls `onSubPanel` instead of its own state. Handed
+   * the activity-relative setter it wrote the editor's panel id under the VISIBLE route's key —
+   * approving an agent diff from Home persisted `home: "debug"` into `prometheus.layout` while
+   * the editor's real selection never moved, so the gate verdict it switched to was never
+   * surfaced. The read side matters equally: `subPanelByActivity[activity]` is undefined for any
+   * non-editor activity, so while hidden the editor saw no panel at all.
+   *
+   * Hard-coding `"editor"` is safe — `SUBPANELS` registers panels for that key only, and
+   * `EditorRoute` is rendered under no other.
+   */
+  const editorSubPanel = resolveSubPanel("editor", subPanelByActivity.editor);
+  const selectEditorSubPanel = useCallback((id: string): void => {
+    setSubPanelByActivity((m) => (m.editor === id ? m : { ...m, editor: id }));
+  }, []);
+
   const sidebarCollapsedForRoute = !hasSidebarBody(activity)
     ? true
     : effectiveSidebarCollapsed(sidebarCollapsedMap, activity);
@@ -771,7 +928,23 @@ function App(): ReactElement {
     // Editor owns its own 8px island gaps; Home owns its own 26/30px mission-control
     // padding; every other route gets the calm default (08 §2.4 density).
     activity === "editor"
-      ? { flex: 1, minWidth: 0, minHeight: 0, overflow: "hidden" }
+      ? // The editor MUST be a flex column here.
+        //
+        // Without it `<main>` is a block box, so the keep-alive wrapper's `flex: 1` is inert and
+        // the wrapper is auto-height; `EditorRoute`'s own `height: 100%` then resolves against an
+        // auto-height parent, which CSS defines as `auto`. The whole IDE therefore sized itself to
+        // its CONTENT and left the bottom of the window empty — the "editor is shrunk for no
+        // apparent reason" report. Every link in the chain below this one was already correct,
+        // which is why it survived so long: the single missing `display` was two levels up from
+        // anything that looked wrong.
+        {
+          flex: 1,
+          minWidth: 0,
+          minHeight: 0,
+          overflow: "hidden",
+          display: "flex",
+          flexDirection: "column",
+        }
       : activity === "home"
         ? { flex: 1, minWidth: 0, minHeight: 0, overflow: "auto" }
         : { flex: 1, minWidth: 0, minHeight: 0, overflow: "auto", padding: "18px 20px" };
@@ -808,10 +981,13 @@ function App(): ReactElement {
         onCommandPalette={() => setPaletteOpen(true)}
         enginePill={enginePill}
         onEngineStatus={openHealth}
-        onRun={() => executeCommandId("debug.start", cmdCtx)}
-        onDebug={() => executeCommandId("debug.start", cmdCtx)}
-        onStop={() => executeCommandId("debug.stop", cmdCtx)}
-        running={aiRunningCount > 0}
+        onRun={() => executeCommandId("run.config", cmdCtx)}
+        onDebug={() => executeCommandId("run.debug", cmdCtx)}
+        onStop={() => executeCommandId("run.stop", cmdCtx)}
+        // …and `running` now means a RUN or DEBUG session, which is what the Stop button
+        // next to it acts on. It was wired to the agent-run count, so the toolbar lit up
+        // while the agent was thinking and stayed dark through an actual debug session.
+        running={runSessionActive}
         onOpenProject={() => setActivity("editor")}
       />
       {/* §2: the main row lays islands out with 8px gaps on the inset ground. */}
@@ -831,10 +1007,13 @@ function App(): ReactElement {
           active={activity}
           sidebarOpen={!sidebarCollapsedForRoute}
           onSelect={handleSelectActivity}
-          aiOpen={!rightCollapsed}
+          aiOpen={!railIsCollapsed}
           aiRunningCount={aiRunningCount}
-          onToggleAI={() => setRightCollapsed((v) => !v)}
+          onToggleAI={() => toggleRail()}
           onSettings={() => setSettingsOpen(true)}
+          subPanels={railSubPanels}
+          activeSubPanel={activeSubPanel}
+          onSelectSubPanel={selectSubPanel}
         />
         <Sidebar
           activity={activity}
@@ -890,6 +1069,16 @@ function App(): ReactElement {
                       setBottomTab(tab);
                       setBottomCollapsed(false);
                     }}
+                    // §2-j's second step. THIS is the live editor mount — the one below in
+                    // `renderActivity` is unreachable (`activity === "editor" ? null : …`),
+                    // because the editor is kept alive here across navigations. Passing the
+                    // prop to the switch alone put it into dead code.
+                    treeOverlay={collapse.tree === "overlay"}
+                    // the rail's lower half drives this now — see shell/ActivityBar.tsx. Bound to
+                    // the EDITOR's own key, not the visible activity's: this mount outlives
+                    // navigation away from the editor (see `selectEditorSubPanel`).
+                    {...(editorSubPanel !== undefined ? { subPanel: editorSubPanel } : {})}
+                    onSubPanel={selectEditorSubPanel}
                   />
                 </div>
               )}
@@ -899,16 +1088,26 @@ function App(): ReactElement {
                   Editor/Docs/Chat do not read the engine at all. */}
               {activity === "editor" ? null : ENGINE_BACKED.has(activity) ? (
                 <EngineGate>
-                  {renderActivity(activity, setActivity, (tab) => {
-                    setBottomTab(tab);
-                    setBottomCollapsed(false);
-                  })}
+                  {renderActivity(
+                    activity,
+                    setActivity,
+                    (tab) => {
+                      setBottomTab(tab);
+                      setBottomCollapsed(false);
+                    },
+                    collapse.tree === "overlay",
+                  )}
                 </EngineGate>
               ) : (
-                renderActivity(activity, setActivity, (tab) => {
-                  setBottomTab(tab);
-                  setBottomCollapsed(false);
-                })
+                renderActivity(
+                  activity,
+                  setActivity,
+                  (tab) => {
+                    setBottomTab(tab);
+                    setBottomCollapsed(false);
+                  },
+                  collapse.tree === "overlay",
+                )
               )}
             </ErrorBoundary>
           </main>
@@ -955,10 +1154,10 @@ function App(): ReactElement {
           )}
         </div>
         <RightRail
-          collapsed={rightCollapsed}
+          collapsed={railIsCollapsed}
           mode={rightMode}
           onModeChange={setRightMode}
-          onToggle={() => setRightCollapsed((v) => !v)}
+          onToggle={() => toggleRail()}
           // §2.5: the rail is GLOBAL and hosts the ONE AgentPane on every route (the editor
           // no longer mounts its own), so a chat started on Home is the same session you
           // keep talking to in the editor.
@@ -976,7 +1175,7 @@ function App(): ReactElement {
           {...(activeSessionTitle ? { sessionLabel: activeSessionTitle } : {})}
           onNewSession={() => {
             useAiSessionStore.getState().newSession();
-            setRightCollapsed(false);
+            forceOpenRail();
           }}
           activity={agentActivity}
         />
@@ -999,6 +1198,10 @@ function App(): ReactElement {
         )}
         <ShellStatusBar
           verdict={shieldTier}
+          // §7's first entry is "🛡 gate armed" — an ARMED claim, which only the health
+          // probe can answer. Home's chip learned this first; the status bar is the same
+          // question in the piece of chrome that is never off screen.
+          {...(engineHealth ? { armed: engineHealth.nemesisPresent === true } : {})}
           venv={venvLabel}
           model={servedModel}
           branch={branch}
@@ -1037,8 +1240,14 @@ function App(): ReactElement {
           // settings, and editor-scoped actions all actually run now. Unknown ids (e.g.
           // models.* / python.* surfaced from other routes) fall back to a navigate.
           if (!executeCommandId(id, cmdCtx)) {
-            const target = activityForCommand(id);
-            if (target) setActivity(target);
+            const target = commandTarget(id);
+            if (target) {
+              // LATCH THE SEGMENT FIRST — the route mounts after setActivity, and a bare
+              // navigate lands `python.selectInterpreter` on Workspace/Repos.
+              if (target.tab && (target.activity === "catalog" || target.activity === "workspace"))
+                requestRouteTab(target.activity, target.tab);
+              setActivity(target.activity);
+            }
           }
           setPaletteOpen(false);
         }}
@@ -1109,7 +1318,7 @@ function selectStyle(): CSSProperties {
     borderRadius: "var(--radius-md, 6px)",
     padding: "var(--space-3, 6px) var(--space-4, 8px)",
     fontFamily: "var(--font-ui)",
-    fontSize: "var(--text-body-size, 0.9375rem)",
+    fontSize: "var(--text-body-size, 0.875rem)",
   };
 }
 

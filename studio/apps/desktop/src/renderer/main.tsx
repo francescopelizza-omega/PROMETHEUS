@@ -74,9 +74,11 @@ import { createRoot } from "react-dom/client";
 import { VisualHarness, visualHarnessRequested } from "./visual-harness.js";
 
 import App from "./App.js";
+import { hydrateEffortFromDisk } from "./ide/ai/effort-store.js";
 import { createQueryClient } from "./query/client.js";
 import { ErrorBoundary } from "./shell/ErrorBoundary.js";
 import { ThemeProvider } from "./shell/index.js";
+import { hydrateAuthLevel } from "./stores/authorisation.js";
 
 const container = document.getElementById("root");
 if (!container) {
@@ -100,6 +102,25 @@ window.addEventListener("error", (e) => {
 // One QueryClient for the renderer's lifetime (created outside render so HMR /
 // StrictMode double-invoke never spawns a second cache).
 const queryClient = createQueryClient();
+
+/**
+ * Adopt the SHARED autonomy level before the first interaction.
+ *
+ * The level lives in `~/.prometheus/config/authorisation.json` — the same file `prometheus`
+ * reads on the terminal — and reaching it means IPC, which is async. The store seeds itself
+ * synchronously from this window's local mirror so the pill never flashes a wrong value, and
+ * this replaces the seed with the file's value a tick later. Fire-and-forget on purpose: a
+ * missing bridge or an unreadable home must not delay or block the mount.
+ */
+void hydrateAuthLevel();
+
+/**
+ * …and the shared thinking-effort tier, for the same reason and from the same config root.
+ *
+ * Both are fire-and-forget: a missing bridge or an unreadable home must not delay the mount,
+ * and each store seeds itself synchronously from this window's own mirror first.
+ */
+void hydrateEffortFromDisk();
 
 /**
  * The §9 decision-card baseline surface, in place of the workbench.

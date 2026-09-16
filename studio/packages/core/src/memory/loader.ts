@@ -180,6 +180,13 @@ export function validateMemoryWrite(input: MemoryWriteInput): MemoryWriteResult 
   const slug = name ? slugify(name) : "";
   if (!name) errors.push('"name" is required — a short topic title, e.g. "deploy order".');
   else if (!slug) errors.push('"name" must contain at least one letter or digit.');
+  else if (name.length > MAX_NAME_CHARS) {
+    // `slugify` CLAMPS at MAX_NAME_CHARS, so two longer names sharing a prefix produce the
+    // same `<slug>.md` and the second write silently replaces the first — a memory the user
+    // was told had been saved, gone, with no error anywhere. Every other length-bounded field
+    // here is validated; this one was clamped instead, which is the one option that loses data.
+    errors.push(`"name" must be ${MAX_NAME_CHARS} characters or fewer.`);
+  }
   // (reachable only for a name that really is punctuation/symbol-only — a name in ANY script
   //  now slugifies, which is why this message can finally be taken at face value.)
 

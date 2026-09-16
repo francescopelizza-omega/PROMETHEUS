@@ -37,3 +37,12 @@ export {
   mergeDayRecords,
   startOfLocalDayMs,
 } from "./budgetGate.js";
+export {
+  type SpendLedgerRecord,
+  appendSharedSpend,
+  dayFileName as sharedDayFileName,
+  parseLedger as parseSpendLedger,
+  readSharedDay,
+  sharedAccountingDir,
+  sharedDayFile,
+} from "./spend-ledger.js";

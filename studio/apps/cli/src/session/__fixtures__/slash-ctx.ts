@@ -72,12 +72,21 @@ export function makeFakeSlashCtx() {
       liveTuning = { ...liveTuning, ...patch };
       calls.tunes.push(patch);
     },
+    // The hosts persist here; the fixture only has to move the live tuning, so a test can read
+    // back what `/think` asked for.
+    setEffort: (tier) => {
+      liveTuning = { ...liveTuning, effort: tier };
+      calls.tunes.push({ effort: tier });
+    },
     control: (s) => {
       calls.controls.push(s);
     },
     setCwd: (d) => {
       calls.setCwds.push(d);
       cwd = d;
+      // the fixture has no filesystem — every move "succeeds", which keeps command tests
+      // about the COMMAND rather than about statSync.
+      return { ok: true, cwd: d };
     },
     compact: () => {
       calls.delegated.push("compact");

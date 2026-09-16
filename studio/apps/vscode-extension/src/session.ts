@@ -8,6 +8,11 @@
  * output, the multi-round fold) lives in core and is inherited rather than re-implemented.
  */
 
+import {
+  type AuthToolEffect,
+  authDecision,
+  scopedWriteDecision,
+} from "@prometheus/core/agent-authorization";
 import type {
   AgentTuning,
   ConfirmResult,
@@ -19,6 +24,8 @@ import type {
 } from "@prometheus/core/agent-loop";
 import { runAgentTurn } from "@prometheus/core/agent-loop";
 import type { ToolDef } from "@prometheus/core/agent-tools";
+import { exposedTools } from "@prometheus/core/agent-tools";
+import type { EffortTier } from "@prometheus/core/ai-effort";
 
 import { VSCODE_EXTRA_TOOLS, VSCODE_TOOL_ALLOW } from "./tool-runner.js";
 
@@ -43,17 +50,39 @@ export const VSCODE_SYSTEM_PROMPT = [
  *
  * `yes` needs the same care it needs everywhere: it does NOT mean "approve everything".
  * `autoApprovable` refuses any tool carrying `destructiveHint` even WITH the grant, so
- * `authLevel >= 1` only ever lifts READ-ONLY tools out of the confirm path. `write_file`,
- * `propose_edit`, `apply_patch`, `delete_file` and `move_file` reach a human at every level.
+ * `yes` only ever lifts READ-ONLY tools out of the confirm path: `apply_patch`, `delete_file`
+ * and `move_file` carry that hint, so the GRANT never covers them.
  *
  * Getting it wrong in either direction is a real failure: left off, the agent asks permission
  * to READ a file — dozens of modal dialogs per turn, which is exactly the pressure that makes
  * a user click a blanket allow.
+ *
+ * `yes` is NOT the whole story any more, and it must not become it again. It is one bit, and
+ * collapsing the 0-7 ladder into it was a real defect: every level from 1 to 7 behaved
+ * identically while the contributed setting advertised the CLI's ladder. The number is carried
+ * to `SessionDeps.authLevel` and applied by `ChatSession.autoApprovesCall`, which is what makes
+ * `write_file`/`propose_edit` auto-approve inside the opened folder at the levels that say so —
+ * and still prompt for a target outside it.
+ *
+ * The LADDER is a wider grant than `yes`, deliberately and identically to the other surfaces:
+ * `destructive` is its last category, so levels 6 ("trusted") and 7 ("run all") do auto-approve
+ * a delete. That is the explicit global opt-in those two rungs mean, it is what the same setting
+ * already does in the terminal, and nemesis still hard-stops danger underneath it.
+ * (`NEVER_AUTO_TOOLS` — `propose_elevated` — is not reachable here at all: it is absent from
+ * `VSCODE_TOOL_ALLOW`, so the loop never offers it. Core's own suite covers that rule.)
  */
 export function vscodeTuning(
   model: string,
   authLevel = 1,
   permissionMode: PermissionModeId = "default",
+  /**
+   * The reasoning-effort tier, or undefined to leave the model's own default alone.
+   *
+   * This parameter did not exist, so `tuning.effort` was always unset and `llm.ts`'s
+   * `resolveEffort` call — which is fully wired — never had anything to resolve. The editor was
+   * the one surface that could not ask a model to think harder.
+   */
+  effort?: EffortTier,
 ): AgentTuning {
   return {
     model: { provider: "local", modelId: model },
@@ -69,6 +98,9 @@ export function vscodeTuning(
     verbosity: "normal",
     yes: authLevel >= 1,
     permissionMode,
+    // Omitted rather than set to a made-up default: an absent tier means "the model's own
+    // default", which is not the same claim as any rung of the ladder.
+    ...(effort ? { effort } : {}),
   };
 }
 
@@ -101,6 +133,28 @@ export interface SessionDeps {
    */
   confirm(call: ToolCall): Promise<ConfirmResult>;
   tuning: AgentTuning;
+  /**
+   * The resolved autonomy level, 0-7, on the SAME ladder as the CLI and the desktop app.
+   *
+   * Carried as a NUMBER rather than pre-collapsed into `tuning.yes`. `yes` is one bit and the
+   * loop's broker needs it (it is what lifts read-only tools out of the confirm path entirely),
+   * but collapsing to it was the whole defect: `prometheus.authLevel` advertised 0-7 and every
+   * level from 1 to 7 behaved identically, because nothing else in this host ever consulted the
+   * ladder. `autoApprovesCall` below is what makes the rungs mean something here.
+   *
+   * Optional so an embedder that has no level still gets today's behaviour (ask for everything
+   * `yes` does not cover) rather than an accidental grant.
+   */
+  authLevel?: number;
+  /**
+   * Is this path inside the workspace the user opened?
+   *
+   * A write the LEVEL would auto-approve still prompts when its target lands outside the
+   * working set — `scopedWriteDecision`'s rule, and the reason `authDecision` alone is not
+   * enough: "level >= 2 auto-approves edits" means the files the human is working on, not an
+   * arbitrary-write primitive. Fail-closed: an unresolvable target counts as OUTSIDE.
+   */
+  insideWorkingSet?: (path: string) => boolean;
   /**
    * The endpoint's context window, in tokens, so a session can WARN before it wedges.
    *
@@ -248,13 +302,60 @@ export class ChatSession {
     return run;
   }
 
+  /**
+   * The ladder, applied — then the human, for everything it does not cover.
+   *
+   * `tuning.yes` alone was the whole authorization story on this surface, so
+   * `prometheus.authLevel` advertised "0-7, the SAME ladder as the CLI and the desktop app,
+   * 7 = run all" while levels 1 through 7 were behaviourally identical: the loop reads only the
+   * boolean, and nothing here consulted the number. A user who set 7 after reading that
+   * description still got a modal for every edit; one who set 2 got no more autonomy than 1.
+   *
+   * Mirrors the CLI host's `hostAutoApproves` (apps/cli/src/session/host.ts), including its
+   * fail-closed rules:
+   *   - `scopedWriteDecision`, NOT bare `authDecision`, for the write category. "Level >= 2
+   *     auto-approves edits" means the files the human is working on; `authDecision` alone would
+   *     auto-approve `write_file` for ANY path, which is the arbitrary-write escape the scoped
+   *     variant exists to close.
+   *   - a target that cannot be resolved counts as OUTSIDE the working set, so it prompts.
+   *   - no level, or no way to test scope, means no auto-approval at all.
+   * `run_command` needs no equivalent here — this host does not dispatch it (see
+   * VSCODE_EXTRA_TOOLS).
+   *
+   * Destructive tools (`delete_file`, `move_file`, `apply_patch`) carry `destructiveHint`, which
+   * `authDecision` refuses at every level including 7 — so they still reach a human, exactly as
+   * the tuning docstring promises.
+   */
+  private autoApprovesCall(call: ToolCall): boolean {
+    const level = this.deps.authLevel;
+    if (typeof level !== "number") return false;
+    const ann: AuthToolEffect | undefined = exposedTools(this.deps.tuning.tools).find(
+      (t) => t.name === call.name,
+    )?.annotations;
+    // The two tools whose NAME is not enough to know the risk — core classifies both as writes.
+    if (call.name === "write_file" || call.name === "propose_edit") {
+      const inside = this.deps.insideWorkingSet;
+      if (!inside) return false; // no scope test available ⇒ never auto-approve a write
+      const raw = typeof call.args.path === "string" ? call.args.path : "";
+      if (!raw) return false;
+      return scopedWriteDecision(level, call.name, ann, inside(raw)) === "allow";
+    }
+    return authDecision(level, call.name, ann) === "allow";
+  }
+
+  /** Auto-approve what the level covers; otherwise ask the human (the seam that always existed). */
+  private confirmOrAutoApprove(call: ToolCall): Promise<ConfirmResult> {
+    if (this.autoApprovesCall(call)) return Promise.resolve({ approved: true });
+    return this.deps.confirm(call);
+  }
+
   private async runTurn(sinks: SessionSinks): Promise<void> {
     let streamed = false;
     try {
       for await (const ev of runAgentTurn(this.thread, this.deps.tuning, {
         llm: this.deps.llm,
         runTool: this.deps.runTool,
-        confirm: this.deps.confirm,
+        confirm: (call) => this.confirmOrAutoApprove(call),
         signal: this.controller?.signal,
       })) {
         switch (ev.kind) {

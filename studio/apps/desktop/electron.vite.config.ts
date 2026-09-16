@@ -23,7 +23,30 @@ import { createRequire } from "node:module";
 import { resolve } from "node:path";
 import react from "@vitejs/plugin-react";
 import { defineConfig, externalizeDepsPlugin } from "electron-vite";
-import type { Plugin } from "vite";
+import type { BuildOptions, Plugin } from "vite";
+
+/**
+ * Vite 5 / electron-vite 5 TYPE skew — do not delete without re-running
+ * `pnpm --filter @prometheus/desktop run typecheck`.
+ *
+ * electron-vite@5 declares `peerDependencies.vite: "^5.0.0 || ^6.0.0 || ^7.0.0"` and it
+ * genuinely does accept Vite 5 AT RUNTIME. Its own `.d.ts`, however, types all three
+ * build blocks as `extends BuildEnvironmentOptions` — a name Vite only began exporting
+ * in 6.x (Vite 5.4 has `BuildOptions`). Under Vite 5 that import resolves to nothing, so
+ * `MainBuildOptions` / `PreloadBuildOptions` / `RendererBuildOptions` collapse to just
+ * their electron-vite-specific mixins (`externalizeDeps`, `bytecode`, `isolatedEntries`)
+ * and every ordinary Vite build key set below — `outDir`, `rollupOptions`, `sourcemap` —
+ * is rejected with TS2769 "Object literal may only specify known properties". `skipLibCheck`
+ * hides the broken import inside node_modules, but not its consequence at these call sites.
+ *
+ * Re-supplying the missing alias repairs the three `build:` blocks without altering the
+ * config's shape or its runtime behaviour by one byte. Remove this augmentation when the
+ * workspace moves to Vite 6+, which exports `BuildEnvironmentOptions` for real — leaving it
+ * in place then would merge against the genuine declaration.
+ */
+declare module "vite" {
+  interface BuildEnvironmentOptions extends BuildOptions {}
+}
 
 const ROOT = resolve(__dirname, "..", "..");
 const require = createRequire(import.meta.url);
@@ -252,6 +275,21 @@ export default defineConfig({
           // out/main/extRunner.js) so utilityProcess.fork can load it from the same dir,
           // exactly like worker.js. Extensions run in THIS process — never main/renderer.
           extRunner: resolve(__dirname, "src/ext-runner/index.ts"),
+          // The local-runner WATCHDOG entry (engine-bridge's ollama-watchdog-entry.ts). Built
+          // beside main for the same reason as worker/extRunner: it is spawned BY PATH, never
+          // imported, so nothing in the module graph pulls it in and rollup has no reason to
+          // emit it. Without this input the file simply does not exist in a packaged build, and
+          // because the spawn is `stdio: "ignore"` and fire-and-forget the only symptom is that
+          // the 15-minute idle stop and the critical-RAM eviction silently never run — the exact
+          // guard that keeps a resident model from taking the machine's display down with it.
+          // The rollup input KEY names the output file, so it must match the basename
+          // `watchdogEntryPath()` resolves (ollama-watchdog-entry.js). It is spawned as PLAIN
+          // node (ELECTRON_RUN_AS_NODE), which has no asar support, so electron-builder.yml
+          // unpacks out/main/** — keep those two facts together if either moves.
+          "ollama-watchdog-entry": resolve(
+            ROOT,
+            "packages/engine-bridge/src/ollama-watchdog-entry.ts",
+          ),
         },
       },
     },

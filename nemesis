@@ -930,6 +930,17 @@ _ARC_LINK_RULE = Rule(
     "nemesis skips links on extraction; verify why a source archive ships links.",
     action="report", klass="container", flags=0,
 )
+_FILE_UNSCAN_RULE = Rule(
+    "FILE-UNSCANNABLE", "File could not be inspected", "archive", "HIGH", "",
+    "nemesis could not run its text detectors on this file (it contains NUL bytes despite a "
+    "source/doc/config extension, or it exceeds the text-scan size cap) — its contents are an "
+    "unverified blind spot.",
+    "Inspect the file by hand, or raise --max-text-mb, before trusting this artifact.",
+    # Same contract as ARC-UNSCANNABLE: klass=container so the block is carried by
+    # build_verdict's dedicated 'unscannable blind spot' reason and --allow-unscannable
+    # still works, rather than by malware block_score.
+    action="report", klass="container", flags=0,
+)
 _ARC_LINK_ESC_RULE = Rule(
     "ARC-LINK-ESCAPE", "Link escapes the archive tree", "archive", "CRITICAL", "",
     "An archive member is a link whose target escapes the extraction tree or points "
@@ -1154,14 +1165,30 @@ _DECODE_MAX_BYTES = 4 * 1024 * 1024
 
 
 def _maybe_decompress(data: bytes) -> bytes:
+    """Decompress an embedded gzip/zlib blob, capped at `_DECODE_MAX_BYTES`.
+
+    The cap is applied DURING decompression, not after. This used to read
+    `gzip.decompress(data)[:_DECODE_MAX_BYTES]` — the slice ran only once the entire stream was
+    already resident, so a ≤4 MiB base64 blob of compressed zeros allocated ~4 GB before being
+    truncated to 4 MiB. That is a decompression bomb reachable from any scanned text file (via
+    `_scan_decoded` and `_extract_urls`), and on an Apple Silicon box with unified memory it is
+    the documented black-screen path: the scanner is supposed to be what protects you from
+    hostile input, not a way to hand it your RAM.
+
+    `decompressobj().decompress(data, max_length)` stops at `max_length` output bytes and leaves
+    the remainder in `unconsumed_tail`, which we drop — a payload that needs more than 4 MiB of
+    decoded prefix to look malicious is out of scope for this heuristic anyway. Any failure
+    returns the ORIGINAL bytes, exactly as before, so a non-compressed blob is unaffected."""
     try:
         if data[:2] == b"\x1f\x8b":
-            return gzip.decompress(data)[:_DECODE_MAX_BYTES]
-        if data[:1] == b"\x78":  # zlib
-            return zlib.decompress(data)[:_DECODE_MAX_BYTES]
+            wbits = 16 + zlib.MAX_WBITS   # gzip wrapper
+        elif data[:1] == b"\x78":        # raw zlib
+            wbits = zlib.MAX_WBITS
+        else:
+            return data
+        return zlib.decompressobj(wbits).decompress(data, _DECODE_MAX_BYTES)
     except (OSError, zlib.error, EOFError):
-        pass
-    return data
+        return data
 
 
 # -- short base64 (CLI-041): catch sub-40-char b64 payloads that slip the {40,} floor.
@@ -2501,8 +2528,35 @@ class Scanner:
             # /bin/sh, embedded commands) — beyond magic + hash.
             if exe_hit or ext in _BIN_EXTS:
                 findings += self._scan_binary_strings(name, raw)
+            else:
+                # FAIL-CLOSED: a single NUL anywhere in the first 4 KiB used to silently
+                # disable EVERY text detector — signatures, IOC feeds, Trojan-Source,
+                # entropy, the Python AST SAST, decode-and-recurse, SCA — and this returned
+                # an empty finding list, which build_verdict reads as a clean ALLOW.
+                # A dropper only had to carry one NUL in a leading comment to pass the gate.
+                # A file whose extension says "text" but whose bytes say "binary" is a blind
+                # spot, and this gate reports blind spots rather than passing them.
+                if (
+                    ext in _SOURCE_EXT
+                    or ext in _DOC_EXTS
+                    or ext in _URL_CTX_CONFIG_EXTS
+                    or (ext == "" and head.startswith(b"#!"))
+                ):
+                    findings.append(Finding(
+                        name, 1, 1, _FILE_UNSCAN_RULE,
+                        "NUL byte in first 4096 bytes; text detectors not run",
+                    ))
             return findings
         if total_size > self.text_max:
+            # FAIL-CLOSED: an oversized text file was skipped silently, so padding a dropper
+            # past the cap produced zero findings and an ALLOW verdict. The defang path already
+            # refuses to claim INERT for this case (_quick_url_finding_count counts `oversized`);
+            # the scan/gate path now reports it too.
+            findings.append(Finding(
+                name, 1, 1, _FILE_UNSCAN_RULE,
+                f"{total_size} bytes exceeds text-scan cap of {self.text_max}; "
+                f"text detectors not run",
+            ))
             return findings
 
         try:
@@ -4812,7 +4866,9 @@ def build_verdict(findings: list[Finding], scanner: Scanner, target: str,
     score = min(100, sum(_SEV_WEIGHT[f.rule.severity] for f in findings))
     # hard blind spot (whole archive unreadable) blocks; a member-level encrypted
     # blind spot warns — the rest of the archive WAS scanned (plan §8).
-    unscannable_hard = any(f.rule.rid == "ARC-UNSCANNABLE" for f in findings)
+    unscannable_hard = any(
+        f.rule.rid in ("ARC-UNSCANNABLE", "FILE-UNSCANNABLE") for f in findings
+    )
     unscannable_soft = any(f.rule.rid == "ARC-ENCRYPTED" for f in findings)
     unscannable = unscannable_hard or unscannable_soft
     hb = set(policy.get("high_block_categories", []))

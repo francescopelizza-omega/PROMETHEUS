@@ -435,6 +435,7 @@ function HierRows({
                   padding: "1px 0",
                   overflow: "hidden",
                   textOverflow: "ellipsis",
+                  minWidth: 0, // flex/grid floor — without it the ellipsis is unreachable
                   whiteSpace: "nowrap",
                 }}
               >

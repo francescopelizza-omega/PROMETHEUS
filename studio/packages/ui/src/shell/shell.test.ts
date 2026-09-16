@@ -14,7 +14,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { hasActivityIcon } from "./icon-names.js";
+import { ACTIVITY_ICON_NAMES, hasActivityIcon } from "./icon-names.js";
 import {
   ACTIVITIES,
   ACTIVITY_REDIRECTS,
@@ -37,27 +37,21 @@ import type { PaletteItem } from "./palette.js";
 
 /* ── activity icons (APP-071) ─────────────────────────────────────────────── */
 
-test("hasActivityIcon: every editor inner-rail + open-button icon has geometry", () => {
-  // ActivityIcon renders a blank dot when a name is missing from PATHS — gate each name
-  // the editor route uses so a typo can't ship an invisible rail button.
-  const EDITOR_RAIL_ICONS = [
-    "Files",
-    "Search",
-    "GitBranch",
-    "Bug",
-    "FlaskConical",
-    "ListChecks",
-    "ListTree",
-    "CallHierarchy",
-    "TypeHierarchy",
-    "History",
-    "FileText", // open-file button
-    "FolderOpen", // open-folder button
-  ];
-  for (const name of EDITOR_RAIL_ICONS) {
+test("hasActivityIcon: a name in the catalogue has geometry, an unknown one does not", () => {
+  // This used to hold a HAND-COPIED list of the editor route's rail icons, and that copy is
+  // precisely why two entries could ship drawing the same glyph without anything failing: the
+  // real array grew a duplicate, and the test was reading a different list. The rail's own
+  // contract — every icon present, and no two entries sharing one — now lives in
+  // `apps/desktop/src/routes/editor-rail.test.ts`, which parses the REAL declaration.
+  //
+  // What belongs here is only what this package can own: the catalogue is self-consistent
+  // (name↔geometry is already a TYPE error via `Record<ActivityIconName, ReactNode>`), and an
+  // unknown name is reported as missing rather than silently accepted.
+  for (const name of ACTIVITY_ICON_NAMES) {
     assert.equal(hasActivityIcon(name), true, `missing ActivityIcon geometry: ${name}`);
   }
   assert.equal(hasActivityIcon("NoSuchIcon"), false); // negative control
+  assert.equal(hasActivityIcon(""), false);
 });
 
 /* ── activity routing ────────────────────────────────────────────────────── */
@@ -254,6 +248,39 @@ test("deriveShield: null verdict + fresh DB ⇒ clean placeholder", () => {
 
 test("deriveShield: null verdict + stale DB ⇒ stale", () => {
   assert.equal(deriveShield(null, { dbStale: true }).state, "stale");
+});
+
+/* ── armed: is there a SCANNER at all (handoff §2.3.1/§7 "gate armed") ───── */
+
+test("deriveShield: a CONFIRMED-present scanner with nothing scanned reads 'armed'", () => {
+  const s = deriveShield(null, { armed: true });
+  assert.equal(s.state, "armed");
+  assert.equal(s.label, "armed");
+  assert.equal(s.role, "ok");
+});
+
+test("deriveShield: an ABSENT scanner outranks every verdict and is never green", () => {
+  // this is the whole point: before `armed`, a build with nemesis missing fell through
+  // to the benign `clean` placeholder and painted the chip GREEN while nothing at all
+  // was being gated.
+  for (const v of [null, undefined, "allow", "warn", "block", "error"] as const) {
+    const s = deriveShield(v, { armed: false });
+    assert.equal(s.state, "unarmed", `verdict ${String(v)} must not outrank a missing scanner`);
+    assert.equal(s.role, "danger");
+    assert.equal(s.label, "unarmed");
+  }
+  // …and staleness cannot soften it either
+  assert.equal(deriveShield(null, { armed: false, dbStale: true }).state, "unarmed");
+});
+
+test("deriveShield: armed only speaks when the caller HAS a probe", () => {
+  // undefined = "we have not looked", which must behave exactly as before — the chip
+  // may not accuse a scanner nobody asked about.
+  assert.equal(deriveShield(null, {}).state, "clean");
+  assert.equal(deriveShield(null).state, "clean");
+  // a real verdict still wins over the bare "armed" placeholder
+  assert.equal(deriveShield("warn", { armed: true }).state, "warn");
+  assert.equal(deriveShield("allow", { armed: true }).state, "clean");
 });
 
 /* ── theme / density attribute resolution (system sync + override) ───────── */

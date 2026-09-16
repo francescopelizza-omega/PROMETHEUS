@@ -139,7 +139,7 @@ export function SqlConsole({
           borderRadius: "var(--radius-md, 6px)",
           padding: "var(--space-2, 4px)",
           fontFamily: "var(--font-mono)",
-          fontSize: "var(--text-code-size, 0.875rem)",
+          fontSize: "var(--text-code-size, 0.78125rem)",
           resize: "vertical",
           outline: "none",
         }}

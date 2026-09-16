@@ -709,6 +709,159 @@ class PullTests(unittest.TestCase):
         self.assertIn("ollama serve", obj["hint"])
 
 
+class OllamaLibraryVisibilityTests(unittest.TestCase):
+    """`model.list` used to report ZERO ollama-installed models whenever the daemon simply
+    wasn't running right now — even though the weights were already pulled and sitting on
+    disk (`~/.ollama/models/...`), and the GUI/CLI then both offered to re-download them.
+    The fix: `_ollama_installed_models` now calls `_ensure_ollama_daemon` (starts `ollama
+    serve` if it's down but installed) instead of a bare reachability check, before it
+    decides there's nothing to index."""
+
+    def test_installed_models_visible_once_the_daemon_is_treated_as_up(self) -> None:
+        # MODELHUB_FAKE_OLLAMA short-circuits _ensure_ollama_daemon to "already up" (no real
+        # spawn) — MODELHUB_FAKE_OLLAMA_TAGS then stands in for the /api/tags body a real
+        # daemon would have answered with, so this stays fully hermetic (no live ollama).
+        tags = json.dumps({
+            "models": [
+                {
+                    "name": "gemma4:12b",
+                    "size": 7381382048,
+                    "details": {
+                        "format": "gguf",
+                        "family": "gemma4",
+                        "parameter_size": "11.9B",
+                        "quantization_level": "Q4_K_M",
+                    },
+                },
+                {"name": "qwen3.6:latest", "size": 5000000000, "details": {}},
+            ]
+        })
+        obj, _stderr, code = run_verb_env(
+            {"MODELHUB_FAKE_OLLAMA": "1", "MODELHUB_FAKE_OLLAMA_TAGS": tags},
+            "model.list",
+        )
+        self.assertEqual(code, 0)
+        self.assertTrue(obj["ok"], msg=obj.get("error"))
+        names = {m["name"] for m in obj["models"]}
+        self.assertIn("gemma4:12b", names, "an already-pulled model must not vanish from the library")
+        self.assertIn("qwen3.6:latest", names)
+        gemma = next(m for m in obj["models"] if m["name"] == "gemma4:12b")
+        self.assertEqual(gemma["source"], "ollama")
+        self.assertTrue(gemma["installed"])
+        self.assertEqual(gemma["family"], "gemma4")
+        self.assertEqual(gemma["quant"], "Q4_K_M")
+
+    def test_daemon_down_and_unstartable_is_a_clean_empty_result_not_an_error(self) -> None:
+        # No ollama binary at all, or a binary that refuses to start — model.list must
+        # degrade to "no ollama rows", never crash or emit a malformed envelope (the same
+        # fail-soft contract _ollama_installed_models's docstring already promised).
+        #
+        # FORCE_DAEMON_DOWN (not just FORCE_NO_OLLAMA) is deliberate: _ensure_ollama_daemon
+        # checks a REAL _ollama_reachable() probe before it ever looks at FORCE_NO_OLLAMA's
+        # `_which` override, so on a dev machine that happens to have a real `ollama serve`
+        # already running (e.g. started by hand, or left behind by another test elsewhere in
+        # this suite that isn't fully hermetic), FORCE_NO_OLLAMA alone does NOT stop this test
+        # from hitting that real daemon. FORCE_DAEMON_DOWN short-circuits unconditionally, so
+        # this test's result cannot depend on ambient machine/process state.
+        obj, _stderr, code = run_verb_env(
+            {"MODELHUB_FORCE_NO_OLLAMA": "1", "MODELHUB_FORCE_DAEMON_DOWN": "1"},
+            "model.list", str(HERE),
+        )
+        self.assertEqual(code, 0)
+        self.assertTrue(obj["ok"], msg=obj.get("error"))
+        self.assertIsInstance(obj["models"], list)
+        self.assertFalse(any(m.get("source") == "ollama" for m in obj["models"]))
+
+
+class OllamaReleaseTests(unittest.TestCase):
+    """`ollama.release` — the autonomous-STOP half of autonomous-start. Every branch below
+    is a SAFETY property: this must never signal a process Prometheus didn't itself start
+    (a system-wide `brew services` ollama, or one the user started by hand, or another app's
+    instance) just because Prometheus happens to be quitting. The marker
+    (`_ollama_daemon_marker_path`) is isolated to a tempdir per test via PROMETHEUS_MODELS_DIR
+    (the same seam `_default_models_dir` already honors), never the real `~/.cache/prometheus`
+    — these tests must not touch whatever the operator's own machine is actually running."""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.mkdtemp(prefix="mh-ollama-release-")
+        self.env = {"PROMETHEUS_MODELS_DIR": str(Path(self.tmp) / "models")}
+        self.marker = Path(self.tmp) / "ollama-daemon.json"
+
+    def _spawn_fake_ollama(self) -> subprocess.Popen:
+        # A SYMLINK named "ollama" to a long-lived real binary (/bin/sleep), not a copy: a
+        # copied+renamed system binary fails macOS code-signing on launch (killed instantly,
+        # `ps -o comm=` then reports "<defunct>") — a symlink resolves to the original,
+        # signature-intact binary, so `ps` reports the invoking path ("…/ollama"), exactly
+        # matching what the real `ollama` binary's own comm would report.
+        fake_bin = Path(self.tmp) / "ollama"
+        os.symlink("/bin/sleep", fake_bin)
+        return subprocess.Popen([str(fake_bin), "60"])
+
+    def test_no_marker_is_a_clean_noop(self) -> None:
+        obj, _stderr, code = run_verb_env(self.env, "ollama.release")
+        self.assertEqual(code, 0)
+        self.assertTrue(obj["ok"])
+        self.assertFalse(obj["stopped"])
+        self.assertIn("not started", obj["reason"])
+
+    def test_a_pid_that_is_not_running_is_a_clean_noop_and_clears_the_stale_marker(self) -> None:
+        # PID 1 is init/launchd — always running, never named "ollama", so this also proves
+        # the SAFETY check independently of "is it running at all": a live pid whose name
+        # doesn't match is treated exactly like a dead one — refuse, don't signal.
+        self.marker.write_text(json.dumps({"pid": 1, "started_at": 0}))
+        obj, _stderr, code = run_verb_env(self.env, "ollama.release")
+        self.assertEqual(code, 0)
+        self.assertTrue(obj["ok"])
+        self.assertFalse(obj["stopped"])
+        self.assertFalse(self.marker.exists(), "a marker that can't be honored must not linger")
+
+    def test_corrupt_marker_is_a_clean_noop(self) -> None:
+        self.marker.write_text("not json")
+        obj, _stderr, code = run_verb_env(self.env, "ollama.release")
+        self.assertEqual(code, 0)
+        self.assertTrue(obj["ok"])
+        self.assertFalse(obj["stopped"])
+
+    def test_stops_a_real_process_named_ollama_it_recorded(self) -> None:
+        # Proves the happy path end-to-end without needing the real (multi-hundred-MB)
+        # ollama binary in this test environment.
+        proc = self._spawn_fake_ollama()
+        try:
+            self.marker.parent.mkdir(parents=True, exist_ok=True)
+            self.marker.write_text(json.dumps({"pid": proc.pid, "started_at": 0}))
+            obj, _stderr, code = run_verb_env(self.env, "ollama.release")
+            self.assertEqual(code, 0, msg=obj)
+            self.assertTrue(obj["ok"], msg=obj)
+            self.assertTrue(obj["stopped"], msg=obj)
+            self.assertEqual(obj["pid"], proc.pid)
+            self.assertFalse(self.marker.exists())
+            # give the OS a moment to reap; then confirm it is REALLY gone, not just SIGTERM-sent.
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                self.fail("ollama.release reported stopped:true but the process is still alive")
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait()
+
+    def test_release_a_second_time_is_idempotent(self) -> None:
+        proc = self._spawn_fake_ollama()
+        try:
+            self.marker.parent.mkdir(parents=True, exist_ok=True)
+            self.marker.write_text(json.dumps({"pid": proc.pid, "started_at": 0}))
+            first, _e1, c1 = run_verb_env(self.env, "ollama.release")
+            second, _e2, c2 = run_verb_env(self.env, "ollama.release")
+            self.assertEqual((c1, c2), (0, 0))
+            self.assertTrue(first["stopped"])
+            self.assertFalse(second["stopped"], "nothing left to release the second time")
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait()
+
+
 # --------------------------------------------------------------------------- #
 # auto-install the runner ON THE USER'S BEHALF (OS-aware, env-stubbed)
 # --------------------------------------------------------------------------- #

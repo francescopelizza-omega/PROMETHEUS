@@ -1,3 +1,5 @@
+import assert from "node:assert/strict";
+import { test } from "node:test";
 /**
  * ai-ipc.test.ts — model streaming in MAIN (§9c).
  *
@@ -6,10 +8,10 @@
  * text all have to come back in the typed reply. And the cloud policy has to be refused
  * HERE, not merely in the renderer, or the enforcement is advisory.
  */
-import assert from "node:assert/strict";
-import { test } from "node:test";
+import { DEFAULT_AUTH_LEVEL, NETWORK_AUTH_LEVEL } from "@prometheus/core/agent-authorization";
 
 import { settings as coreSettings } from "@prometheus/core";
+import type { EvictionEvent } from "@prometheus/engine-bridge";
 import type { AiProgressEvent, AiStreamRequest } from "../shared/ipc-contract.js";
 
 import {
@@ -64,6 +66,15 @@ function recorder(): { sender: unknown; events: AiProgressEvent[] } {
 function req(over: Partial<AiStreamRequest> = {}): AiStreamRequest {
   return { runId: "r1", endpoint: LOCAL, messages: [{ role: "user", content: "hi" }], ...over };
 }
+
+/**
+ * These cloud tests are about wire shape, headers and posture — not the authorisation
+ * ladder — so they pin a level that permits network work. Without it they read the
+ * developer's own `~/.prometheus/config/authorisation.json`, and the suite's result
+ * depends on whose machine it runs on (it is `{"level": 1}` on the box this landed on,
+ * which refused all five of them).
+ */
+const CLOUD_OK = { readAuthLevel: () => 7 } as const;
 
 test("chatCompletionsUrl does not double a baseUrl that already ends in /v1", () => {
   assert.equal(
@@ -259,13 +270,38 @@ test("`keep_alive` goes to LOCAL endpoints only — a cloud provider never sees 
     req({ endpoint: { ...LOCAL, baseUrl: "https://api.example.com/v1", locality: "cloud" } }),
     undefined,
     capture as never,
+    undefined,
+    CLOUD_OK,
   );
-  assert.equal(bodies[0]?.keep_alive, "30m");
+  // DEFAULT: a bounded 60s, not the old hardcoded "30m" which held model weights for half an
+  // hour after the last prompt. Local gets the bound; cloud still gets nothing.
+  assert.equal(bodies[0]?.keep_alive, "60s");
   assert.equal(bodies[1]?.keep_alive, undefined);
   assert.deepEqual(bodies[1]?.stream_options, { include_usage: true });
+
+  // OVERRIDDEN: when the user pins a different value it still reaches LOCAL only — the
+  // local/cloud split this test exists to protect is unchanged by the default becoming a bound.
+  const prev = process.env.PROMETHEUS_LOCAL_KEEP_ALIVE;
+  process.env.PROMETHEUS_LOCAL_KEEP_ALIVE = "9m";
+  try {
+    bodies.length = 0;
+    await runAiStream(req(), undefined, capture as never);
+    await runAiStream(
+      req({ endpoint: { ...LOCAL, baseUrl: "https://api.example.com/v1", locality: "cloud" } }),
+      undefined,
+      capture as never,
+      undefined,
+      CLOUD_OK,
+    );
+    assert.equal(bodies[0]?.keep_alive, "9m");
+    assert.equal(bodies[1]?.keep_alive, undefined, "a cloud provider received keep_alive");
+  } finally {
+    if (prev === undefined) delete process.env.PROMETHEUS_LOCAL_KEEP_ALIVE;
+    else process.env.PROMETHEUS_LOCAL_KEEP_ALIVE = prev;
+  }
 });
 
-test("the request is shaped by the URL, NOT by the renderer's `locality` label", async () => {
+test("the request is shaped by the URL, NOT by the renderer's `locality` label", async (t) => {
   /**
    * The comment above the derivation in ai-ipc.ts says the renderer's label is never trusted,
    * and the security decisions (cloud-allowed, egress, budget, wire format) did re-derive it.
@@ -278,13 +314,22 @@ test("the request is shaped by the URL, NOT by the renderer's `locality` label",
     bodies.push(JSON.parse(init.body));
     return sseResponse(["data: [DONE]\n"]);
   };
+  // Pin a value so the URL-vs-label decision is OBSERVABLE: with the default (send nothing)
+  // both branches would be `undefined` and the test could not tell them apart.
+  const prevKA = process.env.PROMETHEUS_LOCAL_KEEP_ALIVE;
+  process.env.PROMETHEUS_LOCAL_KEEP_ALIVE = "9m";
+  t.after(() => {
+    if (prevKA === undefined) delete process.env.PROMETHEUS_LOCAL_KEEP_ALIVE;
+    else process.env.PROMETHEUS_LOCAL_KEEP_ALIVE = prevKA;
+  });
+
   // a LOCALHOST url mislabelled "cloud" — it is local, whatever the renderer says
   await runAiStream(
     req({ endpoint: { ...LOCAL, locality: "cloud" } }),
     undefined,
     capture as never,
   );
-  assert.equal(bodies[0]?.keep_alive, "30m", "a localhost endpoint lost keep_alive to a label");
+  assert.equal(bodies[0]?.keep_alive, "9m", "a localhost endpoint lost keep_alive to a label");
   assert.equal(bodies[0]?.stream_options, undefined);
 
   // a CLOUD url mislabelled "local" — it is cloud, and must not receive keep_alive
@@ -295,6 +340,8 @@ test("the request is shaped by the URL, NOT by the renderer's `locality` label",
     }),
     undefined,
     capture as never,
+    undefined,
+    CLOUD_OK,
   );
   assert.equal(
     bodies[1]?.keep_alive,
@@ -302,6 +349,206 @@ test("the request is shaped by the URL, NOT by the renderer's `locality` label",
     "a cloud provider received Ollama's keep_alive because the renderer called it local",
   );
   assert.deepEqual(bodies[1]?.stream_options, { include_usage: true });
+});
+
+/**
+ * The autostart gate itself is OPT-IN: `ensureOllamaRunningFn` is omitted by default, and
+ * EVERY test above this point already proves that omission means no extra call ever happens
+ * — each one drives an exact-call-count-sensitive mocked `doFetch` and none of them pass this
+ * option, yet all pass. The two tests below cover the gate's actual behaviour when a caller
+ * (production's one real call site) DOES opt in.
+ */
+test("ollama autostart fires for an ollama-port local endpoint when injected, with the endpoint's OWN model", async () => {
+  let seenModelId: string | undefined = "not called";
+  await runAiStream(
+    req({ runId: "autostart-fires" }),
+    undefined,
+    async () => sseResponse(["data: [DONE]\n"]),
+    undefined,
+    {
+      ensureOllamaRunningFn: async (opts) => {
+        seenModelId = opts?.modelId;
+        return { started: false };
+      },
+    },
+  );
+  assert.equal(seenModelId, LOCAL.model, "the already-picked model must never be silently swapped");
+});
+
+test("ollama autostart does NOT fire for a local endpoint on a different port (e.g. LM Studio)", async () => {
+  let calls = 0;
+  await runAiStream(
+    req({ runId: "autostart-wrong-port", endpoint: { ...LOCAL, baseUrl: "http://127.0.0.1:1234/v1" } }),
+    undefined,
+    async () => sseResponse(["data: [DONE]\n"]),
+    undefined,
+    {
+      ensureOllamaRunningFn: async () => {
+        calls += 1;
+        return { started: false };
+      },
+    },
+  );
+  assert.equal(calls, 0, "the ollama-specific gate must never touch a non-ollama local runner");
+  // Clean up the model this test just pinned into the module-level `residentModels` ledger —
+  // "freeLocalModels unloads exactly the LOCAL models a run pinned" (below) asserts an EXACT
+  // list, and this test's port-1234 endpoint is otherwise never used anywhere else in the file.
+  await freeLocalModels(async () => ({ ok: true }) as Response);
+});
+
+test("lmstudio autostart fires for a port-1234 local endpoint when injected, exactly the way ollama's does", async () => {
+  let seenModelId: string | undefined = "not called";
+  await runAiStream(
+    req({
+      runId: "lmstudio-autostart-fires",
+      endpoint: { ...LOCAL, baseUrl: "http://127.0.0.1:1234/v1", id: "lmstudio", model: "qwen2.5-coder" },
+    }),
+    undefined,
+    async () => sseResponse(["data: [DONE]\n"]),
+    undefined,
+    {
+      ensureLmStudioRunningFn: async (opts) => {
+        seenModelId = opts?.modelId;
+        return { started: false };
+      },
+    },
+  );
+  assert.equal(seenModelId, "qwen2.5-coder");
+  await freeLocalModels(async () => ({ ok: true }) as Response);
+});
+
+test("lmstudio autostart does NOT fire for an ollama-port endpoint, and vice versa — never the wrong runner", async () => {
+  let ollamaCalls = 0;
+  let lmstudioCalls = 0;
+  await runAiStream(req({ runId: "cross-runner-guard" }), undefined, async () => sseResponse(["data: [DONE]\n"]), undefined, {
+    ensureOllamaRunningFn: async () => {
+      ollamaCalls += 1;
+      return { started: false };
+    },
+    ensureLmStudioRunningFn: async () => {
+      lmstudioCalls += 1;
+      return { started: false };
+    },
+  });
+  assert.equal(ollamaCalls, 1, "the ollama endpoint must still bring up ollama");
+  assert.equal(lmstudioCalls, 0, "never LM Studio, for an ollama-port endpoint");
+});
+
+test("NEITHER autostart fires for an unmatched local endpoint (e.g. a vLLM port) — regression guard", async () => {
+  // A prior version of the dispatch logic used a two-way ternary (ollama vs "everything else"),
+  // which silently routed an UNMATCHED runner id (undefined — no LOCAL_RUNNERS entry owns this
+  // port) into the Ollama branch. Neither must ever fire for a runner this app doesn't know.
+  let ollamaCalls = 0;
+  let lmstudioCalls = 0;
+  await runAiStream(
+    req({
+      runId: "unmatched-runner-guard",
+      endpoint: { ...LOCAL, baseUrl: "http://127.0.0.1:8000/v1", id: "vllm" },
+    }),
+    undefined,
+    async () => sseResponse(["data: [DONE]\n"]),
+    undefined,
+    {
+      ensureOllamaRunningFn: async () => {
+        ollamaCalls += 1;
+        return { started: false };
+      },
+      ensureLmStudioRunningFn: async () => {
+        lmstudioCalls += 1;
+        return { started: false };
+      },
+    },
+  );
+  assert.equal(ollamaCalls, 0);
+  assert.equal(lmstudioCalls, 0);
+  await freeLocalModels(async () => ({ ok: true }) as Response);
+});
+
+/* ── ACTIVE EVICTION: a runner Prometheus force-stopped under critical RAM pressure ────────*/
+
+test("ACTIVE EVICTION: a resource-ceiling refusal PAUSES the turn without ever attempting the doomed request", async () => {
+  let fetchCalled = false;
+  const r = await runAiStream(
+    req({ runId: "resource-ceiling" }),
+    undefined,
+    async () => {
+      fetchCalled = true;
+      return sseResponse(["data: [DONE]\n"]);
+    },
+    undefined,
+    {
+      ensureOllamaRunningFn: async () => ({
+        started: false,
+        reason: "resource-ceiling",
+        resourceReason: "RAM at 96% ≥ 90% ceiling",
+      }),
+    },
+  );
+  assert.equal(fetchCalled, false, "a runner just refused a restart must never be asked to serve anyway");
+  assert.equal(r.ok, true);
+  assert.equal(r.paused, true);
+  assert.equal(r.pausedReason, "resources-critical");
+  assert.equal(r.text, "");
+  assert.deepEqual(r.toolCalls, []);
+});
+
+test("ACTIVE EVICTION: a connection failure matching a JUST-evicted runner pauses (resumable), not a red error", async () => {
+  const fail = (async () => {
+    throw new Error("ECONNREFUSED");
+  }) as unknown as typeof fetch;
+  const recentEvent: EvictionEvent = {
+    id: "evt-1",
+    runnerId: "ollama",
+    name: "Ollama",
+    ramPct: 97,
+    ceiling: 95,
+    at: new Date(Date.now() - 5_000).toISOString(), // 5s ago — well inside the recency window
+    reason: "RAM at 97% ≥ 95% for 2 consecutive checks",
+  };
+  const r = await runAiStream(req({ runId: "mid-stream-evicted" }), undefined, fail, undefined, {
+    sleep: async () => {},
+    retries: 0,
+    readEvictionEventsFn: () => [recentEvent],
+  });
+  assert.equal(r.ok, true, "an eviction-caused failure must never surface as ok:false");
+  assert.equal(r.paused, true);
+  assert.equal(r.pausedReason, "resources-critical");
+});
+
+test("ACTIVE EVICTION: a connection failure with NO matching recent eviction still reports the ordinary error (no false positives)", async () => {
+  const fail = (async () => {
+    throw new Error("ECONNREFUSED");
+  }) as unknown as typeof fetch;
+  const r = await runAiStream(req({ runId: "mid-stream-not-evicted" }), undefined, fail, undefined, {
+    sleep: async () => {},
+    retries: 0,
+    readEvictionEventsFn: () => [],
+  });
+  assert.equal(r.ok, false);
+  assert.equal(r.paused, undefined);
+  assert.match(r.error ?? "", /ECONNREFUSED/);
+});
+
+test("ACTIVE EVICTION: a STALE eviction (outside the recency window) does not mask an unrelated failure", async () => {
+  const fail = (async () => {
+    throw new Error("ECONNREFUSED");
+  }) as unknown as typeof fetch;
+  const staleEvent: EvictionEvent = {
+    id: "evt-old",
+    runnerId: "ollama",
+    name: "Ollama",
+    ramPct: 97,
+    ceiling: 95,
+    at: new Date(Date.now() - 10 * 60_000).toISOString(), // 10 minutes ago — long stale
+    reason: "old news",
+  };
+  const r = await runAiStream(req({ runId: "mid-stream-stale-eviction" }), undefined, fail, undefined, {
+    sleep: async () => {},
+    retries: 0,
+    readEvictionEventsFn: () => [staleEvent],
+  });
+  assert.equal(r.ok, false, "a stale eviction from long ago must not paper over today's real failure");
+  assert.equal(r.paused, undefined);
 });
 
 test("a `tool` role is re-mapped to `user` on the wire", async () => {
@@ -778,6 +1025,7 @@ test("with no posture configured nothing changes — including cloud", async () 
     undefined,
     spy.fetch,
     coreSettings.securityPosture(undefined),
+    CLOUD_OK,
   );
   assert.equal(spy.called(), true);
   assert.equal(r.ok, true);
@@ -842,6 +1090,7 @@ test("a cloud endpoint with a configured key gets an Authorization header", asyn
         return sseResponse(["data: [DONE]\n"]);
       }) as never,
       { allowCloud: true, network: "allow", minGateMode: "off", allowForce: false },
+      CLOUD_OK,
     );
     assert.equal(seen?.authorization, "Bearer sk-test-key");
   } finally {
@@ -865,6 +1114,7 @@ test("a cloud endpoint with NO key is refused with an actionable message, not a 
         return sseResponse(["data: [DONE]\n"]);
       }) as never,
       { allowCloud: true, network: "allow", minGateMode: "off", allowForce: false },
+      CLOUD_OK,
     );
     assert.equal(r.ok, false);
     assert.match(r.error ?? "", /prometheus provider connect groq|GROQ_API_KEY/);
@@ -1109,4 +1359,157 @@ test("a 200 that is NOT an SSE stream still yields the answer, not silence", asy
   );
   assert.equal(empty.ok, false);
   assert.match(empty.error ?? "", /no readable content/);
+});
+
+/* ── the authorisation ladder as a THIRD policy floor (handoff_3 §3) ─────────────── */
+
+test("a cloud endpoint is REFUSED below the network rung, before anything leaves", async () => {
+  // The Model Hub greys cloud rows below A5 and labels them "key in keychain · A5+ only".
+  // Nothing enforced it: CLOUD_MIN_AUTH drove an opacity and a note string and had no
+  // reader outside that view, so a user at A0 reached the cloud exactly as easily as one
+  // at A7. This is the check that makes the label true.
+  let called = false;
+  const r = await runAiStream(
+    req({
+      endpoint: { ...LOCAL, baseUrl: "https://api.example.com/v1", locality: "cloud" },
+      neverSendToCloud: false,
+    }),
+    undefined,
+    async () => {
+      called = true;
+      return sseResponse(["data: [DONE]\n"]);
+    },
+    { allowCloud: true, network: "allow", minGateMode: "off", allowForce: false },
+    { readAuthLevel: () => 1 },
+  );
+  assert.equal(called, false, "the request left the machine below the network rung");
+  assert.equal(r.ok, false);
+  assert.match(r.error ?? "", /authorisation A1 is below A5/);
+});
+
+test("the ladder gate is decided by the URL, not the renderer's locality label", async () => {
+  // Same lesson the posture checks learned: a `locality:"local"` label on a cloud URL must
+  // not walk past the gate.
+  let called = false;
+  const r = await runAiStream(
+    req({
+      endpoint: { ...LOCAL, baseUrl: "https://api.example.com/v1", locality: "local" },
+      neverSendToCloud: false,
+    }),
+    undefined,
+    async () => {
+      called = true;
+      return sseResponse(["data: [DONE]\n"]);
+    },
+    { allowCloud: true, network: "allow", minGateMode: "off", allowForce: false },
+    { readAuthLevel: () => 0 },
+  );
+  assert.equal(called, false);
+  assert.equal(r.ok, false);
+});
+
+test("at or above the network rung the cloud request proceeds", async () => {
+  for (const level of [5, 6, 7]) {
+    let called = false;
+    const r = await runAiStream(
+      req({
+        endpoint: { ...LOCAL, baseUrl: "https://api.example.com/v1", locality: "cloud" },
+        neverSendToCloud: false,
+      }),
+      undefined,
+      async () => {
+        called = true;
+        return sseResponse(["data: [DONE]\n"]);
+      },
+      { allowCloud: true, network: "allow", minGateMode: "off", allowForce: false },
+      { readAuthLevel: () => level },
+    );
+    assert.equal(called, true, `A${level} should reach the network`);
+    assert.equal(r.ok, true);
+  }
+});
+
+test("a LOCAL endpoint is never touched by the ladder gate", async () => {
+  // `local-only` has to stay a usable profile: A0 must still reach a local runner.
+  let called = false;
+  const r = await runAiStream(
+    req(),
+    undefined,
+    async () => {
+      called = true;
+      return sseResponse(["data: [DONE]\n"]);
+    },
+    undefined,
+    { readAuthLevel: () => 0 },
+  );
+  assert.equal(called, true);
+  assert.equal(r.ok, true);
+});
+
+test("an unreadable auth store falls back to the ladder's own default, not to open", () => {
+  // DEFAULT_AUTH_LEVEL is 1, which is BELOW the network rung — so "we could not read your
+  // level" must behave like a low level, never like a permissive one.
+  assert.ok(DEFAULT_AUTH_LEVEL < NETWORK_AUTH_LEVEL);
+});
+
+test("a session posture can TIGHTEN the cloud gate but never loosen it", async () => {
+  // The GUI's `plan` posture drives the level to 0 without writing the file (mode->level is
+  // lossy, so persisting it would overwrite an explicit /authorisation 7). Main reads only
+  // the file, so before this a read-only posture still shipped conversations to the cloud.
+  const cloud = {
+    endpoint: { ...LOCAL, baseUrl: "https://api.example.com/v1", locality: "cloud" as const },
+    neverSendToCloud: false,
+  };
+  const posture = { allowCloud: true, network: "allow", minGateMode: "off", allowForce: false };
+
+  // disk A7, session A0 (plan) -> REFUSED
+  let called = false;
+  const tightened = await runAiStream(
+    req({ ...cloud, sessionAuthLevel: 0 }),
+    undefined,
+    async () => {
+      called = true;
+      return sseResponse(["data: [DONE]\n"]);
+    },
+    posture,
+    { readAuthLevel: () => 7 },
+  );
+  assert.equal(called, false, "a plan posture must not reach the network");
+  assert.equal(tightened.ok, false);
+  assert.match(tightened.error ?? "", /authorisation A0 is below A5/);
+
+  // disk A1, session A7 -> still REFUSED; the renderer cannot raise the ceiling
+  called = false;
+  const forged = await runAiStream(
+    req({ ...cloud, sessionAuthLevel: 7 }),
+    undefined,
+    async () => {
+      called = true;
+      return sseResponse(["data: [DONE]\n"]);
+    },
+    posture,
+    { readAuthLevel: () => 1 },
+  );
+  assert.equal(called, false, "a renderer-supplied level raised the ceiling");
+  assert.equal(forged.ok, false);
+  assert.match(forged.error ?? "", /authorisation A1 is below A5/);
+});
+
+test("no sessionAuthLevel behaves exactly as before", async () => {
+  let called = false;
+  const r = await runAiStream(
+    req({
+      endpoint: { ...LOCAL, baseUrl: "https://api.example.com/v1", locality: "cloud" as const },
+      neverSendToCloud: false,
+    }),
+    undefined,
+    async () => {
+      called = true;
+      return sseResponse(["data: [DONE]\n"]);
+    },
+    { allowCloud: true, network: "allow", minGateMode: "off", allowForce: false },
+    { readAuthLevel: () => 6 },
+  );
+  assert.equal(called, true);
+  assert.equal(r.ok, true);
 });

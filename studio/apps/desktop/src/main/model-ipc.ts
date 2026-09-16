@@ -35,6 +35,7 @@ import { ipcMain } from "electron";
 
 import {
   type DownloadResult,
+  type EvictionEvent,
   type ModelHubClientOptions,
   type MutationResult,
   type ServeProfile,
@@ -74,6 +75,7 @@ import {
   validateModelInstallHfCli,
   validateModelInstallRunner,
   validateModelInstallTarget,
+  validateModelKill,
   validateModelLibrary,
   validateModelPull,
   validateModelRemove,
@@ -208,12 +210,22 @@ export interface ModelIpcWiring {
    * injected keeps this module electron-window-agnostic + testable.
    */
   broadcast?: (event: ModelProgressEvent) => void;
+  /**
+   * Raise a SYSTEM-level notice (OS notification, not just an in-app panel row) when
+   * ACTIVE EVICTION force-kills a served recipe under critical RAM pressure — a user staring
+   * at a chat pane, not the Serving panel, must still learn their model just got stopped to
+   * save the machine. The MAIN entry injects the real (Electron `Notification`) implementation;
+   * absent, the eviction is still broadcast via `broadcast` (the Serving panel still updates),
+   * just without an OS-level notice. Keeps this module Electron-window-agnostic + testable.
+   */
+  notifyEviction?: (event: EvictionEvent) => void;
 }
 
 export function registerModelIpcHandlers(wiring: ModelIpcWiring): () => void {
   const client = createModelHubClient(wiring.clientOptions);
   const serve = wiring.serveSupervisor;
   const broadcast = wiring.broadcast ?? ((): void => {});
+  const notifyEviction = wiring.notifyEviction ?? ((): void => {});
 
   // Per-model-id mutation queue: download and remove both touch the same on-disk
   // model files, so two ops on the SAME id must run sequentially (a download
@@ -249,6 +261,19 @@ export function registerModelIpcHandlers(wiring: ModelIpcWiring): () => void {
     broadcast(event);
   };
   serve.on("status", onServeStatus);
+
+  /** ACTIVE EVICTION: the Serving panel's live feed AND a system-level notice — see
+   *  `ModelIpcWiring.notifyEviction`'s doc for why both. */
+  const onServeEviction = (event: EvictionEvent): void => {
+    broadcast({
+      profileId: event.runnerId,
+      phase: "evicted",
+      message: event.reason,
+      raw: JSON.stringify(event),
+    });
+    notifyEviction(event);
+  };
+  serve.on("evicted", onServeEviction);
 
   /** A snapshot of every serve row (the §7 Serving panel state). */
   function servingResult(): ModelServeResult {
@@ -325,7 +350,12 @@ export function registerModelIpcHandlers(wiring: ModelIpcWiring): () => void {
       if (sender) {
         const event: ModelProgressEvent = {
           phase: "download",
-          message: `staging ${a.id}${a.quant ? `:${a.quant}` : ""} for the nemesis gate…`,
+          // NOT "for the nemesis gate": whether a gate runs depends on the path the
+          // sidecar takes. The HF/GGUF spine stages bytes locally and calls
+          // `nemesis_gate.admit`; the ollama runner hands the tag to `ollama pull`, which
+          // has no local stage dir and never reaches nemesis (see modelhub.py::v_pull).
+          // This message is emitted before that branch is chosen, so it may not promise one.
+          message: `staging ${a.id}${a.quant ? `:${a.quant}` : ""}…`,
           raw: `staging ${a.id}`,
         };
         if (a.runId !== undefined) event.runId = a.runId;
@@ -496,6 +526,18 @@ export function registerModelIpcHandlers(wiring: ModelIpcWiring): () => void {
     if (!v.ok) return { ok: false, profiles: serve.list().map(toServeRow), error: v.error.message };
     try {
       await serve.stop(v.value.profileId);
+      return servingResult();
+    } catch (e) {
+      return { ok: false, profiles: serve.list().map(toServeRow), error: errString(e) };
+    }
+  });
+
+  // ── model:kill — force-kill the runner (SIGKILL now, no SIGTERM grace wait) ─
+  ipcMain.handle(IPC.modelKill, async (_evt, arg: unknown): Promise<ModelServeResult> => {
+    const v = validateModelKill(arg);
+    if (!v.ok) return { ok: false, profiles: serve.list().map(toServeRow), error: v.error.message };
+    try {
+      await serve.kill(v.value.profileId);
       return servingResult();
     } catch (e) {
       return { ok: false, profiles: serve.list().map(toServeRow), error: errString(e) };
@@ -702,6 +744,7 @@ export function registerModelIpcHandlers(wiring: ModelIpcWiring): () => void {
   // ── disposer ─────────────────────────────────────────────────────────────
   return () => {
     serve.off("status", onServeStatus as (...a: unknown[]) => void);
+    serve.off("evicted", onServeEviction as (...a: unknown[]) => void);
     for (const channel of [
       IPC.modelHardware,
       IPC.modelSearch,
@@ -716,6 +759,7 @@ export function registerModelIpcHandlers(wiring: ModelIpcWiring): () => void {
       IPC.modelRemove,
       IPC.modelServe,
       IPC.modelUnserve,
+      IPC.modelKill,
       IPC.modelServing,
       IPC.modelEndpoints,
       IPC.modelRepoint,

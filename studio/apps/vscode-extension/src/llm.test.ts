@@ -95,6 +95,146 @@ test("createEndpointLlmClient: the outgoing message carries tool-discipline + pr
 });
 
 /**
+ * The autostart gate is OPT-IN (`ensureOllamaRunningFn` omitted by default) for the same reason
+ * ai-ipc.test.ts's desktop siblings require it: every test in this file drives a single-shape
+ * mocked `fetch`, and a default-on probe would consume one of those calls (miscounting) and,
+ * the moment it read as "unreachable", fall through to REAL shell-outs from inside a unit test.
+ */
+test("createEndpointLlmClient: ollama autostart is never attempted unless ensureOllamaRunningFn is passed", async () => {
+  const { fetch } = capturingFetch(DONE_SSE);
+  const llm = createEndpointLlmClient({ endpoint: LOCAL_ENDPOINT, fetch });
+  const thread: Thread = { messages: [{ role: "user", content: "hi" }] };
+  // No throw, no extra fetch call consumed — the single mocked response above is enough for
+  // the real request to complete normally.
+  const events = await collect(
+    llm.turn(thread, defaultTuning({ provider: "local", modelId: "qwen" }), [READ_TOOL]),
+  );
+  assert.ok(events.length > 0);
+});
+
+test("createEndpointLlmClient: ollama autostart fires once, with the endpoint's OWN model, when injected", async () => {
+  const { fetch } = capturingFetch(DONE_SSE);
+  let seenModelId: string | undefined = "not called";
+  let calls = 0;
+  const llm = createEndpointLlmClient({
+    endpoint: LOCAL_ENDPOINT,
+    fetch,
+    ensureOllamaRunningFn: async (opts) => {
+      calls += 1;
+      seenModelId = opts?.modelId;
+      return { started: false };
+    },
+  });
+  const thread: Thread = { messages: [{ role: "user", content: "hi" }] };
+  // Two turns on the SAME client: `resolveClient` memoises, so the gate must run exactly once.
+  await collect(llm.turn(thread, defaultTuning({ provider: "local", modelId: "qwen" }), [READ_TOOL]));
+  await collect(llm.turn(thread, defaultTuning({ provider: "local", modelId: "qwen" }), [READ_TOOL]));
+  assert.equal(calls, 1, "the gate must run once per client, not once per turn");
+  assert.equal(seenModelId, LOCAL_ENDPOINT.model, "the already-picked model must never be swapped");
+});
+
+test("createEndpointLlmClient: lmstudio autostart fires for a port-1234 endpoint, exactly the way ollama's does", async () => {
+  const { fetch } = capturingFetch(DONE_SSE);
+  let seenModelId: string | undefined = "not called";
+  let ollamaCalls = 0;
+  const llm = createEndpointLlmClient({
+    endpoint: { ...LOCAL_ENDPOINT, baseUrl: "http://127.0.0.1:1234/v1", model: "qwen2.5-coder" },
+    fetch,
+    ensureOllamaRunningFn: async () => {
+      ollamaCalls += 1;
+      return { started: false };
+    },
+    ensureLmStudioRunningFn: async (opts) => {
+      seenModelId = opts?.modelId;
+      return { started: false };
+    },
+  });
+  const thread: Thread = { messages: [{ role: "user", content: "hi" }] };
+  await collect(llm.turn(thread, defaultTuning({ provider: "local", modelId: "qwen" }), [READ_TOOL]));
+  assert.equal(seenModelId, "qwen2.5-coder");
+  assert.equal(ollamaCalls, 0, "an LM Studio endpoint must never start Ollama");
+});
+
+test("createEndpointLlmClient: NEITHER autostart fires for an unmatched local endpoint (e.g. vLLM) — regression guard", async () => {
+  // A prior version of the dispatch used a two-way ternary (ollama vs "everything else"), which
+  // silently routed an UNMATCHED runner id (no LOCAL_RUNNERS entry owns this port) into the
+  // Ollama branch. Neither must ever fire for a runner this extension doesn't know.
+  const { fetch } = capturingFetch(DONE_SSE);
+  let ollamaCalls = 0;
+  let lmstudioCalls = 0;
+  const llm = createEndpointLlmClient({
+    endpoint: { ...LOCAL_ENDPOINT, baseUrl: "http://127.0.0.1:8000/v1" },
+    fetch,
+    ensureOllamaRunningFn: async () => {
+      ollamaCalls += 1;
+      return { started: false };
+    },
+    ensureLmStudioRunningFn: async () => {
+      lmstudioCalls += 1;
+      return { started: false };
+    },
+  });
+  const thread: Thread = { messages: [{ role: "user", content: "hi" }] };
+  await collect(llm.turn(thread, defaultTuning({ provider: "local", modelId: "qwen" }), [READ_TOOL]));
+  assert.equal(ollamaCalls, 0);
+  assert.equal(lmstudioCalls, 0);
+});
+
+test("createEndpointLlmClient: NEITHER autostart fires for a REMOTE endpoint on a runner's port", async () => {
+  // `runnerForBaseUrl` matches by port, so a LAN Ollama on the standard port used to resolve to
+  // the ollama runner and spawn `ollama serve` + a detached watchdog on THIS machine — for a
+  // request that was always going to another host. Pointing the editor at a beefier box is a
+  // first-class use of a local-first product, and on this machine an unrequested model server is
+  // the documented memory-exhaustion path.
+  const { fetch } = capturingFetch(DONE_SSE);
+  let ollamaCalls = 0;
+  let lmstudioCalls = 0;
+  const llm = createEndpointLlmClient({
+    endpoint: { ...LOCAL_ENDPOINT, baseUrl: "http://192.168.1.50:11434/v1" },
+    fetch,
+    ensureOllamaRunningFn: async () => {
+      ollamaCalls += 1;
+      return { started: false };
+    },
+    ensureLmStudioRunningFn: async () => {
+      lmstudioCalls += 1;
+      return { started: false };
+    },
+  });
+  const thread: Thread = { messages: [{ role: "user", content: "hi" }] };
+  await collect(llm.turn(thread, defaultTuning({ provider: "local", modelId: "qwen" }), [READ_TOOL]));
+  assert.equal(ollamaCalls, 0, "a remote host is not ours to start a server for");
+  assert.equal(lmstudioCalls, 0);
+});
+
+test("createEndpointLlmClient: a resource-ceiling refusal is reported as such, and stays retryable", async () => {
+  // The launch guard declining a cold start is a deliberate refusal, not a broken install. The
+  // reason used to be discarded, so the request went out to a dead endpoint and surfaced as
+  // "no model found … start a local runner" — the one thing the user must not do at the ceiling.
+  const { fetch } = capturingFetch(DONE_SSE);
+  let calls = 0;
+  const llm = createEndpointLlmClient({
+    endpoint: LOCAL_ENDPOINT,
+    fetch,
+    ensureOllamaRunningFn: async () => {
+      calls += 1;
+      // clears on the second attempt, so the memo must not have latched the rejection
+      return calls === 1
+        ? { started: false, reason: "resource-ceiling" as const, resourceReason: "RAM at 94%" }
+        : { started: false };
+    },
+  });
+  const thread: Thread = { messages: [{ role: "user", content: "hi" }] };
+  await assert.rejects(
+    () => collect(llm.turn(thread, defaultTuning({ provider: "local", modelId: "qwen" }), [READ_TOOL])),
+    /resource ceiling \(RAM at 94%\)/,
+  );
+  // the memo was dropped, so the next message re-probes rather than replaying the rejection
+  await collect(llm.turn(thread, defaultTuning({ provider: "local", modelId: "qwen" }), [READ_TOOL]));
+  assert.equal(calls, 2, "the refusal is retryable — a second turn samples the guard again");
+});
+
+/**
  * Regression: `turn()`'s `tuning` parameter used to be unused entirely (`_tuning`) — VS Code
  * never sent an effort tier as a request parameter, and the `effort-text` textual fallback
  * (for a model whose mechanism can't express the tier, or has none at all) was permanently

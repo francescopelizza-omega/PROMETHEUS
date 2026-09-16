@@ -22,6 +22,15 @@ export interface QuarantineVaultProps {
   items: SecQuarantineItem[];
   /** Restore one item (reversible). */
   onRestore?: (id: string) => void;
+  /**
+   * Inspect one item — handoff_3 §4 lists it beside Delete.
+   *
+   * There was no way to LOOK at a quarantined artifact from the UI at all: the only
+   * substitute was the raw `nemesis restore --list` dump beside the table, which shows the
+   * whole vault rather than one item. Being asked to decide restore-or-purge with no way to
+   * see what you are deciding about is the shape of a decision people click through.
+   */
+  onInspect?: (id: string) => void;
   /** Purge one item (irreversible) — the renderer opens the PurgeDialog. */
   onPurge?: (id: string) => void;
   /** Bulk restore the current selection. */
@@ -46,6 +55,7 @@ const cellStyle = {
 export function QuarantineVault({
   items,
   onRestore,
+  onInspect,
   onPurge,
   onRestoreSelected,
   onPurgeSelected,
@@ -158,6 +168,18 @@ export function QuarantineVault({
                   }}
                 >
                   {inertText(item.rule_id)}
+                  {/* handoff_3 §4's reassurance, per ROW: the whole point of the vault is
+                      that the artifact is inert while it sits here. */}
+                  <span
+                    style={{
+                      display: "block",
+                      fontFamily: "var(--font-ui)",
+                      fontSize: "0.7rem",
+                      color: "var(--text-muted)",
+                    }}
+                  >
+                    isolated, never executed
+                  </span>
                 </td>
                 <td style={{ ...cellStyle, color: "var(--text-secondary)" }}>
                   {item.from ? inertText(item.from) : "—"}
@@ -172,6 +194,13 @@ export function QuarantineVault({
                   {shortDate(item.quarantined_at)}
                 </td>
                 <td style={{ ...cellStyle, textAlign: "right", whiteSpace: "nowrap" }}>
+                  {onInspect && (
+                    <>
+                      <Button size="sm" variant="ghost" onClick={() => onInspect(item.id)}>
+                        Inspect
+                      </Button>{" "}
+                    </>
+                  )}
                   <Button size="sm" variant="secondary" onClick={() => onRestore?.(item.id)}>
                     Restore
                   </Button>{" "}

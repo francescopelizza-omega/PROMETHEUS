@@ -71,6 +71,12 @@ export function RunToolbar({
       aria-label="run toolbar"
       style={{
         display: "flex",
+        // Wrap rather than clip. The row neither wrapped nor scrolled, so on a narrow
+        // editor column the Stop button — the one control you need while something is
+        // running — was cut off the right edge. Not `overflowX: auto`: that coerces
+        // overflow-y to clip, which TerminalPanel documents as a dropdown hazard.
+        flexWrap: "wrap",
+        rowGap: 4,
         alignItems: "center",
         gap: 6,
         padding: "3px 8px",
@@ -91,6 +97,8 @@ export function RunToolbar({
           padding: "2px 4px",
           fontSize: "0.74rem",
           maxWidth: 200,
+          // the config picker gives up width before the buttons do.
+          minWidth: 0,
         }}
       >
         {configs.length === 0 && <option value={0}>no run configuration</option>}
@@ -133,6 +141,7 @@ export function RunToolbar({
           color: "var(--text-secondary)",
           overflow: "hidden",
           textOverflow: "ellipsis",
+          minWidth: 0, // flex/grid floor — without it the ellipsis is unreachable
           whiteSpace: "nowrap",
         }}
       >

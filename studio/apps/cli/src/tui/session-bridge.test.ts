@@ -9,10 +9,12 @@
  * code), since the two hosts are siblings that must behave identically but do not share this logic.
  */
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join, relative } from "node:path";
 import test from "node:test";
+
+import { agent } from "@prometheus/core";
 
 import type { ParsedArgs } from "../parse.js";
 import { setColorEnabled } from "../render.js";
@@ -53,7 +55,12 @@ async function makeBridge(over: Partial<BridgeDeps> = {}, write: (s: string) => 
     ask: async () => "",
     askPath: async (_p, def) => def,
     quit: () => {},
-    backends: { liveRunners: [], paidClis: [] },
+    backends: {
+      liveRunners: [],
+      paidClis: [],
+      startedRunners: new Set<string>(),
+      unavailableRunners: [],
+    },
     home: TMP_HOME,
     configHome: TMP_HOME,
     ...over,
@@ -298,4 +305,150 @@ test("/cwd: re-discovers steering from the NEW directory too — it moves in pla
   assert.equal(agents?.content, "Always begin every reply with the exact token ZORBLAX.");
   assert.equal(agents?.path, join(projectB, "AGENTS.md"));
   await bridge.dispose();
+});
+
+/* ── the authorisation level: what survives a restart, and what must not ───────────────── */
+
+/** The store's on-disk shape, read straight from the file the production writer writes. */
+function savedLevel(configHome: string): number | null {
+  try {
+    const raw = readFileSync(
+      join(configHome, ".prometheus", "config", "authorisation.json"),
+      "utf8",
+    );
+    const o: unknown = JSON.parse(raw);
+    return o && typeof o === "object" && "level" in o ? (o as { level: number }).level : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * THE USER JOURNEY, which no test covered: set the level, restart, is it still set?
+ *
+ * Every existing test asserted a pure function or called the store directly, so the product
+ * could be — and was — broken while they all passed. This drives the REAL slash dispatch on a
+ * real bridge, then builds a SECOND bridge over the same config home, which is exactly what a
+ * restart is.
+ */
+test("/authorisation N survives a restart, and a permission-mode change never overwrites it", async () => {
+  const configHome = mkdtempSync(join(tmpdir(), "prom-authjourney-"));
+
+  // session 1 — the user makes an explicit, numbered choice
+  const s1 = await makeBridge({ configHome });
+  await s1.submit("/authorisation 7");
+  assert.equal(s1.getAuthLevel(), 7, "the live session must be at the level just set");
+  assert.equal(savedLevel(configHome), 7, "an explicit choice is written to disk");
+
+  // session 2 — a restart: a brand-new bridge over the same config home
+  const s2 = await makeBridge({ configHome });
+  assert.equal(s2.getAuthLevel(), 7, "the saved posture must come back after a restart");
+
+  /**
+   * The defect the user actually hit. `/permission-mode` (and Shift-Tab, which lands on the same
+   * setter) re-derives the level from the coarse mode — five modes for eight levels, so the
+   * derivation is LOSSY — and it used to write that derived value to disk. One keystroke
+   * replaced an explicit 7 with 2; a full cycle back to `default` replaced it with 1, which is
+   * the value found in the real user's authorisation.json after "it did not save".
+   */
+  await s2.submit("/permission-mode default");
+  assert.equal(s2.getAuthLevel(), 1, "the mode still drives the live level (in memory)");
+  assert.equal(
+    savedLevel(configHome),
+    7,
+    "a session-scoped posture change must NOT rewrite the saved default",
+  );
+
+  // session 3 — another restart: the explicit choice is still the one that survived
+  const s3 = await makeBridge({ configHome });
+  assert.equal(s3.getAuthLevel(), 7, "the mode change must not have leaked into the next session");
+});
+
+test("Shift-Tab and the startup restore are session-scoped: neither touches the saved level", async () => {
+  const configHome = mkdtempSync(join(tmpdir(), "prom-authscope-"));
+  const s1 = await makeBridge({ configHome });
+  await s1.submit("/authorisation 6");
+  assert.equal(savedLevel(configHome), 6);
+
+  // Shift-Tab reaches `setPermMode` directly (app.ts's "mode-changed" effect), not the slash path
+  s1.setPermMode("acceptEdits");
+  assert.equal(s1.getAuthLevel(), 2, "the live level follows the coarse mode");
+  assert.equal(savedLevel(configHome), 6, "Shift-Tab is not a preference");
+
+  // a `session`-origin level change (startup restore, --authorisation flag, post-sudo clamp)
+  s1.setAuthLevel(3, "session");
+  assert.equal(s1.getAuthLevel(), 3);
+  assert.equal(savedLevel(configHome), 6, "a session-scoped level change is not a preference");
+
+  // and a `user`-origin one still is
+  s1.setAuthLevel(4, "user");
+  assert.equal(savedLevel(configHome), 4);
+});
+
+test("a fresh config home starts at the safe default and writes NOTHING until asked", async () => {
+  const configHome = mkdtempSync(join(tmpdir(), "prom-authfresh-"));
+  const s = await makeBridge({ configHome });
+  assert.equal(s.getAuthLevel(), agent.DEFAULT_AUTH_LEVEL);
+  assert.equal(
+    savedLevel(configHome),
+    null,
+    "merely opening a session must not create the store — a startup write is what made every " +
+      "read miss and every safety clamp permanent",
+  );
+});
+
+/* ── the thinking-effort tier: what survives a restart, and what a model switch does ────── */
+
+/** The effort store's on-disk shape, read from the file the production writer writes. */
+function savedTier(configHome: string): string | null {
+  try {
+    const raw = readFileSync(join(configHome, ".prometheus", "config", "effort.json"), "utf8");
+    const o: unknown = JSON.parse(raw);
+    return o && typeof o === "object" && "tier" in o ? (o as { tier: string }).tier : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * `/think` had no memory at all: the tier lived in the in-memory REPL tuning and nowhere else,
+ * so every new session started back at the profile's default. This drives the REAL slash
+ * dispatch, then builds a SECOND bridge over the same config home — which is what a restart is.
+ */
+test("/think N survives a restart, and only an explicit choice writes", async () => {
+  const configHome = mkdtempSync(join(tmpdir(), "prom-effortjourney-"));
+
+  // a session that never touches /think must not create the store — a startup write is what
+  // turns every later read-miss and every clamp into a permanent preference
+  await makeBridge({ configHome });
+  assert.equal(savedTier(configHome), null, "opening a session must not create the store");
+
+  const s1 = await makeBridge({ configHome });
+  await s1.submit("/think xhigh");
+  assert.equal(savedTier(configHome), "xhigh", "an explicit /think is written");
+
+  // restart: a brand-new bridge over the same config home starts at the saved tier
+  const s2 = await makeBridge({ configHome });
+  assert.equal(s2.slashCtx.tuning().effort, "xhigh", "the saved tier must come back");
+
+  // …and the trait rail's stepper is the same setter, so it persists too
+  const stepped = s2.stepEffort(1);
+  assert.equal(savedTier(configHome), stepped);
+});
+
+test("a --think/--effort FLAG applies for the session and does not rewrite the saved tier", async () => {
+  const configHome = mkdtempSync(join(tmpdir(), "prom-effortflag-"));
+  const s1 = await makeBridge({ configHome });
+  await s1.submit("/think max");
+  assert.equal(savedTier(configHome), "max");
+
+  // A launch flag is a one-off override, exactly as `--authorisation` is: it wins for THIS
+  // session and leaves the stored preference alone.
+  const s2 = await makeBridge({ configHome, parsed: args({ effort: "low" }) });
+  assert.equal(s2.slashCtx.tuning().effort, "low", "the flag must win this launch");
+  assert.equal(savedTier(configHome), "max", "…and must not overwrite the saved preference");
+
+  // with the flag gone, the saved preference is back
+  const s3 = await makeBridge({ configHome });
+  assert.equal(s3.slashCtx.tuning().effort, "max");
 });

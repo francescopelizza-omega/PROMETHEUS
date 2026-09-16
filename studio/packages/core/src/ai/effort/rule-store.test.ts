@@ -101,7 +101,9 @@ test("layering keeps the builtins and appends overrides — later wins a specifi
   assert.equal(layered.length, builtinRules().length + 1);
   assert.equal(layered[layered.length - 1]?.id, "my-model-v9");
   // the builtins are untouched and still resolve
-  assert.equal(resolveCapability({ modelId: "gpt-5" }, layered).rule?.id, "openai-reasoning");
+  // `gpt-5` now resolves to the gpt-5/codex entry (the one that reaches xhigh/max), not the
+  // conservative o-series one — the split is the point, so assert the specific id.
+  assert.equal(resolveCapability({ modelId: "gpt-5" }, layered).rule?.id, "openai-reasoning-gpt5");
 });
 
 test("an override BEATS a builtin with the same match, because it is appended after it", () => {

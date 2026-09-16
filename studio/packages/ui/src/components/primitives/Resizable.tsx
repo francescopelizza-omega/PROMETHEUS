@@ -8,7 +8,14 @@
  * keyboard-operable today.
  */
 
-import { type KeyboardEvent, type ReactNode, useCallback, useRef, useState } from "react";
+import {
+  type KeyboardEvent,
+  type ReactNode,
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+} from "react";
 import { v } from "./styles.js";
 
 /** Clamp a primary-pane size (px) to [min, total-min] (pure, testable). */
@@ -45,9 +52,22 @@ export function Resizable({
   const [size, setSize] = useState(defaultSize);
   const containerRef = useRef<HTMLDivElement>(null);
   const dragging = useRef(false);
+  /**
+   * Tears down the CURRENT drag's document listeners.
+   *
+   * `onPointerDown` attaches `mousemove`/`mouseup` to the DOCUMENT and only `up()` removes
+   * them. If the component unmounts mid-drag — a pane closed, a route changed, a window torn
+   * out — `mouseup` lands somewhere else and those two listeners stay attached to the
+   * document forever, one pair per drag, each still calling `setSize` on an unmounted tree.
+   * Held in a ref so both `up()` and the unmount effect can run the same teardown.
+   */
+  const cleanup = useRef<(() => void) | null>(null);
+  useEffect(() => () => cleanup.current?.(), []);
 
   const onPointerDown = useCallback(
     (e: { clientX: number; clientY: number }) => {
+      // a drag that never saw its mouseup must not leave its listeners behind
+      cleanup.current?.();
       dragging.current = true;
       const container = containerRef.current;
       const doc = container?.ownerDocument;
@@ -60,12 +80,16 @@ export function Resizable({
         setSize(clampSplit(raw, total, minSize));
       }
       function up(): void {
-        dragging.current = false;
-        doc!.removeEventListener("mousemove", move);
-        doc!.removeEventListener("mouseup", up);
+        cleanup.current?.();
+        cleanup.current = null;
       }
       doc.addEventListener("mousemove", move);
       doc.addEventListener("mouseup", up);
+      cleanup.current = () => {
+        dragging.current = false;
+        doc.removeEventListener("mousemove", move);
+        doc.removeEventListener("mouseup", up);
+      };
     },
     [horizontal, minSize],
   );

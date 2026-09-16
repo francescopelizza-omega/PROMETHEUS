@@ -8,6 +8,7 @@
  * transitions + a render that takes the resolved color caps — fully unit-testable.
  */
 import { type ColorCaps, painter, selectionBar } from "./palette.js";
+import { clipToWidth, padToWidth, stringWidth } from "./width.js";
 
 /** A completable command (mapped from the host's SlashCmd registry). */
 export interface AcItem {
@@ -179,12 +180,10 @@ export interface DropdownOpts {
   sigil?: string;
 }
 
-/** Truncate to `w` visible code points, adding "…" when cut. */
-function clip(s: string, w: number): string {
-  const cps = [...s];
-  if (cps.length <= w) return s;
-  return `${cps.slice(0, Math.max(0, w - 1)).join("")}…`;
-}
+// The local `clip` this replaced counted CODE POINTS, not display columns, and knew nothing
+// about ANSI — so a CJK name (two columns per glyph) overflowed the dropdown and a coloured
+// row could be cut mid-escape. `tui/width.ts` is the one place that measures terminal cells,
+// and using it here keeps this dropdown aligned with every other pane the TUI draws.
 
 /**
  * Render the dropdown rows (shown ABOVE the composer). The selected row gets the
@@ -209,21 +208,21 @@ export function renderDropdown(
   if (n > maxRows) top = Math.min(Math.max(0, state.index - (maxRows >> 1)), n - maxRows);
   const view = state.items.slice(top, top + maxRows);
 
-  const nameW = Math.min(18, Math.max(...view.map((i) => i.name.length + 1)) + 1);
+  const nameW = Math.min(18, Math.max(...view.map((i) => stringWidth(i.name) + 1)) + 1);
   const rows: string[] = [];
   view.forEach((item, idx) => {
     const real = top + idx;
     const nm = `${sigil}${item.name}`;
     const hint = item.args ? ` ${item.args}` : "";
-    const label = `${nm}${hint}`.padEnd(nameW + 1);
-    const line = clip(`${label} ${item.summary}`, w - 3);
+    const label = padToWidth(`${nm}${hint}`, nameW + 1);
+    const line = clipToWidth(`${label} ${item.summary}`, w - 3);
     if (real === state.index) {
       // `▌` left edge marker (fg accent) survives NO_COLOR + colorblind; the rest is
       // the high-contrast gradient bar.
       rows.push(`${p.accent("▌")}${selectionBar(` ${line}`, w - 1, caps)}`);
     } else {
-      const cut = clip(`${label}`, nameW + 1);
-      const summary = clip(item.summary, w - nameW - 4);
+      const cut = clipToWidth(`${label}`, nameW + 1);
+      const summary = clipToWidth(item.summary, w - nameW - 4);
       rows.push(`  ${p.accent(cut)} ${p.muted(summary)}`);
     }
   });

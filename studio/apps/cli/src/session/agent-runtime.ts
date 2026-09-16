@@ -72,7 +72,7 @@ import {
 // The shared model-request path: one retrying POST, one failure classification. Every
 // transport in this repo made a single attempt before this.
 const { AiHttpError, describeAiFailure, endpointBreaker, fetchModelWithRetry } = ai;
-import { DEFAULT_CONTEXT_WINDOW } from "@prometheus/core";
+import { DEFAULT_CONTEXT_WINDOW, localKeepAliveField } from "@prometheus/core";
 import type {
   AiClient,
   AiClientDeps,
@@ -89,6 +89,7 @@ import {
   type EngineClient,
   type SafeFetchOptions,
   type SafeFetchResult,
+  findRecentEviction,
   safeFetch,
 } from "@prometheus/engine-bridge";
 import { hasMeteredConsent } from "../metered-consent.js";
@@ -105,6 +106,7 @@ import {
   readAccounting,
   readAccountingSince,
 } from "./history-store.js";
+import { touchModelActivity } from "./model-activity-store.js";
 import { recordEndpointHealth } from "./model-health-store.js";
 import {
   type SystemToolDeps,
@@ -939,6 +941,7 @@ export function makeSummarizer(
           // idle window than the main turn's (10 min default) for exactly that reason.
           idleTimeoutMs:
             ctx.compactIdleTimeoutMs ?? agent.idleWatchdog.DEFAULT_COMPACT_IDLE_TIMEOUT_MS,
+          ...(ctx.home ? { onLocalActivity: () => touchModelActivity(ctx.home as string) } : {}),
         })
       : undefined);
   if (!llm) {
@@ -1310,7 +1313,7 @@ const toOpenAiTools = agent.protocol.toOpenAiTools;
  * just means the first prompt loads cold, exactly as before. Local endpoints only (never a
  * cloud request, never a non-standard field to a non-Ollama endpoint).
  */
-export function warmupLocalModel(endpoint: AiEndpoint | undefined): void {
+export function warmupLocalModel(endpoint: AiEndpoint | undefined, home?: string): void {
   if (!endpoint || endpoint.locality !== "local") return;
   const base = endpoint.baseUrl.replace(/\/+$/, "");
   const url = /\/v1$/.test(base) ? `${base}/chat/completions` : `${base}/v1/chat/completions`;
@@ -1322,11 +1325,15 @@ export function warmupLocalModel(endpoint: AiEndpoint | undefined): void {
       messages: [{ role: "user", content: "ping" }],
       max_tokens: 1,
       stream: false,
-      keep_alive: "30m",
+      ...localKeepAliveField(endpoint.locality),
     }),
-  }).catch(() => {
-    /* best-effort: a down/absent runner just means the first prompt loads cold */
-  });
+  })
+    .then((res) => {
+      if (res.ok) touchModelActivity(home);
+    })
+    .catch(() => {
+      /* best-effort: a down/absent runner just means the first prompt loads cold */
+    });
 }
 
 /** One tool call being reassembled from OpenAI streaming deltas (name once, args in fragments). */
@@ -1426,6 +1433,8 @@ async function* toolTurn(
     idleWatchdogNow?: () => number;
     idleWatchdogSetTimeout?: (cb: () => void, ms: number) => ReturnType<typeof setTimeout>;
     idleWatchdogClearTimeout?: (handle: ReturnType<typeof setTimeout>) => void;
+    /** mirrors `AiClientDeps.onLocalActivity` for this transport — see request.ts's doc. */
+    onLocalActivity?: () => void;
   } = {},
 ): AsyncIterable<LlmTurn> {
   if (policy.neverSendToCloud && endpoint.locality === "cloud") {
@@ -1681,7 +1690,7 @@ async function* toolTurn(
           // Ollama extension (ignored by other endpoints): keep the model resident 30m so a
           // second prompt doesn't pay the multi-second cold RELOAD. Only for LOCAL runners —
           // never send a non-standard field to a cloud endpoint.
-          ...(endpoint.locality === "local" ? { keep_alive: "30m" } : {}),
+          ...localKeepAliveField(endpoint.locality),
         },
         // Same discipline as `keep_alive` above: a field goes on the wire only when THIS
         // model is known to accept it. A knobless model gets nothing rather than a 400.
@@ -1757,6 +1766,9 @@ async function* toolTurn(
         // idle-fire landing during the backoff sleep observable to `retry()`'s own checks —
         // `signal`'s abort already propagates into it via the listener above.
         userSignal: outerAc.signal,
+        // …but only the CALLER's signal means "the human stopped it". An idle-watchdog abort
+        // reaches `outerAc` too and must still count against the endpoint.
+        userAborted: () => signal?.aborted === true,
         sleep: abortableSleep,
         onRetry: (info: { attempt: number; delayMs: number; reason: string }) => {
           // a response — even a failing one — is evidence the endpoint is alive.
@@ -1765,6 +1777,9 @@ async function* toolTurn(
             `${model}: ${info.reason} — retrying in ${Math.round(info.delayMs / 1000)}s`,
           );
         },
+        ...(endpoint.locality === "local" && aux.onLocalActivity
+          ? { onLocalActivity: aux.onLocalActivity }
+          : {}),
       });
       // (C) pre-first-byte watchdog: from the moment the request is SENT, not from the first
       // response byte — a cold model load or a queue wait behind something else is never
@@ -2274,6 +2289,7 @@ export function makeLlmClient(endpoint: AiEndpoint, deps: LlmClientDeps = {}): L
             ...(deps.idleWatchdogClearTimeout
               ? { idleWatchdogClearTimeout: deps.idleWatchdogClearTimeout }
               : {}),
+            ...(deps.onLocalActivity ? { onLocalActivity: deps.onLocalActivity } : {}),
             // The user's `prompt-caching` switch, honoured on the path that actually sends
             // `cache_control`. `shouldRequestPromptCache` also answers "does this provider
             // support it", which `applyPromptCache` already handles per dialect — so what
@@ -2448,8 +2464,21 @@ export function makeLlmClient(endpoint: AiEndpoint, deps: LlmClientDeps = {}): L
         } else {
           // a refused/unreachable endpoint becomes an honest text turn, not a crash.
           requestFailed = true;
-          const message = err instanceof Error ? err.message : String(err);
-          if (!any) yield { kind: "text", text: `model error: ${message}` };
+          // ACTIVE EVICTION: this endpoint's local runner was JUST force-stopped under critical
+          // RAM pressure (possibly by a DIFFERENT Prometheus shell's watchdog) — the same
+          // "end the turn, never hammer a dead endpoint" contract as any other refused/
+          // unreachable endpoint, but with the honest reason instead of a raw connection-error
+          // string the user has to puzzle out. See engine-bridge's eviction-log.ts.
+          const recentEviction = findRecentEviction(ai.runnerForBaseUrl(endpoint.baseUrl)?.id);
+          if (recentEviction && !any) {
+            yield {
+              kind: "text",
+              text: `⏸ ${endpoint.model ?? endpoint.id} was stopped to prevent a machine-wide freeze (${recentEviction.reason}). Try again once resources are available — Prometheus will bring it back automatically.`,
+            };
+          } else if (!any) {
+            const message = err instanceof Error ? err.message : String(err);
+            yield { kind: "text", text: `model error: ${message}` };
+          }
         }
       }
       recordUsage(usage, messages, received);
@@ -3906,6 +3935,9 @@ export async function runMessageTurn(
       ? {
           onModelHealth: (record: ai.EndpointHealthRecord) =>
             recordEndpointHealth(record, ctx.home as string),
+          // Feeds the ollama idle-shutdown watchdog's "last used" clock — same real-host-only
+          // gate as onModelHealth just above, for the same reason (never touches disk in a test).
+          onLocalActivity: () => touchModelActivity(ctx.home as string),
         }
       : {}),
     ...(deps.signal ? { signal: deps.signal } : {}),

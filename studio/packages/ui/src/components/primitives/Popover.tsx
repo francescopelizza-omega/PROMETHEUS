@@ -151,7 +151,11 @@ export function Tooltip({ label, side = "top", children }: TooltipProps): ReactN
           role="tooltip"
           style={{
             ...anchorStyle(side, "center"),
-            zIndex: Z.modal,
+            // layers.ts: "dropdown 500 — popovers, menus, TOOLTIPS". A tooltip is not a
+            // decision surface and must not outrank a dialog. It renders inline inside a
+            // position:relative span, so within a Dialog it still stacks in that dialog's
+            // own context and stays visible.
+            zIndex: Z.dropdown,
             whiteSpace: "nowrap",
             background: v("bg-surface-2"),
             border: `1px solid ${v("border-strong")}`,

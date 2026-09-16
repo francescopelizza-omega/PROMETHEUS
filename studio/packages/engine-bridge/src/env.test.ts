@@ -45,7 +45,15 @@ test("CONTRACT: listEnvs() returns typed Env[] with exactly one active (REAL env
     assert.equal(typeof e.path, "string");
     assert.equal(typeof e.pythonPath, "string");
     assert.equal(typeof e.pythonVersion, "string");
-    assert.equal(typeof e.packageCount, "number");
+    // OPTIONAL, and that is the contract: envmgr.py reports `packages_count: None` for the
+    // kinds it cannot count cheaply (conda, system pythons). This used to assert `"number"`,
+    // which is why the boundary coerced null → 0 — and the UI then printed "0 packages"
+    // beside a populated conda env. The test was pinning the fabrication in place.
+    assert.ok(
+      e.packageCount === undefined || typeof e.packageCount === "number",
+      `packageCount is a number or absent, got ${typeof e.packageCount}`,
+    );
+    if (typeof e.packageCount === "number") assert.ok(e.packageCount >= 0);
     assert.equal(typeof e.active, "boolean");
     assert.ok(
       ["venv", "virtualenv", "conda", "pyenv", "system", "engine"].includes(e.kind),

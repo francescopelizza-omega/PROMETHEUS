@@ -33,7 +33,11 @@ function variantStyle(variant: ButtonVariant): VariantStyle {
     case "primary":
       return {
         background: "var(--brand)",
-        color: "var(--brand-fg)",
+        // The label sits ON the `--brand` fill, so it needs the computed `--on-brand`.
+        // `--brand-fg` is #ffffff on the dark scheme and measures 3.96:1 over `--brand` —
+        // under the 4.5:1 a label carries. It stays in use where it is a FILL, not a label
+        // (the Toggle knob), which is why this is a call-site change and not a token change.
+        color: "var(--on-brand)",
         border: "1px solid transparent",
       };
     case "danger":
@@ -58,7 +62,7 @@ function variantStyle(variant: ButtonVariant): VariantStyle {
 }
 
 export const Button = forwardRef<HTMLButtonElement, ButtonProps>(function Button(
-  { variant = "secondary", size = "md", icon, children, style, disabled, ...rest },
+  { variant = "secondary", size = "md", icon, children, style, disabled, onFocus, onBlur, ...rest },
   ref,
 ) {
   const v = variantStyle(variant);
@@ -78,7 +82,7 @@ export const Button = forwardRef<HTMLButtonElement, ButtonProps>(function Button
         paddingInline: size === "sm" ? "var(--space-4, 8px)" : "var(--space-6, 12px)",
         borderRadius: "var(--radius-md, 6px)",
         fontFamily: "var(--font-ui)",
-        fontSize: "var(--text-body-size, 0.9375rem)",
+        fontSize: "var(--text-body-size, 0.875rem)",
         fontWeight: 600,
         lineHeight: 1,
         cursor: disabled ? "not-allowed" : "pointer",
@@ -89,15 +93,19 @@ export const Button = forwardRef<HTMLButtonElement, ButtonProps>(function Button
         ...v,
         ...style,
       }}
+      // `{...rest}` FIRST. Spread last, a caller's own onFocus/onBlur silently replaced
+      // the composed prop and the tokenized focus ring stopped being drawn on that
+      // control. Spreading first lets the handlers below win; they chain the caller's,
+      // destructured out of `rest` so the spread cannot reintroduce it.
+      {...rest}
       onFocus={(e) => {
         e.currentTarget.style.boxShadow = "0 0 0 2px var(--bg-app), 0 0 0 4px var(--focus-ring)";
-        rest.onFocus?.(e);
+        onFocus?.(e);
       }}
       onBlur={(e) => {
         e.currentTarget.style.boxShadow = "none";
-        rest.onBlur?.(e);
+        onBlur?.(e);
       }}
-      {...rest}
     >
       {icon != null && (
         <span aria-hidden="true" style={{ display: "inline-flex" }}>

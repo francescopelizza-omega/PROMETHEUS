@@ -368,6 +368,7 @@ function TreeNode({
                   color: "var(--text-secondary)",
                   overflow: "hidden",
                   textOverflow: "ellipsis",
+                  minWidth: 0, // flex/grid floor — without it the ellipsis is unreachable
                   whiteSpace: "nowrap",
                   cursor: editable ? "text" : "default",
                 }}
@@ -375,9 +376,7 @@ function TreeNode({
                 = {curValue}
               </span>
             )}
-            {curType && (
-              <span style={{ color: "var(--text-secondary)", opacity: 0.7 }}>{curType}</span>
-            )}
+            {curType && <span style={{ color: "var(--text-secondary)" }}>{curType}</span>}
           </>
         )}
       </div>
@@ -499,6 +498,9 @@ function BreakpointRow({
           onClick={() => jumpToBreakpoint(bp)}
           style={{
             flex: 1,
+            // the ellipsis on the basename span below is a no-op until EVERY level of the flex
+            // chain is allowed to shrink: a flex item floors at min-content width.
+            minWidth: 0,
             display: "flex",
             gap: 2,
             background: "transparent",
@@ -511,11 +513,15 @@ function BreakpointRow({
             color: bp.enabled ? "var(--text-primary)" : "var(--text-secondary)",
           }}
         >
-          <span style={{ overflow: "hidden", textOverflow: "ellipsis" }}>{basename(bp.path)}</span>
+          <span
+            style={{ overflow: "hidden", textOverflow: "ellipsis", minWidth: 0, whiteSpace: "nowrap" }}
+          >
+            {basename(bp.path)}
+          </span>
           <span style={{ color: "var(--text-secondary)" }}>:{bp.line}</span>
         </button>
         {bp.enabled && bp.verified === false && (
-          <span title="not verified by the debug adapter" style={{ color: "var(--warning)" }}>
+          <span title="not verified by the debug adapter" style={{ color: "var(--warn)" }}>
             ?
           </span>
         )}
@@ -586,7 +592,7 @@ function BreakpointRow({
             style={inputStyle}
           />
           {isLogpoint(bp) && !logpointsSupported && (
-            <span style={{ fontSize: "0.66rem", color: "var(--warning)" }}>
+            <span style={{ fontSize: "0.66rem", color: "var(--warn)" }}>
               this adapter doesn't support logpoints — it will stop instead of logging
             </span>
           )}
@@ -1252,7 +1258,7 @@ export function DebugPanel(): ReactElement {
             title={`unsupported fields skipped on import: ${(
               configs[selectedIdx]?.unsupported ?? []
             ).join(", ")}`}
-            style={{ color: "var(--warning)", cursor: "help" }}
+            style={{ color: "var(--warn)", cursor: "help" }}
           >
             ⚠
           </span>
@@ -1348,6 +1354,7 @@ export function DebugPanel(): ReactElement {
                         color: "var(--text-primary)",
                         overflow: "hidden",
                         textOverflow: "ellipsis",
+                        minWidth: 0, // flex/grid floor — without it the ellipsis is unreachable
                         whiteSpace: "nowrap",
                       }}
                     >
@@ -1361,7 +1368,7 @@ export function DebugPanel(): ReactElement {
                         borderRadius: 3,
                         padding: "0 4px",
                         fontSize: "0.64rem",
-                        color: c.source === "vscode" ? "var(--accent)" : "var(--warning)",
+                        color: c.source === "vscode" ? "var(--accent)" : "var(--warn)",
                       }}
                     >
                       {c.source === "vscode" ? "vscode" : ".idea"}
@@ -1371,7 +1378,7 @@ export function DebugPanel(): ReactElement {
                         role="img"
                         aria-label={`${c.config.name} has unsupported fields`}
                         title={`not imported: ${(c.config.unsupported ?? []).join(", ")}`}
-                        style={{ color: "var(--warning)", cursor: "help" }}
+                        style={{ color: "var(--warn)", cursor: "help" }}
                       >
                         ⚠
                       </span>
@@ -1470,10 +1477,7 @@ export function DebugPanel(): ReactElement {
 
       {pendingRemoteAttach && (
         <Panel title="Confirm remote debug attach" elevation="e2">
-          <p
-            role="alert"
-            style={{ margin: "0 0 6px", color: "var(--warning)", fontSize: "0.74rem" }}
-          >
+          <p role="alert" style={{ margin: "0 0 6px", color: "var(--warn)", fontSize: "0.74rem" }}>
             Attaching to{" "}
             <strong>
               {pendingHost}:{pendingPort}
@@ -1544,7 +1548,7 @@ export function DebugPanel(): ReactElement {
                 margin: "4px 0 0",
                 fontSize: "0.72rem",
                 color: runExit.killed
-                  ? "var(--warning)"
+                  ? "var(--warn)"
                   : runExit.exitCode === 0
                     ? "var(--ok)"
                     : "var(--danger)",
@@ -1656,7 +1660,7 @@ export function DebugPanel(): ReactElement {
               </div>
               {installNeedsConfirm && (
                 <div style={{ marginTop: 6 }}>
-                  <p style={{ margin: 0, color: "var(--warning)", fontSize: "0.72rem" }}>
+                  <p style={{ margin: 0, color: "var(--warn)", fontSize: "0.72rem" }}>
                     {installError}
                   </p>
                   <Button
@@ -1737,7 +1741,7 @@ export function DebugPanel(): ReactElement {
                   <span
                     style={{
                       width: 12,
-                      color: stoppedIds.has(t.id) ? "var(--warning)" : "var(--ok)",
+                      color: stoppedIds.has(t.id) ? "var(--warn)" : "var(--ok)",
                     }}
                   >
                     {stoppedIds.has(t.id) ? "⏸" : "▶"}

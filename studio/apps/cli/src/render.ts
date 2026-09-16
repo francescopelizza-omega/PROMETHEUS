@@ -15,6 +15,7 @@
  */
 
 import { ANSI_SGR, type AnsiRole, sgrParamsFor, sgrParamsForName } from "@prometheus/ui/tokens";
+import { clipToWidth, stringWidth, wrapLine } from "./tui/width.js";
 
 // ---- color state ---------------------------------------------------------- //
 
@@ -107,11 +108,17 @@ export const c = {
 
 // ---- visible-length aware helpers ----------------------------------------- //
 
-const ANSI_RE = /\x1b\[[0-9;]*m/g;
-
-/** Visible width of a string, ignoring ANSI escapes. */
+/**
+ * Display width of a string, ignoring ANSI escapes.
+ *
+ * Delegates to `tui/width.ts` rather than measuring with `.length`. UTF-16 units are not
+ * columns: a CJK glyph occupies two, an astral code point counts as two units but draws as
+ * one or two, and a combining mark draws as none. Everything in this file pads and draws
+ * borders from this number, so a mis-measured line put the box's right edge in the wrong
+ * column and the row below tore across it. Byte-identical for ASCII.
+ */
 export function visibleLen(s: string): number {
-  return s.replace(ANSI_RE, "").length;
+  return stringWidth(s);
 }
 
 /** Right-pad a string to `width` based on its VISIBLE length (ANSI-safe). */
@@ -197,16 +204,33 @@ export interface BoxOpts {
 export function box(lines: string[], opts: BoxOpts = {}): string {
   const pad = opts.pad ?? 1;
   const content = lines.length > 0 ? lines : [""];
-  const inner = Math.max(opts.minWidth ?? 0, ...content.map(visibleLen));
+  // Clamp to the terminal, and WRAP rather than clip. `box` sized itself purely from its
+  // content, so one long line — a path, a model id, a remedy sentence — drew a border wider
+  // than the window, the terminal wrapped every row of it, and the box came apart into a
+  // stack of fragments.
+  //
+  // Wrapping, not truncating, because the content of a box is the message: clipping turned
+  // "…RAM at 94% ≥ 90% ceiling. Free up resources and retry" into "…Free up resources and …",
+  // deleting the one part that tells the user what to do. A box that is too narrow for its
+  // text should get TALLER, never quieter. (`onboarding.test.ts:319` is the case that
+  // measured this.)
+  const cols = process.stdout.columns;
+  const cap = Math.max(20, (typeof cols === "number" && cols > 0 ? cols : 80) - 2 - pad * 2);
+  const wrapped = content.flatMap((line) => wrapLine(line, cap));
+  const inner = Math.min(cap, Math.max(opts.minWidth ?? 0, ...wrapped.map(visibleLen)));
   // CLI-097: ASCII box on a dumb terminal (─│╭╮╰╯ → -|+); unchanged on a unicode terminal.
   const bar = glyph("─", "-").repeat(inner + pad * 2);
   const vert = glyph("│", "|");
   const [tl, tr, bl, br] = UNICODE_ENABLED ? ["╭", "╮", "╰", "╯"] : ["+", "+", "+", "+"];
   const tint = (s: string): string => (opts.border ? c.role(s, opts.border) : c.dim(s));
   const sp = " ".repeat(pad);
-  const body = content.map((line) => {
+  const body = wrapped.map((line) => {
+    // A wrapped line already fits `inner`; the clip is the backstop for the one case wrapping
+    // cannot fix — a single unbreakable token wider than the box — so it still cannot punch
+    // through the right border.
+    const src = clipToWidth(line, inner);
     const filled =
-      opts.align === "center" ? padEnd(padStartCenter(line, inner), inner) : padEnd(line, inner);
+      opts.align === "center" ? padEnd(padStartCenter(src, inner), inner) : padEnd(src, inner);
     return `${tint(vert)}${sp}${filled}${sp}${tint(vert)}`;
   });
   return [tint(`${tl}${bar}${tr}`), ...body, tint(`${bl}${bar}${br}`)].join("\n");

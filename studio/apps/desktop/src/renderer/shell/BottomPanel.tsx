@@ -193,7 +193,35 @@ export function BottomPanel({
           overflow: "hidden",
         }}
       >
-        {tabs.map((t, i) => {
+        {/*
+          The tabs scroll; the controls do not.
+
+          The row is `overflow: hidden` and every tab is `whiteSpace: nowrap`, so at the
+          1100px minimum window (sidebar 240 + rail 330 leaves ~452px for the workbench)
+          the six tab labels alone need more width than the row has — and what got clipped
+          was everything AFTER them: the telemetry strip and both trailing buttons. The
+          collapse toggle is the control you reach for precisely because the panel is too
+          big for the window, and it was the first thing to disappear.
+
+          The spacer that used to sit here is gone: this wrapper takes the free space with
+          `flex: 1 1 auto`, and the controls below are `flexShrink: 0`, so pressure lands on
+          the tab strip (which can scroll) instead of on the buttons (which cannot).
+
+          The roving-tabindex handler above reads `e.currentTarget.parentElement` — this
+          wrapper is the tabs' direct parent and holds nothing else, so it keeps working.
+        */}
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 2,
+            flex: "1 1 auto",
+            minWidth: 0,
+            overflowX: "auto",
+            scrollbarWidth: "none",
+          }}
+        >
+          {tabs.map((t, i) => {
           const n = counts?.[t.id];
           // selection is independent of collapse — a collapsed panel still marks which
           // tab is active (else it reads as "nothing selected").
@@ -241,9 +269,11 @@ export function BottomPanel({
               )}
             </button>
           );
-        })}
-        <div style={{ flex: 1 }} />
-        {rightSlot && <div style={{ display: "flex", alignItems: "center" }}>{rightSlot}</div>}
+          })}
+        </div>
+        {rightSlot && (
+          <div style={{ display: "flex", alignItems: "center", flexShrink: 0 }}>{rightSlot}</div>
+        )}
         {/* APP-072: maximize toggle — expand the body to the window-max, restore on 2nd click.
             Hidden while collapsed (nothing to maximize). */}
         {!collapsed && (
@@ -258,6 +288,7 @@ export function BottomPanel({
               color: "var(--text-secondary)",
               cursor: "pointer",
               fontSize: "0.9rem",
+              flexShrink: 0,
             }}
           >
             {maximized ? "⤡" : "⤢"}
@@ -274,6 +305,7 @@ export function BottomPanel({
             color: "var(--text-secondary)",
             cursor: "pointer",
             fontSize: "0.9rem",
+            flexShrink: 0,
           }}
         >
           {collapsed ? "▴" : "▾"}

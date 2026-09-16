@@ -316,7 +316,9 @@ export function FileTree({ root }: { root: string }): ReactElement {
               <span aria-hidden="true" style={{ width: "1em", color: "var(--text-secondary)" }}>
                 {isDir ? (entry.expanded ? "▾" : "▸") : "·"}
               </span>
-              <span style={{ overflow: "hidden", textOverflow: "ellipsis" }}>{node.name}</span>
+              <span style={{ overflow: "hidden", textOverflow: "ellipsis", minWidth: 0 }}>
+                {node.name}
+              </span>
             </button>
           );
         })}
@@ -335,7 +337,9 @@ export function FileTree({ root }: { root: string }): ReactElement {
               e.preventDefault();
               closeMenu();
             }}
-            style={{ position: "fixed", inset: 0, zIndex: Z.modal }}
+            // A context menu is dismissed by clicking away — that is the DROPDOWN rung. At
+            // Z.modal this click-away backdrop sat above the ⌘K palette and swallowed its clicks.
+            style={{ position: "fixed", inset: 0, zIndex: Z.dropdown }}
           />
           <div
             role="menu"
@@ -347,7 +351,7 @@ export function FileTree({ root }: { root: string }): ReactElement {
               // MENU_H over-estimates the four rows on purpose: erring large only pushes
               // the menu further inside the viewport, which is the safe direction.
               ...(({ x, y }) => ({ left: x, top: y }))(clampToViewport(menu.x, menu.y, 170, 128)),
-              zIndex: Z.modal,
+              zIndex: Z.dropdown,
               background: "var(--bg-surface-2)",
               border: "1px solid var(--border-strong)",
               borderRadius: "var(--radius-md, 6px)",
@@ -505,7 +509,10 @@ function popBtn(primary: boolean): CSSProperties {
     borderRadius: "var(--radius-md, 6px)",
     border: primary ? "none" : "1px solid var(--border-subtle)",
     background: primary ? "var(--accent)" : "transparent",
-    color: primary ? "var(--brand-fg)" : "var(--text-secondary)",
+    // `--on-accent` is the computed label colour for the `--accent` FILL (tokens/contrast.ts `onFill`).
+    // The old `--brand-fg` here was WHITE on the dark scheme over a saturated light fill (~2:1),
+    // and a plain `--bg-app` would be near-white over the same fill on the LIGHT scheme.
+    color: primary ? "var(--on-accent)" : "var(--text-secondary)",
     cursor: "pointer",
     fontSize: "0.78rem",
   };

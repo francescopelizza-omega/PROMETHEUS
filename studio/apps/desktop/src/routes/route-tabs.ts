@@ -8,9 +8,9 @@
  *
  * Hence the latch, generalised from the one `docs-view.ts` grew for the `help.*` commands.
  * It solves a specific ordering problem: a caller that navigates to Workspace and then asks
- * for the Repos tab is racing the mount. So a request LATCHES (for a route that is about to
- * mount) and simultaneously NOTIFIES (for one already mounted); the route reads the latch
- * once in its initial state and subscribes for the rest of its life.
+ * for the Repos tab is racing the mount. So a request LATCHES (for a route about to mount)
+ * **or** NOTIFIES (for one already mounted) — never both. The route reads the latch once in
+ * its initial state and subscribes for the rest of its life.
  *
  * Pure pub-sub, no DOM and no React, so `commands/registry.ts` stays DOM-free and this stays
  * node-testable.
@@ -54,21 +54,70 @@ const listeners = new Map<TabbedRoute, Set<(tab: string) => void>>();
  */
 export function requestRouteTab(route: TabbedRoute, tab: string): void {
   if (!isRouteTab(route, tab)) return;
-  pending.set(route, tab);
+  // a NEW request must not be masked by this tick's memo of the previous answer
+  taken.delete(route);
   const set = listeners.get(route);
-  if (set) for (const l of set) l(tab);
+  /**
+   * LATCH **or** NOTIFY — never both.
+   *
+   * The latch exists for a route that is about to MOUNT; the notification for one already
+   * up. Doing both left a permanent latch behind whenever the target was mounted, and
+   * nothing ever cleared it: `takeRouteTab` only runs on a mount. Reachable, and reported as
+   * a real misrouting — on Workspace/Repos, ⌘K `python.selectInterpreter` latches
+   * "environments", `setActivity("workspace")` is a no-op, the live route switches, and the
+   * stale latch then hijacks the NEXT mount minutes later, dropping the user on Environments
+   * for no reason they can connect to anything. `help.docs` stranded two at once.
+   *
+   * That is verbatim the failure `takeRouteTab`'s own docstring promises to prevent.
+   */
+  if (set && set.size > 0) {
+    for (const l of set) l(tab);
+    pending.delete(route);
+    return;
+  }
+  pending.set(route, tab);
+}
+
+/**
+ * What the current tick's take already answered, per route.
+ *
+ * Every caller of `takeRouteTab` reads it from a `useState` initializer, and React
+ * StrictMode double-invokes those in development, keeping the SECOND pass's value. A take
+ * that cleared on the first pass therefore handed the route `null` on the pass that counts:
+ * a persisted `docs` deep link landed on Workspace→Repos under `vite dev` while the
+ * production build was correct — the worst kind of divergence, because the surface you
+ * develop against is the one that lies.
+ *
+ * Memoising the answer for the remainder of the tick makes the two passes agree without
+ * weakening the one-shot guarantee. Both StrictMode passes run inside one synchronous
+ * render, so the memo is gone on the next microtask — long before any later navigation can
+ * read it, and long before StrictMode's separate double-invocation of EFFECTS.
+ */
+const taken = new Map<TabbedRoute, string | null>();
+let flushQueued = false;
+
+function scheduleTakenFlush(): void {
+  if (flushQueued) return;
+  flushQueued = true;
+  queueMicrotask(() => {
+    flushQueued = false;
+    taken.clear();
+  });
 }
 
 /**
  * Read AND CLEAR the latched tab for `route` — the route's initial segment.
  *
  * Clearing is the point: the latch is a one-shot handoff, so navigating away and back must
- * not silently re-select the tab a redirect asked for three navigations ago.
+ * not silently re-select the tab a redirect asked for three navigations ago. "Clear" means
+ * *by the end of this tick* rather than *on this call* — see `taken` above.
  */
 export function takeRouteTab(route: TabbedRoute): string | null {
-  const t = pending.get(route);
-  if (t === undefined) return null;
+  if (taken.has(route)) return taken.get(route) ?? null;
+  const t = pending.get(route) ?? null;
   pending.delete(route);
+  taken.set(route, t);
+  scheduleTakenFlush();
   return t;
 }
 
@@ -86,4 +135,5 @@ export function onRouteTab(route: TabbedRoute, listener: (tab: string) => void):
 export function resetRouteTabs(): void {
   pending.clear();
   listeners.clear();
+  taken.clear();
 }

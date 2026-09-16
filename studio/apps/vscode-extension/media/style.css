@@ -54,8 +54,12 @@ body {
   border: 1px solid var(--vscode-panel-border, transparent);
 }
 
+/* The reasoning stream is text the user READS, so it cannot be dimmed the way a disabled
+   control is. At 0.6 the default dark foreground (#cccccc over #1e1e1e) composites to about
+   4.0:1 — under the 4.5:1 body floor. 0.8 measures ~6.4:1; the italic and the left rule are
+   what mark it as thinking, not the contrast. */
 .thinking {
-  opacity: 0.6;
+  opacity: 0.8;
   font-style: italic;
   border-left: 2px solid var(--vscode-panel-border, currentColor);
   border-radius: 0;

@@ -28,6 +28,25 @@ import {
 import { applyEffort, applyEffortToMessages } from "@prometheus/core/ai-effort";
 import type { EffortResolution } from "@prometheus/core/ai-effort";
 import { mergeWireUsage } from "@prometheus/core/ai-usage";
+import { useAuthorisationStore } from "../../stores/authorisation.js";
+
+/**
+ * `keep_alive` for a local request, renderer-side.
+ *
+ * The renderer is a sandboxed view: it has no `process.env` and may not import `@prometheus/core`
+ * wholesale, so it cannot call core's `localKeepAliveField`. It therefore does the safe half of
+ * that decision — it sends NOTHING and lets the runner's own configured default win.
+ *
+ * That is deliberate, not an oversight. This used to send `keep_alive: "30m"`, which overrode the
+ * user's standing memory guard (`handoffs/ollama-safe-limits.sh` sets `OLLAMA_KEEP_ALIVE=60s`)
+ * and left a model pinned for half an hour after the user stopped typing. If you need a pinned
+ * value in the desktop, set `PROMETHEUS_LOCAL_KEEP_ALIVE` and route the request through main's
+ * `ai-ipc.ts`, which does read it. Keep this in step with
+ * `packages/core/src/ai/local-runners.ts::localKeepAliveField`.
+ */
+function localKeepAliveField(_locality: string | undefined): { keep_alive?: string } {
+  return {};
+}
 
 /**
  * handoff §3: per-turn phase timings, measured (not estimated). `load` is everything
@@ -441,6 +460,9 @@ async function streamViaMain(
       ...(opts.tools && opts.tools.length > 0 ? { tools: opts.tools } : {}),
       ...(opts.effort ? { effort: opts.effort } : {}),
       ...(opts.neverSendToCloud ? { neverSendToCloud: true } : {}),
+      // The live session level, so a `plan` posture actually restricts egress. Main MINs it
+      // with the persisted level, so this can only tighten — never raise.
+      sessionAuthLevel: useAuthorisationStore.getState().level,
       ...(opts.idleTimeoutMs !== undefined ? { idleTimeoutMs: opts.idleTimeoutMs } : {}),
     });
     if (!r.ok) {
@@ -459,7 +481,9 @@ async function streamViaMain(
       ...(r.usage ? { usage: r.usage } : {}),
       ...(r.timing ? { timing: r.timing } : {}),
       ...(r.breaker ? { breaker: r.breaker } : {}),
-      ...(r.paused ? { paused: true } : {}),
+      ...(r.paused
+        ? { paused: true, ...(r.pausedReason ? { pausedReason: r.pausedReason } : {}) }
+        : {}),
     };
   } finally {
     off();
@@ -559,9 +583,7 @@ export async function* streamChat(
       model,
       messages: applyEffortToMessages(messages, opts.effort),
       stream: true,
-      // Ollama extension, ignored elsewhere: keep the model resident so a second prompt
-      // does not pay the cold RELOAD. LOCAL only — a cloud endpoint gets no unknown field.
-      ...(endpoint.locality === "local" ? { keep_alive: "30m" } : {}),
+      ...localKeepAliveField(endpoint.locality),
     },
     opts.effort,
   );
@@ -709,9 +731,18 @@ export interface ChatTurnResult {
   timing?: TurnTiming;
   /** absent only when this turn ran through the direct-fetch escape hatch (tests). */
   breaker?: BreakerSnapshotView;
-  /** true iff this turn ended because the INACTIVITY watchdog fired — a PAUSE, not a
-   *  completion. `text`/`toolCalls` carry whatever had already streamed before the pause. */
+  /** true iff this turn ended in a PAUSE rather than a completion. `text`/`toolCalls` carry
+   *  whatever had already streamed before it. See `pausedReason` for WHY. */
   paused?: boolean;
+  /**
+   * Why the turn paused. Absent means `idle`.
+   *
+   * Main sets this on the wire and it used to be dropped here, so a pause caused by the RAM
+   * ceiling force-stopping (or refusing to restart) the local runner was reported with the
+   * inactivity watchdog's wording — "model went idle" — and the one piece of actionable advice
+   * ("retry once memory frees up; Prometheus will restart the runner") never reached the user.
+   */
+  pausedReason?: "idle" | "resources-critical";
 }
 
 /**
@@ -773,9 +804,7 @@ export async function runChatTurn(
     messages: applyEffortToMessages(messages, opts.effort),
     stream: true,
     // Ollama extension, ignored elsewhere (CLI parity, `agent-runtime.ts:825`): keep the
-    // model resident 30m so the loop's SECOND round-trip does not pay a cold reload.
-    // LOCAL only — a cloud endpoint never receives a non-standard field.
-    ...(endpoint.locality === "local" ? { keep_alive: "30m" } : {}),
+    ...localKeepAliveField(endpoint.locality),
   };
   // APP-055: ask cloud (OpenAI-compatible) endpoints for token usage on the final chunk.
   // Gated to cloud so a strict local server (llama.cpp/older proxies) never 400s on the

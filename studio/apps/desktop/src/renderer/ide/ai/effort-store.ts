@@ -26,17 +26,35 @@ import type { RendererEndpoint } from "./ai-client.js";
 
 export const EFFORT_KEY = "prometheus.ai.effort.v1";
 
-/** The ladder the chip cycles through. `off` is reachable, but not by accident. */
-export const EFFORT_CYCLE: readonly EffortTier[] = ["low", "medium", "high", "max", "off"];
+/**
+ * The ladder the chip cycles through. `off` is reachable, but not by accident.
+ *
+ * Every rung, including the two the ladder grew at the top (`xhigh`, `ultra`). A cycle that
+ * skipped them would make the app the one surface where a paid model's strongest settings
+ * cannot be asked for — and on a model that does not support them, `resolveEffort` clamps and
+ * the chip says so, which is the same thing that already happens for `max` on a small model.
+ */
+export const EFFORT_CYCLE: readonly EffortTier[] = [
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "ultra",
+  "max",
+  "off",
+];
 
-/** Short chip wording — "medium" is too wide for a 330px rail. */
-export const EFFORT_SHORT: Record<EffortTier, string> = {
-  off: "off",
-  low: "low",
-  medium: "med",
-  high: "high",
-  max: "max",
-};
+/*
+ * There is deliberately NO short-label map here any more.
+ *
+ * `EFFORT_SHORT` used to live at this spot, justified by "medium is too wide for a 330px
+ * rail". It had ZERO consumers: the composer's effort chip became a cell of the shared
+ * TraitRail, whose label (`⚙ <tier>`) is built in `@prometheus/core`'s ai/effort/traits.ts
+ * so the CLI and the GUI cannot disagree about it. An exported constant with a rationale
+ * and no call sites is worse than nothing — it reads as a width guard that is being applied
+ * somewhere, and it is not. The full tier names fit the rail as it is now; if that stops
+ * being true, the fix belongs in core beside the label it would shorten, not here.
+ */
 
 function load(): EffortTier {
   if (typeof window === "undefined") return "medium";
@@ -48,12 +66,62 @@ function load(): EffortTier {
   }
 }
 
-function persist(tier: EffortTier): void {
+/** Update the local mirror. Never the only write — see `persist`. */
+function mirror(tier: EffortTier): void {
   if (typeof window === "undefined") return;
   try {
     window.localStorage.setItem(EFFORT_KEY, tier);
   } catch {
-    /* private mode / quota — the tier just won't survive this session. */
+    /* private mode / quota — the mirror is an optimisation, the file is the truth. */
+  }
+}
+
+/**
+ * Persist an EXPLICIT choice: the shared file first, the local mirror alongside it.
+ *
+ * localStorage used to be the only store, so a `/think max` in the terminal was invisible here
+ * and clearing the app's data reset the tier with nothing on disk to recover it from — the same
+ * split the autonomy level had, in a second setting.
+ */
+function persist(tier: EffortTier): void {
+  mirror(tier);
+  if (typeof window === "undefined") return;
+  void window.prometheus?.effort?.set(tier)?.catch(() => undefined);
+}
+
+/**
+ * Adopt the shared file's tier once the window is up.
+ *
+ * Called from the app shell's boot, beside `hydrateAuthLevel`. A file that has never been
+ * written returns `null` — "never chosen", not "chosen to be the default" — so the seeded value
+ * stands. A tier the user has already picked with the chip THIS session also stands: a decision
+ * made a moment ago outranks a file read that lands after it.
+ *
+ * The "picked this session" guard is a MODULE-LOCAL flag, deliberately not the store's `chosen`.
+ * `chosen` was seeded from localStorage, and `mirror(tier)` below writes the file's tier there —
+ * so the first successful hydration made `chosen` true on the NEXT boot and this function bailed
+ * at its own guard forever after. The shared file was authoritative exactly once, which is the
+ * split ("a `/think max` in the terminal was invisible here") the file store exists to close.
+ * The flag only has to lose to a click that happened while the async read was in flight.
+ */
+let pickedThisSession = false;
+
+export async function hydrateEffortFromDisk(): Promise<void> {
+  if (typeof window === "undefined") return;
+  try {
+    const res = await window.prometheus?.effort?.get();
+    const tier = res?.ok ? res.tier : null;
+    if (!isEffortTier(tier)) return;
+    if (pickedThisSession) return;
+    // Still mirrored: `load()` uses it to seed the FIRST PAINT of the next launch, before any
+    // async read can answer. It is this window's last-seen value, never a record of a choice.
+    mirror(tier);
+    // `chosen: true` — a tier the shared file actually holds IS an explicit choice (it was made
+    // in the terminal, the CLI or a previous session), so the `ai.effort` settings default must
+    // not overwrite it when AgentPane's settings hydrate lands after this read.
+    useEffortStore.setState({ tier, chosen: true });
+  } catch {
+    /* no bridge (a browser-only render, a test) — the seeded value stands */
   }
 }
 
@@ -79,30 +147,18 @@ export interface EffortStore {
   chosen: boolean;
 }
 
-/**
- * Has the user explicitly chosen a tier?
- *
- * Seeded from localStorage at construction and set by `setTier` thereafter — tracked in the
- * STORE rather than re-read from localStorage on each `hydrate`, because `persist` is allowed
- * to fail (private mode, quota — it already swallows that) and a guard that depends on the
- * write having succeeded would let a settings read quietly overwrite a choice the user just
- * made with the chip.
- */
-function storedChoice(): boolean {
-  if (typeof window === "undefined") return false;
-  try {
-    return isEffortTier(window.localStorage.getItem(EFFORT_KEY));
-  } catch {
-    return false;
-  }
-}
-
 export const useEffortStore = create<EffortStore>((set, get) => ({
   tier: load(),
   force: false,
-  chosen: storedChoice(),
+  // NOT seeded from localStorage: the mirror holds whatever tier this window last saw, including
+  // one hydrated from the shared file, so reading it here reported "the user chose this" for a
+  // value the user never picked — and that permanently outranked both the file and the
+  // `ai.effort` setting. A choice is something made in THIS session (`setTier`) or something the
+  // shared file holds (`hydrateEffortFromDisk`).
+  chosen: false,
   setTier: (tier: EffortTier): void => {
     set({ tier, chosen: true });
+    pickedThisSession = true; // outranks a disk read still in flight — see hydrateEffortFromDisk
     persist(tier);
   },
   cycle: (): void => {

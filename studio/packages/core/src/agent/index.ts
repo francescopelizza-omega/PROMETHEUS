@@ -155,6 +155,7 @@ export type { AuthCategory, AuthLevelMeta, AuthToolEffect } from "./authorizatio
 export {
   AUTH_LEVELS,
   DEFAULT_AUTH_LEVEL,
+  MAX_AUTH_LEVEL,
   UNSCOPED_AUTO_LEVEL,
   authDecision,
   authLevelLegend,

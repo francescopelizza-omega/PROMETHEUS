@@ -49,7 +49,7 @@ import { createHash } from "node:crypto";
 import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 
-import { type SecurityVerdict, gateCommand } from "@prometheus/engine-bridge";
+import { type SecurityVerdict, gateCommand, verdictReasons } from "@prometheus/engine-bridge";
 import type { HookEvent, HookSpec } from "../../hooks.js";
 
 /** One hook dropped by the scan or the trust gate, and why. */
@@ -226,11 +226,14 @@ export async function resolveEffectiveHooks(opts: {
       continue;
     }
     if (verdict.verdict === "block" || verdict.verdict === "error") {
-      const finding = verdict.findings[0];
+      // A COMMAND gate answers in prose, so `findings[0]` was always undefined here and a
+      // refused workspace hook could never name what refused it. There is no rule id to
+      // report on that axis — the reason IS the answer.
+      const why = verdictReasons(verdict)[0];
       refused.push({
         event: spec.event,
         command: spec.command,
-        reason: `nemesis ${verdict.verdict}${finding ? `: ${finding.rule}` : ""}`,
+        reason: `nemesis ${verdict.verdict}${why ? `: ${why}` : ""}`,
       });
       appendHooksAudit(opts.home, {
         cwd: opts.cwd,

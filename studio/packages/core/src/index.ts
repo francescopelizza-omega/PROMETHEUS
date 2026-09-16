@@ -447,6 +447,18 @@ export {
   capabilitiesFromOllamaShow,
   revisionFromOllamaShow,
 } from "./ai/context-window.js";
+export type { LocalRunnerSpec } from "./ai/local-runners.js";
+export {
+  LOCAL_RUNNERS,
+  runnerForBaseUrl,
+  runnerById,
+  portOf as localRunnerPortOf,
+  isLocalUrl,
+  localKeepAlive,
+  localKeepAliveField,
+} from "./ai/local-runners.js";
+export type { EnsureOllamaOptions, EnsureOllamaResult } from "./ai/ollama-autostart.js";
+export { ensureLmStudioRunning, ensureOllamaRunning } from "./ai/ollama-autostart.js";
 export type {
   EndpointProbe,
   EndpointProbeDeps,

@@ -10,7 +10,13 @@
  *      — the break-in-the-middle-of-a-word look is only the visible half of the bug.
  *   2. NO fixed-px pane heights on the panes §9 names. Panels flex or size to the
  *      viewport; a hardcoded height wastes a tall window and clips a short one.
- *   3. NO bare numeric z-index. There is ONE ladder (packages/ui/src/tokens/layers.ts):
+ *   3. NO ellipsis without a shrink floor. `overflow:hidden` + `text-overflow:ellipsis` do
+ *      NOTHING to a flex/grid item until it is allowed to shrink: an item's floor is its
+ *      min-content width, so an "ellipsised" label holds its row open at full width and pushes
+ *      the cost onto its siblings — which is how "Open Folder" ended up wrapping onto two lines
+ *      inside its own button. `minWidth: 0` is a no-op on a plain block box, so requiring it
+ *      next to every ellipsis costs nothing and closes the whole family.
+ *   4. NO bare numeric z-index. There is ONE ladder (packages/ui/src/tokens/layers.ts):
  *      base / raise / dropdown / palette / modal / toast. Sixteen ad-hoc values is how a
  *      force-override dialog ends up underneath a command palette.
  *
@@ -52,7 +58,13 @@ const ANYWHERE = /overflow-wrap:\s*anywhere|overflowWrap:\s*["']anywhere["']/;
 const PANE_HEIGHT = /(?<!max)(?<!Max)\bheight:\s*["']?(\d{3,})(?:px)?["']?\s*[,;]/i;
 const PANE_MIN_PX = 120;
 
-/** Rule 3 — a bare numeric z-index. Must be a `Z.<rung>` from the shared ladder. */
+/** Rule 3 — `text-overflow: ellipsis` needs a `minWidth: 0` in the SAME style object. */
+const ELLIPSIS = /textOverflow:\s*["']ellipsis["']|text-overflow:\s*ellipsis/;
+/** How far around an ellipsis line to look for the floor (one style object). */
+const ELLIPSIS_WINDOW = 16;
+const MIN_WIDTH_0 = /minWidth:\s*0|min-width:\s*0/;
+
+/** Rule 4 — a bare numeric z-index. Must be a `Z.<rung>` from the shared ladder. */
 const BARE_Z = /zIndex:\s*\d|z-index:\s*\d/;
 
 function collect(dir, acc) {
@@ -96,6 +108,16 @@ for (const file of files) {
         `${rel}:${i + 1}  fixed ${m[1]}px pane height  →  flex or vh  |${line.trim()}`,
       );
     }
+    if (ELLIPSIS.test(line)) {
+      // Look at the enclosing style OBJECT, not the one line: the floor is a sibling property
+      // and which side of `textOverflow` it is written on is nobody's business.
+      const near = lines.slice(Math.max(0, i - ELLIPSIS_WINDOW), i + ELLIPSIS_WINDOW).join("\n");
+      if (!MIN_WIDTH_0.test(near)) {
+        violations.push(
+          `${rel}:${i + 1}  ellipsis with no shrink floor  →  add minWidth: 0  |${line.trim()}`,
+        );
+      }
+    }
   });
 }
 
@@ -105,6 +127,8 @@ if (violations.length > 0) {
   console.error(
     "\nRules: (1) long strings wrap with overflow-wrap:break-word, NEVER `anywhere`." +
       "\n       (2) panes flex or size to the viewport — no fixed-px pane heights." +
+      "\n       (3) text-overflow:ellipsis needs minWidth:0 — a flex item cannot shrink without it." +
+      "\n       (4) z-index comes from the Z ladder, never a bare number." +
       "\nIf a case is genuinely legitimate, annotate the line: `// layout-allow: <reason>`.",
   );
   process.exit(1);

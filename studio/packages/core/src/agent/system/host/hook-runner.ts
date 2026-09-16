@@ -31,7 +31,7 @@ export interface HookChildLike {
   stderr: { on(e: "data", cb: (c: Buffer | string) => void): void } | null;
   stdin: { end(data?: string): void; on(e: "error", cb: (err: Error) => void): void } | null;
   on(e: "error", cb: (err: Error) => void): void;
-  on(e: "close", cb: (code: number | null) => void): void;
+  on(e: "close", cb: (code: number | null, signal: string | null) => void): void;
   kill(sig?: string): void;
 }
 
@@ -133,8 +133,14 @@ export function createHookRunner(opts: HookRunnerOptions = {}): HookRunner {
       child.stdout?.on("data", (c) => append(c, "out"));
       child.stderr?.on("data", (c) => append(c, "err"));
       child.on("error", (err) => finish({ exitCode: -1, stdout, stderr, error: errText(err) }));
-      child.on("close", (code) => {
+      child.on("close", (code, signal) => {
         if (timedOut) finish({ exitCode: code ?? -1, stdout, stderr, timedOut: true });
+        // `code === null` with a signal means the hook was KILLED — it never got to vote.
+        // Reported as a bare nonzero exit it was indistinguishable from a deliberate DENY,
+        // so a hook that segfaulted (or that anything else on the box killed) silently
+        // vetoed every tool call. Naming it an error lets the caller tell the two apart.
+        else if (code === null && signal)
+          finish({ exitCode: -1, stdout, stderr, error: `hook killed by ${signal}` });
         else finish({ exitCode: code ?? -1, stdout, stderr });
       });
 

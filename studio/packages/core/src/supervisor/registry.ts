@@ -239,8 +239,15 @@ export class ServerSupervisor extends EventEmitter {
     this.emit("stopping", toStatus(server));
 
     return new Promise<ServerStatus>((resolve) => {
+      // Declared BEFORE `onExit`, and with `let`. The kill-throw path below calls `onExit()`
+      // before the timer exists, and a `const killTimer` declared further down is in its
+      // temporal dead zone at that moment — so `clearTimeout(killTimer)` threw a
+      // ReferenceError INSIDE the promise executor, rejecting `stop()` for a server that had
+      // simply already died. The one path meant to handle "already dead" was the one that
+      // could not.
+      let killTimer: ReturnType<typeof setTimeout> | undefined;
       const onExit = () => {
-        clearTimeout(killTimer);
+        if (killTimer) clearTimeout(killTimer);
         resolve(toStatus(server));
       };
       child.once("exit", onExit);
@@ -253,7 +260,7 @@ export class ServerSupervisor extends EventEmitter {
         return;
       }
 
-      const killTimer = setTimeout(() => {
+      killTimer = setTimeout(() => {
         try {
           child.kill("SIGKILL");
         } catch {

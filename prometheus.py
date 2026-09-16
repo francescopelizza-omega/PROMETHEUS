@@ -462,20 +462,90 @@ SCRIPT_VERSION = "0.15.0"
 HOME = Path.home()
 
 
-def _resolve_prom_dir() -> Path:
-    """Prometheus' OWN config dir — the single source of truth for `~/.config/prometheus`.
+# The pre-consolidation engine root. Spelled ONCE, here, and referenced by the resolver below:
+# a second copy of this literal is how an override came to be honoured by half the constants.
+LEGACY_PROM_DIR = HOME / ".config" / "prometheus"
 
-    `$PROMETHEUS_CONFIG_DIR` overrides it so a test run, a sandbox or a probe never writes
-    into the real user's dir. Without an override there was no way to isolate the engine at
-    all: a single unit test that trips the global crash guard (SECTION main) overwrote the
-    user's genuine `last-crash.log` — the very file the crash guard tells them to report.
+
+def _resolve_prom_home() -> Path:
+    """The ONE Prometheus home: ``$PROMETHEUS_HOME``, else ``~/.prometheus``.
+
+    Every root the engine owns hangs off this — the config dir, the model library, the effort
+    rules. Each used to re-derive the home from ``HOME`` separately, so the one variable meant
+    to sandbox the whole product moved some of them and left the rest writing to the real home.
+    """
+    override = (os.environ.get("PROMETHEUS_HOME") or "").strip()
+    return Path(override).expanduser() if override else HOME / ".prometheus"
+
+
+PROM_HOME = _resolve_prom_home()
+
+
+# Files that mean "the engine has state HERE". Presence of the directory is not enough: the new
+# root is shared with the Studio, which creates `~/.prometheus/config` for `mcp-servers.json` and
+# its audit logs long before the engine has ever written anything. Testing `.exists()` therefore
+# declared the move complete on a machine where it had not started, orphaning the trust store,
+# the vault, the pinning key, the installed skills and the managed repos in the old root.
+_ENGINE_STATE_MARKERS = ("trust.json", "config.json", "vault.json", "pin.key")
+
+
+def _has_engine_state(d: Path) -> bool:
+    """Has the ENGINE (not just the Studio) written anything into this directory?"""
+    try:
+        return any((d / name).exists() for name in _ENGINE_STATE_MARKERS)
+    except OSError:
+        return False
+
+
+def _resolve_prom_dir() -> Path:
+    """Prometheus' OWN config dir — the single source of truth for the engine's state.
+
+    ONE HOME. This used to resolve to `~/.config/prometheus`, a third root beside
+    `~/.prometheus` (sessions, cache, logs, models) and the Studio's own
+    `~/.config/prometheus-studio`. Three directories for one product is why "where does
+    Prometheus keep my settings" had no answer, so everything now hangs off
+    `~/.prometheus/config` — the same directory the Studio side resolves to.
+
+    Precedence, most specific first:
+
+      1. ``$PROMETHEUS_CONFIG_DIR`` — an explicit override, so a test run, a sandbox or a
+         probe never writes into the real user's dir. Without one there was no way to
+         isolate the engine at all: a single unit test that trips the global crash guard
+         (SECTION main) overwrote the user's genuine `last-crash.log` — the very file the
+         crash guard tells them to report.
+      2. ``$PROMETHEUS_HOME`` — the one variable that sandboxes the whole product; the
+         engine used to ignore it entirely, so it moved half of Prometheus and left the
+         engine writing to the real home.
+      3. ``~/.prometheus/config``.
+
+    LEGACY: only when NEITHER override is set and the new root has no engine state yet, the
+    old `~/.config/prometheus` is still used, so an existing install keeps its trust store,
+    its policies and its skills instead of silently starting from nothing. `prometheus doctor`
+    reports when this fallback is in force. An explicit `$PROMETHEUS_HOME` ENDS the fallback:
+    see the guard in the body.
 
     Defined next to HOME (not down in SECTION 7B) because several module-level constants
     below resolve at import time and MUST all agree; four separate copies of this expression
     used to drift apart under an override.
     """
     override = (os.environ.get("PROMETHEUS_CONFIG_DIR") or "").strip()
-    return Path(override).expanduser() if override else HOME / ".config" / "prometheus"
+    if override:
+        return Path(override).expanduser()
+    current = _resolve_prom_home() / "config"
+    # `$PROMETHEUS_HOME` means "use THIS tree" — an explicit sandbox, a container, a test run.
+    # It is not a request to adopt whatever the real `~/.config` happens to hold, and treating
+    # it as one reached OUTSIDE the sandbox on every run: `LEGACY_PROM_DIR` is derived from
+    # HOME, not from the override, and a fresh sandbox is by definition empty of markers — so
+    # on any machine carrying a pre-consolidation `~/.config/prometheus/trust.json` (exactly
+    # the case this fallback exists for) PROM_DIR resolved back to the user's REAL config and
+    # every derived constant (TRUST_FILE, PROM_CONFIG, the crash guard's last-crash.log) read
+    # and WROTE it. Mirrors the guard core/src/cli-profiles/migrate.ts already carries, with
+    # the same reasoning. The fallback is for an UNCONFIGURED machine only.
+    if (os.environ.get("PROMETHEUS_HOME") or "").strip():
+        return current
+    if _has_engine_state(LEGACY_PROM_DIR) and not _has_engine_state(current):
+        return LEGACY_PROM_DIR
+    return current
 
 
 PROM_DIR = _resolve_prom_dir()
@@ -10175,6 +10245,8 @@ def cmd_doctor(args, osi: OSInfo) -> int:
                 "python": platform.python_version(),
                 "git": shutil.which("git"),
                 "ai_agents": [h.name for h in detected],
+                "config_dir": str(PROM_DIR),
+                "config_dir_is_legacy": PROM_DIR == LEGACY_PROM_DIR,
             }
         )
         return 0 if ok else 2
@@ -10184,6 +10256,22 @@ def cmd_doctor(args, osi: OSInfo) -> int:
     print(f"  python        : {platform.python_version()}")
     print(f"  git           : {shutil.which('git') or 'NOT FOUND'}")
     print(f"  AI agents     : {', '.join(h.name for h in detected) or 'none detected'}")
+    print(f"  config dir    : {PROM_DIR}")
+    # ONE HOME: everything Prometheus owns now hangs off ~/.prometheus. An install that predates
+    # that keeps working from the old root — silently, which is how a "moved" setting turns into
+    # a lost one — so say so, and say what to do about it. Deliberately NOT moved automatically:
+    # this directory holds `vault.json` and `pin.key`, and quietly leaving a second copy of a key
+    # file on disk is worse than leaving it where it is.
+    if PROM_DIR == LEGACY_PROM_DIR:
+        target = _resolve_prom_home() / "config"
+        Log.warn(f"using the pre-consolidation config dir ({LEGACY_PROM_DIR})")
+        print(f"  everything else lives under {_resolve_prom_home()}. To finish the move:")
+        # `cp -a src/. dst/`, never `mv src dst`: the target usually ALREADY EXISTS (the Studio
+        # puts mcp-servers.json and its audit logs there), and `mv` into an existing directory
+        # would nest the whole engine root one level deeper instead of merging it.
+        print(f"    mkdir -p {target} && cp -a {LEGACY_PROM_DIR}/. {target}/")
+        print(f"  then re-run `prometheus doctor`; when it stops warning, {LEGACY_PROM_DIR}")
+        print("  can be deleted. It holds vault.json and pin.key, so nothing is moved for you.")
     (Log.ok if ok else Log.warn)("ready" if ok else "no usable OS or no AI agents found")
     return 0 if ok else 2
 
@@ -12863,7 +12951,7 @@ STALE_DAYS = 120                                    # config untouched longer = 
 # A single JSON file of durable user prefs (models install folder, chat
 # defaults, ...). Corruption-safe: a broken file NEVER crashes Prometheus.
 PROM_CONFIG = PROM_DIR / "config.json"
-DEFAULT_MODELS_ROOT = HOME / ".prometheus" / "models"
+DEFAULT_MODELS_ROOT = PROM_HOME / "models"
 
 
 def load_config() -> dict:
@@ -14410,7 +14498,8 @@ def cmd_harden(args, osi: OSInfo) -> int:
 #  SECTION 6H-bis — REASONING EFFORT (the `/think` ladder), Python side
 #
 #  The TypeScript hosts (CLI, Studio, VS Code) resolve a user-facing effort tier
-#  — off < low < medium < high < max — against a capability table, because the
+#  — off < low < medium < high < xhigh < ultra < max — against a capability table,
+#  because the
 #  backends do not share a concept: OpenAI-compatible servers take a
 #  `reasoning_effort` string, Ollama's native API a `think` field, Anthropic and
 #  Gemini a token budget or their own enum, gpt-oss a literal line of English,
@@ -14431,7 +14520,12 @@ def cmd_harden(args, osi: OSInfo) -> int:
 #  SPECIFIC each match is and a probe outranks any name guess.
 # ============================================================================
 
-EFFORT_TIERS = ("off", "low", "medium", "high", "max")
+# Mirrors `EFFORT_TIERS` in packages/core/src/ai/effort/types.ts, in the SAME order — the
+# order is the clamp order, so a Python copy that ranked the rungs differently would resolve a
+# tier to a different neighbour than the TypeScript side for the identical model.
+# `xhigh` is a documented level on both cloud vendors; `ultra` was measured on the Ollama /v1
+# shim. `max` stays last: both vendors put it at the top of their own tables.
+EFFORT_TIERS = ("off", "low", "medium", "high", "xhigh", "ultra", "max")
 _EFFORT_RULES_FILENAME = "effort-capabilities.json"
 _EFFORT_BUILTIN_ARTIFACT = (
     Path(__file__).resolve().parent / "studio" / "config" / "effort-capabilities.builtin.json"
@@ -14451,6 +14545,19 @@ _EFFORT_EMULATION = {
         "Think carefully before you answer: consider edge cases, check your own "
         "reasoning, and only respond once you are confident it is correct. Do not "
         "shortcut this."
+    ),
+    # The two rungs between `high` and `max`. Distinct prose, because on a knobless model the
+    # prompt IS the whole mechanism and three rungs that read identically are one rung.
+    "xhigh": (
+        "Work through this thoroughly before answering: explore the problem, consider "
+        "the alternatives, verify each step of your reasoning, and only then give your "
+        "answer. Take the time this needs."
+    ),
+    "ultra": (
+        "Treat this as a hard problem. Explore it from more than one angle, enumerate "
+        "the alternatives and say why you rejected the ones you rejected, check your "
+        "reasoning against the edge cases, and only give a final answer once you have "
+        "verified it holds."
     ),
     "max": (
         "Reason through this as thoroughly as you can before answering: enumerate the "
@@ -14605,13 +14712,15 @@ def effort_rules(cwd: Optional[Path] = None) -> tuple[list[dict], list[str]]:
             f"{_EFFORT_BUILTIN_ARTIFACT.name} is missing or empty — "
             "run `node studio/scripts/emit-effort-rules.mjs`"
         )
-    user, n = _effort_read_rules(HOME / ".prometheus" / _EFFORT_RULES_FILENAME)
+    # Resolved at CALL time, not from the module-level PROM_HOME: `HOME` is monkeypatched by
+    # the suite to sandbox this lookup, and a constant frozen at import would ignore that.
+    user, n = _effort_read_rules(_resolve_prom_home() / _EFFORT_RULES_FILENAME)
     notes += n
     proj: list[dict] = []
     if os.environ.get("PROM_NO_PROJECT_CONFIG") != "1":
         d = (cwd or Path.cwd()).resolve()
         stop = HOME.resolve()
-        user_path = (HOME / ".prometheus" / _EFFORT_RULES_FILENAME).resolve()
+        user_path = (_resolve_prom_home() / _EFFORT_RULES_FILENAME).resolve()
         while True:
             cand = d / ".prometheus" / _EFFORT_RULES_FILENAME
             # Running from $HOME itself makes the project candidate BE the user layer. Loading
@@ -14764,13 +14873,29 @@ def effort_resolve(tier: str, cap: dict, max_tokens: Optional[int] = None,
     note = cap.get("note")
 
     def _forced(why: str) -> dict:
-        vocab = {"off": "none", "low": "low", "medium": "medium", "high": "high", "max": "max"}
+        # Mirrors FORCED_VOCAB in packages/core/src/ai/effort/apply.ts. Forcing is already
+        # "send it and let the provider decide" — the degraded reason is literally "forced" —
+        # so the honest value is the tier the user asked for, not a quiet downgrade.
+        vocab = {"off": "none", "low": "low", "medium": "medium", "high": "high",
+                 "xhigh": "xhigh", "ultra": "ultra", "max": "max"}
+        # Mirrors `forced()` in packages/core/src/ai/effort/apply.ts. Forcing changes what goes
+        # on the WIRE; it does not silence the prose. Hardcoding `emulation: None` here was
+        # worse on this side than on the TypeScript side: there `effort-text.ts` gates on
+        # `mechanism` alone and keeps injecting for a knobless model, whereas here
+        # `effort_apply_messages` is the ONLY injector and it gates on `emulation` — so turning
+        # forcing ON deleted the one thing that was already working. The tier arrived as prose
+        # without the flag and as nothing at all with it, and Studio/VS Code sent a different
+        # prompt than the CLI for the same model and the same tier.
+        # Same predicate as `emulationApplies`: `none` and `template-kwarg` yes, `always-on` no
+        # (a fixed-depth model cannot be talked into thinking harder).
+        emu = _EFFORT_EMULATION.get(tier) if mech in ("none", "template-kwarg") else None
         return {"requested": tier, "applied": tier, "mechanism": mech,
                 "patch": {"kind": "body", "path": "reasoning_effort", "value": vocab[tier]},
                 "degraded": {"reason": "forced",
                              "message": f"{why}; sent anyway because effort forcing is on — "
                                         "the provider may reject this request"},
-                "emulation": None, "constraints": cap.get("constraints")}
+                "emulation": ({"via": "prompt-cot", "text": emu} if emu else None),
+                "constraints": cap.get("constraints")}
 
     if mech == "always-on":
         if force:
@@ -15706,7 +15831,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_chat.add_argument("--local", metavar="MODEL", help="AGENTIC mode: run in-app against a local model (ollama tag / LM Studio model id)")
     p_chat.add_argument("--runner", choices=["ollama", "lmstudio"], help="local runner for --local (default: ollama)")
     p_chat.add_argument("--effort", choices=list(EFFORT_TIERS), metavar="TIER",
-                        help="AGENTIC mode: reasoning effort — off|low|medium|high|max. "
+                        help="AGENTIC mode: reasoning effort — off|low|medium|high|xhigh|ultra|max. "
                              "Translated per-backend (reasoning_effort, a token budget, a "
                              "trained-on prompt line); a model with no knob gets it as a "
                              "step-by-step instruction instead, and says so.")

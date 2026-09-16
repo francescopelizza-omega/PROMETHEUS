@@ -59,12 +59,23 @@ import { PROM_VERSION } from "../commands/help.js";
 import { runInvoke } from "../commands/invoke.js";
 import { readTokenToggles } from "../commands/token-toggles.js";
 import { type CommandOutcome, outcomeFromError } from "../context.js";
-import { guardOwnRepo, resolveCwd } from "../cwd-guard.js";
-import { ensureHomeTree, prometheusHome, resolveCategory } from "../home.js";
+import { type CwdMove, guardOwnRepo, resolveCwd, resolveCwdMove } from "../cwd-guard.js";
+import { fleetReport } from "../fleet/report.js";
+import type { FleetTicker } from "../fleet/ticker.js";
+import { startFleetTicker } from "../fleet/ticker.js";
+import {
+  ensureHomeTree,
+  loadSettings,
+  prometheusHome,
+  resolveCategory,
+  saveSettings,
+} from "../home.js";
 import { runDemos } from "../orchestration/demos-cmd.js";
 import type { ParsedArgs } from "../parse.js";
+import { bannerCwd, shortCwd } from "../path-display.js";
 import { box, c, defaultColorEnabled, padEnd, visibleLen } from "../render.js";
 import { insideTmux } from "../tmux/tmux.js";
+import { fleetBarLine, fleetLegendLines } from "../tui/fleet-bar.js";
 import { type KeymapResolution, resolveKeymap } from "../tui/keys.js";
 import { detectColorCaps } from "../tui/palette.js";
 import { runUpdates, updatesStartupNotice } from "../updates/updates-cmd.js";
@@ -136,9 +147,11 @@ import {
   type Backends,
   backendSummary,
   detectBackends,
+  emptyBackends,
   renderOnboarding,
   runPathsWizard,
   runSetup,
+  stopSelfStartedRunners,
 } from "./onboarding.js";
 import {
   DEFAULT_SUBAGENTS,
@@ -481,40 +494,12 @@ export function banner(state: repl.ReplState, backendLine: string): string {
   return [box(lines, { border: "brand" }), "", tips].join("\n");
 }
 
-/** Shorten an absolute path under $HOME to a leading `~` (Claude-Code-style). Boundary-checked so a
- *  sibling like `/home/user-x` (home `/home/user`) is not mis-collapsed to `~-x`. */
-function shortCwd(dir: string): string {
-  const home = process.env.HOME ?? process.env.USERPROFILE ?? "";
-  if (!home) return dir;
-  if (dir === home) return "~";
-  return dir.startsWith(`${home}/`) || dir.startsWith(`${home}\\`)
-    ? `~${dir.slice(home.length)}`
-    : dir;
-}
-
-/**
- * Like `shortCwd`, but for the ONE-TIME startup banner only: the home folder itself is shown as
- * its real, full path (`/Users/name` / `/home/name`), never a bare `~`.
- *
- * A lone `~` reads clearly to an experienced terminal user and is nearly invisible to everyone
- * else — the ONE line in the whole banner that answers "where am I", reduced to a single
- * low-contrast glyph. A NESTED path (`~/projects/foo`) still collapses, same as `shortCwd`: it is
- * never just that one character, so it stays legible, and the banner stays short for a deep tree.
- * The persistent per-turn status lines (`footer()` here, the TUI's own `/profile`-adjacent cwd
- * chip in tui/status.ts) intentionally keep the plain `shortCwd` behavior — the tilde there is
- * seen on every single prompt, not just once at the start.
- */
-function bannerCwd(dir: string): string {
-  const home = process.env.HOME ?? process.env.USERPROFILE ?? "";
-  return home && dir === home ? dir : shortCwd(dir);
-}
-
 /**
  * Resolve the effective TUI keymap (CLI-096) from the user config's `[keymap]` table. Fail-soft: a
  * missing/unreadable/corrupt config ⇒ the default keymap. The resolution itself surfaces any
  * conflict/reserved errors (`/keys` prints them) — this only handles the fs read.
  */
-function loadKeymap(home: string): KeymapResolution {
+function loadKeymap(home: string | undefined): KeymapResolution {
   try {
     const table = cliProfiles.parseToml(readFileSync(cliProfiles.configPath(home), "utf8"));
     const km = cliProfiles.getPath(table, "keymap");
@@ -531,10 +516,29 @@ function loadKeymap(home: string): KeymapResolution {
  * accent-tinted — cwd │ model · tools · gate · dry-run · verbosity. Re-rendered
  * before each prompt so tuning changes (/gate, /model) show immediately.
  */
-function footer(state: repl.ReplState): string {
+function footer(state: repl.ReplState, fleet?: FleetFooter): string {
   const dir = shortCwd(state.cwd);
   // repl.footerLine carries "model X · tools:on · gate:warn · dry-run:off · verbosity:normal".
-  return `${c.dim(dir)}  ${c.dim("│")}  ${c.dim(repl.footerLine(state.tuning))}`;
+  const line = `${c.dim(dir)}  ${c.dim("│")}  ${c.dim(repl.footerLine(state.tuning))}`;
+  /**
+   * The fleet bar is a SECOND footer row on this host too.
+   *
+   * Parity is not decoration here: the readline host is what runs when the terminal cannot do
+   * raw mode — over a plain ssh pipe, inside CI, on a dumb $TERM — and those are exactly the
+   * sessions a user is most likely to have several of and least likely to be watching. A
+   * presence bar that existed only on the pretty host would be missing from the case that needs
+   * it. Both hosts call the SAME renderer, so the two cannot drift into disagreeing about what
+   * `needs-you` looks like.
+   */
+  const bar = fleet?.model ? fleetBarLine(fleet.model, fleet.width, fleet.caps) : null;
+  return bar ? `${line}\n${bar}` : line;
+}
+
+/** What `footer` needs to paint the fleet row. Absent ⇒ no fleet row, same as a fleet of one. */
+interface FleetFooter {
+  model: Parameters<typeof fleetBarLine>[0] | null;
+  width: number;
+  caps: Parameters<typeof fleetBarLine>[2];
 }
 
 // ── default handler wiring (the real siblings) ─────────────────────────────── //
@@ -590,6 +594,15 @@ export async function launchSession(parsed: ParsedArgs, deps: SessionDeps = {}):
     rejected: projectRejections,
     budget: profileBudget,
   } = seedTuningWithNotes(parsed);
+  /**
+   * The last `/think` tier, restored — the effort twin of the authorisation level.
+   *
+   * Precedence, most specific first: a `--think/--effort` FLAG (this launch) > the SAVED tier
+   * (last session) > the profile layers (a static default). Restored as the REQUESTED tier and
+   * re-resolved per request against whatever model is bound, so changing model re-applies it.
+   */
+  const savedEffort = cliProfiles.readSavedEffort(deps.configHome);
+  if (savedEffort && parsed.effort === undefined) tuning.effort = savedEffort;
   const cwd = resolveCwd(parsed.cwd, writeLine);
   let state = repl.initialReplState(tuning, cwd);
   // capture the profile's system prompt BEFORE any /system override → /system reset (CLI-017).
@@ -668,8 +681,7 @@ export async function launchSession(parsed: ParsedArgs, deps: SessionDeps = {}):
   // paid CLIs. When a local model is found, ADOPT it as the session endpoint + model so
   // chat works with zero config; otherwise keep the profile model and point at /setup.
   const backends: Backends =
-    deps.backends ??
-    (await detectBackends({ client }).catch(() => ({ liveRunners: [], paidClis: [] }) as Backends));
+    deps.backends ?? (await detectBackends({ client }).catch(() => emptyBackends()));
   let endpoint: AiEndpoint | undefined = backends.localEndpoint;
   /**
    * The in-flight context-window/capability probe, if one was kicked off below — awaited
@@ -721,7 +733,7 @@ export async function launchSession(parsed: ParsedArgs, deps: SessionDeps = {}):
     toolCapability = agent.protocol.initialCapability();
     endpoint = next;
     // pre-load the local model NOW (fire-and-forget) so the user's next prompt is warm.
-    warmupLocalModel(next);
+    warmupLocalModel(next, home);
     const settled = endpointProbe
       .attach(next)
       .then((r) => {
@@ -960,6 +972,47 @@ export async function launchSession(parsed: ParsedArgs, deps: SessionDeps = {}):
   // prompt. `let`, not `const`: `/cd` (below) mints a fresh one when it rotates to a new project.
   let sessionId = newSessionId();
   let sessionRecorded = false;
+  /**
+   * Cross-terminal presence (the fleet bar) — the readline host's half of the pair.
+   *
+   * Same ticker, same renderer, same heartbeat file as the raw-mode TUI. The two CLI hosts have
+   * drifted on capability after capability in this file's history; a feature whose whole subject
+   * is "what are the OTHER windows doing" must not be one of them, because a window running the
+   * plain host would simply be missing from every other window's count.
+   */
+  let fleet: FleetTicker | null = null;
+  const fleetState = (s: "working" | "idle" | "needs-you"): void => fleet?.setState(s);
+  /** Report `needs-you` for the duration of a prompt, then hand the window back to `working`. */
+  const whileBlocked = async <T>(fn: () => Promise<T>): Promise<T> => {
+    fleetState("needs-you");
+    try {
+      return await fn();
+    } finally {
+      fleetState("working");
+    }
+  };
+  /** What `footer()` needs to paint the fleet row — resolved fresh, so `/cd` and `/model` show. */
+  const fleetFooter = (): FleetFooter => ({
+    model: fleet?.model() ?? null,
+    width: Math.max(20, (process.stdout.columns ?? 80) - 1),
+    caps: detectColorCaps(process.env, !parsed.json && !parsed.noColor && defaultColorEnabled()),
+  });
+  /** The one-time legend — the same first-run contract the raw TUI honours, same settings key. */
+  let legendShown = loadSettings(home).fleetLegendSeen === true;
+  const maybeShowFleetLegend = (): void => {
+    if (legendShown) return;
+    const m = fleet?.model();
+    if (!m || m.peers.total <= 1) return;
+    legendShown = true;
+    writeLine("");
+    for (const line of fleetLegendLines(fleetFooter().caps)) writeLine(line);
+    writeLine("");
+    try {
+      saveSettings({ fleetLegendSeen: true }, home);
+    } catch {
+      /* an unwritable home costs a repeat legend, never a crashed session */
+    }
+  };
   // /context window: the user-chosen ceiling auto-compact budgets against (default 250k tokens),
   // independent of — and always combined via Math.min with — the model's own measured window.
   let contextWindowSetting = loadContextWindowTokens(home);
@@ -982,7 +1035,8 @@ export async function launchSession(parsed: ParsedArgs, deps: SessionDeps = {}):
 
   // The confirm seam: a yes/no over readline. Honors never-force — the host never
   // auto-approves; a human must answer. Defaults to deny on EOF/blank.
-  const confirm = (prompt: string): Promise<boolean> =>
+  const confirm = (prompt: string): Promise<boolean> => whileBlocked(() => askYesNo(prompt));
+  const askYesNo = (prompt: string): Promise<boolean> =>
     new Promise<boolean>((resolveConfirm) => {
       rl.question(`${c.yellow("?")} ${prompt} ${c.dim("[y/N]")} `, (answer) => {
         const a = answer.trim().toLowerCase();
@@ -1093,13 +1147,18 @@ export async function launchSession(parsed: ParsedArgs, deps: SessionDeps = {}):
 
   // A free-text question over readline (the /setup wizard's input seam).
   const ask = (prompt: string): Promise<string> =>
-    new Promise<string>((resolveAsk) => {
-      rl.question(`${c.cyan("›")} ${prompt} `, (answer) => resolveAsk(answer));
-    });
+    whileBlocked(
+      () =>
+        new Promise<string>((resolveAsk) => {
+          rl.question(`${c.cyan("›")} ${prompt} `, (answer) => resolveAsk(answer));
+        }),
+    );
 
   // A FOLDER picker with `tab` path-completion: flips the completer into path mode,
   // pre-fills the editable default, and returns the typed path (default on blank).
   const askPath = (prompt: string, def: string): Promise<string> =>
+    whileBlocked(() => askPathInner(prompt, def));
+  const askPathInner = (prompt: string, def: string): Promise<string> =>
     new Promise<string>((resolveAsk) => {
       pathMode = true;
       let answered = false;
@@ -1190,6 +1249,38 @@ export async function launchSession(parsed: ParsedArgs, deps: SessionDeps = {}):
    * The session — transcript, history, session id — is deliberately untouched: rotating is
    * `/cd`'s business, and keeping it is the whole point of `/cwd`.
    */
+  /**
+   * Re-print the banner after the working directory moves — see the TUI bridge's twin.
+   *
+   * The banner's `cwd` line was printed once at startup, so the header kept naming the launch
+   * directory for the rest of the session. A terminal cannot rewrite scrollback; printing it
+   * again is the only way to make that line true.
+   */
+  const announceCwd = (_target: string): void => {
+    writeLine("");
+    writeLine(banner(state, backendSummary(backends)));
+  };
+
+  /**
+   * Resolve a move, optionally creating the target first.
+   *
+   * `mkdir -p` runs ONLY for a target the resolver already classified as `missing` — never for
+   * a path that exists as a file, and never before the own-repo guard and the tilde/relative
+   * resolution have been applied, so the directory created is exactly the one we would have
+   * moved to. After creating we re-resolve rather than trusting the mkdir: that keeps one
+   * code path deciding what a valid destination is.
+   */
+  const resolveMoveMaybeCreating = (dir: string, create: boolean): CwdMove => {
+    const first = resolveCwdMove(dir, state.cwd);
+    if (first.ok || !create || !first.missing || !first.path) return first;
+    try {
+      mkdirSync(first.path, { recursive: true });
+    } catch (err) {
+      return { ok: false, error: `could not create ${first.path}: ${(err as Error).message}` };
+    }
+    return resolveCwdMove(dir, state.cwd);
+  };
+
   const moveProjectRoot = (target: string): void => {
     state = repl.reduce(state, { type: "cwd", dir: target });
 
@@ -1209,10 +1300,14 @@ export async function launchSession(parsed: ParsedArgs, deps: SessionDeps = {}):
     // after a move is the same staleness every reload above exists to prevent.
     effortRulesLoad = loadEffortRules(target, home);
     for (const note of effortRulesLoad.notes) writeLine(`  ! effort rules: ${note}`);
+    // EVERY project move refreshes the frame — `/cwd`, `/cd` and `/worktree switch` all
+    // land here, so none of them can be the one that forgets.
+    announceCwd(target);
   };
 
   const changeProjectDirectory = (
     dir: string,
+    opts?: { create?: boolean },
   ):
     | {
         ok: true;
@@ -1223,27 +1318,20 @@ export async function launchSession(parsed: ParsedArgs, deps: SessionDeps = {}):
       }
     | { ok: false; error: string } => {
     // `~`/`~/…` first — `isAbsolute("~/x")` is false, so without this a tilde path resolves
-    // against the CURRENT cwd instead of the home directory (mirrors /add-dir's resolveDir).
-    const expanded = expandHome(dir);
-    const requested = isAbsolute(expanded) ? expanded : resolve(state.cwd, expanded);
-    // Prometheus must never operate with a cwd inside its OWN source repo (see cwd-guard.ts's
-    // own header for why) — a `/cd` into it is silently redirected to the user's home directory
-    // instead, exactly like a fresh session's own startup cwd already is.
-    const guard = guardOwnRepo(requested);
-    const target = guard.cwd;
-    let stat: ReturnType<typeof statSync>;
-    try {
-      stat = statSync(target);
-    } catch (err) {
-      const code = (err as NodeJS.ErrnoException).code;
-      return code === "ENOENT"
-        ? { ok: false, error: `no such directory: ${target}` }
-        : { ok: false, error: `cannot access ${target}: ${(err as Error).message}` };
+    // ONE resolver for both commands. `/cd` used to hand-roll expand → resolve → guard → stat
+    // right here while `/cwd` had its own copy elsewhere, which is exactly how only one of
+    // them ended up with the existence check.
+    const move = resolveMoveMaybeCreating(dir, opts?.create === true);
+    if (!move.ok) {
+      return {
+        ok: false,
+        error: move.error,
+        ...(move.missing ? { missing: true } : {}),
+        ...(move.path ? { path: move.path } : {}),
+      };
     }
-    if (!stat.isDirectory()) {
-      return { ok: false, error: `not a directory: ${target}` };
-    }
-    const redirectedFromOwnRepo = guard.redirected ? guard.requestedCwd : undefined;
+    const target = move.cwd;
+    const redirectedFromOwnRepo = move.redirectedFrom;
     // A no-op move (the pre-filled default accepted verbatim, or `/cd .`) must be genuinely
     // harmless — askPath's own hint promises a bare Enter "keeps the default", so rotating the
     // session (fresh id, cleared transcript/todos, dropped repo map) for a directory the user is
@@ -1307,6 +1395,12 @@ export async function launchSession(parsed: ParsedArgs, deps: SessionDeps = {}):
 
   const turnCtxFor = (write: (s: string) => void): TurnCtx => ({
     client,
+    // The readline host used to omit both, so agent-runtime computed wrapWidth 0 (no
+    // wrapping at all) and fell back to caps "none" (paint() returns plain text) — the
+    // non-raw REPL printed unwrapped monochrome while the raw TUI printed neither.
+    // Re-read per turn: turnCtxFor is re-invoked on every turn, so a resize is picked up.
+    width: Math.max(20, (process.stdout.columns ?? 80) - 1),
+    caps: detectColorCaps(process.env, !parsed.json && !parsed.noColor && defaultColorEnabled()),
     /**
      * Resolve a cloud endpoint's key, lazily, per request.
      *
@@ -1894,6 +1988,33 @@ export async function launchSession(parsed: ParsedArgs, deps: SessionDeps = {}):
   // artifact on disk) silently wrote the saved level to `<prometheusHome>/.config/...` instead.
   let hostAuthLevel = readSavedAuthLevel(deps.configHome) ?? agent.DEFAULT_AUTH_LEVEL;
   /**
+   * `--authorisation(s)` / `--authorization(s)` — parsed, accepted, and until now DROPPED here.
+   *
+   * The TUI read this flag; this host never did. `prometheus --plain --authorisation 7`, every
+   * `--tmux` launch and every non-TTY fallback (SSH, CI, a TUI init failure) therefore ran at
+   * whatever was persisted while printing nothing to say the flag had been ignored. Same flag,
+   * same binary, two different behaviours depending on which host bin.ts happened to pick.
+   *
+   * SESSION-SCOPED: a launch flag is a one-off override, so it is applied but never saved. The
+   * `/authorisation` command remains the only thing that rewrites the stored default.
+   */
+  const authFlag =
+    parsed.flags.authorisations ??
+    parsed.flags.authorisation ??
+    parsed.flags.authorizations ??
+    parsed.flags.authorization ??
+    parsed.flags.auth;
+  if (authFlag !== undefined) {
+    const parsedLevel = typeof authFlag === "string" ? agent.parseAuthLevel(authFlag) : null;
+    if (parsedLevel === null) {
+      writeLine(
+        `unknown --authorisation "${authFlag === true ? "" : authFlag}" — use a level 0–7 or a name: ${agent.authLevelLegend()}`,
+      );
+    } else {
+      hostAuthLevel = parsedLevel;
+    }
+  }
+  /**
    * ELEVATED-PRIVILEGE GATE — this host had none at all.
    *
    * The red warning, the mandatory acknowledgement and the bypass clamp lived inside the TUI
@@ -1911,7 +2032,6 @@ export async function launchSession(parsed: ParsedArgs, deps: SessionDeps = {}):
     ask: (prompt) => new Promise<string>((res) => rl.question(prompt, (a) => res(a))),
     red: (t) => (parsed.noColor ? t : `\x1b[1;37;41m${t}\x1b[0m`),
   });
-  if (elevationDecision.bypassLocked && hostAuthLevel > 5) hostAuthLevel = 5;
   /**
    * The coarse autonomy POSTURE (`/permission-mode`), session-scoped.
    *
@@ -1921,6 +2041,56 @@ export async function launchSession(parsed: ParsedArgs, deps: SessionDeps = {}):
    * session-scoped for the same reason.
    */
   let hostPermMode: agent.PermissionModeId = agent.DEFAULT_PERMISSION_MODE;
+  /**
+   * `--permission-mode <mode>` — the launch-flag twin of `/permission-mode`, and the sibling of
+   * the `--authorisation` handling above. Parsed by parse.ts and read by nobody on any host
+   * until now, so `prometheus --plain --permission-mode plan` started an ordinary session in
+   * silence. Session-scoped, and refused (not silently downgraded) when the elevated-privilege
+   * gate has locked the bypass tiers.
+   */
+  const modeFlag = parsed.flags["permission-mode"] ?? parsed.flags.permissionMode;
+  /** whether an explicit, accepted `--permission-mode` is in force (see the clamp below). */
+  let modeFlagApplied = false;
+  if (typeof modeFlag === "string") {
+    const wanted = agent.PERMISSION_MODES.find((m) => m.id === modeFlag.trim());
+    if (!wanted) {
+      writeLine(
+        `unknown --permission-mode "${modeFlag}" — use one of: ${agent.PERMISSION_MODES.map((m) => m.id).join(" · ")}`,
+      );
+    } else if (
+      elevationDecision.bypassLocked &&
+      (wanted.id === "bypassPermissions" || wanted.id === "yolo")
+    ) {
+      writeLine(`--permission-mode ${wanted.id} is locked (elevated-privilege decline)`);
+    } else {
+      hostPermMode = wanted.id;
+      modeFlagApplied = true;
+      // an explicit mode flag overrides the stored default, exactly as it does in the TUI
+      if (authFlag === undefined) hostAuthLevel = agent.modeToAuthLevel(wanted.id);
+    }
+  }
+  // The cap comes from the DECISION, not from a hand-written 5 in each host — see sudo.ts's
+  // `maxAuthLevel`. A declined gate now really is ask-before-every-change rather than a session
+  // that auto-approves installs as root while the note claims the opposite.
+  const authLevelBeforeClamp = hostAuthLevel;
+  if (hostAuthLevel > elevationDecision.maxAuthLevel) {
+    hostAuthLevel = elevationDecision.maxAuthLevel;
+  }
+  /**
+   * Re-derive the posture from the level ONLY when the clamp actually moved it, and never over an
+   * explicit `--permission-mode`.
+   *
+   * mode → level → mode does not round-trip: `modeToAuthLevel("plan")` is 0 (the fine scale cannot
+   * express "deny") and `authLevelToMode(0)` is "default", so an unconditional re-derivation threw
+   * `plan` away every time — the one mode where that matters, because `permissionMode` is the only
+   * thing enforcing plan's read-only deny on this host (loop.ts checks it above the broker).
+   * `prometheus --plain --permission-mode plan` therefore asked before mutating actions instead of
+   * refusing them, and `--permission-mode plan --authorisation 7` came out as "yolo" — read-only
+   * exploration turned into full-autonomy run-to-done, silently.
+   */
+  if (!modeFlagApplied || hostAuthLevel !== authLevelBeforeClamp) {
+    hostPermMode = agent.authLevelToMode(hostAuthLevel);
+  }
 
   // The rich context handed to every host-side /command (slash-registry).
   const slashCtx: SlashCtx = {
@@ -1928,6 +2098,12 @@ export async function launchSession(parsed: ParsedArgs, deps: SessionDeps = {}):
     json: parsed.json,
     tuning: () => state.tuning,
     cwd: () => state.cwd,
+    /** `/fleet` — refresh, then report. See the TUI bridge's twin: one renderer, both hosts. */
+    fleet: async () => {
+      if (!fleet) return [c.dim("this surface does not track other Prometheus windows")];
+      await fleet.refresh();
+      return fleetReport(fleet.peers(), fleet.meters(), Date.now());
+    },
     getAuthLevel: () => hostAuthLevel,
     // `/authorisation` and `/permission-mode` must sync the SAME two fields the TUI does
     // (session-bridge.ts's identical setAuthLevel/setPermMode) — this host used to leave
@@ -1935,16 +2111,22 @@ export async function launchSession(parsed: ParsedArgs, deps: SessionDeps = {}):
     // bypassPermissions`/`yolo` changed nothing about real approval behavior here (the confirm
     // callback below consults ONLY hostAuthLevel), even though the command's own printed
     // description claimed it had.
-    setAuthLevel: (level) => {
+    setAuthLevel: (level, origin) => {
       hostAuthLevel = agent.authLevelMeta(level).level;
       hostPermMode = agent.authLevelToMode(hostAuthLevel); // sync the coarse mode/indicator
-      saveAuthLevel(hostAuthLevel, deps.configHome); // last-set becomes the next-session default
+      // only an explicit numbered choice becomes the next-session default (see AuthLevelOrigin)
+      if (origin === "user") saveAuthLevel(hostAuthLevel, deps.configHome);
     },
     getPermMode: () => hostPermMode,
+    /**
+     * Session-scoped, exactly as the comment on `hostPermMode` above promises — and it did not
+     * used to be: this wrote the mode-derived level to disk 27 lines under a docblock saying the
+     * posture is "deliberately NOT persisted". mode→level is lossy, so one `/permission-mode`
+     * replaced an explicit `/authorisation 7` with 2 (or with 1, back at `default`) forever.
+     */
     setPermMode: (mode) => {
       hostPermMode = mode;
       hostAuthLevel = agent.modeToAuthLevel(mode);
-      saveAuthLevel(hostAuthLevel, deps.configHome);
     },
     /**
      * `/background <task>` — run a turn DETACHED and register it so `agents list` sees it.
@@ -2059,6 +2241,17 @@ export async function launchSession(parsed: ParsedArgs, deps: SessionDeps = {}):
         ...(state.tuning.effortForce ? { force: true } : {}),
       });
     },
+    /**
+     * `/think <tier>` — the REQUESTED tier, into the tuning and onto disk.
+     *
+     * The readline host's twin of the TUI bridge's setter. What is stored is what was asked
+     * for, never `resolution.applied`: the clamp belongs to the model bound right now, and
+     * persisting it would ratchet the preference down to that model's ceiling for good.
+     */
+    setEffort: (tier) => {
+      state = repl.reduce(state, { type: "tune", patch: { effort: tier } });
+      cliProfiles.saveEffort(tier, deps.configHome);
+    },
     control: (signal) => {
       if (signal === "quit") {
         closing = true;
@@ -2071,21 +2264,29 @@ export async function launchSession(parsed: ParsedArgs, deps: SessionDeps = {}):
         writeLine(c.dim("(context cleared — fresh conversation)"));
       }
     },
-    setCwd: (dir) => {
-      // `/cwd` moves in place (no session rotation), but it must be guarded exactly like `/cd`:
-      // Prometheus can never end up with a cwd inside its own repo, whichever command got it
-      // there.
-      const expanded = expandHome(dir);
-      const requested = isAbsolute(expanded) ? expanded : resolve(state.cwd, expanded);
-      const guard = guardOwnRepo(requested);
-      if (guard.redirected) {
+    setCwd: (dir, opts) => {
+      /**
+       * `/cwd` moves in place (no session rotation), but it is guarded and VALIDATED exactly
+       * like `/cd` — through the one shared resolver, because these two hosts each had their
+       * own copy of the sequence and only `/cd`'s had ever grown the existence check.
+       *
+       * Without it, `/cwd /definitely/not/here` printed a confident `cwd → …` and pointed the
+       * session, its agent files, its permission rules and its repo map at nothing.
+       *
+       * Returns the result instead of swallowing it: the COMMAND decides what to do about a
+       * missing directory (it can ask), the HOST owns the filesystem.
+       */
+      const move = resolveMoveMaybeCreating(dir, opts?.create === true);
+      if (!move.ok) return move;
+      if (move.redirectedFrom) {
         writeLine(
-          `⚠ Prometheus refuses to operate inside its own repository (${guard.requestedCwd}) — redirected to ${guard.cwd}.`,
+          `⚠ Prometheus refuses to operate inside its own repository (${move.redirectedFrom}) — redirected to ${move.cwd}.`,
         );
       }
       // Moves in place AND re-points the project-scoped state — see `moveProjectRoot`. Doing
       // only the reduce here is what left the model reading the launch directory's rules.
-      moveProjectRoot(guard.cwd);
+      moveProjectRoot(move.cwd);
+      return move;
     },
     compact: async (focus) => {
       if (!session || session.turns.length <= COMPACT_KEEP_RECENT) {
@@ -2306,7 +2507,12 @@ export async function launchSession(parsed: ParsedArgs, deps: SessionDeps = {}):
     // the git spawn seam for /worktree (CLI-054): the engine-bridge safe-env spawn (C5).
     git: realGitSpawn,
     // the effective TUI keymap (CLI-096): resolved once from `[keymap]` config at session start.
-    keymap: loadKeymap(home),
+    // `deps.configHome`, NOT `home` — `home` is prometheusHome() (the ~/.prometheus STATE tree),
+    // so this resolved `<state>/.prometheus/config/config.toml`, a path nothing creates. The
+    // `[keymap]` table the CLI's own `config set` writes was therefore never read by anything:
+    // a rebind appeared to save and did nothing. Same config-tree-vs-state-tree confusion that
+    // lost the authorisation level.
+    keymap: loadKeymap(deps.configHome),
     // OSC 52 clipboard (CLI-068): raw passthrough to stdout (works over SSH/tmux; no cursor move).
     copyToClipboard: (text) =>
       copyReplyStatus(text ?? lastAssistantReply(history), !!process.env.TMUX, (s) =>
@@ -2402,14 +2608,28 @@ export async function launchSession(parsed: ParsedArgs, deps: SessionDeps = {}):
       },
     },
     // /cd — see `changeProjectDirectory`'s own header for the full rotation semantics.
-    changeProjectDirectory: (dir) => changeProjectDirectory(dir),
+    changeProjectDirectory: (dir, opts) => changeProjectDirectory(dir, opts),
   };
 
   /** Handle ONE input line. Always wrapped by the caller's try/catch. */
   const handleLine = async (raw: string): Promise<void> => {
     const input = raw.trim();
     if (input === "") return; // empty line → just re-prompt
+    // Peers see this window as `working` for the whole line, and `idle` again when it ends.
+    //
+    // Not decoration, and not merely parity with the TUI host: `whileBlocked` hands the window
+    // back to `working` when a prompt closes, so WITHOUT an owner that returns it to `idle` the
+    // first `[y/N]` on this host would latch the window as busy for the rest of its life. The
+    // two halves of the state machine have to live on the same surface.
+    fleetState("working");
+    try {
+      return await runLine(input);
+    } finally {
+      fleetState("idle");
+    }
+  };
 
+  const runLine = async (input: string): Promise<void> => {
     // Record the input in history (pure reducer).
     state = repl.reduce(state, { type: "history", input });
 
@@ -2552,7 +2772,7 @@ export async function launchSession(parsed: ParsedArgs, deps: SessionDeps = {}):
         // the session's crash-free invariant covers the chrome, not just handleLine.
         try {
           writeLine("");
-          writeLine(footer(state));
+          writeLine(footer(state, fleetFooter()));
           promptLine();
         } catch {
           try {
@@ -2564,16 +2784,75 @@ export async function launchSession(parsed: ParsedArgs, deps: SessionDeps = {}):
       });
     });
 
+    /**
+     * Register this window in the fleet.
+     *
+     * Deliberately started after the first prompt is on screen: the heartbeat's first write is
+     * the moment other windows start counting us, and counting a session that has not finished
+     * booting would make `working`/`idle` wrong for its first second.
+     */
+    fleet = startFleetTicker({
+      home,
+      id: sessionId,
+      cwd: () => state.cwd,
+      model: () => state.tuning.model.modelId ?? "",
+      onChange: maybeShowFleetLegend,
+      /**
+       * A kill by ANY surface's watchdog must be visible on this one too.
+       *
+       * `checkEvictions()` already ran on every tick here and its result was thrown away —
+       * this host paid the file read every 2 s and told the operator nothing, so a `--plain`
+       * session whose model was force-stopped just saw its next turn fail for no stated reason.
+       * The wording is copied from the TUI's callback verbatim so the two surfaces cannot drift.
+       *
+       * No `promptLine()` afterwards: the notice can land mid-turn while output is streaming,
+       * and injecting a stray prompt into that stream is worse than the missing redraw — the
+       * fleet legend above already lives with exactly that.
+       */
+      onEviction: (event) => {
+        writeLine(
+          `\n⚠ Prometheus stopped ${event.name} to prevent a machine-wide freeze (${event.reason}). Some work may have been interrupted — it will restart automatically once resources are available.\n`,
+        );
+      },
+    });
+
     rl.on("close", () => {
-      // Ctrl-D / rl.close(): finish the in-flight chain, then resolve the loop.
-      // .catch keeps a rejected chain (e.g. a broken write sink / EPIPE) from
-      // escaping as an unhandled rejection — the loop always resolves cleanly.
+      /**
+       * Ctrl-D / rl.close(): finish the in-flight chain, THEN tear down.
+       *
+       * The teardown used to START synchronously here and only AWAIT after the chain — but
+       * `stopSelfStartedRunners` runs `lms server stop` / SIGTERMs the matching pids as a side
+       * effect, and when this session autostarted the runner, that is the very process serving
+       * the SSE stream the chain is still reading. Ctrl-D mid-turn therefore killed the reply
+       * it had just promised to finish.
+       *
+       * `.catch` keeps a rejected chain (e.g. a broken write sink / EPIPE) from escaping as an
+       * unhandled rejection — the loop always resolves cleanly.
+       *
+       * Keeping the ticker alive across the final turn is correct, not a leak: the process
+       * really is still working, so the heartbeat is honest, and the interval is `unref`'d so it
+       * cannot hold the event loop open.
+       */
       chain
         .then(() => {
           if (!closing) writeLine(c.dim("\nsession ended."));
         })
         .catch(() => {})
-        .finally(finish);
+        .finally(() => {
+          // Peers read while the ticker is still live, so "is anyone else using this runner?" is
+          // answered from a snapshot at most one tick old — snapshotting at `close` instead
+          // would have made it stale by the whole length of that last turn.
+          const peers = fleet?.peers() ?? [];
+          // Then drop our own heartbeat: a clean exit that left the file behind shows every
+          // other window `dead 1` for five minutes — the bar crying wolf about the one event it
+          // exists to report truthfully.
+          fleet?.stop();
+          // Then stop any local model daemon THIS session started (never one it didn't) that no
+          // other live peer still needs.
+          stopSelfStartedRunners(backends.startedRunners, peers)
+            .catch(() => {})
+            .finally(finish);
+        });
     });
 
     /**

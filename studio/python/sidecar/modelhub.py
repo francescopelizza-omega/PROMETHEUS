@@ -35,6 +35,7 @@ import os
 import platform
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -262,20 +263,43 @@ def _default_models_dir() -> Path:
 
 def _ollama_installed_models() -> List[Dict[str, Any]]:
     """Index models already pulled into the Ollama store (spec 05 §9: the Hub does NOT own
-    Ollama's bytes — it INDEXES Ollama's own library via its HTTP API). Returns [] if the
-    daemon is unreachable. Never raises — a down daemon just means no ollama rows."""
-    if not _ollama_reachable():
+    Ollama's bytes — it INDEXES Ollama's own library via its HTTP API). Never raises — a
+    daemon that genuinely can't be reached (not installed, or failed to start) just means
+    no ollama rows.
+
+    This calls `_ensure_ollama_daemon()` (not a bare reachability check) because the two
+    outcomes look identical to a user but are not: "ollama was never installed" is a real
+    empty state, but "ollama is installed, models are pulled, the daemon just isn't running
+    right now" used to ALSO report zero installed models — the daemon being down erased
+    already-downloaded weights from the library, and the GUI/CLI both then offered to
+    "install" a model the user had already spent the bandwidth pulling once. Ensuring the
+    daemon (a no-op, no spawn, if `ollama` isn't on PATH at all — see its own docstring)
+    is what actually distinguishes those two cases correctly.
+    """
+    if not _ensure_ollama_daemon():
         return []
     import json as _json
-    import urllib.request
 
-    try:
-        with urllib.request.urlopen(  # noqa: S310 — localhost daemon only
-            f"{_ollama_root()}/api/tags", timeout=2.0
-        ) as resp:
-            data = _json.loads(resp.read().decode("utf-8"))
-    except Exception:  # noqa: BLE001 — any failure ⇒ no ollama rows
-        return []
+    # Test seam (mirrors MODELHUB_FAKE_PULL_LINES): a hermetic run fakes the daemon as
+    # already up (MODELHUB_FAKE_OLLAMA / _FORCE_DAEMON_UP short-circuit _ensure_ollama_daemon
+    # above) but there is still no REAL server on :11434 to answer /api/tags — this lets a
+    # test supply that response body directly instead of needing a live ollama binary.
+    fake_tags = os.environ.get("MODELHUB_FAKE_OLLAMA_TAGS")
+    if fake_tags is not None:
+        try:
+            data = _json.loads(fake_tags)
+        except _json.JSONDecodeError:
+            return []
+    else:
+        import urllib.request
+
+        try:
+            with urllib.request.urlopen(  # noqa: S310 — localhost daemon only
+                f"{_ollama_root()}/api/tags", timeout=2.0
+            ) as resp:
+                data = _json.loads(resp.read().decode("utf-8"))
+        except Exception:  # noqa: BLE001 — any failure ⇒ no ollama rows
+            return []
     out: List[Dict[str, Any]] = []
     for m in data.get("models", []) or []:
         name = m.get("name") or m.get("model") or ""
@@ -729,14 +753,40 @@ def _ollama_reachable(timeout: float = 1.0) -> bool:
         return False
 
 
+def _ollama_daemon_marker_path() -> Path:
+    """Where we record "prometheus itself spawned this ollama daemon". Lives next to the
+    models cache (same `PROMETHEUS_MODELS_DIR`-relative root `_default_models_dir` already
+    uses), not in the ollama-owned `~/.ollama` tree — we never write into a store we don't
+    own (spec 05 §9)."""
+    return _default_models_dir().parent / "ollama-daemon.json"
+
+
+def _record_ollama_started_by_us(pid: int) -> None:
+    """Best-effort: a failure to WRITE the marker must never fail the daemon-start itself —
+    worst case, a later `ollama.release` correctly refuses to stop a daemon it can't prove
+    it started, which is the fail-SAFE direction (never kill something we didn't spawn)."""
+    try:
+        marker = _ollama_daemon_marker_path()
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text(json.dumps({"pid": pid, "started_at": time.time()}))
+    except OSError:
+        pass
+
+
 def _ensure_ollama_daemon() -> bool:
-    """Ensure the ollama daemon is running before an `ollama pull`. Returns True once
-    reachable (already up, or successfully started here), else False. Starts
-    ``ollama serve`` DETACHED so the server survives this short-lived sidecar.
+    """Ensure the ollama daemon is running before an `ollama pull` (or before listing/
+    serving already-installed models — spec 05 §9 addendum: a model that's genuinely on
+    disk must not read as "not installed" just because the background service happens to be
+    stopped right now). Returns True once reachable (already up, or successfully started
+    here), else False. Starts ``ollama serve`` DETACHED so the server survives this
+    short-lived sidecar, and records the pid (see `_record_ollama_started_by_us`) so a later
+    `ollama.release` call can tell "we woke this up" apart from "the user's own instance" —
+    the ONLY case it is ever safe to autonomously stop.
 
     Test seams: ``MODELHUB_FORCE_DAEMON_DOWN`` ⇒ always False (no spawn);
     ``MODELHUB_FORCE_DAEMON_UP`` / ``MODELHUB_FAKE_OLLAMA`` / ``MODELHUB_FAKE_PULL_LINES``
-    ⇒ hermetic run, treated as already up (no probe, no spawn)."""
+    ⇒ hermetic run, treated as already up (no probe, no spawn, no marker — a faked daemon
+    was never really started, so there is nothing real to ever release)."""
     if os.environ.get("MODELHUB_FORCE_DAEMON_DOWN"):
         return False
     if (
@@ -762,17 +812,162 @@ def _ensure_ollama_daemon() -> bool:
     else:
         kwargs["start_new_session"] = True  # own session; outlives this sidecar
     try:
-        subprocess.Popen([ollama, "serve"], **kwargs)  # noqa: S603 — fixed argv, no shell
+        proc = subprocess.Popen([ollama, "serve"], **kwargs)  # noqa: S603 — fixed argv, no shell
     except OSError as exc:
         log(f"could not start `ollama serve`: {exc}")
         return False
+    # Claim ownership the MOMENT the spawn succeeds — NOT once the readiness poll passes.
+    # The child is DETACHED (its own session/process group), so it outlives this short-lived
+    # sidecar whether or not it answered /api/version inside the deadline. Recording only on
+    # the success branch meant a daemon that bound :11434 at second 21 — or one still starting
+    # when the app quit mid-poll — was a daemon Prometheus started but could never PROVE it
+    # started, so `ollama.release` refused to stop it ("not started by Prometheus") for the
+    # rest of the machine's life and the model stayed resident. `model.list` runs this path
+    # unattended on every desktop launch, so it is the common case, not an edge one.
+    #
+    # Claiming early stays fail-SAFE: `_release_ollama_daemon` signals nothing unless the pid
+    # is still alive AND its command name contains "ollama", so a `serve` that died at once
+    # (port already bound by the user's own instance, a crash) leaves a marker that is
+    # correctly read as stale and discarded rather than acted on.
+    _record_ollama_started_by_us(proc.pid)
     deadline = time.monotonic() + _OLLAMA_STARTUP_TIMEOUT_S
     while time.monotonic() < deadline:
         if _ollama_reachable(timeout=0.5):
             _emit_progress(0, "ollama service ready")
             return True
+        if proc.poll() is not None:
+            # OUR `serve` exited outright (and is reaped by that poll(), so no zombie).
+            # Nothing of ours is running, so withdraw the claim rather than leave a marker
+            # naming a dead pid the OS may later recycle.
+            try:
+                _ollama_daemon_marker_path().unlink(missing_ok=True)
+            except OSError:
+                pass
+            return False
         time.sleep(0.4)
+    # Readiness deadline missed, but the process is STILL ALIVE and detached — it will very
+    # likely come up a moment from now. Report "not ready" (the caller degrades correctly) and
+    # KEEP the marker, because we did start it and must remain able to stop it.
     return False
+
+
+def _process_name(pid: int) -> Optional[str]:
+    """The command name for a live pid, or None if it's not running (a zombie counts as not
+    running), or can't be inspected.
+    Stdlib-only (no psutil dep): shells out to `ps`, which is present on every macOS/Linux
+    host this sidecar targets (Windows falls back to `tasklist`)."""
+    try:
+        if os.name == "nt":
+            out = subprocess.run(  # noqa: S603, S607
+                ["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"],
+                capture_output=True, text=True, timeout=3,
+            ).stdout
+            return out.split(",")[0].strip('"') if "," in out else None
+        out = subprocess.run(  # noqa: S603, S607
+            ["ps", "-p", str(pid), "-o", "state=,comm="],
+            capture_output=True, text=True, timeout=3,
+        ).stdout.strip()
+        if not out:
+            return None
+        parts = out.split(None, 1)
+        state = parts[0]
+        comm = parts[1].strip() if len(parts) > 1 else ""
+        # A ZOMBIE (state begins "Z") is an ALREADY-DEAD process still occupying a table slot
+        # until its parent reaps it. `ps` keeps reporting it under its original command name,
+        # so counting it as live made "has it gone yet?" answer "no" forever whenever the
+        # caller was also the parent — precisely the shape of a sidecar that spawned the
+        # daemon itself. It also meant `_release_ollama_daemon` would SIGTERM a corpse instead
+        # of taking its "no longer running under that pid" branch. Dead is gone.
+        if state.startswith("Z"):
+            return None
+        return comm or None
+    except Exception:  # noqa: BLE001 — inspection failure ⇒ "can't confirm", treated as absent
+        return None
+
+
+def _release_ollama_daemon() -> Dict[str, Any]:
+    """Stop the ollama daemon, but ONLY if `_ensure_ollama_daemon` is the one that started
+    it (the marker `_record_ollama_started_by_us` wrote). This is the fail-SAFE direction on
+    every branch: no marker, an unreadable/corrupt marker, a pid that's gone, or a pid that
+    now belongs to some OTHER process (recycled by the OS after the real ollama exited) all
+    return `stopped: false` rather than signal anything — a service the user started by hand
+    (or via `brew services`, or a second app that also needs it) must never be killed just
+    because Prometheus happens to be shutting down.
+    """
+    marker = _ollama_daemon_marker_path()
+    if not marker.is_file():
+        return {"ok": True, "stopped": False, "reason": "not started by Prometheus"}
+    try:
+        rec = json.loads(marker.read_text())
+        pid = int(rec["pid"])
+    except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError):
+        return {"ok": True, "stopped": False, "reason": "marker unreadable"}
+    name = _process_name(pid)
+    if not name or "ollama" not in name.lower():
+        # The pid is gone, or (rarer) recycled by the OS for an unrelated process — either
+        # way this is no longer "our" ollama; drop the stale marker and stop.
+        try:
+            marker.unlink()
+        except OSError:
+            pass
+        return {"ok": True, "stopped": False, "reason": "no longer running under that pid"}
+    try:
+        os.kill(pid, getattr(signal, "SIGTERM", 15))
+    except ProcessLookupError:
+        marker.unlink(missing_ok=True)
+        return {"ok": True, "stopped": False, "reason": "already exited"}
+    except OSError as exc:
+        return {"ok": False, "stopped": False, "error": f"could not signal pid {pid}: {exc}"}
+    def _wait_gone(seconds: float) -> bool:
+        deadline = time.monotonic() + seconds
+        while time.monotonic() < deadline:
+            if _process_name(pid) is None:
+                return True
+            time.sleep(0.2)
+        return _process_name(pid) is None
+
+    # SIGTERM grace, then ESCALATE. The old code polled for 5s and then fell through to the
+    # same unconditional tail — unlink the marker, report `stopped: true` — whether or not the
+    # process had actually gone. `ollama serve` flushing a multi-GB model out of memory is
+    # exactly the case that takes longer than that, so a still-resident daemon was reported as
+    # stopped AND the marker (the only proof Prometheus may stop it) was destroyed, orphaning
+    # it permanently. That is the "success reported for work never done" the sidecar contract
+    # exists to forbid.
+    if not _wait_gone(5.0):
+        try:
+            os.kill(pid, getattr(signal, "SIGKILL", 9))
+        except ProcessLookupError:
+            pass  # raced to exit between the last poll and the kill — a clean stop
+        except OSError as exc:
+            return {
+                "ok": False,
+                "stopped": False,
+                "pid": pid,
+                "error": f"pid {pid} ignored SIGTERM and could not be killed: {exc}",
+            }
+        if not _wait_gone(3.0):
+            # Wedged/uninterruptible even after SIGKILL. KEEP the marker so a later release
+            # can try again, and say plainly that it is still running.
+            return {
+                "ok": False,
+                "stopped": False,
+                "pid": pid,
+                "error": f"pid {pid} is still running after SIGTERM and SIGKILL",
+            }
+    try:
+        marker.unlink()
+    except OSError:
+        pass
+    return {"ok": True, "stopped": True, "pid": pid}
+
+
+def v_ollama_release(argv: List[str]) -> int:
+    """Stop the ollama daemon IF (and only if) Prometheus itself started it this session —
+    the autonomous-stop half of the autonomous-start `_ensure_ollama_daemon` already does.
+    Called best-effort on app quit; never errors, always emits a valid envelope."""
+    del argv  # no arguments — this always targets "whatever we started, if anything"
+    result = _release_ollama_daemon()
+    return emit("ollama.release", **result)
 
 
 def v_pull(argv: List[str]) -> int:
@@ -790,6 +985,48 @@ def v_pull(argv: List[str]) -> int:
         return fail("pull", f"pull supports the 'ollama' runner only (got '{runner}')")
     m = _catalog_model(model_id)
     tag = opt_value(argv, "--tag") or (m or {}).get("ollama") or model_id
+
+    # RAM guard: a catalogued model has a known size, so refuse a pull that would land in
+    # OVERFLOW territory before it downloads a single byte — a full weight download is the
+    # expensive, hard-to-undo half of "pull a model too big for this box", and swap-thrashing
+    # the machine to find that out is exactly the failure this check exists to prevent.
+    # Skipped for unknown/uncatalogued tags (no size to reason about) and for --force.
+    params_b = fitmod.parse_params_b((m or {}).get("params_b")) if m else None
+    if params_b and "--force" not in argv and "--allow-overflow" not in argv:
+        try:
+            hw = _resolve_hw_arg(argv)
+        except json.JSONDecodeError as exc:
+            return fail("pull", f"--hw is not valid JSON: {exc}")
+        rec = fitmod.recommend(
+            params_b=params_b, usable_gb=hw["usable_gb"], family=(m or {}).get("family"),
+            # `caps`, like both sibling call sites (`v_fit` above, `v_serve`'s score_quant
+            # below). `recommend()` does `caps = caps or {}` and `score_quant` then reads
+            # `accel = caps.get("accel", "cpu")` — so omitting it judged a metal/cuda box as a
+            # plain CPU host: the wrong overhead constant AND the cpu-only format allow-list,
+            # on hardware `_resolve_hw_arg` had already profiled and was holding right here.
+            caps=hw.get("caps"),
+            candidate_quants=list((m or {}).get("quants") or []) or None,
+            active_params_b=fitmod.parse_params_b((m or {}).get("active_params_b")),
+            arch=(m or {}).get("arch") or None,
+        )
+        # OVERFLOW only — the SAME bar `v_serve`'s guard applies below, deliberately.
+        # `rec["recommended"]` is None for anything worse than TIGHT (fit.py's eligibility is
+        # FITS|TIGHT, ratio <= 1.0), which swept in the whole PARTIAL band (1.0 < ratio <= 1.6).
+        # PARTIAL means "needs layer offload", which the ollama/llama.cpp runner does for you.
+        # Gating on it made `pull` STRICTER than `serve`: a model this tool will happily serve
+        # could not be downloaded. `recommend()` exposes no "best verdict", so read `ranked`.
+        if not any(r.get("runnable") and r.get("verdict") != "OVERFLOW" for r in rec["ranked"]):
+            return fail(
+                "pull",
+                f"{model_id} ({params_b}B) needs far more than this machine's "
+                f"~{hw['usable_gb']}GB usable memory in every offered quant (OVERFLOW) — "
+                "pulling and running it risks exhausting RAM/swap.",
+                id=model_id, tag=str(tag), runner="ollama",
+                hint="pick a smaller model (`model fit --id <id>` lists what fits), "
+                     "or re-run with --force to override",
+                reasons=rec["reasons"],
+            )
+
     if not _which("ollama"):
         return emit(
             "pull", _exit=2, ok=False, id=model_id, tag=tag, runner="ollama",
@@ -1016,6 +1253,21 @@ def v_serve(argv: List[str]) -> int:
         quant, params_b=params_b, usable_gb=hw["usable_gb"], ctx_len=ctx_len,
         family=family, caps=hw.get("caps"),
     )
+    # RAM guard: OVERFLOW means this quant's estimate is >1.6x the usable budget — building
+    # (and a host then spawning) an argv for it anyway is how a resident model runs a laptop
+    # out of RAM and into swap. Refuse here, the one choke point all four hosts call through
+    # (see the module-not-found refusal above), rather than trusting every caller to check
+    # `fit.verdict` itself before spawning.
+    if fit_one.get("verdict") == "OVERFLOW" and "--force" not in argv and "--allow-overflow" not in argv:
+        return fail(
+            "serve",
+            f"{model_id} ({quant}) needs ~{fit_one.get('est_vram_gb')}GB but only "
+            f"~{hw['usable_gb']}GB is usable on this machine (ratio {fit_one.get('ratio')}) — "
+            "serving it risks exhausting RAM/swap.",
+            id=model_id, quant=quant, fit=fit_one,
+            hint="pick a smaller quant (`model fit --id <id>` lists what fits), "
+                 "or re-run with --force to override",
+        )
     profile = servemod.build_serve_profile(
         model_id=model_id, quant=quant, runner=runner, fit=fit_one,
         gguf_path=gguf_path, hf_id=(m or {}).get("repo"),
@@ -1831,6 +2083,7 @@ HANDLERS = {
     "install-runner": v_install_runner,
     "serve": v_serve,
     "unserve": v_unserve,
+    "ollama.release": v_ollama_release,
     "remove": v_remove,
     "prune": v_prune,
     "endpoints": v_endpoints,

@@ -54,6 +54,7 @@ function OutputView({
       style={{
         margin: 0,
         whiteSpace: "pre-wrap",
+        overflowWrap: "break-word",
         color: error ? "var(--danger)" : "var(--text-primary)",
         fontFamily: "var(--font-mono)",
         fontSize: "var(--text-small-size, 0.8125rem)",
@@ -149,7 +150,7 @@ function CellView({
           border: "none",
           padding: "var(--space-2, 4px)",
           fontFamily: "var(--font-mono)",
-          fontSize: "var(--text-code-size, 0.875rem)",
+          fontSize: "var(--text-code-size, 0.78125rem)",
           resize: "vertical",
           outline: "none",
         }}

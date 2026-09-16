@@ -167,6 +167,29 @@ const PATHS: Record<ActivityIconName, ReactNode> = {
     </>
   ),
   // ◔ blame — clock (who/when)
+  // A spine with three siblings — the methods hanging off one type. Deliberately NOT the
+  // zigzag of `CallHierarchy` (who calls whom) nor the Y-tree of `TypeHierarchy` (what
+  // extends what): all three are hierarchies, so they have to differ by SHAPE, not by label.
+  MethodHierarchy: (
+    <>
+      <path d="M6 5v13M6 5h6.9M6 11.5h6.9M6 18h6.9" />
+      <circle cx="15.7" cy="5" r="2.4" />
+      <circle cx="15.7" cy="11.5" r="2.4" />
+      <circle cx="15.7" cy="18" r="2.4" />
+    </>
+  ),
+
+  // A percent sign inside a ring: coverage is a MEASURED PROPORTION, which is exactly what
+  // the old flask did not say — that glyph belongs to Tests, and Coverage was borrowing it.
+  Coverage: (
+    <>
+      <circle cx="12" cy="12" r="8.2" />
+      <path d="M9.2 14.8l5.6-5.6" />
+      <circle cx="9.5" cy="9.5" r="1.15" />
+      <circle cx="14.5" cy="14.5" r="1.15" />
+    </>
+  ),
+
   History: (
     <>
       <circle cx="12" cy="12" r="8.2" />

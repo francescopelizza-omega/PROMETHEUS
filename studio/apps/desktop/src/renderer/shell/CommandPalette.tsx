@@ -24,6 +24,7 @@ import {
 import { type ReactElement, useEffect, useMemo, useRef, useState } from "react";
 
 import { commandPaletteRows } from "../commands/registry.js";
+import { readStoredOverrides } from "../settings/keymap-overrides.js";
 import { useFocusTrap } from "./a11y.js";
 
 export interface CommandPaletteProps {
@@ -49,7 +50,7 @@ function pinnedTier(verdict: PaletteItem["verdict"]): VerdictTier | null {
 }
 
 /** Build the full palette item list: nav go-to + the registry commands (§4.3, leap #1). */
-function buildItems(): PaletteItem[] {
+function buildItems(overrides: Record<string, string>): PaletteItem[] {
   const nav: PaletteItem[] = ACTIVITIES.map((a) => ({
     id: `go.${a.id}`,
     title: `Go to ${a.label}`,
@@ -57,7 +58,7 @@ function buildItems(): PaletteItem[] {
     subtitle: a.label,
     keybind: "",
   }));
-  const commands: PaletteItem[] = commandPaletteRows().map((c) => ({
+  const commands: PaletteItem[] = commandPaletteRows(undefined, overrides).map((c) => ({
     id: c.id,
     title: c.title,
     kind: "command",
@@ -77,7 +78,10 @@ export function CommandPalette({
   const [active, setActive] = useState(0);
   const inputRef = useRef<HTMLInputElement | null>(null);
   const dialogRef = useRef<HTMLDivElement | null>(null);
-  const items = useMemo(buildItems, []);
+  // Rebuilt on every open so a rebind made in Settings (APP-057) shows in the key hints
+  // without a reload; the override map is read from storage, the same source App's matcher uses.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: `open` is the intended refresh key
+  const items = useMemo(() => buildItems(readStoredOverrides()), [open]);
   const ranked = useMemo(() => filterPalette(items, query), [items, query]);
   // APP-100: this aria-modal dialog needs the same focus trap + restore the ide palette has —
   // else Esc drops focus to <body> instead of the opener, and Tab escapes behind the modal.

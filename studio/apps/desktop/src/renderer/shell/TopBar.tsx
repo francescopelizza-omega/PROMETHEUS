@@ -167,13 +167,30 @@ export function TopBar({
             color: "var(--text-disabled)",
             cursor: "pointer",
             fontFamily: "var(--font-ui)",
-            fontSize: 12.5,
+            fontSize: "var(--text-small-size)",
           }}
         >
           <SearchGlyph />
-          <span style={{ flex: 1, textAlign: "left" }}>Search or run a command…</span>
+          {/* The label WRAPPED to a second line inside a 28px-tall pill on a narrow window,
+              spilling out of the border. A flex item's floor is its min-content width — which,
+              for text that is allowed to wrap, is its longest WORD — so the row could not
+              shrink and the pill overflowed instead. `nowrap` + a shrink floor + the ellipsis
+              make it degrade by truncating, which is what a placeholder should do. */}
           <span
             style={{
+              flex: "1 1 auto",
+              minWidth: 0,
+              textAlign: "left",
+              whiteSpace: "nowrap",
+              overflow: "hidden",
+              textOverflow: "ellipsis",
+            }}
+          >
+            Search or run a command…
+          </span>
+          <span
+            style={{
+              flexShrink: 0,
               fontFamily: "var(--font-mono)",
               fontSize: 10,
               padding: "1px 6px",

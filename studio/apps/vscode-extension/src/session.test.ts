@@ -43,6 +43,18 @@ function scriptedLlm(rounds: LlmTurn[][]): LLMClient {
 }
 
 const TOOL_CALL: ToolCall = { id: "1", name: "list_dir", args: { path: "." } };
+/** A WRITE call, so the authorisation ladder — not just `tuning.yes` — decides it. */
+const WRITE_CALL: ToolCall = {
+  id: "2",
+  name: "write_file",
+  args: { path: "src/new.ts", content: "x" },
+};
+/** The same write, aimed OUTSIDE the folder the user opened. */
+const ESCAPING_WRITE: ToolCall = {
+  id: "3",
+  name: "write_file",
+  args: { path: "/etc/passwd", content: "x" },
+};
 
 function collector(): {
   sinks: import("./session.js").SessionSinks;
@@ -252,3 +264,98 @@ test("reset(): cancels and WAITS OUT an in-flight turn before clearing — the i
     "the thread must contain ONLY the fresh system message — no leftover content from the interrupted turn's own round-end fold",
   );
 });
+
+/* ── the authorisation ladder actually reaches this surface ──────────────────── */
+
+/**
+ * Regression: the whole 0-7 ladder used to collapse to `tuning.yes = authLevel >= 1`.
+ *
+ * `prometheus.authLevel` advertised "0-7, the SAME ladder as the prometheus CLI and the desktop
+ * app", `resolveAuthLevel` resolved and clamped a 0-7 value faithfully — and then every level
+ * from 1 to 7 behaved identically, because the loop reads only the boolean and nothing else in
+ * this host consulted the number. A user who set 7 after reading that description still got a
+ * modal for every edit.
+ */
+function writeSession(authLevel: number, call: ToolCall) {
+  let asked = 0;
+  const session = new ChatSession({
+    llm: scriptedLlm([[{ kind: "tool_call", call }], [{ kind: "final" }]]),
+    runTool: okOutcome,
+    confirm: async () => {
+      asked += 1;
+      return { approved: true };
+    },
+    tuning: vscodeTuning("test-model", authLevel),
+    authLevel,
+    // the real predicate is `normalizeWorkspaceRelPath(p) !== null`; this is its rule
+    insideWorkingSet: (p) => !p.startsWith("/") && !p.includes(".."),
+  });
+  return { session, asked: () => asked };
+}
+
+test("a write INSIDE the workspace stops prompting once the level says so", async () => {
+  const low = writeSession(1, WRITE_CALL);
+  const c1 = collector();
+  await low.session.send("go", c1.sinks);
+  assert.equal(low.asked(), 1, "level 1 covers read-only tools only — a write still asks");
+
+  const high = writeSession(5, WRITE_CALL);
+  const c2 = collector();
+  await high.session.send("go", c2.sinks);
+  assert.equal(high.asked(), 0, "at an auto level an in-scope write runs unprompted");
+});
+
+test("a write OUTSIDE the workspace still asks, at every level below the global opt-in", async () => {
+  // `scopedWriteDecision`'s rule, and the reason bare `authDecision` is not enough: "level >= 2
+  // auto-approves edits" means the files the human is working on, not an arbitrary-write
+  // primitive over anything on disk.
+  for (const level of [2, 3, 4, 5]) {
+    const s2 = writeSession(level, ESCAPING_WRITE);
+    const c = collector();
+    await s2.session.send("go", c.sinks);
+    assert.equal(s2.asked(), 1, `level ${level} must still ask for a write outside the folder`);
+  }
+});
+
+test("no authLevel at all ⇒ nothing is auto-approved beyond what tuning.yes covers", async () => {
+  // An embedder that passes no level must get today's behaviour, never an accidental grant.
+  let asked = 0;
+  const session = new ChatSession({
+    llm: scriptedLlm([[{ kind: "tool_call", call: WRITE_CALL }], [{ kind: "final" }]]),
+    runTool: okOutcome,
+    confirm: async () => {
+      asked += 1;
+      return { approved: true };
+    },
+    tuning: vscodeTuning("test-model", 7),
+  });
+  const c = collector();
+  await session.send("go", c.sinks);
+  assert.equal(asked, 1, "the number is what grants, not the tuning bit");
+});
+
+test("a DESTRUCTIVE tool asks below the global opt-in, and only stops asking at 6-7", async () => {
+  /**
+   * The ladder's own rule, shared verbatim with the CLI and the desktop: `destructive` is the
+   * LAST of the six categories, so it is unlocked only by levels 6 ("trusted") and 7 ("run all"),
+   * which are an explicit global opt-in. Nemesis still hard-stops danger at every level.
+   *
+   * Pinned as a test because this is the one place honouring the ladder made this surface LESS
+   * prompt-happy than it used to be, and that has to be a deliberate, stated behaviour rather
+   * than a side effect nobody notices.
+   */
+  const del = (id: string): ToolCall => ({ id, name: "delete_file", args: { path: "src/x.ts" } });
+  for (const level of [0, 1, 2, 3, 4, 5]) {
+    const s2 = writeSession(level, del(`d${level}`));
+    const c = collector();
+    await s2.session.send("go", c.sinks);
+    assert.equal(s2.asked(), 1, `level ${level} must ask before deleting`);
+  }
+  for (const level of [6, 7]) {
+    const s2 = writeSession(level, del(`d${level}`));
+    const c = collector();
+    await s2.session.send("go", c.sinks);
+    assert.equal(s2.asked(), 0, `level ${level} is an explicit global opt-in`);
+  }
+});
+

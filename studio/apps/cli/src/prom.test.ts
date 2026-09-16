@@ -383,7 +383,12 @@ test("dispatch: prom-native + stubs route without the engine", async () => {
 
   const cfg = await run(["config", "path"]);
   assert.equal(cfg.exitCode, 0);
-  assert.ok((cfg.json as { configDir: string }).configDir.endsWith("prometheus-studio"));
+  // ONE home: the config root is `~/.prometheus/config`, not a second tree under `~/.config`.
+  const cfgDir = (cfg.json as { configDir: string }).configDir;
+  assert.ok(
+    cfgDir.endsWith(join(".prometheus", "config")),
+    `config path must live under the one Prometheus home, got ${cfgDir}`,
+  );
 
   // ci profile blocks --force without PROM_ALLOW_FORCE (§4 / Open Q6)
   const forced = await run(["--profile", "ci", "--force", "plugin", "install", "foo"]);
@@ -557,7 +562,12 @@ test("CLI-098 package.json is npm-publish-ready (pack-audit: whitelist + zero wo
   assert.match(pkg.version, /^\d+\.\d+\.\d+/, "real semver, not 0.0.0");
   assert.notEqual(pkg.version, "0.0.0");
   // strict files whitelist ⇒ no src/test/map/dev-register can ever reach the tarball.
-  assert.deepEqual(pkg.files, ["dist/bin.js", "README.md"]);
+  // TWO files, not one: the local-runner watchdog is SPAWNED BY PATH and never imported, so
+  // nothing in bin.js's module graph pulls it in and the single-outfile bundle omitted it —
+  // the detached idle-shutdown and critical-RAM eviction then silently did not exist in any
+  // published CLI. It gets its own esbuild pass (see `bundle` + the //publish-note) and must
+  // keep exactly this basename, which is what `watchdogEntryPath()` resolves beside the bundle.
+  assert.deepEqual(pkg.files, ["dist/bin.js", "dist/ollama-watchdog-entry.js", "README.md"]);
   assert.equal(pkg.engines?.node, ">=20");
   // `prometheus` is the ONE published command name — the old `prom` alias is gone.
   assert.equal(pkg.bin?.prometheus, "dist/bin.js");

@@ -61,7 +61,8 @@ export interface Env {
   /** the interpreter a venv was cloned from (pyvenv.cfg `home=`) — clone provenance. */
   basePrefix?: string;
   /** cheap count for the picker; the full list is fetched lazily via pkgList(). */
-  packageCount: number;
+  /** absent when the sidecar could not count them — NOT the same as zero. */
+  packageCount?: number;
   /** disk footprint (for the delete confirm + housekeeping). */
   sizeBytes?: number;
   /** does THIS env's torch see CUDA? (per-env, not host-wide). */

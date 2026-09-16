@@ -51,9 +51,6 @@ test("an ordinary out-of-scope write keeps the plain refusal", () => {
   clearGrantedRoots();
   grantWorkingSetRoot("/tmp/pg-a");
   setWorkingSetRoots(["/tmp/pg-a"]);
-  assert.throws(
-    () => assertInsideWorkingSet("/tmp/pg-a/../pg-c/x.txt"),
-    /outside the working set/,
-  );
+  assert.throws(() => assertInsideWorkingSet("/tmp/pg-a/../pg-c/x.txt"), /outside the working set/);
   clearGrantedRoots();
 });

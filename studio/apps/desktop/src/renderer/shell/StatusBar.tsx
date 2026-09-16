@@ -42,6 +42,16 @@ export interface ShellStatusBarProps {
   verdict: VerdictTier | null;
   /** whether the nemesis threat DB is stale (drives the "stale" shield). */
   dbStale?: boolean;
+  /**
+   * Whether the SCANNER is present at all (`HealthResult.nemesisPresent`).
+   *
+   * A different question from "what did the last scan say", and the shield answers the
+   * wrong one without it: a null verdict falls to `deriveShield`'s benign `clean`
+   * placeholder, so a build with nemesis missing painted a green shield in the one piece of
+   * chrome that is always on screen. `undefined` = no probe yet, which keeps the previous
+   * behaviour rather than accusing a scanner nobody looked for.
+   */
+  armed?: boolean;
   /** active venv label, e.g. "py3.12 (prometheus)" — shown only when one is active. */
   venv?: string;
   /** served model label, e.g. "qwen3:8b". */
@@ -71,6 +81,7 @@ export interface ShellStatusBarProps {
 export function ShellStatusBar({
   verdict,
   dbStale,
+  armed,
   venv,
   model,
   branch,
@@ -86,9 +97,17 @@ export function ShellStatusBar({
 }: ShellStatusBarProps): ReactElement {
   const authLevel = useAuthorisationStore((s) => s.level);
   // The shield maps a stale/clean state back to a verdict TIER the base bar tints.
-  const shield = deriveShield(verdict, { dbStale });
-  // "stale" has no verdict tier of its own → render it as a warn-tinted shield.
-  const shieldTier: VerdictTier = shield.state === "stale" ? "warn" : (verdict ?? "allow");
+  const shield = deriveShield(verdict, { dbStale, ...(armed === undefined ? {} : { armed }) });
+  // "stale" has no verdict tier of its own → render it as a warn-tinted shield, and an
+  // ABSENT scanner as a danger one: the shield may not read benign while nothing is gated.
+  const shieldTier: VerdictTier =
+    shield.state === "unarmed"
+      ? "block"
+      : shield.state === "stale"
+        ? "warn"
+        : shield.state === "armed"
+          ? "allow"
+          : (verdict ?? "allow");
 
   /* ── left: the security + authority facts (§7) ─────────────────────────────── */
   const left: StatusItem[] = [

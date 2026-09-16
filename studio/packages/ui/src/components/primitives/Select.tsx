@@ -9,7 +9,9 @@
  */
 
 import { type KeyboardEvent, type ReactNode, useId, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { Z } from "../../tokens/layers.js";
+import { useAnchoredLayer } from "./anchor.js";
 import { Input } from "./Input.js";
 import { filterItems } from "./filter.js";
 import { menuKeyHandler, useDismiss } from "./overlay.js";
@@ -129,6 +131,24 @@ export function Select({
   const layerRef = useRef<HTMLDivElement>(null);
   const listboxId = useId();
   useDismiss(layerRef, triggerRef, open, () => setOpen(false));
+  /**
+   * The option list is PORTALED to `document.body`, not absolutely positioned in the field.
+   *
+   * `position: absolute` keeps it inside every ancestor's clipping box, and this control is
+   * used inside panels that scroll or hide their overflow — the settings panes, the chat
+   * composer, the model pickers. The list was cut off at the panel edge, so the options a
+   * user most needs to reach (the ones at the bottom of a long list) could not be seen at
+   * all, and near the viewport bottom it opened off-screen entirely.
+   *
+   * `useAnchoredLayer` measures the trigger and clamps the layer into the viewport.
+   * `layerRef` stays on the portaled node so `useDismiss` still recognises clicks inside it
+   * as "not outside" — without that, opening the list would immediately close it.
+   */
+  const box = useAnchoredLayer(triggerRef, open, {
+    width: "anchor",
+    height: 260, // layout-allow: the layer's expected height for viewport clamping, not a pane
+    placement: "below",
+  });
 
   const selected = options.find((o) => o.value === value);
   const enabled = options.filter((o) => !o.disabled);
@@ -196,21 +216,28 @@ export function Select({
           ▾
         </span>
       </button>
-      {open && (
-        <div
-          ref={layerRef}
-          style={{
-            position: "absolute",
-            top: "calc(100% + 4px)",
-            left: 0,
-            right: 0,
-            zIndex: Z.dropdown,
-          }}
-        >
+      {open &&
+        box &&
+        createPortal(
+          <div
+            ref={layerRef}
+            style={{
+              position: "fixed",
+              left: box.left,
+              top: box.top,
+              width: box.width,
+              zIndex: Z.dropdown,
+            }}
+          >
+          {/* `active` indexes the ENABLED subset (keyboard movement skips disabled rows),
+              while OptionList renders the FULL list — so with any disabled option present the
+              highlight landed on the wrong row. Map at this boundary only: Combobox shares
+              OptionList and its indices are already in the full space. `enabled` holds the
+              same object references as `options`, so indexOf is exact. */}
           <OptionList
             options={options}
-            active={active}
-            setActive={setActive}
+            active={active >= 0 ? options.indexOf(enabled[active] as SelectOption) : -1}
+            setActive={(i) => setActive(enabled.indexOf(options[i] as SelectOption))}
             value={value}
             listboxId={listboxId}
             onChoose={(v2) => {
@@ -218,8 +245,9 @@ export function Select({
               setOpen(false);
             }}
           />
-        </div>
-      )}
+          </div>,
+          document.body,
+        )}
     </div>
   );
 }
@@ -250,6 +278,12 @@ export function Combobox({
   const layerRef = useRef<HTMLDivElement>(null);
   const listboxId = useId();
   useDismiss(layerRef, inputRef, open, () => setOpen(false));
+  // Portaled for the same reason as Select above — see that comment.
+  const box = useAnchoredLayer(inputRef, open, {
+    width: "anchor",
+    height: 260, // layout-allow: the layer's expected height for viewport clamping, not a pane
+    placement: "below",
+  });
 
   const filtered = useMemo(
     () => filterItems(query, options, (o) => o.text ?? o.value).filter((o) => !o.disabled),
@@ -294,17 +328,19 @@ export function Combobox({
         onFocus={() => setOpen(true)}
         onKeyDown={onKey}
       />
-      {open && (
-        <div
-          ref={layerRef}
-          style={{
-            position: "absolute",
-            top: "calc(100% + 4px)",
-            left: 0,
-            right: 0,
-            zIndex: Z.dropdown,
-          }}
-        >
+      {open &&
+        box &&
+        createPortal(
+          <div
+            ref={layerRef}
+            style={{
+              position: "fixed",
+              left: box.left,
+              top: box.top,
+              width: box.width,
+              zIndex: Z.dropdown,
+            }}
+          >
           <OptionList
             options={filtered}
             active={active}
@@ -317,8 +353,9 @@ export function Combobox({
               setOpen(false);
             }}
           />
-        </div>
-      )}
+          </div>,
+          document.body,
+        )}
     </div>
   );
 }

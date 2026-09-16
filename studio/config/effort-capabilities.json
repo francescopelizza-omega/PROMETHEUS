@@ -59,13 +59,7 @@
       "cap": {
         "mechanism": "effort-enum",
         "field": "reasoning_effort",
-        "supported": [
-          "off",
-          "low",
-          "medium",
-          "high",
-          "max"
-        ],
+        "supported": ["off", "low", "medium", "high", "max"],
         "enumMap": {
           "off": "none",
           "low": "low",
@@ -98,10 +92,7 @@
       "cap": {
         "mechanism": "effort-enum",
         "field": "reasoning_effort",
-        "supported": [
-          "off",
-          "low"
-        ],
+        "supported": ["off", "low"],
         "enumMap": {
           "off": "none",
           "low": "low"

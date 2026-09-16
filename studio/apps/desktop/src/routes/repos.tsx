@@ -362,6 +362,7 @@ export function ReposRoute(): ReactElement {
                         color: "var(--text-muted)",
                         overflow: "hidden",
                         textOverflow: "ellipsis",
+                        minWidth: 0, // flex/grid floor — without it the ellipsis is unreachable
                         whiteSpace: "nowrap",
                       }}
                     >

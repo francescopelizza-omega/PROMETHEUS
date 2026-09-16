@@ -10,6 +10,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
+import { isRouteTab } from "../../routes/route-tabs.js";
 import {
   type Command,
   type CommandContext,
@@ -17,6 +18,7 @@ import {
   SHELL_COMMANDS,
   chordLabel,
   commandPaletteRows,
+  commandTarget,
   effectiveKeybinding,
   executeCommandId,
   handleChord,
@@ -216,6 +218,17 @@ test("commandPaletteRows: every command is projected with its key hint", () => {
   assert.equal(rows.find((r) => r.id === "git.commit")?.keybind, "");
 });
 
+test("no command id is registered twice (duplicate palette rows / React keys)", () => {
+  // A second copy of run.config/run.debug/run.stop once shipped alongside the originals, so
+  // `commandPaletteRows` emitted two rows per id and every consumer keying by `item.id`
+  // (CommandPalette.tsx, the docs cheat sheet) hit React's duplicate-key path.
+  const seen = new Set<string>();
+  for (const c of SHELL_COMMANDS) {
+    assert.equal(seen.has(c.id), false, `duplicate command id: ${c.id}`);
+    seen.add(c.id);
+  }
+});
+
 test("no two bound commands share a chord on mac (deterministic dispatch)", () => {
   const seen = new Map<string, string>();
   for (const c of SHELL_COMMANDS) {
@@ -224,4 +237,77 @@ test("no two bound commands share a chord on mac (deterministic dispatch)", () =
     assert.equal(seen.has(label), false, `duplicate chord ${label}: ${seen.get(label)} & ${c.id}`);
     seen.set(label, c.id);
   }
+});
+
+/* ── commandTarget: the merge turned four rail nouns into SEGMENTS (handoff_3 §1) ──── */
+
+test("commandTarget: python.* lands on Workspace's ENVIRONMENTS segment, not Repos", () => {
+  // The live defect this pins: `python.selectInterpreter` is offered by the shell palette
+  // (ide/state/palette-commands.ts) but has no registry handler, so `executeCommandId`
+  // returns false and the shell falls back to a navigate. Naming only the activity put the
+  // user on Workspace→Repos — §1's own failure mode, on a shipped code path.
+  assert.deepEqual(commandTarget("python.selectInterpreter"), {
+    activity: "workspace",
+    tab: "environments",
+  });
+  assert.deepEqual(commandTarget("python.createVenv"), {
+    activity: "workspace",
+    tab: "environments",
+  });
+});
+
+test("commandTarget: the un-segmented routes carry no tab", () => {
+  assert.deepEqual(commandTarget("models.pull"), { activity: "models" });
+  assert.deepEqual(commandTarget("prometheus.scan"), { activity: "security" });
+  assert.deepEqual(commandTarget("gate.audit"), { activity: "security" });
+  assert.deepEqual(commandTarget("git.commit"), { activity: "editor" });
+  assert.deepEqual(commandTarget("editor.format"), { activity: "editor" });
+});
+
+test("commandTarget: panel.* is handled inline, never navigated to", () => {
+  assert.equal(commandTarget("panel.problems"), null);
+});
+
+test("commandTarget: every tab it names is a REAL segment of the route it names", () => {
+  // a typo'd tab would be silently dropped by requestRouteTab's own guard, leaving the
+  // user on the default segment with nothing to show for it.
+  for (const id of ["python.selectInterpreter", "models.pull", "git.commit", "panel.problems"]) {
+    const t = commandTarget(id);
+    if (t?.tab) {
+      assert.ok(
+        t.activity === "catalog" || t.activity === "workspace",
+        `${id}: a tab on an un-segmented route`,
+      );
+      assert.ok(isRouteTab(t.activity, t.tab), `${id}: ${t.tab} is not a segment of ${t.activity}`);
+    }
+  }
+});
+
+/* -- the Run toolbar's three verbs must EXIST and reach the editor -- */
+
+test("run.config / run.debug / run.stop are registered and editor-scoped", () => {
+  // The TopBar called `debug.start` for both Run and Debug (a handler that only opens the
+  // debug panel) and `debug.stop`, which was never registered - so executeCommandId returned
+  // false and Stop did nothing, silently, forever.
+  for (const id of ["run.config", "run.debug", "run.stop"]) {
+    const cmd = SHELL_COMMANDS.find((c) => c.id === id);
+    assert.ok(cmd, `${id} is not registered`);
+    const ran = [];
+    cmd.run({
+      ...({} as CommandContext),
+      runEditorCommand: (x) => ran.push(x),
+    } as CommandContext);
+    assert.deepEqual(ran, [id], `${id} does not reach the editor`);
+  }
+});
+
+test("executeCommandId returns TRUE for each of them (a silent false is the bug)", () => {
+  const ran = [];
+  const ctx = { ...({} as CommandContext), runEditorCommand: (x) => ran.push(x) } as CommandContext;
+  for (const id of ["run.config", "run.debug", "run.stop"]) {
+    assert.equal(executeCommandId(id, ctx), true, `${id} fell through to the navigate fallback`);
+  }
+  assert.deepEqual(ran, ["run.config", "run.debug", "run.stop"]);
+  // and the id that never existed still reports false rather than pretending
+  assert.equal(executeCommandId("debug.stop", ctx), false);
 });

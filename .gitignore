@@ -82,3 +82,7 @@ studio/**/.prometheus/
 .agents/
 /docs/plan/
 /docs/interface/
+
+# 2-second RAM trace written by handoffs/ram-2sec-log.sh — machine-local evidence,
+# regenerated per session, never published.
+/2_sec_ram_log.md

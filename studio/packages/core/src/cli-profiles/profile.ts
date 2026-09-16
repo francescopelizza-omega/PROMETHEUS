@@ -16,6 +16,7 @@ import { SYSTEM_MEMORY_TOOLS } from "../agent/system/memory.js";
 import { SYSTEM_TOOLS } from "../agent/system/tools.js";
 import { TODO_TOOLS } from "../agent/todo.js";
 import type { ModelRef } from "../agents/types.js";
+import type { EffortTier } from "../ai/effort/types.js";
 import { isEffortTier } from "../ai/effort/types.js";
 import { type TomlTable, parseToml, stringifyToml } from "./toml.js";
 
@@ -35,7 +36,7 @@ export interface CliProfile {
      * as `"off"`: unset means "no tier was chosen", and the composer badge reads the model's
      * own default rather than claiming one.
      */
-    effort?: "off" | "low" | "medium" | "high" | "max";
+    effort?: EffortTier;
     /**
      * Send the effort knob even when `ai/effort/rules.ts` says this model has none.
      *
@@ -224,7 +225,7 @@ export interface ProfileFlagOverrides {
   yes?: boolean;
   model?: string;
   /** `--effort <tier>` — the human at the keyboard outranks every config layer (§6). */
-  effort?: "off" | "low" | "medium" | "high" | "max";
+  effort?: EffortTier;
   /** `--force-effort` — send the knob over the capability table's objection. */
   effortForce?: boolean;
 }

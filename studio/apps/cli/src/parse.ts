@@ -13,6 +13,8 @@
  * starts with "-".
  */
 
+import { type EffortTier, isEffortTier } from "@prometheus/core/ai-effort";
+
 export interface ParsedArgs {
   /** the resolved command path, e.g. ["scan"], ["model","hw"], ["provider","list"]. */
   command: string[];
@@ -38,8 +40,8 @@ export interface ParsedArgs {
   force: boolean;
   noGate: boolean;
   gateMode?: "enforce" | "warn" | "off";
-  /** `--effort <off|low|medium|high|max>` — the `/think` ladder, pinned from the command line. */
-  effort?: "off" | "low" | "medium" | "high" | "max";
+  /** `--effort <tier>` — the `/think` ladder, pinned from the command line. */
+  effort?: EffortTier;
   /** `--force-effort` — send the effort knob over the capability table's objection. */
   forceEffort: boolean;
   profile?: string;
@@ -359,6 +361,11 @@ const BOOLEAN_FLAGS = new Set<string>([
   "free-only",
   "keep-unverified",
   "force-budget",
+  // Autonomy grants are BOOLEAN. Missing from this set, the generic branch consumed the
+  // next token as their value, so `chat --allow-writes "fix the tests"` swallowed the
+  // prompt: the grant was set to the prompt string and the model got an empty request.
+  "allow-writes",
+  "allow-commands",
   "explain", // CLI-080: `secure <target> --explain` — boolean so it never consumes the target
   "fresh", // `gate --fresh <target>` — bypass the nemesis verdict cache
   "sign", // `gate --sign <target>` — sign the verdict
@@ -590,16 +597,13 @@ function liftGlobals(result: ParsedArgs): void {
     result.gateMode = gateMode;
   // `--effort` is validated against the ladder here rather than downstream: an unrecognised
   // tier must be ignored, not carried as a string that quietly fails a comparison later.
+  //
+  // `isEffortTier`, not a hand-written chain of `===`. The chain WAS the ladder, spelled a
+  // second time, so when the ladder grew `xhigh` and `ultra` this validator silently dropped
+  // them: `/think xhigh` worked, `--effort xhigh` was accepted by the parser and discarded here,
+  // and nothing said so. A predicate that reads the real list cannot fall behind it.
   const effort = flagStr(f, "effort");
-  if (
-    effort === "off" ||
-    effort === "low" ||
-    effort === "medium" ||
-    effort === "high" ||
-    effort === "max"
-  ) {
-    result.effort = effort;
-  }
+  if (isEffortTier(effort)) result.effort = effort;
   const profile = flagStr(f, "profile");
   if (profile) result.profile = profile;
   const engine = flagStr(f, "engine");

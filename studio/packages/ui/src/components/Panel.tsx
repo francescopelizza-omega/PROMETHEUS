@@ -64,7 +64,7 @@ export function Panel({
             paddingBlock: "var(--space-4, 8px)",
             borderBottom: "1px solid var(--border-subtle)",
             fontFamily: "var(--font-ui)",
-            fontSize: "var(--text-h2-size, 1.125rem)",
+            fontSize: "var(--text-h2-size, 1rem)",
             fontWeight: 600,
           }}
         >

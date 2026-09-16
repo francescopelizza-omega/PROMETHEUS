@@ -742,7 +742,7 @@ export function CommandPalette(props: CommandPaletteProps): ReactElement {
                     border: "none",
                     padding: "6px 12px",
                     cursor: "pointer",
-                    background: i === active ? "var(--bg-surface-3)" : "transparent",
+                    background: i === active ? "var(--bg-elevated)" : "transparent",
                     display: "flex",
                     alignItems: "center",
                     gap: 8,
@@ -767,6 +767,7 @@ export function CommandPalette(props: CommandPaletteProps): ReactElement {
                         color: "var(--text-secondary)",
                         overflow: "hidden",
                         textOverflow: "ellipsis",
+                        minWidth: 0, // flex/grid floor — without it the ellipsis is unreachable
                         whiteSpace: "nowrap",
                       }}
                     >
@@ -872,7 +873,7 @@ function Preview({ row, root }: { row: Row | undefined; root: string }): ReactEl
         fontSize: "0.75rem",
         lineHeight: 1.5,
         color: "var(--text-primary)",
-        background: "var(--bg-surface-1)",
+        background: "var(--bg-surface)",
       }}
     >
       {children}
@@ -916,6 +917,7 @@ function Preview({ row, root }: { row: Row | undefined; root: string }): ReactEl
           marginBottom: 4,
           overflow: "hidden",
           textOverflow: "ellipsis",
+          minWidth: 0, // flex/grid floor — without it the ellipsis is unreachable
           whiteSpace: "nowrap",
         }}
       >
@@ -937,7 +939,7 @@ function Preview({ row, root }: { row: Row | undefined; root: string }): ReactEl
           >
             <span
               style={{
-                color: "var(--text-tertiary)",
+                color: "var(--text-muted)",
                 width: 34,
                 textAlign: "right",
                 flexShrink: 0,
@@ -982,7 +984,7 @@ function PreviewLine({
           {clip.text.slice(0, clip.start)}
           <span
             style={{
-              background: "var(--accent-muted, rgba(109,94,240,0.35))",
+              background: "var(--bg-active)",
               color: "var(--text-primary)",
             }}
           >

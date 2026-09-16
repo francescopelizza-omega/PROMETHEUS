@@ -186,8 +186,12 @@ export function rawEngine(
     }, timeoutMs);
     if (typeof timer.unref === "function") timer.unref();
 
-    child.stdout?.on("data", (b: Buffer) => {
-      stdout += b.toString();
+    // setEncoding, not per-chunk `b.toString()`: a multi-byte character straddling a chunk
+    // boundary decodes to U+FFFD on BOTH sides, silently corrupting the JSON payload. The
+    // stream decoder holds the partial sequence until the rest arrives.
+    child.stdout?.setEncoding("utf8");
+    child.stdout?.on("data", (chunk: string) => {
+      stdout += chunk;
       if (stdout.length > 64 * 1024 * 1024) {
         try {
           child.kill("SIGKILL");
@@ -197,8 +201,9 @@ export function rawEngine(
         done(fail(`${command} emitted more than 64MB — aborted (fail-closed)`));
       }
     });
-    child.stderr?.on("data", (b: Buffer) => {
-      stderr += b.toString();
+    child.stderr?.setEncoding("utf8");
+    child.stderr?.on("data", (chunk: string) => {
+      stderr += chunk;
     });
     child.stdin?.end();
 

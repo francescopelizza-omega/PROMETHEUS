@@ -26,6 +26,7 @@
 import { buildPatch } from "./apply.js";
 import type { EffortRule } from "./rules.js";
 import { builtinRules } from "./rules.js";
+import { isSafeSetPath } from "./types.js";
 import type { EffortCapability, EffortMechanism, EffortTier } from "./types.js";
 import { EFFORT_TIERS, isEffortTier } from "./types.js";
 
@@ -110,6 +111,14 @@ function parseRule(raw: unknown, index: number): { rule: EffortRule } | { error:
     mechanism === "token-budget";
   if (needsField && typeof cap.field !== "string") {
     return { error: `${at} (${id}): mechanism "${mechanism}" requires a "field"` };
+  }
+  // A rules file can come from a project directory the user merely cloned. A `field` naming a
+  // prototype-chain segment is a prototype-pollution attempt, not a typo — reject the rule by
+  // name so it is visible, rather than silently dropping the patch at the sink.
+  if (needsField && !isSafeSetPath(cap.field as string)) {
+    return {
+      error: `${at} (${id}): "field" may not contain __proto__, constructor or prototype`,
+    };
   }
   if (mechanism === "template-kwarg" && typeof cap.kwarg !== "string") {
     return { error: `${at} (${id}): mechanism "template-kwarg" requires a "kwarg"` };

@@ -699,7 +699,10 @@ function Toggle({
       aria-pressed={on}
       style={{
         background: on ? "var(--accent)" : "transparent",
-        color: on ? "var(--brand-fg)" : "var(--text-secondary)",
+        // `--on-accent` is the computed label colour for the `--accent` FILL (tokens/contrast.ts `onFill`).
+        // The old `--brand-fg` here was WHITE on the dark scheme over a saturated light fill (~2:1),
+        // and a plain `--bg-app` would be near-white over the same fill on the LIGHT scheme.
+        color: on ? "var(--on-accent)" : "var(--text-secondary)",
         border: "1px solid var(--border-subtle)",
         borderRadius: 4,
         padding: "1px 5px",

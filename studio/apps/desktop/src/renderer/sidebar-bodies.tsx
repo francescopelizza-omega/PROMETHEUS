@@ -66,6 +66,7 @@ const rowStyle: CSSProperties = {
   whiteSpace: "nowrap",
   overflow: "hidden",
   textOverflow: "ellipsis",
+  minWidth: 0, // flex/grid floor — without it the ellipsis is unreachable
 };
 
 /* ── home: workspace explorer ───────────────────────────────────────────────*/
@@ -95,7 +96,9 @@ function OpenEditorsBody(): ReactElement {
           onClick={() => activate(d.uri)}
           style={{ ...rowStyle, fontStyle: d.preview ? "italic" : "normal" }}
         >
-          <span style={{ overflow: "hidden", textOverflow: "ellipsis" }}>{d.name}</span>
+          <span style={{ overflow: "hidden", textOverflow: "ellipsis", minWidth: 0 }}>
+            {d.name}
+          </span>
           {d.dirty ? <span style={{ color: "var(--accent)" }}>●</span> : null}
         </button>
       ))}
@@ -159,7 +162,9 @@ function VcsBody(): ReactElement {
                 title={`${r.kind}: ${r.path}`}
                 style={{ ...rowStyle, cursor: "default" }}
               >
-                <span style={{ overflow: "hidden", textOverflow: "ellipsis" }}>{r.path}</span>
+                <span style={{ overflow: "hidden", textOverflow: "ellipsis", minWidth: 0 }}>
+                  {r.path}
+                </span>
                 <span style={{ color: "var(--text-secondary)", fontSize: "0.7rem" }}>
                   {r.kind.slice(0, 1).toUpperCase()}
                 </span>

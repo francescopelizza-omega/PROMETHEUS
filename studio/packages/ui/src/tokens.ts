@@ -21,6 +21,8 @@
 // The 20 famous community schemes + the operator's "Pelly" scheme (pure data; the
 // module type-imports our shapes, so this adds no runtime cycle / no React dep).
 import { FAMOUS_SCHEMES } from "./tokens/famous-schemes.js";
+import { FILL_ROLES, onFill } from "./tokens/contrast.js";
+import { derivePalette } from "./tokens/scheme-derive.js";
 
 /* ────────────────────────────────────────────────────────────────────────────
  * Verdict / severity model mirror (structural copy of C3; do not drift).
@@ -220,6 +222,33 @@ export interface SemanticColors {
   "danger-fg": string;
   info: string;
   selection: string;
+  /* ── the LABEL colour for each role used as a SOLID FILL (`on-<role>`) ──────────
+   *
+   * A role colour is painted two ways and the two need different foregrounds:
+   *   - as a glyph, border or 14% tint  → the role itself, 3:1 (already covered above);
+   *   - as a SOLID FILL with a label on it → a verdict chip's solid variant, the Git
+   *     `tag:` pill, the search Aa/.*\/ab toggles, the MCP enable switch, every primary
+   *     CTA. That label is TEXT, so it carries 4.5:1 against the fill.
+   *
+   * There was no token for the second case, so call sites reached for whatever was
+   * nearest — mostly `brand-fg`, which is WHITE on the dark scheme. White on `--accent`
+   * (#35c7ee) measures 1.99:1, on `--ok` 1.63:1, on `--warn` 1.58:1. Swapping them all to
+   * `bg-app` fixes the dark scheme and breaks the light one for the mirror-image reason:
+   * there `bg-app` is near-white and the fills are saturated mid-tones (black on light
+   * `--accent` reads 5.85:1, the near-white ground only 3.38:1). Neither ground nor pole
+   * is right universally — it depends on the fill — which is exactly what a token is for.
+   *
+   * Computed, never hand-picked: `onFill` prefers the scheme's OWN `bg-app` (so a chip
+   * still reads as part of the scheme) and falls back to whichever pole actually carries
+   * the ratio. `resolveScheme` recomputes any of these that a scheme leaves to the base
+   * while overriding the matching role, so a partial palette can never inherit a
+   * foreground that was measured against a different fill. */
+  "on-brand": string;
+  "on-accent": string;
+  "on-ok": string;
+  "on-warn": string;
+  "on-danger": string;
+  "on-info": string;
 }
 
 /** Dark theme — the default (08 §2.1, restyled to the handoff §1 navy ground).
@@ -233,19 +262,32 @@ export const darkSemantic: SemanticColors = {
   "bg-chip": "#0e1a2e", //         TopBar + composer pill fill
   "bg-active": "#13253f", //       active rail icon / active tab / row hover
   "bg-elevated": "#152a47", //     secondary button fill
-  "border-subtle": "#172a47", //   island borders
-  "border-row": "#101d31", //      row separators
-  "border-header": "#142438", //   header separators
-  "border-chip": "#1a2c48", //     chip / pill outline
-  "border-strong": "#244168",
-  "border-hover": "#2a4570",
-  "text-primary": "#e8f2ff",
-  "text-strong": "#eef5ff", //     greeting / hero
-  "text-title": "#c9dcf4", //      card titles
-  "text-body": "#b7cbe6", //       body copy in cards
-  "text-secondary": "#9db4d4",
-  "text-muted": "#7d97bd", //      faint metadata
-  "text-disabled": "#5f7899",
+  // BORDERS, re-based for legibility.
+  //
+  // Every one of these sat between 1.06:1 and 1.87:1 against `bg-surface`. WCAG asks 3:1 of a
+  // non-text UI boundary, and these were not close — which is why "text going outside the
+  // graphical element that contains it" was so hard to see: on a dark ground the element had
+  // no perceivable edge to go outside OF. Lifted along the SAME hue (lightness only), so the
+  // navy character is unchanged and only the visibility moves.
+  "border-subtle": "#2a4d82", //   island borders        (1.25 → 2.12:1)
+  "border-row": "#213b64", //      row separators        (1.06 → 1.60:1, deliberately the quietest)
+  "border-header": "#28476f", //   header separators     (1.15 → 1.90:1)
+  "border-chip": "#2f5082", //     chip / pill outline   (1.28 → 2.22:1)
+  "border-strong": "#3865a1", //   dividers that carry MEANING — clears the 3:1 UI bar (1.74 → 3.03:1)
+  "border-hover": "#436eb2", //    hover/focus edge      (1.87 → 3.52:1)
+  // TEXT, lifted (2026-09-08). The whole text ramp below `text-primary` read as "gray on
+  // dark": secondary (662 call sites) sat at #9db4d4 and muted at #7d97bd — WCAG-legal, but
+  // visibly dim next to white chrome. Lifted along the same navy hue so hierarchy survives
+  // (primary > title > body > secondary > muted > disabled) while every step stays bright.
+  // Ratios on bg-surface (#0c1728): primary 16.9, title 14.7, body 13.0, secondary 12.0,
+  // muted 9.2, disabled 6.9 — all comfortably above AA (4.5:1).
+  "text-primary": "#f0f6ff",
+  "text-strong": "#ffffff", //     greeting / hero
+  "text-title": "#e4eefc", //      card titles
+  "text-body": "#d6e3f5", //       body copy in cards
+  "text-secondary": "#c3d4ea",
+  "text-muted": "#a6bbd9", //      faint metadata — still legible, not faint
+  "text-disabled": "#8ba1c0", //   dimmest step; 6.9:1 so "disabled" never means "invisible"
   brand: violet[500], //           #a855f7 (kept — the Prometheus violet)
   "brand-2": "#e879f9", //         CTA gradient end
   "brand-3": "#c084fc", //         wordmark gradient start / legend swatch
@@ -257,7 +299,13 @@ export const darkSemantic: SemanticColors = {
   danger: "#ff5566",
   "danger-fg": "#ff8093",
   info: "#35c7ee",
-  selection: "#16325a",
+  selection: "#16325a",  /* label colours for the solid role fills — see `onFill`; pinned by tokens.test.ts. */
+  "on-brand": "#070d18", // on #a855f7 = 4.92:1
+  "on-accent": "#070d18", // on #35c7ee = 9.78:1
+  "on-ok": "#070d18", // on #8be04a = 11.91:1
+  "on-warn": "#070d18", // on #f5c944 = 12.34:1
+  "on-danger": "#070d18", // on #ff5566 = 6.24:1
+  "on-info": "#070d18", // on #35c7ee = 9.78:1
 };
 
 /** Light theme — the same identity inverted (08 §2.1 light override). */
@@ -280,9 +328,16 @@ export const lightSemantic: SemanticColors = {
   "text-strong": "#0a0f18",
   "text-title": neutral[900],
   "text-body": slate[500],
-  "text-secondary": neutral[600],
-  "text-muted": slate[400],
-  "text-disabled": neutral[400],
+  // The bottom of the LIGHT ramp was measured against its own grounds (bg-app #f7f8fa,
+  // bg-surface #fff, bg-inset #e9ecf1) and three of four steps failed AA on the inset:
+  // secondary 4.92, muted 3.95, disabled 2.13. `neutral[400]` as "disabled" is the light
+  // twin of the grey-on-dark report — legible on white, invisible on an inset panel. Re-based
+  // along the same slate hue so the ladder survives and every step clears 4.5:1 on the WORST
+  // light ground: secondary 5.47, muted 4.97, disabled 4.54. The band is narrower than dark's
+  // because a light ground has less room below AA; that is the ground's limit, not a choice.
+  "text-secondary": "#535f71",
+  "text-muted": "#5a6578",
+  "text-disabled": "#606b7e",
   brand: violet[600],
   "brand-2": "#c026d3",
   "brand-3": violet[500],
@@ -296,7 +351,13 @@ export const lightSemantic: SemanticColors = {
   danger: red[600],
   "danger-fg": red[700],
   info: cyan[600],
-  selection: cyan[100],
+  selection: cyan[100],  /* label colours for the solid role fills — see `onFill`; pinned by tokens.test.ts. */
+  "on-brand": "#f7f8fa", // on #8b3ad6 = 5.38:1
+  "on-accent": "#000000", // on #0894ad = 5.85:1
+  "on-ok": "#000000", // on #179c4a = 5.89:1
+  "on-warn": "#f7f8fa", // on #a35c08 = 4.83:1
+  "on-danger": "#f7f8fa", // on #cf2727 = 4.97:1
+  "on-info": "#000000", // on #0894ad = 5.85:1
 };
 
 /** High-contrast theme — AAA targets, pure black/white + saturated cues (08 §7). */
@@ -333,7 +394,13 @@ export const highContrastSemantic: SemanticColors = {
   danger: red[300],
   "danger-fg": red[200],
   info: cyan[300],
-  selection: cyan[800],
+  selection: cyan[800],  /* label colours for the solid role fills — see `onFill`; pinned by tokens.test.ts. */
+  "on-brand": "#000000", // on #c08cff = 8.44:1
+  "on-accent": "#000000", // on #5cdff5 = 13.33:1
+  "on-ok": "#000000", // on #5fd98c = 11.79:1
+  "on-warn": "#000000", // on #fbbf4a = 12.65:1
+  "on-danger": "#000000", // on #fa6b6b = 7.38:1
+  "on-info": "#000000", // on #5cdff5 = 13.33:1
 };
 
 /* ────────────────────────────────────────────────────────────────────────────
@@ -436,13 +503,21 @@ export const typography = {
    * decision): the root is a plain 16px (the 112.5% scale is GONE), and dense UI text
    * is authored at 13px / 12.5px — ONE scale, applied everywhere.
    */
+  /**
+   * The small end of the scale was re-based for READABILITY.
+   *
+   * 13px body / 12.5px small is a scale drawn for someone who reads code all day on a
+   * high-DPI display. Reported verbatim by the user: text is "quite difficult to be read in
+   * most cases for people that are not expert developers". The large end was already fine and
+   * is untouched — this only lifts the sizes that dense UI actually renders at.
+   */
   scale: {
     display: { size: "1.5rem", line: "1.25" }, //   24px — the Home greeting
     h1: { size: "1.125rem", line: "1.35" }, //      18px
-    h2: { size: "0.9375rem", line: "1.4" }, //      15px — island titles
-    body: { size: "0.8125rem", line: "1.5" }, //    13px — the density decision
-    small: { size: "0.78125rem", line: "1.45" }, // 12.5px — dense rows / chat
-    code: { size: "0.75rem", line: "1.6" }, //      12px mono
+    h2: { size: "1rem", line: "1.4" }, //           16px — island titles   (was 15px)
+    body: { size: "0.875rem", line: "1.55" }, //    14px — UI default      (was 13px)
+    small: { size: "0.8125rem", line: "1.5" }, //   13px — dense rows/chat (was 12.5px)
+    code: { size: "0.78125rem", line: "1.6" }, //   12.5px mono            (was 12px)
   },
 } as const;
 
@@ -532,9 +607,29 @@ export function baseSemantic(base: SchemeBase): SemanticColors {
   }
 }
 
-/** Flatten a scheme to a complete SemanticColors map (base ◀ override). */
+/**
+ * Flatten a scheme to a complete SemanticColors map (base ◀ override).
+ *
+ * The `on-<role>` pass is what makes a PARTIAL palette safe. `tokens` is a
+ * `Partial<SemanticColors>`, so a scheme that overrides `danger` but says nothing about
+ * `on-danger` would inherit a label colour measured against the BASE scheme's red — the
+ * exact fall-through that once gave Ember the base's navy separators and an inverted text
+ * ramp. So whenever a scheme moves a fill without stating its label colour, the label is
+ * recomputed from the fill that will actually be painted.
+ *
+ * An EXPLICIT `on-*` in `tokens` is left alone: a hand-authored or user-imported theme that
+ * states one has said something deliberate, and the save-gate is where legibility is
+ * enforced for those.
+ */
 export function resolveScheme(scheme: ColorScheme): SemanticColors {
-  return { ...baseSemantic(scheme.base), ...scheme.tokens };
+  const merged = { ...baseSemantic(scheme.base), ...scheme.tokens };
+  for (const role of FILL_ROLES) {
+    const key = `on-${role}` as const;
+    if (scheme.tokens[key] !== undefined) continue;
+    if (scheme.tokens[role] === undefined && scheme.tokens["bg-app"] === undefined) continue;
+    merged[key] = onFill(merged[role], merged["bg-app"]);
+  }
+  return merged;
 }
 
 // ── #1 Prometheus Dark ★ (the default — IS the 08 dark map, named) ───────────
@@ -557,120 +652,134 @@ const prometheusLight: ColorScheme = {
   tokens: {}, // identity over the light base
 };
 
-// ── #3 Ember — warm charcoal + ember-orange (fully filled) ───────────────────
+// ── #3–#6 — the fully-authored first-party schemes ───────────────────────────
+//
+// These four used to be hand-written `Partial<SemanticColors>` maps that filled ~22 of the 33
+// §2 roles and let the rest fall through to the Prometheus base. `filled: true` was therefore
+// only half true, and the half that was missing was visible: Ember (warm charcoal) inherited
+// the base's NAVY row separators, chips and `text-muted`; Nord and Solarized did the same.
+// Worse, the inherited `text-muted` sat on a different ground than it was tuned for, which is
+// how Ember ended up with muted (9.11:1) BRIGHTER than its own secondary (6.67:1) — the same
+// inverted ramp the famous schemes had.
+//
+// They are authored as palettes now and run through the SAME `derivePalette` the famous
+// schemes use, so every role is filled from the scheme's own colours and the text ramp is
+// monotone and floored by construction. See tokens/scheme-derive.ts for the measurements.
+
+/** Ember — warm charcoal + ember-orange. */
 const ember: ColorScheme = {
   id: "ember",
   name: "Ember",
   base: "dark",
   builtin: true,
   filled: true,
-  tokens: {
-    "bg-app": "#14110d",
-    "bg-surface": "#1b1712",
-    "bg-surface-2": "#221c16",
-    "bg-inset": "#0e0b08",
-    "border-subtle": "#2c2419",
-    "border-strong": "#3d3322",
-    "text-primary": "#f3e8d8",
-    "text-secondary": "#b39a82",
-    "text-disabled": "#6b5d4f",
-    brand: "#d2691e",
-    "brand-fg": "#14110d",
-    accent: "#e0a96d",
-    "focus-ring": "#e0a96d",
-    ok: green[400],
-    warn: amber[400],
-    danger: red[400],
-    info: "#e0a96d",
-    selection: "#3d3322",
-  },
+  tokens: derivePalette(
+    {
+      bg: "#14110d",
+      surface: "#1b1712",
+      surface2: "#221c16",
+      inset: "#0e0b08",
+      borderSubtle: "#2c2419",
+      borderStrong: "#3d3322",
+      text: "#f3e8d8",
+      textDim: "#b39a82",
+      brand: "#d2691e",
+      accent: "#e0a96d",
+      ok: green[400],
+      warn: amber[400],
+      danger: red[400],
+      info: "#e0a96d",
+      selection: "#3d3322",
+    },
+    "dark",
+  ),
 };
 
-// ── #4 Nord Frost — arctic blue-grays (fully filled) ─────────────────────────
+/** Nord Frost — arctic blue-grays. */
 const nordFrost: ColorScheme = {
   id: "nord-frost",
   name: "Nord Frost",
   base: "dark",
   builtin: true,
   filled: true,
-  tokens: {
-    "bg-app": "#2e3440",
-    "bg-surface": "#3b4252",
-    "bg-surface-2": "#434c5e",
-    "bg-inset": "#272c36",
-    "border-subtle": "#434c5e",
-    "border-strong": "#4c566a",
-    "text-primary": "#eceff4",
-    "text-secondary": "#d8dee9",
-    "text-disabled": "#7b88a1",
-    brand: "#b48ead",
-    "brand-fg": "#2e3440",
-    accent: "#88c0d0",
-    "focus-ring": "#88c0d0",
-    ok: "#a3be8c",
-    warn: "#ebcb8b",
-    danger: "#bf616a",
-    info: "#81a1c1",
-    selection: "#434c5e",
-  },
+  tokens: derivePalette(
+    {
+      bg: "#2e3440",
+      surface: "#3b4252",
+      surface2: "#434c5e",
+      inset: "#272c36",
+      borderSubtle: "#434c5e",
+      borderStrong: "#4c566a",
+      text: "#eceff4",
+      textDim: "#d8dee9",
+      brand: "#b48ead",
+      accent: "#88c0d0",
+      ok: "#a3be8c",
+      warn: "#ebcb8b",
+      danger: "#bf616a",
+      info: "#81a1c1",
+      selection: "#434c5e",
+    },
+    "dark",
+  ),
 };
 
-// ── #5 Solarized Dark — Schoonover's low-contrast classic (fully filled) ─────
+/** Solarized Dark — Schoonover's low-contrast classic. */
 const solarizedDark: ColorScheme = {
   id: "solarized-dark",
   name: "Solarized Dark",
   base: "dark",
   builtin: true,
   filled: true,
-  tokens: {
-    "bg-app": "#002b36",
-    "bg-surface": "#073642",
-    "bg-surface-2": "#0a4250",
-    "bg-inset": "#00212b",
-    "border-subtle": "#0a4250",
-    "border-strong": "#586e75",
-    "text-primary": "#fdf6e3",
-    "text-secondary": "#93a1a1",
-    "text-disabled": "#586e75",
-    brand: "#d33682",
-    "brand-fg": "#002b36",
-    accent: "#2aa198",
-    "focus-ring": "#2aa198",
-    ok: "#859900",
-    warn: "#b58900",
-    danger: "#dc322f",
-    info: "#268bd2",
-    selection: "#0a4250",
-  },
+  tokens: derivePalette(
+    {
+      bg: "#002b36",
+      surface: "#073642",
+      surface2: "#0a4250",
+      inset: "#00212b",
+      borderSubtle: "#0a4250",
+      borderStrong: "#586e75",
+      text: "#fdf6e3",
+      textDim: "#93a1a1",
+      brand: "#d33682",
+      accent: "#2aa198",
+      ok: "#859900",
+      warn: "#b58900",
+      danger: "#dc322f",
+      info: "#268bd2",
+      selection: "#0a4250",
+    },
+    "dark",
+  ),
 };
 
-// ── #6 Solarized Light — sepia base (fully filled) ───────────────────────────
+/** Solarized Light — sepia base. */
 const solarizedLight: ColorScheme = {
   id: "solarized-light",
   name: "Solarized Light",
   base: "light",
   builtin: true,
   filled: true,
-  tokens: {
-    "bg-app": "#fdf6e3",
-    "bg-surface": "#eee8d5",
-    "bg-surface-2": "#e6dfc8",
-    "bg-inset": "#f5eeda",
-    "border-subtle": "#e6dfc8",
-    "border-strong": "#93a1a1",
-    "text-primary": "#073642",
-    "text-secondary": "#586e75",
-    "text-disabled": "#93a1a1",
-    brand: "#d33682",
-    "brand-fg": "#fdf6e3",
-    accent: "#2aa198",
-    "focus-ring": "#2aa198",
-    ok: "#859900",
-    warn: "#b58900",
-    danger: "#dc322f",
-    info: "#268bd2",
-    selection: "#e6dfc8",
-  },
+  tokens: derivePalette(
+    {
+      bg: "#fdf6e3",
+      surface: "#eee8d5",
+      surface2: "#e6dfc8",
+      inset: "#f5eeda",
+      borderSubtle: "#e6dfc8",
+      borderStrong: "#93a1a1",
+      text: "#073642",
+      textDim: "#586e75",
+      brand: "#d33682",
+      accent: "#2aa198",
+      ok: "#859900",
+      warn: "#b58900",
+      danger: "#dc322f",
+      info: "#268bd2",
+      selection: "#e6dfc8",
+    },
+    "light",
+  ),
 };
 
 // ── #7–#20 — named placeholders (inherit their base until hand-authored) ──────
@@ -752,12 +861,18 @@ const catppuccinMocha = stub("catppuccin-mocha", "Catppuccin Mocha", "dark", {
   warn: "#f9e2af",
   danger: "#f38ba8",
 });
+// Latte's own green/peach/sky are drawn for syntax on a warm off-white, and as CHIP fills on
+// the app's white surface they measured 2.62–2.88:1 against the surface and their own 14%
+// tint — under the §7 3:1 bar for a non-text UI element, so a warn chip and an ok chip were
+// telling the user apart by a colour they could barely see. Darkened along the same hue by
+// the smallest step that clears 3:1 on both (ok 3.63/3.10, warn 3.69/3.15, accent 3.60/3.04).
+// brand and danger already cleared it and are the authentic values, untouched.
 const catppuccinLatte = stub("catppuccin-latte", "Catppuccin Latte", "light", {
   "bg-app": "#eff1f5",
   brand: "#8839ef",
-  accent: "#04a5e5",
-  ok: "#40a02b",
-  warn: "#df8e1d",
+  accent: "#0490c8",
+  ok: "#3d9929",
+  warn: "#ba7618",
   danger: "#d20f39",
 });
 const highContrast = stub("high-contrast", "High Contrast", "high-contrast");

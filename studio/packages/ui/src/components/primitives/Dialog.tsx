@@ -218,7 +218,9 @@ export function AlertDialog({
       style={{
         position: "fixed",
         inset: 0,
-        zIndex: Z.palette,
+        // Z.modal, not Z.palette: an alert dialog is a decision the user must answer, so it
+        // outranks the command palette. Matches ForceOverrideDialog/PurgeDialog, already Z.modal.
+        zIndex: Z.modal,
         display: "flex",
         alignItems: "center",
         justifyContent: "center",

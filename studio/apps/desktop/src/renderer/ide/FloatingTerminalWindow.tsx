@@ -115,7 +115,7 @@ export function FloatingTerminalWindow({
           overflow: "auto",
           padding: "var(--space-3, 6px)",
           fontFamily: "var(--font-mono)",
-          fontSize: "var(--text-code-size, 0.875rem)",
+          fontSize: "var(--text-code-size, 0.78125rem)",
           whiteSpace: "pre-wrap",
         }}
       >

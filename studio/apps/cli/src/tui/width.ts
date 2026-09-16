@@ -185,5 +185,9 @@ export function clipToWidth(s: string, width: number): string {
     out += cell.s;
     w += cell.w;
   }
-  return `${out}…`;
+  // Re-close explicitly. The cut can land BEFORE the source's own reset, and a clipped
+  // coloured string that never resets leaves its tint running into everything drawn after it
+  // — one truncated row repaints the rest of the screen in its colour. Zero-width, so no
+  // caller's column budget changes.
+  return `${out}…${out.includes("\x1b[") ? "\x1b[0m" : ""}`;
 }

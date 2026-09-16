@@ -20,6 +20,7 @@
 
 import { estimateTextTokens } from "../agent/compact.js";
 import { IdleWatchdog } from "../agent/idle-watchdog.js";
+import { localKeepAliveField } from "./local-runners.js";
 import { applyEffort, applyEffortToMessages } from "./effort/apply.js";
 import { runtimeFromBaseUrl } from "./effort/rules.js";
 import type { EffortResolution } from "./effort/types.js";
@@ -191,6 +192,12 @@ export interface AiClientDeps {
    * with no explanation, and has no way to know the provider rate-limited them.
    */
   onRetry?: (info: { attempt: number; delayMs: number; reason: string }) => void;
+  /**
+   * Fired once a request to a LOCAL endpoint (`endpoint.locality === "local"`) actually
+   * succeeds — never for a cloud endpoint. Feeds the idle-shutdown watchdog's "last used"
+   * timestamp; a caller with no local-runner lifecycle to manage (most tests) can omit it.
+   */
+  onLocalActivity?: () => void;
 }
 
 /* ------------------------------------------------------------------------- *
@@ -538,7 +545,7 @@ export function createAiClient(
           // Ollama extension, ignored elsewhere: keep the model resident so a multi-round
           // agentic turn does not pay a cold reload between rounds. LOCAL only — a cloud
           // endpoint never receives a non-standard field.
-          ...(endpoint.locality === "local" ? { keep_alive: "30m" } : {}),
+          ...localKeepAliveField(endpoint.locality),
         },
         opts.effort,
       ),
@@ -663,12 +670,18 @@ export function createAiClient(
           // idle-fire landing during the backoff sleep observable to `retry()`'s own checks —
           // `opts.signal`'s abort already propagates into it via the listener above.
           userSignal: outerAc.signal,
+          // …but only the CALLER's signal means "the human stopped it". An idle-watchdog
+          // abort reaches `outerAc` too and must still count against the endpoint.
+          userAborted: () => opts.signal?.aborted === true,
           sleep: abortableSleep,
           ...(deps.rng ? { rng: deps.rng } : {}),
           onRetry: (info) => {
             watchdog.touch(); // a response — even a failing one — is evidence of life.
             deps.onRetry?.(info);
           },
+          ...(endpoint.locality === "local" && deps.onLocalActivity
+            ? { onLocalActivity: deps.onLocalActivity }
+            : {}),
         });
       } catch (err) {
         if (idlePaused()) throw new ModelIdlePausedError(watchdog.idleForMs());

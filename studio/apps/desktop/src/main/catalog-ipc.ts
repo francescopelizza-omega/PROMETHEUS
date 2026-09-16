@@ -83,7 +83,7 @@ function errString(e: unknown): string {
 /** Extract the renderer's WebContents `sender` WITHOUT importing the electron type. */
 function senderOf(
   evt: unknown,
-): { send(channel: string, payload: CatalogProgressEvent): void } | undefined {
+): { send(channel: string, payload: CatalogProgressEvent): void; isDestroyed?(): boolean } | undefined {
   if (!evt || typeof evt !== "object") return undefined;
   const sender = (evt as { sender?: unknown }).sender;
   if (sender && typeof (sender as { send?: unknown }).send === "function") {
@@ -178,6 +178,10 @@ export function registerCatalogIpcHandlers(wiring: CatalogIpcWiring = {}): () =>
     const sender = senderOf(evt);
     if (!sender) return undefined;
     return (line: string): void => {
+      // Checked per LINE, not once when the sink is built: a catalog install runs for
+      // minutes and the window can go away at any point inside it. Fire-and-forget `send`
+      // on a destroyed WebContents throws, and it threw out of the engine's stderr pump.
+      if (sender.isDestroyed?.()) return;
       const event: CatalogProgressEvent = { phase: "info", message: line, raw: line };
       if (runId !== undefined) event.runId = runId;
       sender.send(IPC_EVENTS.catalogProgress, event);

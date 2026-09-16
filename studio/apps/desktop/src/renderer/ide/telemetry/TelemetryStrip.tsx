@@ -5,6 +5,7 @@
  */
 import type { ReactElement } from "react";
 
+import { meterPct } from "../../routes/home-view.js";
 import { useTelemetryStore } from "../../stores/telemetry.js";
 import { Meter } from "./Meter.js";
 import { toneVar } from "./telemetry-view.js";
@@ -25,7 +26,13 @@ export function TelemetryStrip({ onOpen }: TelemetryStripProps): ReactElement | 
       title={
         blocked
           ? (t.guard.reason ?? "System under heavy load")
-          : `CPU ${t.cpu.usedPct}% · RAM ${t.ram.usedPct}% — open System telemetry`
+          : // `measured` is the contract's own guard ("measured:false ⇒ the figure is n/a"),
+            // and this tooltip ignored it. It is saved today only by an accident — the
+            // fail-soft envelope also sets guard.allow:false, so the `blocked` branch
+            // usually wins — which is not a guarantee, it is a coincidence.
+            `CPU ${meterPct(t.cpu) === null ? "—" : `${Math.round(t.cpu.usedPct)}%`} · RAM ${
+              meterPct(t.ram) === null ? "—" : `${Math.round(t.ram.usedPct)}%`
+            } — open System telemetry`
       }
       aria-label="System telemetry"
       style={{

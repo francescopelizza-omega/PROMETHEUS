@@ -106,7 +106,7 @@ export function resolveModelCandidate(
  *  overlay still gets a working picker. */
 export function renderModelCandidates(candidates: readonly ModelCandidate[]): string {
   if (candidates.length === 0) {
-    return "no switchable models detected — run /setup to download a local model or configure a cloud key.";
+    return "no switchable models detected — run /setup to download a local model (or start it, if you already have one installed) or configure a cloud key.";
   }
   return candidates
     .map(

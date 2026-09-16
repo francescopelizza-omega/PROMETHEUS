@@ -20,6 +20,8 @@ import {
   ramps,
 } from "@prometheus/ui/tokens";
 
+import { stringWidth } from "./width.js";
+
 /** What the terminal can render. `none` = monochrome (NO_COLOR / dumb / piped). */
 export type ColorCaps = "truecolor" | "ansi256" | "ansi16" | "none";
 
@@ -52,6 +54,14 @@ export type Role =
   // scannable without a legend.
   | "traitOn"
   | "traitOff"
+  // the fleet bar's three-way resource split. These are the ONLY roles whose hue is fixed by
+  // what the bar means rather than by a generic severity: light blue is Prometheus everywhere
+  // in this product, yellow is "someone else's work", green is headroom. They are separate
+  // roles rather than reused accent/warn/traitOn so that re-tuning a severity colour can never
+  // silently re-tune the legend the user learned.
+  | "fleetOurs"
+  | "fleetOther"
+  | "fleetFree"
   // syntax-highlight token roles (WRAPPER Subsystem 2). The exact hues come from the Pelly
   // scheme (tokens/pelly-syntax) on truecolor/256; the ramp/ANSI-16 maps below are the fallback.
   | "synKeyword"
@@ -115,6 +125,9 @@ const ROLE_RAMP: Record<Role, [RampName, keyof Ramp]> = {
   heading: ["violet", 200],
   traitOn: ["green", 400],
   traitOff: ["amber", 400],
+  fleetOurs: ["cyan", 400], //  light blue — pinned to the operator accent by ACCENT_ROLES
+  fleetOther: ["amber", 300], // yellow
+  fleetFree: ["green", 400], //  green
   synKeyword: ["violet", 400],
   synString: ["green", 400],
   synDoc: ["green", 300],
@@ -175,6 +188,9 @@ const ROLE_ANSI16: Record<Role, AnsiColorName> = {
   heading: "brightMagenta",
   traitOn: "green",
   traitOff: "yellow",
+  fleetOurs: "brightCyan",
+  fleetOther: "brightYellow",
+  fleetFree: "green",
   synKeyword: "brightYellow",
   synString: "brightBlue",
   synDoc: "brightGreen",
@@ -296,7 +312,7 @@ function sgr(text: string, code: string, extra = ""): string {
  * Roles whose output is "light blue": pinned to the operator accent (#16b3f5) and ALWAYS
  * bold. `command` is violet (not light blue) so it is intentionally excluded.
  */
-const ACCENT_ROLES = new Set<Role>(["accent", "info", "question"]);
+const ACCENT_ROLES = new Set<Role>(["accent", "info", "question", "fleetOurs"]);
 
 /** Tint text by a semantic role, honoring the resolved color depth. */
 export function paint(
@@ -388,7 +404,11 @@ export function gradientText(text: string, caps: ColorCaps, ends?: [Rgb, Rgb]): 
  * single reverse-video bar in ansi16 and to "› text" in no-color.
  */
 export function selectionBar(text: string, width: number, caps: ColorCaps): string {
-  const padded = text.length >= width ? text : text + " ".repeat(width - text.length);
+  // Display width, not `.length`: a CJK glyph is two columns and an astral code point is two
+  // UTF-16 units, so `.length` over-pads one and under-pads the other — and this bar paints a
+  // background, so a mis-padded row leaves a ragged edge or bleeds past the pane.
+  const w0 = stringWidth(text);
+  const padded = w0 >= width ? text : text + " ".repeat(width - w0);
   if (caps === "none") return `› ${text}`;
   if (caps === "ansi16") return `${ESC}[7m${padded}${ESC}[0m`; // reverse video
   const [a, b] = brandGradientEnds();

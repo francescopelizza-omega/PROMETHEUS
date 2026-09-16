@@ -51,7 +51,11 @@ function variantStyle(variant: IconButtonVariant): {
         border: `1px solid ${v("border-strong")}`,
       };
     case "brand":
-      return { background: v("brand"), color: v("brand-fg"), border: "1px solid transparent" };
+      // The label sits ON the `--brand` fill, so it needs the computed `--on-brand`.
+      // `--brand-fg` is #ffffff on the dark scheme and measures 3.96:1 over `--brand` —
+      // under the 4.5:1 a label carries. It stays in use where it is a FILL, not a label
+      // (the Toggle knob), which is why this is a call-site change and not a token change.
+      return { background: v("brand"), color: v("on-brand"), border: "1px solid transparent" };
     case "danger":
       return {
         background: "color-mix(in srgb, var(--danger) 14%, transparent)",
@@ -68,7 +72,7 @@ function variantStyle(variant: IconButtonVariant): {
 }
 
 export const IconButton = forwardRef<HTMLButtonElement, IconButtonProps>(function IconButton(
-  { variant = "ghost", size = "md", icon, className, style, disabled, ...rest },
+  { variant = "ghost", size = "md", icon, className, style, disabled, onFocus, onBlur, ...rest },
   ref,
 ) {
   const dim = size === "sm" ? "28px" : "var(--row-h, 36px)";
@@ -97,15 +101,19 @@ export const IconButton = forwardRef<HTMLButtonElement, IconButtonProps>(functio
         ...vs,
         ...style,
       }}
+      // `{...rest}` FIRST. Spread last, a caller's own onFocus/onBlur silently replaced
+      // the composed prop and the tokenized focus ring stopped being drawn on that
+      // control. Spreading first lets the handlers below win; they chain the caller's,
+      // destructured out of `rest` so the spread cannot reintroduce it.
+      {...rest}
       onFocus={(e) => {
         ring.onFocus(e);
-        rest.onFocus?.(e);
+        onFocus?.(e);
       }}
       onBlur={(e) => {
         ring.onBlur(e);
-        rest.onBlur?.(e);
+        onBlur?.(e);
       }}
-      {...rest}
     >
       <span aria-hidden="true" style={{ display: "inline-flex", lineHeight: 1 }}>
         {icon}

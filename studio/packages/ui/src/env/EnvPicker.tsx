@@ -12,6 +12,7 @@
  */
 
 import type { ReactElement, ReactNode } from "react";
+import { EmptyState } from "../components/EmptyState.js";
 import type { EnvRowData } from "./types.js";
 import {
   allowsDestructive,
@@ -153,6 +154,15 @@ export function EnvPicker({
             +
           </button>
         </header>
+        {/* §6: never blank. A bare `.map` over an empty list rendered nothing at all —
+            indistinguishable from a panel that failed to load. */}
+        {envs.length === 0 ? (
+          <EmptyState
+            icon="⬢"
+            title="No environments yet"
+            hint="Create one with +, or open a project that has a .venv."
+          />
+        ) : null}
         <ul style={{ listStyle: "none", margin: 0, padding: 0, display: "grid", gap: "2px" }}>
           {envs.map((e) => {
             const isSel = e.id === selectedId;
@@ -176,6 +186,8 @@ export function EnvPicker({
                     color: "var(--text-primary)",
                     cursor: "pointer",
                     fontFamily: "var(--font-ui)",
+                    flexWrap: "wrap", // §7: rows wrap, they do not overflow
+                    minWidth: 0,
                   }}
                 >
                   <span aria-hidden="true" style={{ color: roleVar(healthRole(e.health)) }}>
@@ -184,6 +196,12 @@ export function EnvPicker({
                   <span
                     style={{
                       flex: 1,
+                      // §7: the parent is a flex row and this cell holds the name — without
+                      // minWidth:0 the ellipsis below can never engage.
+                      minWidth: 0,
+                      // handoff_3 §5 renders the env NAME in mono, like every other
+                      // machine-supplied identifier in a row.
+                      fontFamily: "var(--font-mono)",
                       overflow: "hidden",
                       textOverflow: "ellipsis",
                       whiteSpace: "nowrap",
@@ -258,6 +276,7 @@ export function EnvPicker({
                 color: "var(--text-secondary)",
                 overflow: "hidden",
                 textOverflow: "ellipsis",
+                minWidth: 0, // flex/grid floor — without it the ellipsis is unreachable
                 whiteSpace: "nowrap",
               }}
             >
@@ -273,13 +292,43 @@ export function EnvPicker({
                 fontSize: "0.85rem",
               }}
             >
-              <span>python {inert(selected.pythonVersion) || "—"}</span>
-              <span style={{ color: "var(--text-secondary)" }}>·</span>
-              <span>{selected.packageCount} pkgs</span>
-              <span style={{ color: "var(--text-secondary)" }}>·</span>
-              <span>{formatBytes(selected.sizeBytes)}</span>
-              <span style={{ color: "var(--text-secondary)" }}>·</span>
-              <span>torch sees CUDA: {selected.cuda?.available ? "✓" : "✗ (CPU)"}</span>
+              {/* Cells INTERLEAVED with their separators, not laid out as fixed siblings: the
+                  bullets used to be unconditional, so an env whose package count the sidecar
+                  could not read — the exact case `packageCount` became optional to express —
+                  rendered "python 3.12 · · 412 MB", two adjacent bullets with nothing between
+                  them. A missing cell must take its separator with it. */}
+              {(
+                [
+                  {
+                    id: "py",
+                    el: <span key="py">python {inert(selected.pythonVersion) || "—"}</span>,
+                  },
+                  ...(typeof selected.packageCount === "number"
+                    ? [{ id: "pkgs", el: <span key="pkgs">{selected.packageCount} pkgs</span> }]
+                    : []),
+                  { id: "size", el: <span key="size">{formatBytes(selected.sizeBytes)}</span> },
+                  {
+                    id: "cuda",
+                    el: (
+                      <span key="cuda">
+                        torch sees CUDA: {selected.cuda?.available ? "✓" : "✗ (CPU)"}
+                      </span>
+                    ),
+                  },
+                ] as ReadonlyArray<{ id: string; el: ReactElement }>
+              ).flatMap((cell, i) =>
+                // The separator is keyed by the CELL IT PRECEDES, never by the array index: the
+                // list changes shape when `packageCount` is absent, and an index key would make
+                // React reuse the wrong node across that change.
+                i === 0
+                  ? [cell.el]
+                  : [
+                      <span key={`sep-${cell.id}`} style={{ color: "var(--text-secondary)" }}>
+                        ·
+                      </span>,
+                      cell.el,
+                    ],
+              )}
             </div>
 
             <div style={{ display: "flex", gap: "var(--space-3, 6px)", flexWrap: "wrap" }}>

@@ -26,6 +26,8 @@ import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { test } from "node:test";
 
+import type { EvictionEvent } from "@prometheus/engine-bridge";
+
 import {
   type PollResult,
   type ServeRecipe,
@@ -37,6 +39,9 @@ import {
 class FakeCoreSupervisor extends EventEmitter {
   spawned: string[] = [];
   stopped: string[] = [];
+  /** the `graceMs` each stop() call was made with — asserts kill() actually passes 0
+   *  instead of silently falling back to the default 5s grace window. */
+  stopGraceMs: (number | undefined)[] = [];
   /** the next start() result (so we can simulate a synchronous spawn error). */
   nextStart: { pid?: number; state: string; lastError?: string } = { pid: 4242, state: "running" };
 
@@ -44,8 +49,9 @@ class FakeCoreSupervisor extends EventEmitter {
     this.spawned.push(profile.id);
     return { id: profile.id, ...this.nextStart };
   }
-  stop(id: string): Promise<{ id: string; state: string }> {
+  stop(id: string, graceMs?: number): Promise<{ id: string; state: string }> {
     this.stopped.push(id);
+    this.stopGraceMs.push(graceMs);
     return Promise.resolve({ id, state: "stopped" });
   }
   list(): { id: string; state: string }[] {
@@ -107,8 +113,24 @@ const RECIPE: ServeRecipe = {
   autostart: false,
 };
 
+/** Overrides for the ACTIVE EVICTION monitor — see makeSup's `criticalOpts` param. */
+interface CriticalOpts {
+  /** keep the critical-pressure interval alive in `timers` (default: disposed immediately, so
+   *  every test written before this feature existed keeps seeing `timers.intervals.length` as
+   *  it always has — only a test specifically exercising eviction opts in). */
+  keepCriticalCheck?: boolean;
+  ramSampleFn?: () => number;
+  recordEvictionFn?: (event: Omit<EvictionEvent, "id" | "at">) => EvictionEvent;
+  criticalRamCeilingPct?: number;
+}
+
 /** Build a supervisor wired to a fake core + injected poll/timers/clock. */
-function makeSup(poll: (base: string) => Promise<PollResult>, now = () => 1000) {
+function makeSup(
+  poll: (base: string) => Promise<PollResult>,
+  now = () => 1000,
+  resourceGuardFn: () => { ok: boolean; reason?: string } = () => ({ ok: true }),
+  criticalOpts: CriticalOpts = {},
+) {
   const core = new FakeCoreSupervisor();
   const timers = timerHarness();
   const sup = new ServeSupervisor({
@@ -122,7 +144,21 @@ function makeSup(poll: (base: string) => Promise<PollResult>, now = () => 1000) 
     setTimeoutFn: timers.setTimeoutFn,
     clearTimeoutFn: timers.clearTimeoutFn,
     now,
+    // A fake, always-clear resource guard by default — the real one reads THIS machine's live
+    // RAM, which would make tests flaky on a loaded box. A test exercising the ceiling passes
+    // its own via the third parameter.
+    resourceGuardFn,
+    // Always-clear by default too — same reasoning, for the SEPARATE critical-eviction monitor.
+    ramSampleFn: criticalOpts.ramSampleFn ?? (() => 10),
+    recordEvictionFn:
+      criticalOpts.recordEvictionFn ??
+      ((e): EvictionEvent => ({ ...e, id: "test-event", at: "1970-01-01T00:00:00.000Z" })),
+    criticalRamCeilingPct: criticalOpts.criticalRamCeilingPct,
   });
+  // Every pre-existing test in this file predates the eviction monitor and asserts exact
+  // `timers.intervals`/`timers.timeouts` counts for the PER-RECIPE poll/deadline machinery only
+  // — disposing this supervisor-wide interval immediately keeps those assertions meaningful.
+  if (!criticalOpts.keepCriticalCheck) sup.disposeCriticalCheck();
   return { sup, core, timers };
 }
 
@@ -230,6 +266,170 @@ test("a synchronous spawn error fails closed to error (no poll loop started)", a
   assert.equal(sup.status(RECIPE.id)?.status, "error");
 });
 
+test("start() refuses on a saturated machine — no spawn, no poll loop, error names the reason", async () => {
+  const { sup, core } = makeSup(
+    async () => ({ ok: true, status: 200 }),
+    undefined,
+    () => ({ ok: false, reason: "RAM at 94% ≥ 90% ceiling" }),
+  );
+  const row = sup.start(RECIPE);
+  assert.equal(row.status, "error");
+  assert.match(row.lastError ?? "", /RAM at 94%/);
+  assert.deepEqual(core.spawned, [], "the core supervisor must never see this recipe");
+  await Promise.resolve();
+  assert.equal(sup.status(RECIPE.id)?.status, "error");
+});
+
+test("start() proceeds normally when resources are clear", () => {
+  const { sup, core } = makeSup(
+    async () => ({ ok: true, status: 200 }),
+    undefined,
+    () => ({ ok: true }),
+  );
+  const row = sup.start(RECIPE);
+  assert.equal(row.status, "starting");
+  assert.deepEqual(core.spawned, [RECIPE.id]);
+});
+
+test("checkCriticalPressure: SUSTAINED critical RAM force-kills a ready recipe and records/emits one eviction", async () => {
+  // [readying tick: harmless] [1st critical reading: not enough alone] [2nd: sustained → evict]
+  const ramReadings = [50, 96, 97];
+  let ramIdx = 0;
+  const recorded: Omit<EvictionEvent, "id" | "at">[] = [];
+  const events: EvictionEvent[] = [];
+  const { sup, core, timers } = makeSup(
+    async () => ({ ok: true, status: 200 }),
+    undefined,
+    () => ({ ok: true }),
+    {
+      keepCriticalCheck: true,
+      ramSampleFn: () => ramReadings[Math.min(ramIdx++, ramReadings.length - 1)] as number,
+      recordEvictionFn: (e): EvictionEvent => {
+        recorded.push(e);
+        return { ...e, id: `evt-${recorded.length}`, at: "2026-01-01T00:00:00.000Z" };
+      },
+      criticalRamCeilingPct: 95,
+    },
+  );
+  sup.on("evicted", (e) => events.push(e));
+
+  sup.start(RECIPE);
+  await Promise.resolve();
+  timers.tickIntervals(); // resolves the /models poll → ready (consumes ramReadings[0], harmless)
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.equal(sup.status(RECIPE.id)?.status, "ready");
+  assert.deepEqual(core.stopped, [], "not evicted yet — no critical reading has happened");
+
+  timers.tickIntervals(); // 1st critical reading (96) — one alone must never evict
+  assert.equal(sup.status(RECIPE.id)?.status, "ready");
+  assert.deepEqual(core.stopped, []);
+
+  timers.tickIntervals(); // 2nd consecutive critical reading (97) — SUSTAINED → evict
+  await Promise.resolve();
+  await Promise.resolve();
+
+  assert.deepEqual(core.stopped, [RECIPE.id]);
+  assert.equal(core.stopGraceMs.at(-1), 0, "eviction force-kills, same as the manual kill() control");
+  assert.equal(recorded.length, 1);
+  assert.equal(recorded[0]?.runnerId, RECIPE.id);
+  assert.equal(recorded[0]?.ramPct, 97);
+  assert.equal(recorded[0]?.ceiling, 95);
+  assert.match(recorded[0]?.reason ?? "", /RAM at 97%/);
+  assert.equal(events.length, 1, "the 'evicted' event fired exactly once");
+  assert.equal(events[0]?.id, "evt-1");
+  assert.equal(sup.status(RECIPE.id)?.status, "stopped");
+});
+
+test("the eviction poll is not armed at all while nothing is live — no vm_stat fork per 2s tick", () => {
+  const { timers } = makeSup(
+    async () => ({ ok: false, status: 503 }),
+    undefined,
+    () => ({ ok: true }),
+    { keepCriticalCheck: true, ramSampleFn: () => 99, criticalRamCeilingPct: 95 },
+  );
+  // Nothing registered or started, so there is nothing an eviction could free. On darwin each
+  // tick is a BLOCKING `vm_stat` fork on the Electron main thread, so an idle supervisor must
+  // hold no timer whatsoever — not merely decline to evict.
+  assert.equal(timers.intervals.length, 0, "no critical-check interval while nothing is live");
+  assert.doesNotThrow(() => {
+    timers.tickIntervals();
+    timers.tickIntervals();
+  });
+});
+
+test("the eviction poll arms on the first live recipe and disarms when the last one stops", async () => {
+  let answers200 = false; // stay "starting" until the test says otherwise
+  const { sup, timers } = makeSup(
+    async () => (answers200 ? { ok: true, status: 200 } : { ok: false, status: 503 }),
+    undefined,
+    () => ({ ok: true }),
+    { keepCriticalCheck: true, ramSampleFn: () => 10, criticalRamCeilingPct: 95 },
+  );
+  assert.equal(timers.intervals.length, 0, "idle: nothing armed");
+
+  sup.start(RECIPE); // → starting: weights are paging in, which is when pressure climbs fastest
+  await Promise.resolve();
+  assert.equal(sup.status(RECIPE.id)?.status, "starting");
+  assert.equal(timers.intervals.length, 2, "the per-recipe poll AND the critical check are live");
+
+  answers200 = true;
+  timers.tickIntervals(); // the /models poll answers 200 → ready (its own poll loop tears down)
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.equal(sup.status(RECIPE.id)?.status, "ready");
+  assert.equal(timers.intervals.length, 1, "poll gone, critical check stays while ready");
+
+  await sup.stop(RECIPE.id);
+  assert.equal(timers.intervals.length, 0, "last live recipe gone → the critical check disarms");
+
+  answers200 = false; // keep the next serve in "starting" so both timers are observable
+  sup.start(RECIPE); // and it re-arms for the next serve
+  await Promise.resolve();
+  assert.equal(timers.intervals.length, 2, "re-armed on the next start");
+});
+
+test("checkCriticalPressure: a non-ready recipe (still starting) is left alone even under sustained critical pressure", async () => {
+  const { sup, core, timers } = makeSup(
+    async () => ({ ok: false, status: 503 }), // never answers — stays "starting"
+    undefined,
+    () => ({ ok: true }),
+    { keepCriticalCheck: true, ramSampleFn: () => 99, criticalRamCeilingPct: 95 },
+  );
+  sup.start(RECIPE);
+  await Promise.resolve();
+  assert.equal(sup.status(RECIPE.id)?.status, "starting");
+
+  timers.tickIntervals();
+  timers.tickIntervals();
+  await Promise.resolve();
+
+  assert.deepEqual(core.stopped, [], "a starting (not yet ready) recipe is never an eviction target");
+  assert.equal(sup.status(RECIPE.id)?.status, "starting");
+});
+
+test("disposeCriticalCheck stops the monitor — no further eviction, even under sustained critical pressure", async () => {
+  const { sup, core, timers } = makeSup(
+    async () => ({ ok: true, status: 200 }),
+    undefined,
+    () => ({ ok: true }),
+    { keepCriticalCheck: true, ramSampleFn: () => 99, criticalRamCeilingPct: 95 },
+  );
+  sup.start(RECIPE);
+  await Promise.resolve();
+  timers.tickIntervals();
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.equal(sup.status(RECIPE.id)?.status, "ready");
+
+  sup.disposeCriticalCheck();
+  assert.equal(timers.intervals.length, 0, "the critical-check interval itself is torn down");
+  timers.tickIntervals(); // no-op now — nothing left to tick
+  await Promise.resolve();
+  assert.deepEqual(core.stopped, []);
+  assert.equal(sup.status(RECIPE.id)?.status, "ready");
+});
+
 test("stop() tears down the poll, stops the core child, and moves to stopped (intentional)", async () => {
   let answer200 = true;
   const { sup, core, timers } = makeSup(async () => ({ ok: answer200, status: 200 }));
@@ -246,6 +446,36 @@ test("stop() tears down the poll, stops the core child, and moves to stopped (in
   // a later (stale) exit from the child does NOT flip a stopped row back to error.
   core.emitExit(RECIPE.id, "late exit");
   assert.equal(sup.status(RECIPE.id)?.status, "stopped");
+});
+
+test("kill() tears down the poll, force-stops the core child with graceMs:0, and moves to stopped", async () => {
+  let answer200 = true;
+  const { sup, core, timers } = makeSup(async () => ({ ok: answer200, status: 200 }));
+  // start NOT-yet-ready — "not responding properly" is exactly what kill() is for.
+  answer200 = false;
+  sup.start(RECIPE);
+  await Promise.resolve();
+  assert.equal(sup.status(RECIPE.id)?.status, "starting");
+
+  const killed = await sup.kill(RECIPE.id);
+  assert.equal(killed.status, "stopped");
+  assert.ok(core.stopped.includes(RECIPE.id));
+  assert.equal(
+    core.stopGraceMs.at(-1),
+    0,
+    "kill() must skip the grace window, not just call the regular stop()",
+  );
+  assert.equal(timers.intervals.length, 0, "poll loop torn down on kill");
+  // a later (stale) exit from the child does NOT flip a stopped row back to error.
+  core.emitExit(RECIPE.id, "late exit");
+  assert.equal(sup.status(RECIPE.id)?.status, "stopped");
+});
+
+test("kill() on an unknown id resolves to a synthetic stopped row", async () => {
+  const { sup } = makeSup(async () => ({ ok: true, status: 200 }));
+  const row = await sup.kill("ghost");
+  assert.equal(row.status, "stopped");
+  assert.equal(row.id, "ghost");
 });
 
 test("start() is idempotent for an already-starting id (one spawn)", async () => {

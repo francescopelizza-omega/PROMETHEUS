@@ -262,7 +262,12 @@ export function Problems(): ReactElement {
                   {r.name}:{r.line + 1}
                 </span>
                 <span
-                  style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
+                  style={{
+                    overflow: "hidden",
+                    textOverflow: "ellipsis",
+                    minWidth: 0,
+                    whiteSpace: "nowrap",
+                  }}
                 >
                   {r.message}
                 </span>
@@ -351,7 +356,14 @@ export function Problems(): ReactElement {
               >
                 {t.name}:{t.line}
               </span>
-              <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+              <span
+                style={{
+                  overflow: "hidden",
+                  textOverflow: "ellipsis",
+                  minWidth: 0,
+                  whiteSpace: "nowrap",
+                }}
+              >
                 {t.label}
               </span>
             </button>

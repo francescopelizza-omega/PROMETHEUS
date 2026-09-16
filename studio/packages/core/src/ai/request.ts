@@ -84,6 +84,15 @@ export interface ModelRequestOptions<R extends ModelResponseLike> {
   signalFor?: (attempt: number) => AbortSignal | undefined;
   /** the USER's abort (stop button / superseded turn) — checked between attempts. */
   userSignal?: AbortSignal;
+  /**
+   * Did the USER stop this, as opposed to the idle watchdog?
+   *
+   * Every caller passes its OUTER controller as `userSignal`, and that same controller is
+   * what the idle watchdog aborts (`onIdle: () => outerAc.abort()`), so `userSignal.aborted`
+   * cannot tell the two apart. Callers that own both signals pass this to say which it was.
+   * Optional: omitted, the classification falls back to the old `userSignal` check.
+   */
+  userAborted?: () => boolean;
   /** injected sleeper/RNG so a test never waits and the schedule is deterministic. */
   sleep?: (ms: number) => Promise<void>;
   rng?: () => number;
@@ -103,6 +112,14 @@ export interface ModelRequestOptions<R extends ModelResponseLike> {
    * `endpointBreaker(opts.endpointId)` to get the one shared per-endpoint instance.
    */
   breaker?: CircuitBreaker;
+  /**
+   * Fired once a request to this endpoint actually SUCCEEDS. A caller passes this only when it
+   * already knows the endpoint is local (an `AiEndpoint.locality === "local"` check, or
+   * `isLocalUrl(opts.url)`, done at the call site) — this module stays PURE and never makes that
+   * judgment itself. Used to record "a local model was just used" for the idle-shutdown
+   * watchdog; never called on a failed/retried attempt, only the one that returns 2xx.
+   */
+  onLocalActivity?: () => void;
 }
 
 /**
@@ -135,6 +152,7 @@ export async function fetchModelWithRetry<R extends ModelResponseLike>(
             ...(advice !== undefined ? { retryAfterMs: advice } : {}),
           });
         }
+        opts.onLocalActivity?.();
         return res;
       },
       {
@@ -163,11 +181,16 @@ export async function fetchModelWithRetry<R extends ModelResponseLike>(
         /**
          * A turn the USER stopped says nothing about the endpoint's health. Without this, five
          * ESC cancels in a row opened the breaker and the next ordinary message was refused
-         * with "circuit open — fail-fast" for 30 seconds. The idle watchdog's own abort is a
-         * DIFFERENT signal and still counts, so an endpoint that has genuinely gone silent
-         * still trips the breaker as before.
+         * with "circuit open — fail-fast" for 30 seconds.
+         *
+         * The watchdog is the opposite case and must still count. It used to say here that the
+         * idle abort was "a DIFFERENT signal", but it is not: `onIdle` aborts the very
+         * controller each caller passes as `userSignal`, so an endpoint that went silent
+         * looked exactly like an ESC and the breaker never tripped on the one failure it
+         * exists for. `userAborted` is the caller's own answer to "was this the human?"; the
+         * `??` fallback keeps a caller that has not opted in behaving as before.
          */
-        isEndpointFailure: () => opts.userSignal?.aborted !== true,
+        isEndpointFailure: () => !(opts.userAborted?.() ?? opts.userSignal?.aborted === true),
       })
     : run();
 }

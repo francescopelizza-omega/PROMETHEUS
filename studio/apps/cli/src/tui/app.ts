@@ -12,10 +12,12 @@
  * the thin, crash-guarded glue. A non-TTY (pipe/CI/dumb) returns -1 so bin.ts can fall
  * back to the readline session host.
  */
+import { mkdirSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { createInterface } from "node:readline";
 import { StringDecoder } from "node:string_decoder";
 
-import { agent } from "@prometheus/core";
+import { agent, ai } from "@prometheus/core";
 import { frecencyForDirectory } from "@prometheus/core/path-completion";
 import type { EngineClient } from "@prometheus/engine-bridge";
 import { engineHandshake } from "../doctor-bridge.js";
@@ -127,6 +129,28 @@ function candidatesHint(cands: readonly string[]): string {
 export const TUI_NOT_TTY = -1;
 
 /**
+ * Best-effort persist a crash (an `uncaughtException`/`unhandledRejection` `onCrash` caught) to
+ * `<home>/logs/crashes/crash-<timestamp>.log`. Returns the path written, or `""` if the write
+ * itself failed — that failure must never block the crash exit it's part of.
+ *
+ * Split out from `onCrash` (a closure over live terminal/session state that can't be driven from
+ * a test) so the actual logging behavior — does it capture the real error, does it land on disk —
+ * is unit-testable on its own.
+ */
+export function logCrash(home: string, err: unknown): string {
+  const detail = err instanceof Error ? (err.stack ?? err.message) : String(err);
+  try {
+    const dir = join(home, "logs", "crashes");
+    mkdirSync(dir, { recursive: true });
+    const logPath = join(dir, `crash-${new Date().toISOString().replace(/[:.]/g, "-")}.log`);
+    writeFileSync(logPath, `${new Date().toISOString()}\n${detail}\n`);
+    return logPath;
+  } catch {
+    return "";
+  }
+}
+
+/**
  * Launch the raw-mode TUI. Resolves with the process exit code, or TUI_NOT_TTY when
  * the environment can't host it (the caller then falls back to launchSession).
  */
@@ -152,6 +176,8 @@ export async function launchTui(parsed: ParsedArgs, deps: TuiDeps = {}): Promise
   const elevation = detectElevation();
   let startMode: TuiState["permMode"] = "default";
   let bypassLocked = false;
+  /** The ceiling the elevated-privilege gate imposes on this session (7 = no ceiling). */
+  let maxAuthLevel = agent.MAX_AUTH_LEVEL;
   if (elevation) {
     const red = (s: string): string => (caps === "none" ? s : `\x1b[1;37;41m${s}\x1b[0m`);
     for (const line of sudoWarningLines(elevation).slice(0, -1)) {
@@ -167,6 +193,7 @@ export async function launchTui(parsed: ParsedArgs, deps: TuiDeps = {}): Promise
     const decision = resolveSudoDecision(elevation, answer);
     startMode = decision.startMode;
     bypassLocked = decision.bypassLocked;
+    maxAuthLevel = decision.maxAuthLevel;
     stdout.write(`\n${paint(decision.note, decision.bypassLocked ? "warn" : "info", caps)}\n\n`);
   }
 
@@ -346,6 +373,10 @@ export async function launchTui(parsed: ParsedArgs, deps: TuiDeps = {}): Promise
       return true;
     },
     quit: () => finish(0),
+    // The fleet bar moves on its own clock — a peer dying, or one entering `needs-you` — and a
+    // status line that only refreshes on a keystroke cannot report an event whose whole purpose
+    // is to reach a user who is not typing.
+    redraw: () => scheduleRender(),
     caps,
     // stream word-wrap width: cols-1 dodges the last-column autowrap glitch (?7l region).
     width: () => Math.max(20, size.cols - 1),
@@ -385,10 +416,42 @@ export async function launchTui(parsed: ParsedArgs, deps: TuiDeps = {}): Promise
     parsed.flags.authorisations ??
     parsed.flags.authorisation ??
     parsed.flags.authorizations ??
-    parsed.flags.authorization;
+    parsed.flags.authorization ??
+    // `--auth` was a slash ALIAS but never a flag alias, so `--auth 7` parsed and did nothing.
+    parsed.flags.auth;
   // default = the LAST-SET level persisted from any prior session (so the user's chosen posture
   // carries across sessions); falls back to the sudo-derived mode when never set. A flag overrides.
+  /**
+   * `--permission-mode <mode>` — parsed by parse.ts, and read by NOBODY until now.
+   *
+   * `prometheus --permission-mode plan` was accepted in silence and started an ordinary session,
+   * on every host. It is applied here, ahead of the authorisation flag so an explicit
+   * `--authorisation N` still wins when both are given, and SESSION-SCOPED like every other
+   * launch flag. A declined sudo gate forbids the bypass tiers, so those are refused with a note
+   * rather than silently downgraded.
+   */
+  const modeFlag = parsed.flags["permission-mode"] ?? parsed.flags.permissionMode;
+  let modeFlagApplied = false;
+  if (typeof modeFlag === "string") {
+    const wanted = agent.PERMISSION_MODES.find((m) => m.id === modeFlag.trim());
+    if (!wanted) {
+      const legend = agent.PERMISSION_MODES.map((m) => m.id).join(" · ");
+      stdout.write(
+        `${paint(`unknown --permission-mode "${modeFlag}" — use one of: ${legend}`, "warn", caps)}\n`,
+      );
+    } else if (bypassLocked && (wanted.id === "bypassPermissions" || wanted.id === "yolo")) {
+      stdout.write(
+        `${paint(`--permission-mode ${wanted.id} is locked (elevated-privilege decline)`, "warn", caps)}\n`,
+      );
+    } else {
+      startMode = wanted.id;
+      modeFlagApplied = true;
+    }
+  }
   let startAuthLevel = resolveStartAuthLevel(deps.configHome, startMode);
+  // An explicit `--permission-mode` OVERRIDES the stored default — otherwise the saved level
+  // would win and the flag would be inert on exactly the machines that have ever used it.
+  if (modeFlagApplied) startAuthLevel = agent.modeToAuthLevel(startMode);
   if (authFlag !== undefined) {
     const parsedLevel = typeof authFlag === "string" ? agent.parseAuthLevel(authFlag) : null;
     if (parsedLevel === null) {
@@ -403,9 +466,39 @@ export async function launchTui(parsed: ParsedArgs, deps: TuiDeps = {}): Promise
       startAuthLevel = parsedLevel;
     }
   }
-  // a declined-sudo lock forbids the full-autonomy tiers (trusted/runall) — clamp to 5.
-  if (bypassLocked && startAuthLevel > 5) startAuthLevel = 5;
-  session.setAuthLevel(startAuthLevel); // sets the level AND syncs the coarse permMode/indicator
+  // The post-sudo cap comes from the gate's own decision (sudo.ts `maxAuthLevel`), so the note
+  // the user was shown and the posture they actually get are produced by one object. The old
+  // hand-written `> 5 → 5` left a DECLINED root session auto-approving installs.
+  const authLevelBeforeClamp = startAuthLevel;
+  if (startAuthLevel > maxAuthLevel) startAuthLevel = maxAuthLevel;
+  /**
+   * `session`, never `user`: restoring the saved level, applying a launch flag and clamping after
+   * a declined sudo gate are all things that happen TO the session, not choices the operator
+   * typed. This call used to persist unconditionally, which is what made every one of them
+   * permanent — a single `sudo prometheus` with a declined acknowledgement rewrote a saved
+   * level 7 to 5 on disk, for every future session on the machine.
+   *
+   * `setAuthLevel` DERIVES the mode from the level, and mode↔level is lossy both ways, so an
+   * explicit `--permission-mode` cannot survive it: plan pins the level to 0 and level 0 maps
+   * back to "default", while `plan --authorisation 7` came out as "yolo" — read-only exploration
+   * turned into full-autonomy run-to-done. `setPosture` writes the two fields independently, so
+   * an explicitly named mode is used only when the flag really named one AND the sudo clamp did
+   * not have to move the level (a clamp is a safety decision and outranks the flag).
+   */
+  if (modeFlagApplied && startAuthLevel === authLevelBeforeClamp) {
+    session.setPosture(startMode, startAuthLevel);
+  } else {
+    session.setAuthLevel(startAuthLevel, "session"); // sets the level AND syncs the coarse mode
+  }
+  /**
+   * Push the derived posture into the REDUCER's state too.
+   *
+   * `state.permMode` is what the status chip paints and what Shift-Tab cycles FROM, and it was
+   * only ever initialised from `startMode` — so a restored level 7 rendered "auth:7·runall" beside
+   * a `[PROMETHEUS:DEFAULT]` chip, and the first Shift-Tab advanced from `default` (the stale
+   * value) to `acceptEdits`, dropping the user to level 2 instead of moving on from `yolo`.
+   */
+  state = { ...state, permMode: session.getPermMode() };
   if (authFlag !== undefined) {
     const m = agent.authLevelMeta(startAuthLevel);
     stdout.write(
@@ -463,8 +556,21 @@ export async function launchTui(parsed: ParsedArgs, deps: TuiDeps = {}): Promise
   // A crash (uncaughtException / unhandledRejection) must not merely restore the
   // terminal and return — that leaves the exit promise UNRESOLVED and the host hung.
   // finish(1) restores AND resolves with a non-zero code so the caller exits cleanly.
-  function onCrash(): void {
+  //
+  // `onCrash` used to take no argument at all: registered directly as the
+  // `uncaughtException`/`unhandledRejection` listener, it silently dropped the error Node
+  // handed it. The terminal was restored and the process exited clean — with ZERO trace of
+  // what actually threw, anywhere. A crash left no log, no stack, nothing to diagnose after
+  // the fact. This writes the error to a crash log FIRST, before the terminal teardown that
+  // `finish` performs, then prints a one-line pointer to it once the terminal is restored
+  // (printed while the alt-screen buffer is still up would otherwise never be seen).
+  function onCrash(err: unknown): void {
+    const logPath = logCrash(home, err);
     finish(1);
+    const message = err instanceof Error ? err.message : String(err);
+    process.stderr.write(
+      `\nPrometheus crashed: ${message}${logPath ? `\n  details: ${logPath}` : ""}\n`,
+    );
   }
   function finish(code: number): void {
     if (resolveExit === null) return;
@@ -772,13 +878,51 @@ export async function launchTui(parsed: ParsedArgs, deps: TuiDeps = {}): Promise
     }
     if (trimmed === "/think" || trimmed === "/effort") {
       const current = session.slashCtx.tuning().effort;
+      /**
+       * Every rung the ladder HAS, with what the bound model will actually do with it.
+       *
+       * The list was a hard-coded five, so the two rungs the ladder grew — the ones a paid
+       * Claude or GPT model charges for and a person is most likely to want — could not be
+       * picked here at all. Reading `EFFORT_TIERS` means the picker cannot fall behind again.
+       *
+       * The `detail` is the honest half: a rung this model cannot express is still OFFERED (it
+       * is a preference, and it applies the moment you switch to a model that has it) but it
+       * says up front what it will resolve to here, rather than accepting the choice and
+       * quietly sending something else.
+       */
       openPicker(
         "Reasoning effort",
-        (["off", "low", "medium", "high", "max"] as const).map((tier) => ({
-          label: tier,
-          current: tier === current,
-          submitText: `/think ${tier}`,
-        })),
+        ai.EFFORT_TIERS.map((tier) => {
+          const res = session.slashCtx.effortResolution?.(tier);
+          /**
+           * `applied === null` FIRST — it is the case the annotation exists for.
+           *
+           * `resolveEffort` returns `applied: null` for exactly the tiers a model cannot express
+           * (`no-capability`, `always-on`), and both old arms required a non-null `applied`. So
+           * the unexpressible rungs rendered identically to fully supported ones: the picker
+           * accepted `max` and nothing changed on any turn — the silent acceptance the docblock
+           * above says this feature removes. The `reason` slug is never shown raw.
+           */
+          const detail = !res
+            ? undefined
+            : res.applied === null
+              ? res.degraded?.reason === "always-on"
+                ? "no effect — this model always reasons at a fixed depth"
+                : "not available on this model"
+              : res.applied !== tier
+                ? `→ ${res.applied} on this model`
+                : res.degraded?.reason === "emulated"
+                  ? "by instruction (this model has no knob)"
+                  : res.degraded?.reason === "forced"
+                    ? "forced onto the wire — the provider may reject it"
+                    : undefined;
+          return {
+            label: tier,
+            current: tier === current,
+            ...(detail ? { detail } : {}),
+            submitText: `/think ${tier}`,
+          };
+        }),
       );
       return;
     }
@@ -798,7 +942,7 @@ export async function launchTui(parsed: ParsedArgs, deps: TuiDeps = {}): Promise
       if (candidates.length === 0) {
         renderer.printAbove(
           paint(
-            "/model: no switchable models detected — run /setup to download a local model or configure a cloud key.",
+            "/model: no switchable models detected — run /setup to download a local model (or start it, if you already have one installed) or configure a cloud key.",
             "warn",
             caps,
           ),
@@ -856,6 +1000,16 @@ export async function launchTui(parsed: ParsedArgs, deps: TuiDeps = {}): Promise
       );
     } finally {
       if (spin) clearInterval(spin);
+      /**
+       * Re-sync the reducer's posture from the bridge after EVERY submitted line.
+       *
+       * `/authorisation 6` and `/permission-mode plan` move the bridge's `permMode`; the reducer
+       * kept its own copy, which is the one the status chip paints and the one Shift-Tab cycles
+       * from. Without this the chip reported a posture the session had already left, and the
+       * next Shift-Tab advanced from that stale value — silently undoing the command the user
+       * had just typed.
+       */
+      state = { ...state, permMode: session.getPermMode() };
     }
     // close an unterminated fence at turn end so the box always finishes.
     const tail = md.flush();

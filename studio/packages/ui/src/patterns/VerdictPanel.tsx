@@ -141,6 +141,7 @@ export function VerdictPanel({
                 fontSize: "var(--text-small-size, 0.8125rem)",
                 overflow: "hidden",
                 textOverflow: "ellipsis",
+                minWidth: 0, // flex/grid floor — without it the ellipsis is unreachable
                 whiteSpace: "nowrap",
                 maxWidth: "60%",
               }}
@@ -158,7 +159,7 @@ export function VerdictPanel({
           <h3
             style={{
               margin: 0,
-              fontSize: "var(--text-h2-size, 1.125rem)",
+              fontSize: "var(--text-h2-size, 1rem)",
               fontWeight: 600,
             }}
           >
@@ -191,7 +192,7 @@ export function VerdictPanel({
               gap: "var(--space-6, 12px)",
             }}
           >
-            <h3 style={{ margin: 0, fontSize: "var(--text-h2-size, 1.125rem)", fontWeight: 600 }}>
+            <h3 style={{ margin: 0, fontSize: "var(--text-h2-size, 1rem)", fontWeight: 600 }}>
               {t("verdict.findingsCount", { count: findings.length })}
             </h3>
             <ClassChips counts={class_counts} />
@@ -279,7 +280,7 @@ function baseBtn() {
     paddingBlock: "var(--space-3, 6px)",
     borderRadius: "var(--radius-md, 6px)",
     fontFamily: "var(--font-ui)",
-    fontSize: "var(--text-body-size, 0.9375rem)",
+    fontSize: "var(--text-body-size, 0.875rem)",
     fontWeight: 600,
     cursor: "pointer",
     lineHeight: 1.2,
@@ -306,7 +307,11 @@ function primaryBtn() {
     ...baseBtn(),
     background: "var(--brand)",
     border: "1px solid var(--brand)",
-    color: "var(--brand-fg)",
+    // The label sits ON the `--brand` fill, so it needs the computed `--on-brand`.
+    // `--brand-fg` is #ffffff on the dark scheme and measures 3.96:1 over `--brand` —
+    // under the 4.5:1 a label carries. It stays in use where it is a FILL, not a label
+    // (the Toggle knob), which is why this is a call-site change and not a token change.
+    color: "var(--on-brand)",
   };
 }
 function dangerBtn() {
@@ -314,7 +319,10 @@ function dangerBtn() {
     ...baseBtn(),
     background: "var(--danger)",
     border: "1px solid var(--danger)",
-    color: "var(--brand-fg)",
+    // `--on-danger` is the computed label colour for the `--danger` FILL (tokens/contrast.ts `onFill`).
+    // The old `--brand-fg` here was WHITE on the dark scheme over a saturated light fill (~2:1),
+    // and a plain `--bg-app` would be near-white over the same fill on the LIGHT scheme.
+    color: "var(--on-danger)",
   };
 }
 

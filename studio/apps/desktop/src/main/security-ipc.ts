@@ -76,6 +76,24 @@ import {
 } from "./security-validate.js";
 
 /** Coerce an unknown caught value to a short error string. */
+/**
+ * The gate mode the NEXT engine spawn will inherit.
+ *
+ * `safeChildEnv()` forwards main's env verbatim to prometheus.py, so main's own
+ * `$PROMETHEUS_GATE` IS the mode — a live fact, not an inference from the audit history. The
+ * console had only that history, and a stale `enforce` row vouched for a session now running
+ * `off`, which is a green "armed, fail-closed" banner over an unguarded engine.
+ *
+ * Unset means `enforce`: that is the engine's own fail-closed default, so absence is not
+ * uncertainty. Anything unrecognised IS uncertainty and reports as `unknown` rather than being
+ * quietly rounded to a mode nobody asked for.
+ */
+function configuredGateMode(): "enforce" | "warn" | "off" | "unknown" {
+  const raw = process.env.PROMETHEUS_GATE?.trim().toLowerCase();
+  if (!raw) return "enforce";
+  return raw === "enforce" || raw === "warn" || raw === "off" ? raw : "unknown";
+}
+
 function errString(e: unknown): string {
   if (e instanceof Error) return e.message;
   return typeof e === "string" ? e : "unknown error";
@@ -87,7 +105,7 @@ function errString(e: unknown): string {
  */
 function senderOf(
   evt: unknown,
-): { send(channel: string, payload: ProgressFeedEvent): void } | undefined {
+): { send(channel: string, payload: ProgressFeedEvent): void; isDestroyed?(): boolean } | undefined {
   if (!evt || typeof evt !== "object") return undefined;
   const sender = (evt as { sender?: unknown }).sender;
   if (sender && typeof (sender as { send?: unknown }).send === "function") {
@@ -114,11 +132,14 @@ export function registerSecurityIpcHandlers(wiring: SecurityIpcWiring = {}): () 
 
   /** Forward a security progress line to the initiating window (cosmetic, C5). */
   function emitSecurityProgress(
-    sender: { send(channel: string, payload: ProgressFeedEvent): void } | undefined,
+    sender: { send(channel: string, payload: ProgressFeedEvent): void; isDestroyed?(): boolean } | undefined,
     runId: string | undefined,
     line: string,
   ): void {
-    if (!sender) return;
+    // A progress feed OUTLIVES its window: an op started, the user closed that window,
+    // and every later line threw "Object has been destroyed" out of a fire-and-forget
+    // emit — which surfaced as the op appearing to die mid-run.
+    if (!sender || sender.isDestroyed?.()) return;
     const event: ProgressFeedEvent = { message: line, phase: "info", raw: line };
     if (runId !== undefined) event.runId = runId;
     sender.send(IPC_EVENTS.securityProgress, event);
@@ -274,6 +295,26 @@ export function registerSecurityIpcHandlers(wiring: SecurityIpcWiring = {}): () 
             };
           }
           case "restore": {
+            /**
+             * §4's typed confirm, re-checked HERE and not only in the renderer.
+             *
+             * Restore puts an artifact the gate refused back where nemesis found it, and it
+             * is executable the moment it lands. Purge — the irreversible one — has had a
+             * main-process re-check since it shipped; restore had a dialog and nothing else,
+             * so any renderer bug that armed a target and called through reinstated the
+             * artifact with no independent verification.
+             *
+             * Same limits as purge, stated plainly: the renderer mediates the human's input
+             * and a fully compromised renderer could forge it. This catches a buggy or
+             * wrong-item caller, which is the realistic failure. Fail-closed.
+             */
+            if (a.typedName !== purgeBasename(a.path ?? a.id)) {
+              return {
+                ok: false,
+                op: "restore",
+                error: "restore refused: typed confirmation does not match the item",
+              };
+            }
             const res = await restore(a.id, { quarantineDir: a.quarantineDir }, config);
             return { ok: res.ok, op: "restore", data: res as unknown as Record<string, unknown> };
           }
@@ -412,7 +453,16 @@ export function registerSecurityIpcHandlers(wiring: SecurityIpcWiring = {}): () 
             ...(a.blocks !== undefined ? { blocks: a.blocks } : {}),
             ...(a.last24h !== undefined ? { last24h: a.last24h } : {}),
           });
-          return { ok: true, op: "auditLog", auditLog: rows };
+          // Project away `verdict_full` unless the caller asked for it. It is the signed
+          // canonical verdict object and it dwarfs everything else in the row — the live
+          // log here is 38 MB across 1257 rows, and the one renderer that reads this op
+          // uses twelve summaries and never touches the blob. Filtering already happened
+          // above (AuditLogFilter.rule searches verdict_full inside engine-bridge), so
+          // this drops bytes, never matches.
+          const auditLog = a.includeVerdictFull
+            ? rows
+            : rows.map(({ verdict_full: _omitted, ...rest }) => rest);
+          return { ok: true, op: "auditLog", auditLog, configuredGateMode: configuredGateMode() };
         }
         default: {
           const res = await verify(a.file, {}, config);

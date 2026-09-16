@@ -67,5 +67,38 @@ test("unreachable engine (down pill) → down tier, score 0, engine down", () =>
   assert.equal(v.score, 0);
   assert.equal(v.components.find((c) => c.id === "engine")?.status, "down");
   // engine-reported problems surface as a diagnostics row
-  assert.ok(v.components.some((c) => c.id === "problems"));
+  assert.ok(v.components.some((c) => c.id === "diagnostics"));
+});
+
+test("the diagnostics row is always present - section 2.3 lists three rows", () => {
+  // It used to appear only when problems.length > 0, so a healthy machine saw two rows and
+  // the summary said "all systems nominal (2)" - a count that silently became 3 when
+  // something broke, and a spec'd row that could never report clean.
+  const healthy = deriveSystemHealthView(
+    { ok: true, contractOk: true, nemesisPresent: true, problems: [], version: "3.14.6" },
+    "ready",
+  );
+  const ids = healthy.components.map((c) => c.id);
+  assert.deepEqual(ids, ["engine", "nemesis", "diagnostics"]);
+  const diag = healthy.components.find((c) => c.id === "diagnostics");
+  assert.equal(diag?.status, "ok");
+  assert.equal(diag?.detail, "0 issues");
+  assert.match(healthy.summary, /\(3\)/, "the row count must not change with the machine");
+});
+
+test("the diagnostics row reports the real issue count when there are problems", () => {
+  const sick = deriveSystemHealthView(
+    {
+      ok: true,
+      contractOk: true,
+      nemesisPresent: true,
+      problems: ["node-pty not compiled"],
+      version: "3.14.6",
+    },
+    "degraded",
+  );
+  const diag = sick.components.find((c) => c.id === "diagnostics");
+  assert.equal(diag?.status, "degraded");
+  assert.equal(diag?.detail, "1 issue");
+  assert.equal(sick.components.length, 3, "still three rows");
 });

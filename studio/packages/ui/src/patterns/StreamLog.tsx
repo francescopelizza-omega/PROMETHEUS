@@ -127,7 +127,7 @@ export function StreamLog({
           overflow: "auto",
           maxHeight: typeof maxHeight === "number" ? `${maxHeight}px` : maxHeight,
           padding: "var(--space-3, 6px)",
-          fontSize: "var(--text-code-size, 0.875rem)",
+          fontSize: "var(--text-code-size, 0.78125rem)",
           lineHeight: 1.5,
         }}
       >

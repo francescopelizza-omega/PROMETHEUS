@@ -11,10 +11,13 @@
  *   - the turn persists via the shared session store (appendTurn + serialize).
  */
 import assert from "node:assert/strict";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
 
 import { agent, type mcpServer } from "@prometheus/core";
-import type { EngineClient } from "@prometheus/engine-bridge";
+import { type EngineClient, recordEvictionEvent } from "@prometheus/engine-bridge";
 
 // the agent loop types live under the `agent` namespace; ToolDef under `mcpServer`.
 type AgentTuning = agent.AgentTuning;
@@ -1864,8 +1867,9 @@ test("toolTurn (the tool-capable transport) also carries the effort tier", async
   const tools = [{ name: "noop", description: "does nothing", schema: {} }] as never[];
   await collect(llm.turn(thread("hi"), fakeTuning({ effort: "max" }), tools));
   assert.equal(f.body().reasoning_effort, "max");
-  // the pre-existing local keep_alive extension must survive alongside it
-  assert.equal(f.body().keep_alive, "30m");
+  // `keep_alive` is now a 60s bound Prometheus puts on its own local requests, not the old
+  // "30m" pin — the effort tier must reach the wire alongside it. See `localKeepAliveField`.
+  assert.equal(f.body().keep_alive, "60s");
 });
 
 test("makeLlmClient: endpoint.probedCapabilities reaches resolveCapability with no explicit override", async () => {
@@ -3878,6 +3882,69 @@ test("a FAILED request ends the turn — it is not fed back as 'you replied with
     .map((t) => (t.kind === "text" ? t.text : ""))
     .join("");
   assert.match(text, /model error/, "the failure must still be reported to the user");
+});
+
+test("ACTIVE EVICTION: a failed request matching a JUST-evicted runner reports WHY, not a raw connection error", async () => {
+  // Real (but sandboxed) shared eviction log — PROMETHEUS_HOME points at a fresh temp dir for
+  // the duration of this test, matching model-health-store-path.test.ts's `withHome` pattern.
+  // agent-runtime.ts calls the shared engine-bridge `findRecentEviction` with no injected reader
+  // (it isn't threaded through makeLlmClient's options — this is a system-wide, cross-surface
+  // notice, not a per-client seam), so this is the lowest-risk way to exercise it for real.
+  const home = mkdtempSync(join(tmpdir(), "prom-home-"));
+  const prevHome = process.env.PROMETHEUS_HOME;
+  process.env.PROMETHEUS_HOME = home;
+  try {
+    recordEvictionEvent({
+      runnerId: "ollama",
+      name: "Ollama",
+      ramPct: 97,
+      ceiling: 95,
+      reason: "RAM at 97% ≥ 95% for 2 consecutive checks",
+    });
+    const dead = (async () => {
+      throw new TypeError("fetch failed");
+    }) as never;
+    const llm = makeLlmClient(OLLAMA_ENDPOINT, { fetch: dead });
+    const turns = await collect(llm.turn(thread("hi"), fakeTuning(), []));
+    assert.ok(
+      turns.some((t) => t.kind === "final"),
+      "an eviction-caused failure must still END the turn, not leave the loop re-requesting",
+    );
+    const text = turns
+      .filter((t) => t.kind === "text")
+      .map((t) => (t.kind === "text" ? t.text : ""))
+      .join("");
+    assert.match(text, /stopped to prevent a machine-wide freeze/);
+    assert.match(text, /RAM at 97%/);
+    assert.doesNotMatch(text, /model error/, "the honest reason replaces the raw connection error");
+  } finally {
+    if (prevHome === undefined) delete process.env.PROMETHEUS_HOME;
+    else process.env.PROMETHEUS_HOME = prevHome;
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("ACTIVE EVICTION: a failed request with NO matching recent eviction still reports the ordinary error (no false positives)", async () => {
+  const home = mkdtempSync(join(tmpdir(), "prom-home-"));
+  const prevHome = process.env.PROMETHEUS_HOME;
+  process.env.PROMETHEUS_HOME = home; // fresh home — no eviction log exists here at all
+  try {
+    const dead = (async () => {
+      throw new TypeError("fetch failed");
+    }) as never;
+    const llm = makeLlmClient(OLLAMA_ENDPOINT, { fetch: dead });
+    const turns = await collect(llm.turn(thread("hi"), fakeTuning(), []));
+    const text = turns
+      .filter((t) => t.kind === "text")
+      .map((t) => (t.kind === "text" ? t.text : ""))
+      .join("");
+    assert.match(text, /model error/);
+    assert.doesNotMatch(text, /machine-wide freeze/);
+  } finally {
+    if (prevHome === undefined) delete process.env.PROMETHEUS_HOME;
+    else process.env.PROMETHEUS_HOME = prevHome;
+    rmSync(home, { recursive: true, force: true });
+  }
 });
 
 test("CLI-004: the path guard covers the SYSTEM tools, not just engine verbs", async () => {

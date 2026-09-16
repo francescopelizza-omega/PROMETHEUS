@@ -68,7 +68,7 @@ function errString(e: unknown): string {
 /** Extract the renderer's WebContents `sender` WITHOUT importing the electron type. */
 function senderOf(
   evt: unknown,
-): { send(channel: string, payload: ProgressFeedEvent): void } | undefined {
+): { send(channel: string, payload: ProgressFeedEvent): void; isDestroyed?(): boolean } | undefined {
   if (!evt || typeof evt !== "object") return undefined;
   const sender = (evt as { sender?: unknown }).sender;
   if (sender && typeof (sender as { send?: unknown }).send === "function") {
@@ -119,11 +119,14 @@ export function registerEnvIpcHandlers(wiring: EnvIpcWiring = {}): () => void {
 
   /** Forward an env progress line to the initiating window (cosmetic, C5). */
   function emitEnvProgress(
-    sender: { send(channel: string, payload: ProgressFeedEvent): void } | undefined,
+    sender: { send(channel: string, payload: ProgressFeedEvent): void; isDestroyed?(): boolean } | undefined,
     runId: string | undefined,
     line: string,
   ): void {
-    if (!sender) return;
+    // A progress feed OUTLIVES its window: an op started, the user closed that window,
+    // and every later line threw "Object has been destroyed" out of a fire-and-forget
+    // emit — which surfaced as the op appearing to die mid-run.
+    if (!sender || sender.isDestroyed?.()) return;
     const event: ProgressFeedEvent = { message: line, phase: "info", raw: line };
     if (runId !== undefined) event.runId = runId;
     sender.send(IPC_EVENTS.envProgress, event);

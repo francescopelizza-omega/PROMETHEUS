@@ -104,6 +104,21 @@ export interface EndpointLlmOptions {
   idleWatchdogNow?: () => number;
   idleWatchdogSetTimeout?: (cb: () => void, ms: number) => ReturnType<typeof setTimeout>;
   idleWatchdogClearTimeout?: (handle: ReturnType<typeof setTimeout>) => void;
+  /**
+   * Bring Ollama up before the first request if it's merely stopped — mirrors the desktop's
+   * `ai-ipc.ts` seam exactly, INCLUDING why it's opt-in rather than defaulted to the real
+   * `ai.ensureOllamaRunning`: this file's tests drive a mocked `fetch` with exact-call-count
+   * assertions, and a default-on probe would both miscount calls and, the moment the mocked
+   * probe reads as "unreachable", fall through to REAL `canStart`/`listenersOnPort`/
+   * `startModelServer` shell-outs from inside a unit test. `extension.ts`'s real activation
+   * path passes `ai.ensureOllamaRunning` explicitly; tests simply omit it.
+   */
+  ensureOllamaRunningFn?: typeof ai.ensureOllamaRunning;
+  /** LM Studio's twin of `ensureOllamaRunningFn` above — same opt-in reasoning, same real
+   *  activation-path wiring (`ai.ensureLmStudioRunning`). */
+  ensureLmStudioRunningFn?: typeof ai.ensureLmStudioRunning;
+  /** mirrors `AiClientDeps.onLocalActivity` — feeds the idle-shutdown watchdog's clock. */
+  onLocalActivity?: () => void;
 }
 
 /**
@@ -136,6 +151,48 @@ export function createEndpointLlmClient(opts: EndpointLlmOptions): LLMClient {
   }> => {
     resolving ??= (async () => {
       let endpoint = opts.endpoint;
+      // Runner-specific and opt-in — see `EndpointLlmOptions.ensureOllamaRunningFn`'s doc.
+      // Runs once per client (this whole block is memoised via `resolving`), never per turn.
+      // Dispatched by the endpoint's OWN runner id so an LM Studio endpoint never has Ollama
+      // started underneath it, or vice versa — an unmatched/other-runner endpoint gets neither.
+      //
+      // LOCAL ONLY. `runnerForBaseUrl` now refuses a non-loopback host itself, but the guard is
+      // repeated here because this is the seam that SPAWNS a process: pointing the editor at a
+      // beefier LAN box (`http://192.168.1.50:11434/v1`) is a first-class use of a local-first
+      // product, and it must never start `ollama serve` plus a detached watchdog on the laptop
+      // for a request bound elsewhere. Locality is derived from the URL rather than read off
+      // `endpoint.locality`, so a caller-supplied field can never widen the gate — the same
+      // discipline as ai-ipc.ts's `localityOfUrl(req.endpoint.baseUrl)`.
+      const endpointRunnerId = ai.isLocalUrl(endpoint.baseUrl)
+        ? ai.runnerForBaseUrl(endpoint.baseUrl)?.id
+        : undefined;
+      const ensureRunnerRunningFn =
+        endpointRunnerId === "ollama"
+          ? opts.ensureOllamaRunningFn
+          : endpointRunnerId === "lmstudio"
+            ? opts.ensureLmStudioRunningFn
+            : undefined;
+      if (ensureRunnerRunningFn) {
+        const ensured = await ensureRunnerRunningFn({
+          ...(endpoint.model?.trim() ? { modelId: endpoint.model } : {}),
+          fetchFn: fetchImpl,
+        });
+        // The machine-wide launch guard refused the cold start, so the runner is deliberately
+        // still down. The desktop pauses the turn on exactly this (ai-ipc.ts's
+        // `pausedReason: "resources-critical"`); dropping the reason here let the request go out
+        // to a dead endpoint and reported it as "no model found … start a local runner" — the one
+        // thing the user must NOT do while the machine is at its memory ceiling.
+        if (ensured.reason === "resource-ceiling") {
+          // Transient by nature, so drop the memo: otherwise `resolving` stays a REJECTED promise
+          // for this client's whole life and "free memory and try again" is unactionable until a
+          // settings change happens to rebuild the client.
+          resolving = undefined;
+          const why = ensured.resourceReason ? ` (${ensured.resourceReason})` : "";
+          throw new Error(
+            `Not starting the local model server: this machine is at its resource ceiling${why}. Free memory and send the message again.`,
+          );
+        }
+      }
       if (!endpoint.model?.trim()) {
         const found = await firstServedModel(endpoint.baseUrl, fetchImpl);
         if (!found) {
@@ -155,6 +212,7 @@ export function createEndpointLlmClient(opts: EndpointLlmOptions): LLMClient {
           // before a single request left the machine. Measured: with the setting empty a turn
           // answers; with `env:MY_KEY` it throws even when MY_KEY is exported.
           resolveKey: resolveApiKeyRef,
+          ...(opts.onLocalActivity ? { onLocalActivity: opts.onLocalActivity } : {}),
         }),
       };
     })();

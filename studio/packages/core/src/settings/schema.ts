@@ -7,6 +7,7 @@
  * unknown extension keys through — strict for core, open for extensions.
  */
 import { type HookSpec, validateHooks } from "../agent/hooks.js";
+import { type EffortTier, isEffortTier } from "../ai/effort/types.js";
 
 export type { HookSpec };
 
@@ -74,7 +75,7 @@ export interface Settings {
    * Absent ⇒ the session starts UNSET, which is not the same as `"off"`: unset means no tier
    * was chosen, and the composer badge reads the model's own default rather than claiming one.
    */
-  "ai.effort"?: "off" | "low" | "medium" | "high" | "max";
+  "ai.effort"?: EffortTier;
   /**
    * Send the effort knob even when `ai/effort/rules.ts` says this model has none.
    *
@@ -222,9 +223,10 @@ export function validateSettings(value: unknown): Settings {
       case "ai.effort":
         // Validated against the ladder: a typo'd tier that survived as a bare string would
         // fail every comparison downstream while the settings file still read as configured.
-        if (v === "off" || v === "low" || v === "medium" || v === "high" || v === "max") {
-          out["ai.effort"] = v;
-        }
+        //
+        // `isEffortTier`, not a chain of `===`. The chain WAS the ladder spelled a second time,
+        // so it silently rejected `xhigh` and `ultra` the moment the real one grew them.
+        if (isEffortTier(v)) out["ai.effort"] = v;
         break;
       case "ai.effortForce":
         if (typeof v === "boolean") out["ai.effortForce"] = v;

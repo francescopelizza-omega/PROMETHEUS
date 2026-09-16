@@ -167,7 +167,7 @@ export function InlineEdit(props: InlineEditProps): ReactElement {
 
       {error && <p style={{ color: "var(--danger)", margin: "6px 0 0" }}>{error}</p>}
       {paused && (
-        <p style={{ color: "var(--warning)", margin: "6px 0 0" }}>
+        <p style={{ color: "var(--warn)", margin: "6px 0 0" }}>
           ⏸ the model went idle — paused, nothing lost.{" "}
           {streaming ? "Accept below, or retry." : "Retry."}
         </p>

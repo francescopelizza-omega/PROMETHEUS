@@ -22,6 +22,7 @@ const CODE_SPAN: CSSProperties = {
   borderRadius: 3,
   padding: "0 3px",
   fontSize: "0.9em",
+  overflowWrap: "break-word", // an inline `path/like/this` must not widen the bubble
 };
 
 /** Render inline `code` + **bold** within a text run (everything else is escaped text). */
@@ -59,7 +60,9 @@ function CodeBlock({ text }: { text: string }): ReactElement {
       <pre
         style={{
           margin: 0,
-          padding: 8,
+          // right gutter reserves room for the ⧉ copy button, which otherwise sits on top of
+          // the first line of code.
+          padding: "8px 30px 8px 8px",
           overflow: "auto",
           background: "var(--bg-inset)",
           borderRadius: "var(--radius-md, 6px)",
@@ -108,7 +111,7 @@ export function Markdown({ source }: { source: string }): ReactElement {
           <CodeBlock key={`blk${i}`} text={b.text} />
         ) : (
           // biome-ignore lint/suspicious/noArrayIndexKey: blocks are positionally stable per render
-          <div key={`blk${i}`} style={{ whiteSpace: "pre-wrap" }}>
+          <div key={`blk${i}`} style={{ whiteSpace: "pre-wrap", overflowWrap: "break-word" }}>
             {renderInline(b.text)}
           </div>
         ),

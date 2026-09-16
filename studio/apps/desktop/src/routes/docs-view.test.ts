@@ -17,8 +17,10 @@ import {
   filterTutorials,
   formatChord,
   groupDocRows,
+  requestDocsTab,
   searchCommandDocs,
   searchHelp,
+  takeDocsTab,
 } from "./docs-view.js";
 
 test("commandDocRows: one row per spec, all fields present", () => {
@@ -160,4 +162,27 @@ test("tutorials: shape valid + every commandId resolves against SHELL_COMMANDS",
       }
     }
   }
+});
+
+/* ── the docs sub-tab latch: the same StrictMode hazard as routes/route-tabs.ts ────── */
+
+test("takeDocsTab is STABLE within one tick, one-shot across ticks", async () => {
+  // docs.tsx reads this from a `useState` initializer, which React StrictMode
+  // double-invokes in development while KEEPING THE SECOND value. Clearing on the first
+  // call handed the route null on the pass that counts, so a `help.*` command landed on
+  // the default "engine" tab under `vite dev` and was correct only in a production build.
+  requestDocsTab("cheatsheet");
+  assert.equal(takeDocsTab(), "cheatsheet", "pass 1 (discarded by React)");
+  assert.equal(takeDocsTab(), "cheatsheet", "pass 2 — the one React keeps");
+  await Promise.resolve();
+  assert.equal(takeDocsTab(), null, "still a one-shot handoff across navigations");
+});
+
+test("a fresh docs request within the same tick is not masked by the memo", async () => {
+  requestDocsTab("engine");
+  assert.equal(takeDocsTab(), "engine");
+  requestDocsTab("cheatsheet");
+  assert.equal(takeDocsTab(), "cheatsheet");
+  await Promise.resolve();
+  assert.equal(takeDocsTab(), null);
 });

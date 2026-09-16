@@ -15,17 +15,46 @@ import { test } from "node:test";
 
 import { applyEffort, applyEffortToMessages, describeEffort, resolveEffort } from "./apply.js";
 import { builtinRules, resolveCapability, runtimeFromBaseUrl } from "./rules.js";
-import type { EffortCapability } from "./types.js";
-import { EFFORT_TIERS, isEffortTier, nearestTier } from "./types.js";
+import type { EffortCapability, EffortResolution, EffortTier } from "./types.js";
+import { EFFORT_TIERS, isEffortTier, nearestTier, tierIndex } from "./types.js";
 
 /* ── the ladder ───────────────────────────────────────────────────────────── */
 
-test("the ladder is ascending and off is the floor", () => {
-  assert.deepEqual([...EFFORT_TIERS], ["off", "low", "medium", "high", "max"]);
+test("the ladder is ascending, off is the floor, and max stays the ceiling", () => {
+  assert.deepEqual([...EFFORT_TIERS], ["off", "low", "medium", "high", "xhigh", "ultra", "max"]);
   assert.ok(isEffortTier("off"));
   assert.ok(isEffortTier("max"));
-  assert.equal(isEffortTier("xhigh"), false);
-  assert.equal(isEffortTier("minimal"), false); // Ollama rejects this too
+  // The two rungs the ladder grew. `xhigh` is a documented level on BOTH cloud vendors; `ultra`
+  // was measured on the local Ollama /v1 shim.
+  assert.ok(isEffortTier("xhigh"));
+  assert.ok(isEffortTier("ultra"));
+  // `minimal` still has no rung: it is a shade of `low`, not a distinct depth, and the ladder
+  // stays coarse at the bottom on purpose.
+  assert.equal(isEffortTier("minimal"), false);
+  /**
+   * ORDER is the load-bearing part, not membership.
+   *
+   * Both vendors put `max` at the TOP of their own tables — Anthropic calls it "absolute maximum
+   * capability with no constraints on token spending" and ranks `xhigh` below it; OpenAI lists
+   * `none, minimal, low, medium, high, xhigh, max`. Ranking the new rungs ABOVE `max` would make
+   * `nearestTier` clamp a request for `max` DOWNWARD on a model that accepts exactly that value.
+   */
+  assert.equal(tierIndex("high") < tierIndex("xhigh"), true);
+  assert.equal(tierIndex("xhigh") < tierIndex("ultra"), true);
+  assert.equal(tierIndex("ultra") < tierIndex("max"), true);
+  assert.equal(tierIndex("max"), EFFORT_TIERS.length - 1);
+});
+
+test("the new rungs clamp honestly on a provider that does not have them", () => {
+  // Anthropic has xhigh but not ultra: asking for ultra lands on xhigh, never on max.
+  assert.equal(nearestTier("ultra", ["low", "medium", "high", "xhigh", "max"]), "xhigh");
+  // A backend stuck at the classic five sees both new rungs clamp to a neighbour rather than
+  // silently becoming `max` — the tie-break is downward, so the user is never charged MORE than
+  // they asked for by a clamp they did not make.
+  assert.equal(nearestTier("xhigh", ["off", "low", "medium", "high", "max"]), "high");
+  assert.equal(nearestTier("ultra", ["off", "low", "medium", "high", "max"]), "max");
+  // …and a request for `max` on a model that HAS max is still max, not a downward clamp.
+  assert.equal(nearestTier("max", ["low", "medium", "high", "xhigh", "max"]), "max");
 });
 
 test("nearestTier clamps to the closest supported tier, breaking ties downward", () => {
@@ -881,7 +910,9 @@ test("most of this table is INFERRED, and says so", () => {
   // properly verified, this number moves and the test makes you say so out loud.
   const counts = { measured: 0, published: 0, inferred: 0 };
   for (const r of builtinRules()) counts[r.provenance as keyof typeof counts] += 1;
-  assert.deepEqual(counts, { measured: 4, published: 7, inferred: 23 });
+  // published 7 → 8: the OpenAI rule split into a conservative o-series entry and a gpt-5/codex
+  // entry that reaches `xhigh`/`max`. Both are read off the vendor's published vocabulary.
+  assert.deepEqual(counts, { measured: 4, published: 8, inferred: 23 });
 });
 
 /* ── the adversarial sweep: four ways a tier reported as applied sent nothing ─────────── */
@@ -975,4 +1006,53 @@ test("runtimeFromBaseUrl matches the PORT against the port and the HOST against 
   // and nothing at all is "unknown", not a crash
   assert.equal(runtimeFromBaseUrl("", "cloud"), "unknown");
   assert.equal(runtimeFromBaseUrl("not a url at all", "local"), "openai-compatible");
+});
+
+/* ── changing model RE-APPLIES the tier ─────────────────────────────────────────────── */
+
+/**
+ * "Every time the user changes the AI model, re-apply the thinking effort to the new model."
+ *
+ * There is no re-apply STEP, and that is the design rather than an omission: the tier the
+ * session holds is the REQUEST, and the capability is looked up per request from the model
+ * that is bound at that moment. Switching model therefore re-resolves the same request against
+ * the new vocabulary with nothing to trigger and nothing to forget.
+ *
+ * The failure mode this pins is the alternative anyone would reach for first — resolving once
+ * at bind time and storing the ANSWER. That ratchets: the tier a weak model clamped becomes the
+ * tier every later model gets, and the user is never told their preference moved.
+ */
+test("one saved request, four models — each gets what IT can do, and the request is untouched", () => {
+  const REQUEST: EffortTier = "xhigh"; // what the operator asked for, once
+  const bind = (ctx: Parameters<typeof resolveCapability>[0]): EffortResolution =>
+    resolveEffort(REQUEST, resolveCapability(ctx).cap);
+
+  // Claude Opus 5 has the rung: it goes out verbatim.
+  const opus5 = bind({ runtime: "anthropic", modelId: "claude-opus-5" });
+  assert.equal(opus5.applied, "xhigh");
+  assert.deepEqual(opus5.patch, {
+    kind: "body",
+    path: "output_config.effort",
+    value: "xhigh",
+  });
+
+  // Claude 4.6 does not: it clamps DOWN to high and says why…
+  const opus46 = bind({ runtime: "anthropic", modelId: "claude-opus-4-6" });
+  assert.equal(opus46.applied, "high");
+  assert.ok(opus46.degraded, "a clamp must never be silent");
+
+  // …a gpt-5 model has it back…
+  const gpt5 = bind({ modelId: "gpt-5.5" });
+  assert.deepEqual(gpt5.patch, { kind: "body", path: "reasoning_effort", value: "xhigh" });
+
+  // …and a model with no reasoning control at all still honours the tier, by instruction.
+  const gemma = bind({ modelId: "gemma-3" });
+  assert.deepEqual(gemma.patch, { kind: "none" }, "nothing may go on the wire here");
+  assert.equal(gemma.applied, "xhigh", "…but the tier is still in force");
+  assert.equal(gemma.emulation?.via, "prompt-cot");
+
+  // The REQUEST is the same string throughout. Nothing above mutates it, which is exactly why
+  // switching back to Opus 5 gets `xhigh` again rather than the `high` that 4.6 imposed.
+  assert.equal(REQUEST, "xhigh");
+  assert.equal(bind({ runtime: "anthropic", modelId: "claude-opus-5" }).applied, "xhigh");
 });

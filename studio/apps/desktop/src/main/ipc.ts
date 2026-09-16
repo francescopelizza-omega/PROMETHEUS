@@ -18,6 +18,8 @@
  * renderer is forbidden from doing.
  */
 
+import { existsSync } from "node:fs";
+
 import { ipcMain } from "electron";
 
 import {
@@ -38,6 +40,8 @@ import {
   type EngineConfig,
   type SecurityVerdict,
   createEngineClient,
+  createLifecycleClient,
+  resolveEngine,
 } from "@prometheus/engine-bridge";
 
 import {
@@ -101,9 +105,13 @@ function errString(e: unknown): string {
  * type `evt` as unknown). Returns a minimal `{ send }` surface used only to push
  * progress events back to the initiating window; undefined if absent.
  */
+  // `isDestroyed` is part of the surface because a progress feed OUTLIVES its window: an
+  // op started, the user closed that window, and every subsequent line threw
+  // "Object has been destroyed" out of a fire-and-forget emit — surfacing as the op
+  // appearing to die mid-run. Optional so a test double need not implement it.
 function senderOf(
   evt: unknown,
-): { send(channel: string, payload: ProgressFeedEvent): void } | undefined {
+): { send(channel: string, payload: ProgressFeedEvent): void; isDestroyed?(): boolean } | undefined {
   if (!evt || typeof evt !== "object") return undefined;
   const sender = (evt as { sender?: unknown }).sender;
   if (sender && typeof (sender as { send?: unknown }).send === "function") {
@@ -151,6 +159,13 @@ export interface IpcWiring {
  */
 export function registerIpcHandlers(wiring: IpcWiring): () => void {
   const client: EngineClient = createEngineClient(wiring.engineConfig);
+  /**
+   * The STATE-CHANGING surface. `EngineClient`'s bare uninstall/enable/disable exist but
+   * build argv with no flags — lifecycle.ts says so in its own header. Routing the three
+   * mutating handlers through here is what lets `dryRun` and `component` actually reach the
+   * engine instead of being validated and then dropped on the floor.
+   */
+  const lifecycle = createLifecycleClient({ config: wiring.engineConfig });
   const promotionContext: PromotionContext = wiring.promotionContext ?? {};
   const { supervisor } = wiring;
 
@@ -187,11 +202,11 @@ export function registerIpcHandlers(wiring: IpcWiring): () => void {
    * Cosmetic only — NO security verdict crosses (C5).
    */
   function emitProgress(
-    sender: { send(channel: string, payload: ProgressFeedEvent): void } | undefined,
+    sender: { send(channel: string, payload: ProgressFeedEvent): void; isDestroyed?(): boolean } | undefined,
     runId: string | undefined,
     line: string,
   ): void {
-    if (!sender) return;
+    if (!sender || sender.isDestroyed?.()) return;
     const event: ProgressFeedEvent = { message: line, phase: "info", raw: line };
     if (runId !== undefined) event.runId = runId;
     sender.send(IPC_EVENTS.progress, event);
@@ -334,16 +349,37 @@ export function registerIpcHandlers(wiring: IpcWiring): () => void {
       problems.push(errString(e));
     }
     // Contract probe: a read-only `scan` must yield a parseable envelope.
-    let nemesisPresent = false;
     try {
       const env = await client.scan();
       contractOk = typeof env.command === "string";
-      // doctor would report nemesis health; absent a typed doctor we conservatively
-      // mark nemesis present only when the contract held (fail-closed on doubt).
-      nemesisPresent = contractOk;
       if (!contractOk) problems.push("engine did not return a valid --json envelope");
     } catch (e) {
       problems.push(errString(e));
+    }
+    /**
+     * SCANNER PRESENCE — a different question from "did the engine answer".
+     *
+     * This used to be `nemesisPresent = contractOk`, with a comment conceding it was a
+     * stand-in ("absent a typed doctor we conservatively mark nemesis present only when
+     * the contract held"). That is not conservative, it is inverted: a machine with a
+     * healthy `prometheus.py` and NO nemesis binary reported `nemesisPresent: true`, so
+     * every consumer of this field was told the gate was armed when nothing could scan.
+     *
+     * The real probe already exists and is the one the sidecar prints at startup —
+     * `existsSync(resolveEngine(config).nemesisBin)` (engine-bridge/src/sidecar.ts). It is
+     * a filesystem stat, not a spawn, so it is cheap enough for a health poll.
+     *
+     * Fail-CLOSED on doubt: if the resolver itself throws we report absent, because
+     * "we could not tell" and "the scanner is missing" must produce the same UI.
+     */
+    let nemesisPresent = false;
+    try {
+      nemesisPresent = existsSync(resolveEngine(wiring.engineConfig ?? {}).nemesisBin);
+      if (!nemesisPresent) {
+        problems.push("nemesis binary not found — installs and gates fail closed");
+      }
+    } catch (e) {
+      problems.push(`nemesis probe failed: ${errString(e)}`);
     }
     const ok = version !== undefined && contractOk;
     const result: HealthResult = { ok, contractOk, nemesisPresent, problems };
@@ -464,7 +500,13 @@ export function registerIpcHandlers(wiring: IpcWiring): () => void {
       const ac = a.runId ? new AbortController() : undefined;
       if (a.runId && ac) runs.set(a.runId, ac);
       try {
-        const env = await client.uninstall(a.name, {
+        // `dryRun` is passed EXPLICITLY and must stay that way: LifecycleClient.uninstall
+        // defaults it to TRUE, so omitting it would turn every real uninstall into a
+        // preview — the exact inverse of the bug being fixed. `yes` is set because an IPC
+        // caller has already confirmed in the UI and there is no TTY to prompt on.
+        const env = await lifecycle.uninstall(a.name, {
+          dryRun: a.dryRun,
+          yes: true,
           ...(ac ? { signal: ac.signal } : {}),
           onStderr: (line: string) => emitProgress(sender, a.runId, line),
         });
@@ -483,7 +525,12 @@ export function registerIpcHandlers(wiring: IpcWiring): () => void {
     async (_evt, name: unknown, component: unknown): Promise<EnvelopeResult> => {
       const a = unwrap(validateToggle(name, component));
       try {
-        const env = await client.enable(a.name);
+        // `component` was validated and then dropped: the bare EngineClient.enable builds
+        // argv with no `--component`, so a hooks-only or mcp-only toggle silently
+        // toggled the WHOLE plugin.
+        const env = await lifecycle.enable(a.name, {
+          ...(a.component ? { component: a.component } : {}),
+        });
         return { ok: env.ok !== false, data: env as Record<string, unknown> };
       } catch (e) {
         return { ok: false, error: errString(e) };
@@ -497,7 +544,12 @@ export function registerIpcHandlers(wiring: IpcWiring): () => void {
     async (_evt, name: unknown, component: unknown): Promise<EnvelopeResult> => {
       const a = unwrap(validateToggle(name, component));
       try {
-        const env = await client.disable(a.name);
+        // `component` was validated and then dropped: the bare EngineClient.disable builds
+        // argv with no `--component`, so a hooks-only or mcp-only toggle silently
+        // toggled the WHOLE plugin.
+        const env = await lifecycle.disable(a.name, {
+          ...(a.component ? { component: a.component } : {}),
+        });
         return { ok: env.ok !== false, data: env as Record<string, unknown> };
       } catch (e) {
         return { ok: false, error: errString(e) };
@@ -531,7 +583,32 @@ export function registerIpcHandlers(wiring: IpcWiring): () => void {
 
   // ── disposer ─────────────────────────────────────────────────────────────
   return () => {
-    for (const channel of Object.values(IPC)) {
+    // Only THIS module's channels. `Object.values(IPC)` is the whole contract, so disposing
+    // this registrar also tore down handlers owned by ide-ipc/catalog-ipc/env-ipc/security-ipc
+    // — a re-register left those permanently unhandled and their renderer calls hung. The
+    // sibling registrars already list their own channels explicitly; this one now does too.
+    for (const channel of [
+      IPC.scan,
+      IPC.gate,
+      IPC.list,
+      IPC.info,
+      IPC.audit,
+      IPC.status,
+      IPC.where,
+      IPC.matrix,
+      IPC.health,
+      IPC.providers,
+      IPC.envList,
+      IPC.modelHw,
+      IPC.servers,
+      IPC.serverStart,
+      IPC.serverStop,
+      IPC.install,
+      IPC.uninstall,
+      IPC.enable,
+      IPC.disable,
+      IPC.version,
+    ]) {
       ipcMain.removeHandler(channel);
     }
     ipcMain.removeAllListeners(IPC_CANCEL);

@@ -21,7 +21,7 @@ export interface SliderProps
 }
 
 export const Slider = forwardRef<HTMLInputElement, SliderProps>(function Slider(
-  { value, min = 0, max = 100, step = 1, onValueChange, className, style, disabled, ...rest },
+  { value, min = 0, max = 100, step = 1, onValueChange, className, style, disabled, onFocus, onBlur, ...rest },
   ref,
 ) {
   const pct = max > min ? ((value - min) / (max - min)) * 100 : 0;
@@ -51,13 +51,19 @@ export const Slider = forwardRef<HTMLInputElement, SliderProps>(function Slider(
         outline: "none",
         ...style,
       }}
+      // `{...rest}` FIRST. Spread last, a caller's own onFocus/onBlur silently replaced
+      // the composed prop and the tokenized focus ring stopped being drawn on that
+      // control. Spreading first lets the handlers below win; they chain the caller's,
+      // destructured out of `rest` so the spread cannot reintroduce it.
+      {...rest}
       onFocus={(e) => {
         e.currentTarget.style.boxShadow = FOCUS_RING;
+        onFocus?.(e);
       }}
       onBlur={(e) => {
         e.currentTarget.style.boxShadow = "none";
+        onBlur?.(e);
       }}
-      {...rest}
     />
   );
 });

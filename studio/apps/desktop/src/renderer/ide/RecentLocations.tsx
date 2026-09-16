@@ -194,6 +194,7 @@ export function RecentLocations({
                     color: "var(--text-secondary)",
                     overflow: "hidden",
                     textOverflow: "ellipsis",
+                    minWidth: 0, // flex/grid floor — without it the ellipsis is unreachable
                     whiteSpace: "nowrap",
                   }}
                 >
@@ -254,7 +255,7 @@ function RecentPreview({ loc, root }: { loc: NavLoc | undefined; root: string })
         fontSize: "0.75rem",
         lineHeight: 1.5,
         color: "var(--text-primary)",
-        background: "var(--bg-surface-1)",
+        background: "var(--bg-surface)",
       }}
     >
       {children}
@@ -275,6 +276,7 @@ function RecentPreview({ loc, root }: { loc: NavLoc | undefined; root: string })
           marginBottom: 4,
           overflow: "hidden",
           textOverflow: "ellipsis",
+          minWidth: 0, // flex/grid floor — without it the ellipsis is unreachable
           whiteSpace: "nowrap",
         }}
       >
@@ -296,7 +298,7 @@ function RecentPreview({ loc, root }: { loc: NavLoc | undefined; root: string })
           >
             <span
               style={{
-                color: "var(--text-tertiary)",
+                color: "var(--text-muted)",
                 width: 34,
                 textAlign: "right",
                 flexShrink: 0,

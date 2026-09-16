@@ -22,6 +22,7 @@ import {
   Button,
   CostLight,
   DisinfectWizard,
+  EmptyState,
   Panel,
   Progress,
   PurgeDialog,
@@ -56,8 +57,8 @@ import type {
   SecurityUrlAuditResult,
 } from "../shared/ipc-contract.js";
 import {
-  GATE_BANNER_NOTE,
-  GATE_BANNER_TITLE,
+  classifyRemediationLine,
+  gateBanner,
   gateCounts,
   historyRows,
   remediationProgress,
@@ -83,6 +84,15 @@ interface ParsedQuarantineRecord {
 
 /** ANSI SGR escapes the engine colours its stdout with — stripped before parse. */
 const ANSI = /\x1b\[[0-9;]*m/g;
+
+/**
+ * When this renderer started, i.e. the earliest an audit row could describe the engine THIS app
+ * will spawn.
+ *
+ * Module scope on purpose: it must not move when the console re-renders or re-mounts, or a row
+ * written moments ago would start failing the recency test. See `gateBanner`.
+ */
+const APP_START_MS = Date.now();
 
 /**
  * Parse `nemesis restore --quarantine-dir <dir> --list` output into records.
@@ -196,6 +206,8 @@ export function SecurityRoute(): ReactElement {
   );
   const restoreQuarantined = useCallback(
     async (vault: string) => {
+      // the typed confirm has already been satisfied by the time we get here
+      setUrlRestoreTarget(null);
       try {
         await window.prometheus.security.urlAudit({ op: "restore", vault });
         await runUrlAudit(false);
@@ -226,6 +238,42 @@ export function SecurityRoute(): ReactElement {
     unresolved?: unknown;
   } | null>(null);
   const [disinfectError, setDisinfectError] = useState<string | null>(null);
+  const loadTrustDb = useCallback(async () => {
+    try {
+      const s = await window.prometheus.security.threatdb({ op: "status" });
+      // §6: SHAPE-guard the cast, not just its truthiness. ThreatDbPanel dereferences
+      // `status.db.seeded`; an engine payload without `db` would throw a TypeError and
+      // drop the whole Security route into the error boundary. Normalise instead.
+      if (s.ok && s.status && typeof s.status === "object") {
+        const raw = s.status as unknown as Record<string, unknown>;
+        const db = (raw.db ?? {}) as Record<string, unknown>;
+        setThreatDb({
+          ...raw,
+          db: { seeded: Boolean(db.seeded), stale: Boolean(db.stale), ...db },
+          feeds: Array.isArray(raw.feeds) ? raw.feeds : [],
+        } as unknown as SecThreatDbStatus);
+      }
+    } catch {
+      /* non-fatal */
+    }
+    try {
+      const t = await window.prometheus.security.trust({ op: "list" });
+      if (t.ok && Array.isArray(t.trusted)) setTrusted(t.trusted as unknown as SecTrustedSource[]);
+    } catch {
+      /* non-fatal */
+    }
+    try {
+      const a = await window.prometheus.security.trust({ op: "auditLog" });
+      if (a.ok && Array.isArray(a.auditLog))
+        setAuditLog(a.auditLog as unknown as SecAuditLogEntry[]);
+      // The LIVE mode, read from main's `$PROMETHEUS_GATE` — what the next engine spawn will
+      // actually inherit. It outranks anything inferred from the history; see `gateBanner`.
+      if (a.ok && typeof a.configuredGateMode === "string") setGateMode(a.configuredGateMode);
+    } catch {
+      /* non-fatal */
+    }
+  }, []);
+
   const scanThreat = useCallback(
     async (path: string) => {
       const t = path.trim();
@@ -259,9 +307,10 @@ export function SecurityRoute(): ReactElement {
         });
       } finally {
         setScanningThreat(false);
+        void loadTrustDb(); // keep the banner's pills in step with this console's own scans
       }
     },
-    [scanningThreat],
+    [scanningThreat, loadTrustDb],
   );
   const pickAndScan = useCallback(
     async (kind: "file" | "folder") => {
@@ -302,38 +351,8 @@ export function SecurityRoute(): ReactElement {
   const [dbBusy, setDbBusy] = useState(false);
   const [trusted, setTrusted] = useState<SecTrustedSource[]>([]);
   const [auditLog, setAuditLog] = useState<SecAuditLogEntry[]>([]);
-  const loadTrustDb = useCallback(async () => {
-    try {
-      const s = await window.prometheus.security.threatdb({ op: "status" });
-      // §6: SHAPE-guard the cast, not just its truthiness. ThreatDbPanel dereferences
-      // `status.db.seeded`; an engine payload without `db` would throw a TypeError and
-      // drop the whole Security route into the error boundary. Normalise instead.
-      if (s.ok && s.status && typeof s.status === "object") {
-        const raw = s.status as unknown as Record<string, unknown>;
-        const db = (raw.db ?? {}) as Record<string, unknown>;
-        setThreatDb({
-          ...raw,
-          db: { seeded: Boolean(db.seeded), stale: Boolean(db.stale), ...db },
-          feeds: Array.isArray(raw.feeds) ? raw.feeds : [],
-        } as unknown as SecThreatDbStatus);
-      }
-    } catch {
-      /* non-fatal */
-    }
-    try {
-      const t = await window.prometheus.security.trust({ op: "list" });
-      if (t.ok && Array.isArray(t.trusted)) setTrusted(t.trusted as unknown as SecTrustedSource[]);
-    } catch {
-      /* non-fatal */
-    }
-    try {
-      const a = await window.prometheus.security.trust({ op: "auditLog" });
-      if (a.ok && Array.isArray(a.auditLog))
-        setAuditLog(a.auditLog as unknown as SecAuditLogEntry[]);
-    } catch {
-      /* non-fatal */
-    }
-  }, []);
+  /** the gate mode main reports for the next engine spawn — undefined until the load answers. */
+  const [gateMode, setGateMode] = useState<string | undefined>(undefined);
   useEffect(() => {
     void loadTrustDb();
   }, [loadTrustDb]);
@@ -378,9 +397,12 @@ export function SecurityRoute(): ReactElement {
         setInstallNote(e instanceof Error ? e.message : String(e));
       } finally {
         endRemediationRun();
+        // a forced install APPENDS an audit row — the one console action that certainly
+        // changes the counts the banner is showing.
+        void loadTrustDb();
       }
     },
-    [beginRemediationRun, endRemediationRun],
+    [beginRemediationRun, endRemediationRun, loadTrustDb],
   );
 
   const updateThreatDb = useCallback(async () => {
@@ -416,13 +438,16 @@ export function SecurityRoute(): ReactElement {
   // Verify a gate-audit row's HMAC (§8) — was a DEAD button (route never passed onVerify).
   const [verifyResults, setVerifyResults] = useState<Record<string, SecVerifyResult>>({});
   const verifyAuditRow = useCallback(async (row: SecAuditLogEntry) => {
+    // Must match AuditLogView's row key exactly: `at` is second-granular, so a batch
+    // install's rows collide and a verdict would render against the wrong target.
+    const rowId = `${row.at}|${row.label}|${row.target}`;
     try {
       const r = await window.prometheus.security.trust({ op: "verify", file: row.target });
-      setVerifyResults((m) => ({ ...m, [row.at]: { valid: !!r.valid, reason: r.message } }));
+      setVerifyResults((m) => ({ ...m, [rowId]: { valid: !!r.valid, reason: r.message } }));
     } catch (e) {
       setVerifyResults((m) => ({
         ...m,
-        [row.at]: { valid: false, reason: e instanceof Error ? e.message : String(e) },
+        [rowId]: { valid: false, reason: e instanceof Error ? e.message : String(e) },
       }));
     }
   }, []);
@@ -432,11 +457,20 @@ export function SecurityRoute(): ReactElement {
   // route only renders what `security.remediate` returns (C5).
   const [quarantineTarget, setQuarantineTarget] = useState("");
   const [quarantineDir, setQuarantineDir] = useState("");
+  /** the PARSED records behind `quarantineItems` — they keep `kind`, which the row shape drops. */
+  const [quarantineRecords, setQuarantineRecords] = useState<ParsedQuarantineRecord[]>([]);
   const [quarantineItems, setQuarantineItems] = useState<SecQuarantineItem[]>([]);
   const [quarantineRaw, setQuarantineRaw] = useState("");
   const [qBusy, setQBusy] = useState(false);
   const [qNote, setQNote] = useState<string | null>(null);
   const [purgeTarget, setPurgeTarget] = useState<SecQuarantineItem | null>(null);
+  /** the vault item awaiting a typed RESTORE confirm (§4). */
+  const [restoreTarget, setRestoreTarget] = useState<SecQuarantineItem | null>(null);
+  /** the URL-AUDIT vault entry awaiting its own typed RESTORE confirm (§4). */
+  const [urlRestoreTarget, setUrlRestoreTarget] = useState<{
+    vault: string;
+    label: string;
+  } | null>(null);
 
   // Live remediation progress (§9 / deliverables 2-3). The `securityProgress` feed
   // is PER-WINDOW and SHARED by every security op; we mint a runId per remediation
@@ -473,6 +507,10 @@ export function SecurityRoute(): ReactElement {
       setQuarantineDir(data.quarantineDir ?? "");
       setQuarantineRaw(data.listing ?? "");
       const recs = parseQuarantineListing(data.listing ?? "");
+      // Kept alongside the UI rows because `SecQuarantineItem` has no `kind` field and the row
+      // mapping below folds it into `rule_id` — where it is unrecoverable for any record that
+      // has rules. Inspect needs it: an `erased` record has no vault copy at all.
+      setQuarantineRecords(recs);
       setQuarantineItems(
         recs.map((x) => ({
           id: x.id,
@@ -485,6 +523,7 @@ export function SecurityRoute(): ReactElement {
       else if (recs.length === 0) setQNote("vault is empty — nothing quarantined here.");
     } catch (e) {
       setQuarantineItems([]);
+      setQuarantineRecords([]);
       setQNote(e instanceof Error ? e.message : String(e));
     } finally {
       setQBusy(false);
@@ -499,9 +538,18 @@ export function SecurityRoute(): ReactElement {
   // Restore one vault item via the engine (reversible). Returns the outcome but
   // does NOT reload — callers reload ONCE so a batch restore never N-fetches (#7).
   const restoreOne = useCallback(
-    async (id: string): Promise<{ ok: boolean; msg: string }> => {
+    async (id: string, typedName: string, path: string): Promise<{ ok: boolean; msg: string }> => {
       try {
-        const r = await window.prometheus.security.remediate({ op: "restore", id, quarantineDir });
+        // `typedName` + `path` are what main re-checks — the renderer's dialog is the
+        // VISIBLE half of the confirm, security-ipc.ts's comparison is the enforcing half,
+        // exactly as purge has always worked.
+        const r = await window.prometheus.security.remediate({
+          op: "restore",
+          id,
+          quarantineDir,
+          typedName,
+          path,
+        });
         const data = (r.data ?? {}) as { message?: string; error?: string };
         return {
           ok: r.ok,
@@ -515,27 +563,17 @@ export function SecurityRoute(): ReactElement {
   );
 
   const restoreFromVault = useCallback(
-    async (id: string) => {
+    async (item: SecQuarantineItem, typedName: string) => {
+      // Check the precondition BEFORE clearing the dialog: the old order dismissed the
+      // confirm first, so a user typed the whole basename and was only then told that no
+      // vault was loaded.
       if (!quarantineDir) {
         setQNote("load a vault first.");
         return;
       }
-      const { msg } = await restoreOne(id);
+      setRestoreTarget(null);
+      const { msg } = await restoreOne(item.id, typedName, item.path);
       setQNote(msg);
-      await loadQuarantine(vaultTarget);
-    },
-    [quarantineDir, restoreOne, vaultTarget, loadQuarantine],
-  );
-
-  // Batch restore: run each restore sequentially, then reload the vault ONCE (#7).
-  const restoreSelected = useCallback(
-    async (ids: string[]) => {
-      if (!quarantineDir || ids.length === 0) return;
-      let ok = 0;
-      for (const id of ids) {
-        if ((await restoreOne(id)).ok) ok += 1;
-      }
-      setQNote(`restored ${ok}/${ids.length} item${ids.length === 1 ? "" : "s"}.`);
       await loadQuarantine(vaultTarget);
     },
     [quarantineDir, restoreOne, vaultTarget, loadQuarantine],
@@ -676,14 +714,29 @@ export function SecurityRoute(): ReactElement {
       setVerdict(blocked);
     } finally {
       setGating(false);
+      // §4: the banner's pills and the history are a fold over the gate-audit log, and the
+      // log only had three readers — mount, threat-DB update, and revoke. So the console's
+      // OWN actions left the pills frozen on the mount-time snapshot: you could run a scan
+      // here and watch the counts not move.
+      void loadTrustDb();
     }
-  }, [target, gating, setVerdict]);
+  }, [target, gating, setVerdict, loadTrustDb]);
 
   const tierACount = providers.filter((p) => p.tier === "A").length;
   // §4: the banner's pills and the verdict-history rows are both folds over the gate-audit
   // log, computed in a PURE module so "an unknown verdict is not an allow" is a test, not a
   // reading of this file.
   const counts = gateCounts(auditLog);
+  // §4's banner is DERIVED, never asserted: `gate_mode` rides on every audit row and had no
+  // reader, so `PROMETHEUS_GATE=off` still rendered "armed, fail-closed" in green.
+  // Bounded to THIS session: an audit row older than the app cannot vouch for the mode the
+  // running engine will use — see `gateBanner`.
+  // `configured` is a live reading and wins outright; the session-bounded history is the
+  // fallback for a build/preload that does not report one — see `gateBanner`.
+  const banner = gateBanner(auditLog, {
+    sinceMs: APP_START_MS,
+    ...(gateMode !== undefined ? { configured: gateMode } : {}),
+  });
   // §4's `2 / 3`. `disinfectResult` is the post-fix verdict; its resolved/unresolved split is
   // the only real step count anywhere in the flow, and it does not exist until the run ends.
   const remediationSteps = remediationProgress(disinfectCounts);
@@ -741,20 +794,26 @@ export function SecurityRoute(): ReactElement {
             height: 30,
             flex: "none",
             borderRadius: "var(--radius-md, 6px)",
-            background: "color-mix(in srgb, var(--ok) 12%, transparent)",
-            border: "1px solid color-mix(in srgb, var(--ok) 30%, transparent)",
-            color: "var(--ok)",
+            background: `color-mix(in srgb, var(--${banner.role}) 12%, transparent)`,
+            border: `1px solid color-mix(in srgb, var(--${banner.role}) 30%, transparent)`,
+            color: `var(--${banner.role})`,
             fontSize: 14,
           }}
         >
           🛡
         </span>
         <div style={{ flex: 1, minWidth: 200 }}>
-          <div style={{ color: "var(--text-title)", fontSize: "0.85rem", fontWeight: 700 }}>
-            {GATE_BANNER_TITLE}
+          <div
+            style={{
+              color: banner.mode === "enforce" ? "var(--text-title)" : `var(--${banner.role})`,
+              fontSize: "0.85rem",
+              fontWeight: 700,
+            }}
+          >
+            {banner.title}
           </div>
           <div style={{ color: "var(--text-secondary)", fontSize: "0.75rem", lineHeight: 1.45 }}>
-            {GATE_BANNER_NOTE}
+            {banner.note}
           </div>
         </div>
         <div style={{ display: "flex", flexWrap: "wrap", gap: 5 }}>
@@ -927,6 +986,7 @@ export function SecurityRoute(): ReactElement {
                     fontSize: "0.85rem",
                     overflow: "hidden",
                     textOverflow: "ellipsis",
+                    minWidth: 0, // flex/grid floor — without it the ellipsis is unreachable
                     whiteSpace: "nowrap",
                   }}
                 >
@@ -949,6 +1009,14 @@ export function SecurityRoute(): ReactElement {
           </p>
         ) : scanning ? (
           <p style={{ color: "var(--text-secondary)", marginTop: 0 }}>Scanning…</p>
+        ) : agents.length === 0 ? (
+          // §6: never blank. A bare `.map` over an empty list painted nothing, which reads
+          // as "the panel is broken" rather than "no agents are installed here".
+          <EmptyState
+            icon="◇"
+            title="No agents detected"
+            hint="Run a scan to look for coding agents installed on this machine."
+          />
         ) : (
           <ul style={{ listStyle: "none", margin: 0, padding: 0, display: "grid", gap: "4px" }}>
             {agents.map((a) => (
@@ -981,6 +1049,7 @@ export function SecurityRoute(): ReactElement {
                       fontSize: "0.72rem",
                       overflow: "hidden",
                       textOverflow: "ellipsis",
+                      minWidth: 0, // flex/grid floor — without it the ellipsis is unreachable
                       whiteSpace: "nowrap",
                     }}
                   >
@@ -1062,7 +1131,10 @@ export function SecurityRoute(): ReactElement {
                     <Button
                       type="button"
                       variant="secondary"
-                      onClick={() => void restoreQuarantined(q.vault)}
+                      // §4: "Restore requires a typed confirm." This is the SECOND quarantine
+                      // vault on this route — the URL-audit one — and it used to re-trust a
+                      // blocked origin on a single click. Same gate as the nemesis vault.
+                      onClick={() => setUrlRestoreTarget({ vault: q.vault, label: q.original })}
                     >
                       Restore (re-trust)
                     </Button>
@@ -1200,14 +1272,16 @@ export function SecurityRoute(): ReactElement {
       </Panel>
 
       {/* Remediation & quarantine (§9) — disinfect / vault restore / purge. */}
-      <Panel title="Remediation & quarantine" elevation="e1">
+      {/* handoff_3 §4 lists Quarantine and Remediation as TWO islands. They shared one
+          Panel, so the vault form, the vault table and the streaming remediation feed
+          all scrolled together under one header and neither half could be read as a
+          thing in its own right. */}
+      <Panel title="Remediation" elevation="e1">
         <p style={{ marginTop: 0, color: "var(--text-secondary)", fontSize: "0.85rem" }}>
           Act on what a scan found. <strong>Disinfect</strong> writes a CLEANED COPY to a folder you
           pick — the original is never modified (in-tree single files keep a{" "}
-          <code>.nemesis.bak</code>). The <strong>vault</strong> holds files nemesis sidelined:{" "}
-          <strong>Restore</strong> is reversible; <strong>Purge</strong> is forever and has no
-          backup. The residual verdict is the honest one — a quarantined item does not make a source
-          safe.
+          <code>.nemesis.bak</code>). The residual verdict is the honest one: disinfecting does not
+          make a source safe.
         </p>
 
         {threatFindings.length > 0 ? (
@@ -1303,7 +1377,10 @@ export function SecurityRoute(): ReactElement {
             <StreamLog
               lines={
                 remediationFeed.lines.length > 0
-                  ? remediationFeed.lines.map((text, i) => ({ id: `remediation:${i}`, text }))
+                  ? remediationFeed.lines.map((raw, i) => ({
+                      id: `remediation:${i}`,
+                      ...classifyRemediationLine(raw),
+                    }))
                   : [
                       {
                         id: "waiting",
@@ -1316,6 +1393,15 @@ export function SecurityRoute(): ReactElement {
             />
           </div>
         )}
+      </Panel>
+
+      <Panel title="Quarantine" elevation="e1">
+        <p style={{ marginTop: 0, color: "var(--text-secondary)", fontSize: "0.85rem" }}>
+          The vault holds files nemesis sidelined. They are isolated and never executed.{" "}
+          <strong>Restore</strong> is reversible and needs a typed confirm; <strong>Purge</strong>{" "}
+          is forever and has no backup. A quarantined item does not make its source safe — the
+          residual verdict is the honest one.
+        </p>
 
         <form
           ref={vaultRef}
@@ -1361,6 +1447,7 @@ export function SecurityRoute(): ReactElement {
               fontSize: "0.72rem",
               overflow: "hidden",
               textOverflow: "ellipsis",
+              minWidth: 0, // flex/grid floor — without it the ellipsis is unreachable
               whiteSpace: "nowrap",
             }}
           >
@@ -1375,8 +1462,56 @@ export function SecurityRoute(): ReactElement {
         <div style={{ marginTop: "var(--space-3, 6px)" }}>
           <QuarantineVault
             items={quarantineItems}
-            onRestore={(id) => void restoreFromVault(id)}
-            onRestoreSelected={(ids) => void restoreSelected(ids)}
+            onRestore={(id) => setRestoreTarget(quarantineItems.find((i) => i.id === id) ?? null)}
+            /**
+             * §4's Inspect. Deliberately REVEALS rather than opens: the whole premise of the
+             * vault is that the artifact is never executed, and "open" is exactly the verb
+             * that could hand it to a default application. Showing it in the file manager
+             * lets the operator look without anything running it.
+             */
+            onInspect={(id) => {
+              /**
+               * Reveal the VAULT ARTIFACT, not the original path.
+               *
+               * `item.path` is nemesis's `original_path`, and `_quarantine` removes the file
+               * after copying it — so it is guaranteed NOT to exist. The bytes live at
+               * `<quarantineDir>/<id>.gz`. Inspect was pointed at the erased location and then
+               * printed "revealed <path>" unconditionally, so the one thing the operator asked
+               * for (look at what the gate refused) never happened and nothing said so.
+               */
+              const item = quarantineItems.find((i) => i.id === id);
+              if (!item) return;
+              if (!quarantineDir) {
+                setQNote("load a vault first — its directory is where the artifact lives.");
+                return;
+              }
+              const rec = quarantineRecords.find((r) => r.id === id);
+              if (rec?.kind === "erased") {
+                setQNote(`${item.path} was erased, not quarantined — there is no copy to inspect.`);
+                return;
+              }
+              const artifact = `${quarantineDir}/${item.id}.gz`;
+              // The result is SURFACED: `revealPath` answers `{ok:false}` for a path that is not
+              // there (and `r?.ok` also covers the bridge method being absent), which the old
+              // `void` call reported as success.
+              void window.prometheus?.revealPath?.(artifact).then((r) => {
+                setQNote(
+                  r?.ok
+                    ? `revealed ${artifact}`
+                    : `could not reveal ${artifact}: ${r?.error ?? "unknown error"}`,
+                );
+              });
+            }}
+            onRestoreSelected={(ids) => {
+              // §4: "Restore requires typed confirm." Same one-at-a-time discipline as
+              // purge, and for the same reason — the confirm is keyed to ONE item's
+              // basename, so a single confirm can never stand in for a whole selection.
+              setRestoreTarget(quarantineItems.find((i) => i.id === ids[0]) ?? null);
+              if (ids.length > 1)
+                setQNote(
+                  `Restore confirms one item at a time — confirm the first; re-select the other ${ids.length - 1} after.`,
+                );
+            }}
             onPurge={(id) => setPurgeTarget(quarantineItems.find((i) => i.id === id) ?? null)}
             onPurgeSelected={(ids) => {
               // Purge needs a per-item typed confirm (each has its own basename), so
@@ -1592,6 +1727,42 @@ export function SecurityRoute(): ReactElement {
         />
       )}
 
+      {/* §4: "Restore requires a typed confirm." Restoring lifts a file the gate refused
+          back into the workspace — reversible in the sense that it can be re-quarantined,
+          but the artifact is executable again the moment it lands, which is precisely the
+          state the gate was protecting against. It reuses PurgeDialog because that dialog
+          was written to be reused ("only the copy changes") and a second hand-rolled modal
+          is a second place for the confirm to be got wrong. */}
+      {urlRestoreTarget && (
+        <PurgeDialog
+          filename={urlRestoreTarget.label}
+          title="Re-trust this origin"
+          description={
+            <>
+              This lifts <strong>{urlRestoreTarget.label}</strong> out of the URL-audit quarantine,
+              so the app may fetch from it again. Re-audit afterwards.
+            </>
+          }
+          onCancel={() => setUrlRestoreTarget(null)}
+          onConfirm={() => void restoreQuarantined(urlRestoreTarget.vault)}
+        />
+      )}
+
+      {restoreTarget && (
+        <PurgeDialog
+          filename={restoreTarget.path}
+          title="Restore from quarantine"
+          description={
+            <>
+              This puts <strong>{restoreTarget.rule_id || "a quarantined artifact"}</strong> back
+              where nemesis found it. It becomes executable again. Re-scan it afterwards.
+            </>
+          }
+          onCancel={() => setRestoreTarget(null)}
+          onConfirm={(typed) => void restoreFromVault(restoreTarget, typed)}
+        />
+      )}
+
       {/* §4: clicking a history row opens the SAME verdict card the scan, the catalog
           install and the chat render — one card, so a verdict never looks different
           depending on where you met it. It is read-only here: the decision it describes
@@ -1610,11 +1781,11 @@ export function SecurityRoute(): ReactElement {
             artifact={historyPicked.target}
             sourceKind={historyPicked.label || historyPicked.tier || "gate audit"}
             riskScore={historyPicked.risk_score ?? undefined}
-            findings={(historyPicked.blocking_reasons ?? []).map((r, i) => ({
-              rule: `R-${i + 1}`,
-              description: r,
-              severity: historyPicked.verdict === "warn" ? "medium" : "high",
-            }))}
+            // audit rows carry blocking REASONS, not scanner findings — see VerdictCard's
+            // `reasons` prop for why these may not be dressed up as rule ids + severities.
+            reasons={
+              Array.isArray(historyPicked.blocking_reasons) ? historyPicked.blocking_reasons : []
+            }
             actions={false}
           />
         </DecisionOverlay>

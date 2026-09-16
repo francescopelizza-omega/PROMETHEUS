@@ -14,6 +14,7 @@ import {
   __resetForTests,
   installChildReaper,
   reapNow,
+  signalTracked,
   trackChild,
   trackChildProcess,
   trackedChildren,
@@ -77,6 +78,30 @@ test("reaping a GROUP also kills grandchildren (never orphans the tree)", async 
   trackChild({ pid: child.pid as number, group: true });
   reapNow("SIGKILL");
   await until(() => !alive(grandchild));
+});
+
+test("signalTracked: kills a REAL tracked child by pid, without touching any OTHER tracked child", async () => {
+  __resetForTests();
+  const victim = spawn("sleep", ["300"], { detached: true, stdio: "ignore" });
+  const bystander = spawn("sleep", ["300"], { detached: true, stdio: "ignore" });
+  await until(() => typeof victim.pid === "number" && typeof bystander.pid === "number");
+  const victimPid = victim.pid as number;
+  const bystanderPid = bystander.pid as number;
+  trackChild({ pid: victimPid, group: true, label: "agent:opencode" });
+  trackChild({ pid: bystanderPid, group: true, label: "agent:hermes" });
+
+  const delivered = signalTracked(victimPid, "SIGKILL");
+  assert.equal(delivered, true);
+  await until(() => !alive(victimPid));
+  assert.ok(alive(bystanderPid), "a DIFFERENT tracked child must never be touched");
+
+  reapNow("SIGKILL"); // cleanup — the bystander is still tracked
+  await until(() => !alive(bystanderPid));
+});
+
+test("signalTracked: an UNTRACKED pid is refused (returns false), never signalled blind", () => {
+  __resetForTests();
+  assert.equal(signalTracked(999_999, "SIGTERM"), false);
 });
 
 test("trackChildProcess untracks on the child's own exit (no recycled-pid signal)", async () => {

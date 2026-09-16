@@ -169,7 +169,9 @@ export function Tree({
               {row.hasChildren ? (row.expanded ? "▾" : "▸") : ""}
             </span>
             {row.node.icon != null && <span aria-hidden="true">{row.node.icon}</span>}
-            <span style={{ overflow: "hidden", textOverflow: "ellipsis" }}>{row.node.label}</span>
+            <span style={{ overflow: "hidden", textOverflow: "ellipsis", minWidth: 0 }}>
+              {row.node.label}
+            </span>
           </div>
         );
       })}

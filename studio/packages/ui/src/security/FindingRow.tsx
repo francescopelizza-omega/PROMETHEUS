@@ -183,6 +183,7 @@ export function FindingRow({
               fontSize: "var(--text-small-size, 0.8125rem)",
               overflow: "hidden",
               textOverflow: "ellipsis",
+              minWidth: 0, // flex/grid floor — without it the ellipsis is unreachable
               whiteSpace: "nowrap",
               maxWidth: "40%",
             }}
@@ -198,6 +199,7 @@ export function FindingRow({
               fontSize: "var(--text-small-size, 0.8125rem)",
               overflow: "hidden",
               textOverflow: "ellipsis",
+              minWidth: 0, // flex/grid floor — without it the ellipsis is unreachable
               whiteSpace: "nowrap",
               maxWidth: "40%",
             }}
@@ -239,7 +241,7 @@ export function FindingRow({
                 borderRadius: "var(--radius-md, 6px)",
                 color: "var(--text-primary)",
                 fontFamily: "var(--font-mono)",
-                fontSize: "var(--text-code-size, 0.875rem)",
+                fontSize: "var(--text-code-size, 0.78125rem)",
                 lineHeight: 1.5,
                 overflowX: "auto",
                 whiteSpace: "pre",

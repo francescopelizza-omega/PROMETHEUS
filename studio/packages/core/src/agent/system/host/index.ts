@@ -107,6 +107,8 @@ export {
 export {
   installChildReaper,
   trackChild,
+  trackedChildren,
+  signalTracked,
   setRegistryDelegate,
   OWNER_PID_ENV,
 } from "./reaper/child-reaper.js";

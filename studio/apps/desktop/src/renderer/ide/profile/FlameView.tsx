@@ -202,6 +202,7 @@ export function FlameView({
               maxWidth: "min(300px, 90vw)",
               overflow: "hidden",
               textOverflow: "ellipsis",
+              minWidth: 0, // flex/grid floor — without it the ellipsis is unreachable
               zIndex: Z.dropdown,
               pointerEvents: "none",
               padding: "var(--space-2, 4px) var(--space-3, 6px)",

@@ -15,12 +15,114 @@
  * banner should make visible.
  */
 
+import {
+  type ClassifiedLine,
+  type StreamLineLevel,
+  classifyStreamLine,
+  streamLineLevel,
+} from "./stream-line-level.js";
+
 /* ── the gate banner ─────────────────────────────────────────────────────────*/
 
-/** §4's banner copy. One home, so the console and any future status surface agree. */
-export const GATE_BANNER_TITLE = "nemesis gate — armed, fail-closed";
-export const GATE_BANNER_NOTE =
-  "Every fetched artifact is scanned before it can execute. A scanner that cannot answer counts as a refusal, not as a pass.";
+/**
+ * §4's banner copy — DERIVED from the gate's actual mode, not asserted.
+ *
+ * The banner used to be two constants rendered unconditionally under a green shield. The
+ * engine branches on `PROMETHEUS_GATE` (prometheus.py) and records the mode it ran in on
+ * EVERY audit row as `gate_mode`; that field is parsed by engine-bridge and typed all the
+ * way into the UI package, and had zero readers anywhere in the repo. So a user running
+ * `PROMETHEUS_GATE=off` — nothing scanned at all — opened the security console and was told,
+ * in green, "nemesis gate — armed, fail-closed".
+ *
+ * That is a false security claim on the security console itself, which is why the mode now
+ * decides the copy AND the tint. The rules:
+ *
+ *   enforce  → armed, fail-closed (the only state that earns the green shield)
+ *   warn     → findings are reported, nothing is blocked
+ *   off      → nothing is being scanned
+ *   unknown  → we have not seen a decision, so we do not claim one either way
+ *
+ * "unknown" is deliberately NOT green. An empty audit log and an unreadable audit log are
+ * currently indistinguishable at the bridge (it fails soft to `[]`), so the honest banner in
+ * both cases is "we cannot see our own evidence", never a reassurance.
+ */
+export type GateMode = "enforce" | "warn" | "off" | "unknown";
+
+export interface GateBanner {
+  mode: GateMode;
+  title: string;
+  note: string;
+  /** the role token the shield chip and title tint with. */
+  role: "ok" | "warn" | "danger";
+}
+
+const BANNERS: Record<GateMode, Omit<GateBanner, "mode">> = {
+  enforce: {
+    title: "nemesis gate — armed, fail-closed",
+    note: "Every staged artifact is scanned before it can execute. A scanner that cannot answer counts as a refusal, not as a pass.",
+    role: "ok",
+  },
+  warn: {
+    title: "nemesis gate — WARN MODE, nothing is blocked",
+    note: "Findings are reported and recorded, but a block does not stop an install. Set PROMETHEUS_GATE=enforce to fail closed.",
+    role: "warn",
+  },
+  off: {
+    title: "nemesis gate — OFF, nothing is being scanned",
+    note: "PROMETHEUS_GATE is set to off, so artifacts execute without a verdict. Nothing on this page describes what is running now.",
+    role: "danger",
+  },
+  unknown: {
+    title: "nemesis gate — mode unknown",
+    note: "No gate decision has been recorded by the engine in this session, so the console cannot say which mode it is running in. The mode comes from PROMETHEUS_GATE in the environment that launched the app.",
+    role: "warn",
+  },
+};
+
+/** Normalise the engine's `gate_mode` string; anything unrecognised is `unknown`. */
+export function gateModeOf(raw: string | undefined | null): GateMode {
+  const v = typeof raw === "string" ? raw.trim().toLowerCase() : "";
+  return v === "enforce" || v === "warn" || v === "off" ? v : "unknown";
+}
+
+/**
+ * The banner for an audit log, newest-first (the order `auditLog()` returns).
+ *
+ * `opts.configured` — main's own `$PROMETHEUS_GATE`, i.e. the mode the NEXT engine spawn will
+ * inherit — wins outright when it is recognised. That is a LIVE fact about the running process,
+ * and the whole failure this function had was inferring a present-tense claim from history.
+ *
+ * Without it, falls back to the newest row that carries a mode AND is not older than `sinceMs`.
+ * The ordering rule alone does not deliver the invariant: "newest row wins" says nothing about
+ * whether that row has anything to do with the process now running, so an `enforce` row from
+ * last week vouched for a session started today with `PROMETHEUS_GATE=off`, painting
+ * `role: "ok"`. `break`, not `continue`, once a row is too old — the list is newest-first, so
+ * nothing after it can be newer.
+ *
+ * With neither, the banner says it cannot tell rather than guessing.
+ */
+export function gateBanner(
+  rows: readonly { gate_mode?: string; at?: string }[] | null | undefined,
+  opts: { sinceMs?: number; configured?: string | null } = {},
+): GateBanner {
+  const live = gateModeOf(opts.configured);
+  if (live !== "unknown") return { mode: live, ...BANNERS[live] };
+  const list = Array.isArray(rows) ? rows : [];
+  for (const r of list) {
+    const mode = gateModeOf(r?.gate_mode);
+    if (mode === "unknown") continue;
+    if (opts.sinceMs !== undefined) {
+      const t = Date.parse(r?.at ?? "");
+      if (!Number.isFinite(t) || t < opts.sinceMs) break; // too old to vouch for this session
+    }
+    return { mode, ...BANNERS[mode] };
+  }
+  return { mode: "unknown", ...BANNERS.unknown };
+}
+
+/** Back-compat re-exports — the enforce copy, for surfaces that have no audit log to read. */
+export const GATE_BANNER_TITLE = BANNERS.enforce.title;
+export const GATE_BANNER_NOTE = BANNERS.enforce.note;
 
 /** The verdict tallies behind the banner's pills. */
 export interface GateCounts {
@@ -109,9 +211,15 @@ export interface HistoryRow {
 
 /** Summarise a row's findings. Zero reasons on a non-allow verdict is still not "clean". */
 export function findingsSummary(row: AuditRowLike): string {
+  // `blocking_reasons` are the gate's SENTENCES, not scanner findings — the audit row
+  // carries no findings array at all. Calling them "findings" put a count of prose in the
+  // column every other surface uses for nemesis rule hits.
   const n = row.blocking_reasons?.length ?? 0;
-  if (n > 0) return `${n} ${n === 1 ? "finding" : "findings"}`;
-  return row.verdict === "allow" ? "clean" : "no reason recorded";
+  if (n > 0) return `${n} ${n === 1 ? "reason" : "reasons"}`;
+  // …and "clean" is a SEVERITY word (tokens.ts says so verbatim: "`clean` is a SEVERITY,
+  // never a verdict"). Deriving it from the TIER `allow` restates the decision as if it were
+  // an independent measurement — §4's two-axis rule, in the row beside the verdict chip.
+  return row.verdict === "allow" ? "no findings recorded" : "no reason recorded";
 }
 
 /**
@@ -163,4 +271,28 @@ export function remediationProgress(
   const left = Array.isArray(result.unresolved) ? result.unresolved.length : 0;
   const total = done + left;
   return total > 0 ? { done, total } : null;
+}
+
+/**
+ * Classify one streamed remediation line into a StreamLog level.
+ *
+ * Delegates to the SHARED classifier: the catalog install log needed the identical thing
+ * (handoff_3 §2's coloured lines), and the two engines emit overlapping vocabulary — a
+ * nemesis scan line shows up in both — so a second copy here would drift the moment either
+ * spec moved. Kept as a named export because "remediation" is the kind this route always
+ * passes, and a call site that has to remember a string literal is a call site that will
+ * one day pass the wrong one.
+ */
+export function remediationLineLevel(text: string): StreamLineLevel {
+  return streamLineLevel(text, "remediation");
+}
+
+/**
+ * Classify a remediation line AND return the text to print.
+ *
+ * Same delegation as above, to the variant that also strips a leading marker the gutter
+ * glyph is about to repeat. Named here so the route never has to remember the kind string.
+ */
+export function classifyRemediationLine(text: string): ClassifiedLine {
+  return classifyStreamLine(text, "remediation");
 }

@@ -83,12 +83,24 @@ function fakeCtx() {
       liveTuning = { ...liveTuning, ...patch };
       calls.tunes.push(patch);
     },
+    // A LOCAL twin of `__fixtures__/slash-ctx.ts` lives in this file, so a new required member
+    // of SlashCtx has to be added in both places — which is exactly how `/think` came to write
+    // through `tune` here while the hosts had a setter of their own. Recorded as a tune so the
+    // existing assertions on `calls.tunes` keep meaning "what /think asked for".
+    setEffort: (tier) => {
+      liveTuning = { ...liveTuning, effort: tier };
+      calls.tunes.push({ effort: tier });
+    },
     control: (s) => {
       calls.controls.push(s);
     },
     setCwd: (d) => {
       calls.setCwds.push(d);
       cwd = d;
+      // no filesystem here — every move "succeeds", so these tests stay about the COMMAND.
+      // (This fake is a second copy of `__fixtures__/slash-ctx.ts`'s; both must return a
+      // result now that `setCwd` reports whether it actually moved.)
+      return { ok: true, cwd: d };
     },
     compact: () => {},
     exportTranscript: () => "/tmp/proj/session.txt",
@@ -256,7 +268,11 @@ test("no alias collides with another command's primary name or a different comma
 test("findSlash('orchestrate') resolves to the standalone macro, not /demos (alias collision fix)", () => {
   assert.equal(findSlash("orchestrate")?.name, "orchestrate");
   assert.equal(findSlash("swarm")?.name, "demos");
-  assert.equal(findSlash("fleet")?.name, "demos");
+  // `fleet` used to be a third alias of /demos and is now a command of its own — the per-window
+  // presence table the fleet bar's legend tells the user to run. Two different nouns had claimed
+  // one word: a swarm of AGENTS, and the fleet of terminal WINDOWS. `swarm` says the first one,
+  // and a legend cannot point at a command that resolves to something else.
+  assert.equal(findSlash("fleet")?.name, "fleet");
   assert.ok(!findSlash("demos")?.aliases?.includes("orchestrate"));
 });
 
@@ -1553,4 +1569,98 @@ test("/agents cannot confirm a fan-out larger than the delegation budget allows"
   const bare = fakeCtx();
   await cmd.run("", bare.ctx);
   assert.match(bare.calls.writes.join("\n"), new RegExp(`1–${MAX_SUBAGENTS}`));
+});
+
+/* -- a missing directory is an OBSTACLE, not a dead end: offer to create it -- */
+
+/** A fakeCtx whose setCwd reports the target as missing until it is created. */
+function missingDirCtx(answer) {
+  const base = fakeCtx();
+  const created = [];
+  let exists = false;
+  base.ctx.confirm = async (p) => {
+    base.calls.writes.push(`CONFIRM:${p}`);
+    return answer;
+  };
+  base.ctx.setCwd = (d, opts) => {
+    if (opts?.create) {
+      created.push(d);
+      exists = true;
+    }
+    if (!exists) return { ok: false, error: `no such directory: ${d}`, missing: true, path: d };
+    base.calls.setCwds.push(d);
+    return { ok: true, cwd: d };
+  };
+  return { ...base, created };
+}
+
+test("/cwd: a missing directory prompts, and YES creates it and moves", async () => {
+  const { ctx, calls, created } = missingDirCtx(true);
+  await findSlash("cwd")?.run("/new/place", ctx);
+  const out = strip(calls.writes.join("\n"));
+  assert.match(out, /CONFIRM:\/new\/place does not exist\. Create it\? \[y\/N\]/);
+  assert.deepEqual(created, ["/new/place"]);
+  assert.match(out, /cwd → \/new\/place/);
+});
+
+test("/cwd: NO leaves the disk alone and says where you still are", async () => {
+  const { ctx, calls, created } = missingDirCtx(false);
+  await findSlash("cwd")?.run("/new/place", ctx);
+  const out = strip(calls.writes.join("\n"));
+  assert.deepEqual(created, [], "declining must not create anything");
+  assert.match(out, /not created/);
+  assert.match(out, /no such directory/);
+  assert.match(out, /still in/);
+  assert.doesNotMatch(out, /cwd → \/new\/place/, "it must not claim a move it did not make");
+});
+
+test("/cd: the same offer, on the rotating path", async () => {
+  const { ctx, calls } = fakeCtx();
+  const seen = [];
+  let exists = false;
+  ctx.confirm = async (p) => {
+    calls.writes.push(`CONFIRM:${p}`);
+    return true;
+  };
+  ctx.changeProjectDirectory = (dir, opts) => {
+    seen.push(opts?.create === true);
+    if (opts?.create) exists = true;
+    return exists
+      ? { ok: true, movedTo: dir, newSessionId: "sess_abcdefghij", rotated: true }
+      : { ok: false, error: `no such directory: ${dir}`, missing: true, path: dir };
+  };
+  await findSlash("cd")?.run("/fresh/proj", ctx);
+  const out = strip(calls.writes.join("\n"));
+  assert.match(out, /CONFIRM:\/fresh\/proj does not exist/);
+  assert.deepEqual(seen, [false, true], "it retries WITH create after a yes");
+  assert.match(out, /moved to \/fresh\/proj/);
+});
+
+test("/cd: declining reports the refusal, not a move", async () => {
+  const { ctx, calls } = fakeCtx();
+  ctx.confirm = async () => false;
+  ctx.changeProjectDirectory = (dir) => ({
+    ok: false,
+    error: `no such directory: ${dir}`,
+    missing: true,
+    path: dir,
+  });
+  await findSlash("cd")?.run("/nope", ctx);
+  const out = strip(calls.writes.join("\n"));
+  assert.match(out, /not created/);
+  assert.match(out, /\/cd: no such directory: \/nope/);
+  assert.doesNotMatch(out, /moved to/);
+});
+
+test("a target that exists as a FILE is never offered for creation", async () => {
+  const { ctx, calls } = fakeCtx();
+  let asked = false;
+  ctx.confirm = async () => {
+    asked = true;
+    return true;
+  };
+  ctx.setCwd = (d) => ({ ok: false, error: `not a directory: ${d}`, path: d });
+  await findSlash("cwd")?.run("/tmp/notes.md", ctx);
+  assert.equal(asked, false, "mkdir -p over a file would fail anyway - do not offer it");
+  assert.match(strip(calls.writes.join("\n")), /not a directory/);
 });

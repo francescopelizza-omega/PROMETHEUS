@@ -199,23 +199,26 @@ export function moveFileTool(args: Record<string, unknown>, deps: FsMutateDeps):
    *
    * Read the destination BEFORE the rename, or there is nothing left to read.
    */
-  let destPre = "";
+  // `readTextExact`, not `readFileSync(..., "utf8")`. The raw read is the exact mistake this
+  // file's own helper was written to end: it does NOT throw on binary, it returns U+FFFD
+  // mush. Both catch blocks here were therefore dead for the case they were written for, and
+  // the mush was handed to `onPreImage` with `existed: true` — so `/revert` "succeeded" and
+  // wrote the replacement characters over a PNG. `readTextExact` returns null unless the
+  // bytes round-trip, and a null pre-image is simply not emitted: revert then does nothing,
+  // which is the honest answer for a file that is not byte-restorable as text.
+  let destPre: string | null = null;
   if (destExists) {
     try {
-      destPre = readFileSync(to.abs, "utf8");
+      destPre = readTextExact(to.abs);
     } catch {
-      // binary or unreadable: the move still happens, it just cannot be undone byte-for-byte.
-      destPre = "";
+      destPre = null; // a directory, or unreadable
     }
   }
-  let sourcePre = "";
-  let sourceCapturable = false;
+  let sourcePre: string | null = null;
   try {
-    sourcePre = readFileSync(from.abs, "utf8");
-    sourceCapturable = true;
+    sourcePre = readTextExact(from.abs);
   } catch {
-    // a directory move, or a binary — not byte-restorable, so it is not claimed to be.
-    sourceCapturable = false;
+    sourcePre = null; // a directory move
   }
   try {
     mkdirSync(dirname(to.abs), { recursive: true });
@@ -223,11 +226,21 @@ export function moveFileTool(args: Record<string, unknown>, deps: FsMutateDeps):
   } catch (err) {
     return { ok: false, summary: `move_file: failed: ${errText(err)}` };
   }
-  // The SOURCE existed and now does not → revert by writing it back.
-  if (sourceCapturable) deps.onPreImage?.({ path: from.abs, preImage: sourcePre, existed: true });
-  // The DESTINATION either did not exist (revert by deleting) or was replaced (revert by
-  // writing its old bytes back).
-  deps.onPreImage?.({ path: to.abs, preImage: destPre, existed: destExists });
+  // The SOURCE existed and now does not → revert by writing it back, but only if its bytes
+  // survived the round-trip.
+  if (sourcePre !== null) {
+    deps.onPreImage?.({ path: from.abs, preImage: sourcePre, existed: true });
+  }
+  if (!destExists) {
+    // The destination did not exist → revert by DELETING it. No read involved, so this is
+    // always safe to claim, binary or not.
+    deps.onPreImage?.({ path: to.abs, preImage: "", existed: false });
+  } else if (destPre !== null) {
+    // The destination was replaced → revert by writing its old bytes back.
+    deps.onPreImage?.({ path: to.abs, preImage: destPre, existed: true });
+  }
+  // else: an overwritten BINARY destination. Nothing is claimed, because nothing can be
+  // restored from a lossy read — emitting a pre-image here is what destroyed the file.
   return { ok: true, summary: `moved ${from.raw} → ${to.raw}` };
 }
 

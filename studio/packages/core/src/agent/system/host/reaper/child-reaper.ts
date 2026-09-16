@@ -169,6 +169,20 @@ export function trackedChildren(): { pid: number; group: boolean; label: string 
 }
 
 /**
+ * Signal ONE tracked child by pid — for a caller that needs to stop a SPECIFIC child (e.g. the
+ * orchestration resource guard evicting a single runaway `opencode`/`hermes` subprocess under
+ * critical RAM pressure) without touching every other child this process happens to have
+ * spawned. Returns false for a pid that isn't (or is no longer) tracked. Does NOT untrack the
+ * pid itself — that happens naturally via the child's own `exit` handler (`trackChildProcess`),
+ * exactly as if the signal had come from the process's own timeout instead of this caller.
+ */
+export function signalTracked(pid: number, signal: NodeJS.Signals): boolean {
+  const entry = live.get(pid);
+  if (!entry) return false;
+  return signalOne(pid, entry.group, signal);
+}
+
+/**
  * Signal every tracked child NOW and forget them. Returns how many were signalled.
  * Synchronous by design so it is usable from a `process.on("exit")` handler.
  */

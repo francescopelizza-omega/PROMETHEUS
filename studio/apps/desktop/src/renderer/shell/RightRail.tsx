@@ -18,6 +18,7 @@ import type { CSSProperties, ReactElement, ReactNode } from "react";
 
 import { ResizeHandle, useResizable } from "./Resizable.js";
 import { safeInspectorJson } from "./rightrail-view.js";
+import { paneMaxWidth, readPaneWidth } from "./responsive.js";
 
 /** §2.5: 330px open. */
 const RAIL_DEFAULT = 330;
@@ -134,7 +135,14 @@ export function RightRail({
     min: RAIL_MIN,
     // 0.42 so rail_max + sidebar_max (0.35) + the 46px activity bar + the 8px island gaps
     // can never exceed the viewport at the 1100px window minimum.
-    max: () => Math.max(RAIL_MIN, Math.round(window.innerWidth * 0.42)),
+    // Budgeted against the SIDEBAR — see Sidebar.tsx and responsive.ts WORKBENCH_MIN.
+    max: () =>
+      paneMaxWidth({
+        viewportWidth: window.innerWidth,
+        ownMin: RAIL_MIN,
+        fraction: 0.42,
+        siblingWidth: readPaneWidth("prometheus.layout.sidebarWidth", 240),
+      }),
     invert: true,
     storageKey: "prometheus.layout.rightRailWidth",
   });
@@ -253,6 +261,7 @@ export function RightRail({
               maxWidth: 110,
               overflow: "hidden",
               textOverflow: "ellipsis",
+              minWidth: 0, // flex/grid floor — without it the ellipsis is unreachable
               whiteSpace: "nowrap",
             }}
           >

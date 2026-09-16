@@ -32,6 +32,9 @@ const SYSTEM = MONO_FAMILIES.filter((f) => !f.bundled);
 const labelStyle = {
   display: "flex",
   flexDirection: "column" as const,
+  // without a floor the label keeps its intrinsic width and overflows its grid area
+  // the moment the track is allowed to shrink.
+  minWidth: 0,
   gap: "var(--space-2, 4px)",
   fontSize: "var(--text-small-size, 0.8125rem)",
   color: "var(--text-secondary)",
@@ -95,7 +98,8 @@ function FontSection({
       <div
         style={{
           display: "grid",
-          gridTemplateColumns: "2fr 1fr 1fr",
+          // bare fr tracks floor at min-content — the widest <option> held the row open.
+          gridTemplateColumns: "minmax(0, 2fr) minmax(0, 1fr) minmax(0, 1fr)",
           gap: "var(--space-4, 8px)",
           alignItems: "end",
         }}

@@ -39,9 +39,10 @@ function shortDate(at: string): string {
 
 export interface AuditLogViewProps {
   rows: SecAuditLogEntry[];
-  /** Verify a row (the renderer recomputes the HMAC); keyed by row `at`. */
+  /** Verify a row (the renderer recomputes the HMAC); results keyed `at|label|target`. */
   onVerify?: (row: SecAuditLogEntry) => void;
-  /** Verification outcomes keyed by row `at`, set by the renderer. */
+  /** Verification outcomes keyed `at|label|target` (NOT `at` — it is second-granular and
+   *  repeats across a batch install), set by the renderer. */
   verifyResults?: Record<string, SecVerifyResult>;
   /** Inject a clock for the last-24h filter (tests / SSR determinism). */
   now?: number;
@@ -136,10 +137,15 @@ export function AuditLogView({
           }}
         >
           {visible.map((row) => {
-            const result = verifyResults[row.at];
+            // `at` alone is NOT unique: the engine stamps it with SECOND granularity and a
+            // batch install calls the gate audit once per fetched target, so several rows
+            // share a timestamp. React then warned about duplicate keys and — worse —
+            // `verifyResults[row.at]` showed one row's signature verdict on all of them.
+            const rowId = `${row.at}|${row.label}|${row.target}`;
+            const result = verifyResults[rowId];
             return (
               <div
-                key={row.at}
+                key={rowId}
                 role="listitem"
                 style={{
                   display: "flex",

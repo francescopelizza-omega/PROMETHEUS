@@ -399,7 +399,10 @@ function NavButton({
         background: ghost ? "transparent" : "var(--accent)",
         border: "1px solid var(--border-subtle)",
         borderRadius: "var(--radius-md, 6px)",
-        color: ghost ? "var(--text-primary)" : "var(--brand-fg)",
+        // `--on-accent` is the computed label colour for the `--accent` FILL (tokens/contrast.ts `onFill`).
+        // The old `--brand-fg` here was WHITE on the dark scheme over a saturated light fill (~2:1),
+        // and a plain `--bg-app` would be near-white over the same fill on the LIGHT scheme.
+        color: ghost ? "var(--text-primary)" : "var(--on-accent)",
         cursor: disabled || !onClick ? "default" : "pointer",
         opacity: disabled || !onClick ? 0.45 : 1,
         padding: "var(--space-3, 6px) var(--space-6, 10px)",

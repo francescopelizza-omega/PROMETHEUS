@@ -25,6 +25,16 @@
 @tailwind components;
 @tailwind utilities;
 
+/* Tailwind's preflight hardcodes ::placeholder to gray-400 (#9ca3af) — the one text colour
+ * in the whole renderer that is not a token. It never re-themes, and on the dark ground it
+ * is the greyest text on screen. Re-point it at the ramp. Specificity is one element +
+ * pseudo-element, so any Tailwind `placeholder-*` utility (a class) still wins. */
+input::placeholder,
+textarea::placeholder {
+  color: var(--text-muted);
+  opacity: 1; /* Firefox dims placeholders by default; the token already carries the level. */
+}
+
 /* Brand typography ships from the generated tokens.css now (--font-brand = bundled
  * Space Grotesk, --font-brand-weight = 700 — handoff §1). Nothing to override here:
  * a token regen owns the brand face so the CLI/TUI/Monaco read the same value. */
@@ -39,8 +49,10 @@ body,
 
 /* DENSITY DECISION (handoff §1): the root is a plain 16px. The old html{font-size:112.5%}
  * scaled every rem-authored size up by 1.125× while the chrome stayed in fixed px, so text
- * and frame drifted apart. One scale now: 16px root, UI text authored at 13px/12.5px via
- * the --text-*-size tokens, applied everywhere. Do NOT reintroduce a root scale. */
+ * and frame drifted apart. One scale now: 16px root, UI text authored at 14px/13px via the
+ * --text-*-size tokens, applied everywhere. Do NOT reintroduce a root scale — the small end
+ * of the scale was raised in tokens.ts (13→14 body, 12.5→13 small) rather than by rescaling
+ * the root, precisely so the chrome and the text stay on the same ruler. */
 
 body {
   background: var(--bg-app);
@@ -48,10 +60,26 @@ body {
   font-family: var(--font-ui);
   font-size: var(--text-body-size);
   line-height: var(--text-body-line);
-  font-weight: 450;
+  /* 450 was the "thin" in "all text is very thin, very light coloured". It is a variable-font
+     weight BELOW Medium, and on a dark ground with subpixel smoothing off (the two font-smoothing
+     lines below) a 450 stem is visibly lighter than the same colour at 500. The colour tokens
+     were mostly fine — measured 6:1 and better — so weight, not hue, was carrying the problem. */
+  font-weight: 500;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
   text-rendering: optimizeLegibility;
+}
+
+/* The activity rail's two parts scroll when a short window cannot fit twenty buttons, but a
+   scrollbar inside a 46px column is nearly as wide as the icons it sits beside — it reads as a
+   defect, and it is one of the stray scrollbars reported in the UI. The parts still scroll;
+   only the bar is hidden. */
+.prom-rail-scroll {
+  scrollbar-width: none;
+}
+.prom-rail-scroll::-webkit-scrollbar {
+  width: 0;
+  height: 0;
 }
 
 /* Links carry the accent (the prototype's #35c7ee → brightened hover). */
@@ -59,8 +87,13 @@ a {
   color: var(--accent);
   text-decoration: none;
 }
+/* Hover must move the link AWAY from the page, not toward white. Mixing toward a literal
+   #ffffff brightens correctly on a dark ground but WASHES OUT on the light scheme, where the
+   accent (#0894ad) over #f7f8fa fell to ~2.2:1 on hover — the one state the user is looking
+   straight at. `--text-primary` is the scheme's own far pole (near-white on dark, near-black
+   on light), so the same rule raises contrast in every theme and carries no raw hex. */
 a:hover {
-  color: color-mix(in srgb, var(--accent) 70%, #ffffff);
+  color: color-mix(in srgb, var(--accent) 70%, var(--text-primary));
 }
 
 /* The cyan focus ring (§2.1 / §7): visible on every keyboard-focused control. */
@@ -259,7 +292,7 @@ a:hover {
  * token-colored, visually secondary to real code. */
 .prom-inline-value {
   color: var(--text-secondary);
-  opacity: 0.75;
+  opacity: 0.9;
   font-style: italic;
   pointer-events: none;
 }
@@ -269,7 +302,7 @@ a:hover {
    handled by Monaco's onMouseDown at the line end, so pointer-events stay off. */
 .prom-inline-blame {
   color: var(--text-secondary);
-  opacity: 0.6;
+  opacity: 0.8;
   font-style: italic;
   pointer-events: none;
 }

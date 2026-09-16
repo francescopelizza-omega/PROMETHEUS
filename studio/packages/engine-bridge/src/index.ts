@@ -22,6 +22,7 @@ export {
   normalizeSeverity,
   normalizeKlass,
   isBlockingTier,
+  verdictReasons,
 } from "./security/verdict.js";
 
 // --- error taxonomy --------------------------------------------------------
@@ -612,10 +613,47 @@ export {
   type ProbeOptions,
   type ExecCaptureResult,
 } from "./system-probe.js";
+
+/* ── local model-server control (start / status / stop / force-kill) ───────── */
+export type {
+  ModelServerStatus,
+  ServerProcess,
+  SignalResult,
+  StartResult,
+} from "./model-server.js";
 export {
+  canStart,
+  listenersOnPort,
+  modelServerStatus,
+  parseLsofFields,
+  probeModels,
+  signalPid,
+  startModelServer,
+} from "./model-server.js";
+export {
+  type SpawnWatchdogOptions,
+  spawnWatchdogIfNeeded,
+  watchdogEntryPath,
+} from "./ollama-watchdog.js";
+export { acquireLock, type PidLockFs, pidIsAlive, releaseLock } from "./pid-lock.js";
+export { acquireRunnerStartLock, releaseRunnerStartLock } from "./start-lock.js";
+export {
+  EVICTION_RECENCY_MS,
+  type EvictionEvent,
+  evictionLogPath,
+  findRecentEviction,
+  readEvictionEvents,
+  recordEvictionEvent,
+} from "./eviction-log.js";
+export {
+  CRITICAL_POLLS_REQUIRED,
+  CRITICAL_RAM_CEILING_PCT,
   LAUNCH_CEILING_PCT,
   type LaunchGuardSample,
   launchGuardVerdict,
+  nextCriticalStreak,
+  ramCeilingVerdict,
+  ramPctNow,
   sampleLaunchGuard,
 } from "./launch-guard.js";
 export {

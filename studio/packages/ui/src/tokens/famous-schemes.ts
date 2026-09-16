@@ -9,26 +9,8 @@
  * through getScheme()/ThemeProvider like any other scheme. Type-only import of the
  * shared shapes (no runtime cycle with tokens.ts).
  */
-import type { ColorScheme, SchemeBase, SemanticColors } from "../tokens.js";
-
-/** A compact palette → a full SemanticColors map (the 18 §2 roles). */
-interface Palette {
-  bg: string;
-  surface: string;
-  surface2: string;
-  inset: string;
-  borderSubtle: string;
-  borderStrong: string;
-  text: string;
-  textDim: string;
-  brand: string;
-  accent: string;
-  ok: string;
-  warn: string;
-  danger: string;
-  info: string;
-  selection: string;
-}
+import type { ColorScheme, SchemeBase } from "../tokens.js";
+import { type Palette, derivePalette } from "./scheme-derive.js";
 
 /* ── derived-token math ───────────────────────────────────────────────────────
  * A compact Palette can't spell out every §2 role, so the SECOND-ORDER tokens the
@@ -36,66 +18,18 @@ interface Palette {
  * bg-chip/active/elevated, brand-2/3, danger-fg, bg-app-glow) are DERIVED from the
  * palette by mixing two of its own colors. That keeps each famous scheme internally
  * coherent — a Monokai row separator stays Monokai-brown, never the default navy —
- * without hand-authoring 14 extra hex values × 21 schemes. */
-
-function chan(hex: string, i: number): number {
-  const h = hex.replace("#", "");
-  const full =
-    h.length === 3
-      ? h
-          .split("")
-          .map((c) => c + c)
-          .join("")
-      : h.slice(0, 6);
-  return Number.parseInt(full.slice(i * 2, i * 2 + 2), 16);
-}
-
-/** Linear sRGB mix: `t` = how much of `a` survives (1 → a, 0 → b). */
-function mix(a: string, b: string, t: number): string {
-  const c = (i: number): string =>
-    Math.max(0, Math.min(255, Math.round(chan(a, i) * t + chan(b, i) * (1 - t))))
-      .toString(16)
-      .padStart(2, "0");
-  return `#${c(0)}${c(1)}${c(2)}`;
-}
+ * without hand-authoring 14 extra hex values × 21 schemes.
+ *
+ * The derivation itself now lives in `scheme-derive.ts`, shared with the first-party
+ * schemes in tokens.ts, because the mixing alone shipped an INVERTED text ramp in every
+ * one of these palettes (`text-muted` was mixed toward the background and came out dimmer
+ * than `text-disabled`) and never floored the dim end at all. `derivePalette` interpolates
+ * the ramp between two ends it has already proven legible, so it cannot invert and cannot
+ * fall under AA — while still lifting only along the palette's own colours, so Monokai
+ * stays Monokai. See that file's header for the measurements. */
 
 function mk(id: string, name: string, base: SchemeBase, p: Palette): ColorScheme {
-  const tokens: SemanticColors = {
-    "bg-app": p.bg,
-    "bg-app-glow": mix(p.surface2, p.bg, 0.6),
-    "bg-surface": p.surface,
-    "bg-surface-2": p.surface2,
-    "bg-inset": p.inset,
-    "bg-chip": mix(p.surface, p.bg, 0.5),
-    "bg-active": mix(p.surface2, p.accent, 0.88),
-    "bg-elevated": mix(p.surface2, p.borderStrong, 0.65),
-    "border-subtle": p.borderSubtle,
-    "border-row": mix(p.borderSubtle, p.bg, 0.5),
-    "border-header": mix(p.borderSubtle, p.bg, 0.75),
-    "border-chip": p.borderSubtle,
-    "border-strong": p.borderStrong,
-    "border-hover": mix(p.borderStrong, p.accent, 0.75),
-    "text-primary": p.text,
-    "text-strong": p.text,
-    "text-title": mix(p.text, p.textDim, 0.75),
-    "text-body": mix(p.text, p.textDim, 0.5),
-    "text-secondary": p.textDim,
-    "text-muted": mix(p.textDim, p.bg, 0.8),
-    "text-disabled": p.textDim,
-    brand: p.brand,
-    "brand-2": mix(p.brand, p.accent, 0.65),
-    "brand-3": mix(p.brand, p.text, 0.65),
-    "brand-fg": p.bg,
-    accent: p.accent,
-    "focus-ring": p.accent,
-    ok: p.ok,
-    warn: p.warn,
-    danger: p.danger,
-    "danger-fg": mix(p.danger, p.text, 0.6),
-    info: p.info,
-    selection: p.selection,
-  };
-  return { id, name, base, builtin: true, tokens, filled: true };
+  return { id, name, base, builtin: true, tokens: derivePalette(p, base), filled: true };
 }
 
 export const FAMOUS_SCHEMES: readonly ColorScheme[] = [

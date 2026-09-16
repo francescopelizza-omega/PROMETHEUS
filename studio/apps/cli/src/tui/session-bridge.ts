@@ -33,7 +33,7 @@ import {
   resolveEffectiveHooks,
   runSystemTool,
 } from "@prometheus/core/agent-system-host";
-import { type EngineClient, createEngineClient } from "@prometheus/engine-bridge";
+import { type EngineClient, createEngineClient, verdictReasons } from "@prometheus/engine-bridge";
 import { type HooksSource, loadHooksDetailed } from "../session/hooks-config.js";
 import { createKeyResolver, keychainProviders } from "../session/key-resolver.js";
 
@@ -50,10 +50,20 @@ import {
 } from "../commands/invoke.js";
 import { readTokenToggles } from "../commands/token-toggles.js";
 import type { CommandOutcome } from "../context.js";
-import { guardOwnRepo, resolveCwd } from "../cwd-guard.js";
-import { ensureHomeTree, prometheusHome, resolveCategory } from "../home.js";
+import { type CwdMove, guardOwnRepo, resolveCwd, resolveCwdMove } from "../cwd-guard.js";
+import { fleetReport } from "../fleet/report.js";
+import type { FleetTicker } from "../fleet/ticker.js";
+import { startFleetTicker } from "../fleet/ticker.js";
+import {
+  ensureHomeTree,
+  loadSettings,
+  prometheusHome,
+  resolveCategory,
+  saveSettings,
+} from "../home.js";
 import { runDemos } from "../orchestration/demos-cmd.js";
 import type { ParsedArgs } from "../parse.js";
+import { shortCwd } from "../path-display.js";
 import { appendPermissionAudit } from "../permission-audit.js";
 import { defaultOpenEditor } from "../profile-store.js";
 import { c } from "../render.js";
@@ -117,9 +127,11 @@ import {
   type Backends,
   backendSummary,
   detectBackends,
+  emptyBackends,
   renderOnboarding,
   runPathsWizard,
   runSetup,
+  stopSelfStartedRunners,
 } from "../session/onboarding.js";
 import {
   DEFAULT_SUBAGENTS,
@@ -137,6 +149,7 @@ import {
   execSlash,
 } from "../session/slash-exec.js";
 import {
+  type AuthLevelOrigin,
   type HookListing,
   type HookTestOutcome,
   type SlashCtx,
@@ -150,6 +163,7 @@ import { createWorkingSet, isPathAllowed } from "../session/working-set.js";
 import { insideTmux } from "../tmux/tmux.js";
 import { runUpdates } from "../updates/updates-cmd.js";
 import { copyReplyStatus, lastAssistantReply, osc52Sequence } from "./clipboard.js";
+import { fleetLegendLines } from "./fleet-bar.js";
 import { CODE_STATE, detectLanguage, highlightLine, isHighlightable } from "./highlight.js";
 import type { InvokeItem } from "./invoke-overlay.js";
 import { type KeymapResolution, resolveKeymap } from "./keys.js";
@@ -196,7 +210,7 @@ const SESSION_VERBS = new Set([
 
 /** Resolve the effective TUI keymap (CLI-096) from the user config's `[keymap]`; fail-soft to
  *  defaults. Duplicated from host.ts (not imported) to avoid the host↔session-bridge import cycle. */
-function loadKeymap(home: string): KeymapResolution {
+function loadKeymap(home: string | undefined): KeymapResolution {
   try {
     const table = cliProfiles.parseToml(readFileSync(cliProfiles.configPath(home), "utf8"));
     const km = cliProfiles.getPath(table, "keymap");
@@ -316,18 +330,6 @@ function renderDiffCard(
   return out;
 }
 
-/** Shorten an absolute path under $HOME to a leading `~`. */
-function shortCwd(dir: string): string {
-  const home = process.env.HOME ?? process.env.USERPROFILE ?? "";
-  // boundary-checked: `dir === home` or a real child (`home/…`), so a SIBLING like `/home/user-x`
-  // (home `/home/user`) is NOT collapsed to a bogus `~-x`.
-  if (!home) return dir;
-  if (dir === home) return "~";
-  return dir.startsWith(`${home}/`) || dir.startsWith(`${home}\\`)
-    ? `~${dir.slice(home.length)}`
-    : dir;
-}
-
 export interface BridgeDeps {
   parsed: ParsedArgs;
   /** print a line ABOVE the chrome (renderer.printAbove). */
@@ -361,6 +363,15 @@ export interface BridgeDeps {
   configHome?: string;
   /** the session's MCP surface (tests inject; default: connect the configured servers). */
   mcp?: McpSession;
+  /**
+   * Repaint the chrome NOW.
+   *
+   * The fleet bar changes on a clock nobody typed into: a peer appearing, a peer dying, the CPU
+   * crossing 80%. Without this the new state sits invisible until the user's next keystroke —
+   * which, for `needs-you`, is precisely the keystroke they are not making because they are
+   * waiting on the window that needs them.
+   */
+  redraw?: () => void;
 }
 
 export interface SessionBridge {
@@ -374,8 +385,27 @@ export interface SessionBridge {
   setPermMode: (mode: PermissionModeId) => void;
   /** the active 0–7 authorisation level (fine autonomy scale). */
   getAuthLevel: () => number;
-  /** set the 0–7 authorisation level; also syncs the coarse permMode/indicator. */
-  setAuthLevel: (level: number) => void;
+  /**
+   * Set the 0–7 authorisation level; also syncs the coarse permMode/indicator.
+   *
+   * `origin` decides whether the change reaches disk — `user` is an explicit numbered choice and
+   * becomes the next session's default, `session` is anything that moved the level for this run
+   * only (startup restore, a launch flag, a safety clamp). Required, so a new call site cannot
+   * silently inherit the wrong one.
+   */
+  setAuthLevel: (level: number, origin: AuthLevelOrigin) => void;
+  /**
+   * Set BOTH halves of the posture independently, session-scoped.
+   *
+   * `setPermMode` and `setAuthLevel` each derive the other field, and the derivation is lossy in
+   * both directions — so there is no ordering of the two that can express `--permission-mode plan
+   * --authorisation 7`: `setAuthLevel(7)` rewrites the mode to "yolo", and calling `setPermMode`
+   * after it drops the level back to 0. Launch flags are the one caller that has an explicit,
+   * independent value for each, so they get a setter that does not guess.
+   *
+   * Nothing reaches disk, exactly like `setPermMode` — a launch flag is a one-off override.
+   */
+  setPosture: (mode: PermissionModeId, level: number) => void;
   /** the startup banner + onboarding hint block. */
   banner: () => string;
   /** undo the last applied propose_edit; returns the reverted path (or undefined). CLI-010. */
@@ -427,6 +457,21 @@ export async function createSessionBridge(deps: BridgeDeps): Promise<SessionBrid
   for (const r of seeded.rejected) {
     deps.write(`  ! .prometheus.toml: ${r.key} ignored — ${r.reason}`);
   }
+  /**
+   * The last `/think` tier, restored — the effort twin of the authorisation level below.
+   *
+   * Precedence, most specific first: a `--think/--effort` FLAG (the human at the keyboard, this
+   * launch) > the SAVED tier (the human at the keyboard, last session) > the profile layers
+   * (a static default). A saved tier is the more recent expression of the same intent as
+   * `[agent] effort`, which is why it outranks it; a flag is more recent still.
+   *
+   * What is restored is the REQUESTED tier. It is resolved against whatever model is bound, per
+   * request, by `agent-runtime` — so restoring `xhigh` onto a session that opens on a small
+   * local model applies that model's ceiling and reports the clamp, and switching later to a
+   * model that has `xhigh` gets `xhigh` with no further action.
+   */
+  const savedEffort = cliProfiles.readSavedEffort(deps.configHome);
+  if (savedEffort && parsed.effort === undefined) seeded.tuning.effort = savedEffort;
   let state = repl.initialReplState(seeded.tuning, resolveCwd(parsed.cwd, deps.write));
   // capture the profile's system prompt BEFORE any /system override → /system reset (CLI-017).
   const systemPromptDefault = state.tuning.systemPrompt;
@@ -447,14 +492,64 @@ export async function createSessionBridge(deps: BridgeDeps): Promise<SessionBrid
   // first-prompt record. `let`, not `const`: `/cd` mints a fresh one when it rotates projects.
   let sessionId = newSessionId();
   let sessionRecorded = false;
+  /**
+   * Cross-terminal presence (the fleet bar). Declared here because the confirm/ask wrappers
+   * below need to flip this window to `needs-you`, and it is only STARTED further down, once
+   * there is a cwd and a model to report. Null until then, and null forever on a surface where
+   * the heartbeat could not be written — every reader treats that as "no fleet", never as an error.
+   */
+  let fleet: FleetTicker | null = null;
+  /**
+   * The state this window last reported, mirrored locally.
+   *
+   * The ticker is the writer, but it has no getter and starts existing only later, so
+   * `whileBlocked` needs its own record of what to go back TO.
+   */
+  let selfState: "working" | "idle" | "needs-you" = "idle";
+  const fleetState = (s: "working" | "idle" | "needs-you"): void => {
+    selfState = s;
+    fleet?.setState(s);
+  };
+  /**
+   * Run something while this window reports `needs-you`, then go back.
+   *
+   * Wrapping the four prompt primitives ONCE is the point: `deps.confirm` alone has fifteen call
+   * sites in this file — an edit approval, a command approval, a clipboard copy, the exit
+   * sweep — and a per-site flag would have been fifteen chances to forget one. The whole value
+   * of the state is that it is never wrong.
+   */
+  const whileBlocked = async <T>(fn: () => Promise<T>): Promise<T> => {
+    // Restore whatever was in force, rather than assuming `working`.
+    //
+    // "A confirm only ever interrupts a turn that is already running" is not true: the `/invoke`
+    // overlay dispatches `invokeInstall` straight onto `submitChain`, bypassing `submit()` — and
+    // `submit()`'s `finally` is the ONLY thing that ever returns this window to `idle`. So a
+    // prompt raised from that path left the window reporting `working` forever, in the one table
+    // other windows consult to see who is busy.
+    //
+    // Captured verbatim (no needs-you → working remap): when `whileBlocked` nests, the inner
+    // `finally` must restore `needs-you`, because the OUTER prompt is still blocking.
+    const prev = selfState;
+    fleetState("needs-you");
+    try {
+      return await fn();
+    } finally {
+      fleetState(prev);
+    }
+  };
+  const askConfirm = (prompt: string): Promise<boolean> => whileBlocked(() => deps.confirm(prompt));
+  const askPhrase = (prompt: string, phrase: string): Promise<boolean> =>
+    whileBlocked(() => deps.confirmPhrase(prompt, phrase));
+  const askText = (prompt: string): Promise<string> => whileBlocked(() => deps.ask(prompt));
+  const askFolder = (prompt: string, def: string): Promise<string> =>
+    whileBlocked(() => deps.askPath(prompt, def));
   // /context window: the user-chosen ceiling auto-compact budgets against (mirrors the host).
   let contextWindowSetting = loadContextWindowTokens(home);
   // (A) `/timeout` — the inactivity-pause threshold this session's turns use (default 10 min).
   let idleTimeoutMsSetting = loadIdleTimeoutMs(home);
 
   const backends: Backends =
-    deps.backends ??
-    (await detectBackends({ client }).catch(() => ({ liveRunners: [], paidClis: [] }) as Backends));
+    deps.backends ?? (await detectBackends({ client }).catch(() => emptyBackends()));
   let endpoint: AiEndpoint | undefined = backends.localEndpoint;
   /**
    * The in-flight context-window/capability probe, if one was kicked off below — awaited
@@ -520,7 +615,7 @@ export async function createSessionBridge(deps: BridgeDeps): Promise<SessionBrid
     toolCapability = agent.protocol.initialCapability();
     endpoint = next;
     // pre-load the local model NOW (fire-and-forget) so the user's next prompt is warm.
-    warmupLocalModel(next);
+    warmupLocalModel(next, home);
     const settled = endpointProbe
       .attach(next)
       .then((r) => {
@@ -658,7 +753,7 @@ export async function createSessionBridge(deps: BridgeDeps): Promise<SessionBrid
       }
       return status;
     },
-    confirm: deps.confirm,
+    confirm: askConfirm,
   });
   // Durable cross-session memory: the `memory_write`-authored index, re-read every turn — same
   // getter posture as `steering` above, and the same PROMETHEUS_HOME `home` (not `deps.configHome`,
@@ -685,7 +780,7 @@ export async function createSessionBridge(deps: BridgeDeps): Promise<SessionBrid
     cwd: state.cwd,
     globalHooks: rawHooks.globalHooks,
     workspaceHooks: rawHooks.workspaceHooks,
-    confirm: deps.confirm,
+    confirm: askConfirm,
   });
   const hooksSource: HooksSource = rawHooks.workspaceHooks !== undefined ? "workspace" : "global";
   for (const r of hookRefusals) {
@@ -709,15 +804,54 @@ export async function createSessionBridge(deps: BridgeDeps): Promise<SessionBrid
       });
   }
 
+  /**
+   * Drop our fleet heartbeat and stop any local model daemon THIS session started.
+   *
+   * Lives here, not inside `doQuit`, because `/quit` is the ONE exit that used to run it. Ctrl-D
+   * and a double Ctrl-C emit `{type:"exit"}`, SIGINT/SIGTERM/SIGHUP go through `onSignal`, a dead
+   * stdin/stdout gives 129 and a crash gives 1 — all of which call `finish()` → `dispose()` and
+   * never came anywhere near this code. Since the ticker's interval is `unref`'d, the process
+   * exited promptly and simply left `<home>/run/<pid>.json` behind with a dead pid, so every
+   * other window showed this one as `dead` for five minutes.
+   *
+   * Idempotent: `/quit` reaches it and then `dispose()` reaches it again.
+   *
+   * ORDER MATTERS. `finish()` fire-and-forgets `dispose()` (`void session.dispose().catch(...)`),
+   * so anything after an `await` in this function may never run at all. `fleet.stop()` is
+   * synchronous (clearInterval + unlink) and goes FIRST; `stopSelfStartedRunners` does network
+   * probes and a graceful stop with a 15 s timeout, so parking the heartbeat removal behind it
+   * would leave the exact stale file this exists to remove whenever the user hits Ctrl-C again.
+   */
+  let fleetTornDown = false;
+  const teardownFleet = async (): Promise<void> => {
+    if (fleetTornDown) return;
+    fleetTornDown = true;
+    // Snapshot peers BEFORE stopping the ticker: `stopSelfStartedRunners` needs to know who else
+    // is still using a runner, and our own row is filtered out by its `!p.self` test anyway.
+    const peers = fleet?.peers() ?? [];
+    fleet?.stop();
+    await stopSelfStartedRunners(backends.startedRunners, peers).catch(() => {});
+  };
+
   // Quit hook (CLI-SVC): before tearing down, offer to free local-AI memory (unload the
   // resident Ollama model). Fire-and-forget is safe — `deps.quit()` is what actually exits,
   // so the process stays alive until the prompt resolves; a failure never blocks the exit.
+  //
+  // `maybeStopServicesOnExit` stays HERE and only here: it prompts, and a hangup or crash path
+  // has nobody to answer it.
   const doQuit = async (): Promise<void> => {
     try {
-      await maybeStopServicesOnExit({ confirm: deps.confirm, write });
+      await maybeStopServicesOnExit({ confirm: askConfirm, write });
     } catch {
       /* never let a shutdown-prompt error trap the user in the session */
     }
+    // Stop any local model DAEMON this session itself started, before it's too late to ask the
+    // fleet who else is still using it — `maybeStopServicesOnExit` above only ever unloads a
+    // resident model's memory and deliberately leaves the daemon running (see its own comment);
+    // this is that daemon's stop, autonomous rather than prompted, and never touches one Prometheus
+    // did not start itself. Shared with `dispose()` so it also happens on the exits that never
+    // reach here — see `teardownFleet`.
+    await teardownFleet();
     deps.quit();
   };
 
@@ -727,7 +861,7 @@ export async function createSessionBridge(deps: BridgeDeps): Promise<SessionBrid
     client,
     json: parsed.json,
     ...(parsed.profile ? { profile: parsed.profile } : {}),
-    confirm: deps.confirmPhrase,
+    confirm: askPhrase,
     write,
   };
 
@@ -808,9 +942,9 @@ export async function createSessionBridge(deps: BridgeDeps): Promise<SessionBrid
       auditBypass(call);
       return true;
     }
-    const ok = await deps.confirm(`apply edit to ${path}?`);
+    const ok = await askConfirm(`apply edit to ${path}?`);
     if (ok) return true;
-    const reason = (await deps.ask("reject reason (optional):").catch(() => "")).trim();
+    const reason = (await askText("reject reason (optional):").catch(() => "")).trim();
     return { approved: false, reason: reason || "rejected" };
   };
 
@@ -876,17 +1010,17 @@ export async function createSessionBridge(deps: BridgeDeps): Promise<SessionBrid
         ),
       );
       // an outside-scope write is always human-authorized → audit it whatever the mode.
-      const okOut = await deps.confirm(`write file OUTSIDE the working set: ${abs}?`);
+      const okOut = await askConfirm(`write file OUTSIDE the working set: ${abs}?`);
       if (okOut) {
         appendPermissionAudit(call.name, call.args, "approved-outside-working-set", home);
         return true;
       }
-      const why = (await deps.ask("reject reason (optional):").catch(() => "")).trim();
+      const why = (await askText("reject reason (optional):").catch(() => "")).trim();
       return { approved: false, reason: why || "rejected (outside the working set)" };
     }
-    const ok = await deps.confirm(`write file ${path}?`);
+    const ok = await askConfirm(`write file ${path}?`);
     if (ok) return true;
-    const reason = (await deps.ask("reject reason (optional):").catch(() => "")).trim();
+    const reason = (await askText("reject reason (optional):").catch(() => "")).trim();
     return { approved: false, reason: reason || "rejected" };
   };
 
@@ -963,7 +1097,7 @@ export async function createSessionBridge(deps: BridgeDeps): Promise<SessionBrid
     const verdict =
       gateMode === "off" ? null : await scanCommand(agent.formatCommand(parsed.command));
     if (verdict && verdictBlocks(verdict, gateMode)) {
-      const why = verdict.findings.map((f) => f.where).join("; ") || verdict.verdict;
+      const why = verdictReasons(verdict).join("; ") || verdict.verdict;
       write(`  ⎿ run_command REFUSED by the nemesis gate (${verdict.verdict}): ${why}`);
       audit("blocked", verdict.verdict, why);
       // Refused at EVERY level, A7 included — the ladder decides how often a human is asked,
@@ -977,7 +1111,7 @@ export async function createSessionBridge(deps: BridgeDeps): Promise<SessionBrid
       audit("auto", verdict?.verdict ?? "-");
       return true;
     }
-    const approved = await deps.confirm(
+    const approved = await askConfirm(
       `run: ${agent.describeCommand(parsed.command, cls)}${tierLabel}?`,
     );
     audit(approved ? "approved" : "declined", verdict?.verdict ?? "-");
@@ -1016,7 +1150,7 @@ export async function createSessionBridge(deps: BridgeDeps): Promise<SessionBrid
     const gateMode = state.tuning.gateMode ?? "enforce";
     const verdict = gateMode === "off" ? null : await scanCommand(line);
     if (verdict && verdictBlocks(verdict, gateMode)) {
-      const why = verdict.findings.map((f) => f.where).join("; ") || verdict.verdict;
+      const why = verdictReasons(verdict).join("; ") || verdict.verdict;
       write(`  ⎿ propose_elevated REFUSED by the nemesis gate (${verdict.verdict}): ${why}`);
       appendExecAudit(
         prometheusHome(),
@@ -1038,7 +1172,7 @@ export async function createSessionBridge(deps: BridgeDeps): Promise<SessionBrid
       .split("\n")) {
       write(`  ⎿ ${l}`);
     }
-    const approved = await deps.confirm("copy this command to your clipboard?");
+    const approved = await askConfirm("copy this command to your clipboard?");
     if (approved) {
       // OSC 52 rather than pbcopy/xclip: it is the terminal that owns the clipboard, so this
       // also works over SSH and tmux, which is where "just run it yourself" most often lands.
@@ -1171,7 +1305,7 @@ export async function createSessionBridge(deps: BridgeDeps): Promise<SessionBrid
     // absolute paths, and whether any of them escape the working set); everything else keeps
     // the terse form it already had. "run tool delete_file?" was never a question anyone could
     // answer responsibly.
-    return deps.confirm(
+    return askConfirm(
       previewed ? confirmPrompt(call, state.cwd, scopeRoots()) : `run tool ${call.name}?`,
     );
   };
@@ -1253,7 +1387,7 @@ export async function createSessionBridge(deps: BridgeDeps): Promise<SessionBrid
       effortRules: effortRulesLoad.rules,
       confirm: turnConfirm,
       // The `question` tool's seam — the TUI already has a free-text modal.
-      ask: deps.ask,
+      ask: askText,
       ...(agentFiles.length > 0 ? { agentFiles } : {}),
       // Remembered "don't ask again" grants (deny-priority, narrow subjects, safe-defaults
       // forced to `once`).
@@ -1612,7 +1746,7 @@ export async function createSessionBridge(deps: BridgeDeps): Promise<SessionBrid
       },
       runShell: async (command) => {
         write(c.dim(`  ${cmd.file.name}: wants to run  ${command}`));
-        if (!(await deps.confirm(`run \`${command}\` from ${cmd.path}?`))) return null;
+        if (!(await askConfirm(`run \`${command}\` from ${cmd.path}?`))) return null;
         const out = await runSystemTool(
           "run_command",
           { command },
@@ -1639,7 +1773,7 @@ export async function createSessionBridge(deps: BridgeDeps): Promise<SessionBrid
   };
 
   const runHostSetup = async (): Promise<void> => {
-    const r = await runSetup({ client, write, ask: deps.ask, askPath: deps.askPath, home });
+    const r = await runSetup({ client, write, ask: askText, askPath: askFolder, home });
     if (r.endpoint) {
       process.env.PROMETHEUS_MODELS_DIR = resolveCategory("open_models", home);
       state = repl.reduce(state, {
@@ -1654,7 +1788,7 @@ export async function createSessionBridge(deps: BridgeDeps): Promise<SessionBrid
     }
   };
   const runHostPaths = async (): Promise<void> => {
-    await runPathsWizard({ client, write, ask: deps.ask, askPath: deps.askPath, home });
+    await runPathsWizard({ client, write, ask: askText, askPath: askFolder, home });
     process.env.PROMETHEUS_MODELS_DIR = resolveCategory("open_models", home);
   };
 
@@ -1688,6 +1822,44 @@ export async function createSessionBridge(deps: BridgeDeps): Promise<SessionBrid
    * What this deliberately does NOT touch is the session: transcript, history and session id
    * are `/cd`'s business (it rotates), and keeping them is the whole point of `/cwd`.
    */
+  /**
+   * Re-print the banner after the working directory moves.
+   *
+   * The banner's `cwd` line is the ONE place the session says where it is, and it was printed
+   * exactly once at startup — so after a `/cwd` or `/cd` the header kept naming the launch
+   * directory for the rest of the session. A terminal cannot rewrite scrollback, so the only
+   * way to make that line current is to print it again.
+   *
+   * The whole frame, not a one-line echo, and deliberately: a directory change re-points the
+   * agent files, the permission rules, the repo map and the effort table (see
+   * `moveProjectRoot`), and `/cd` additionally rotates the session. Re-showing the frame is
+   * the honest marker for "everything above this belongs to a different project".
+   */
+  const announceCwd = (_target: string): void => {
+    write("");
+    write(banner());
+  };
+
+  /**
+   * Resolve a move, optionally creating the target first.
+   *
+   * `mkdir -p` runs ONLY for a target the resolver already classified as `missing` — never for
+   * a path that exists as a file, and never before the own-repo guard and the tilde/relative
+   * resolution have been applied, so the directory created is exactly the one we would have
+   * moved to. After creating we re-resolve rather than trusting the mkdir: that keeps one
+   * code path deciding what a valid destination is.
+   */
+  const resolveMoveMaybeCreating = (dir: string, create: boolean): CwdMove => {
+    const first = resolveCwdMove(dir, state.cwd);
+    if (first.ok || !create || !first.missing || !first.path) return first;
+    try {
+      mkdirSync(first.path, { recursive: true });
+    } catch (err) {
+      return { ok: false, error: `could not create ${first.path}: ${(err as Error).message}` };
+    }
+    return resolveCwdMove(dir, state.cwd);
+  };
+
   const moveProjectRoot = (target: string): void => {
     state = repl.reduce(state, { type: "cwd", dir: target });
 
@@ -1705,10 +1877,14 @@ export async function createSessionBridge(deps: BridgeDeps): Promise<SessionBrid
     // after a move is the same staleness every reload above exists to prevent.
     effortRulesLoad = loadEffortRules(target, home);
     for (const note of effortRulesLoad.notes) write(`  ! effort rules: ${note}`);
+    // EVERY project move refreshes the frame — `/cwd`, `/cd` and `/worktree switch` all
+    // land here, so none of them can be the one that forgets.
+    announceCwd(target);
   };
 
   const changeProjectDirectory = (
     dir: string,
+    opts?: { create?: boolean },
   ):
     | {
         ok: true;
@@ -1719,27 +1895,20 @@ export async function createSessionBridge(deps: BridgeDeps): Promise<SessionBrid
       }
     | { ok: false; error: string } => {
     // `~`/`~/…` first — `isAbsolute("~/x")` is false, so without this a tilde path resolves
-    // against the CURRENT cwd instead of the home directory (mirrors /add-dir's resolveDir).
-    const expanded = expandHome(dir);
-    const requested = isAbsolute(expanded) ? expanded : resolve(state.cwd, expanded);
-    // Prometheus must never operate with a cwd inside its OWN source repo (see cwd-guard.ts's
-    // own header for why) — a `/cd` into it is silently redirected to the user's home directory
-    // instead, exactly like a fresh session's own startup cwd already is.
-    const guard = guardOwnRepo(requested);
-    const target = guard.cwd;
-    let stat: ReturnType<typeof statSync>;
-    try {
-      stat = statSync(target);
-    } catch (err) {
-      const code = (err as NodeJS.ErrnoException).code;
-      return code === "ENOENT"
-        ? { ok: false, error: `no such directory: ${target}` }
-        : { ok: false, error: `cannot access ${target}: ${(err as Error).message}` };
+    // ONE resolver for both commands. `/cd` used to hand-roll expand → resolve → guard → stat
+    // right here while `/cwd` had its own copy elsewhere, which is exactly how only one of
+    // them ended up with the existence check.
+    const move = resolveMoveMaybeCreating(dir, opts?.create === true);
+    if (!move.ok) {
+      return {
+        ok: false,
+        error: move.error,
+        ...(move.missing ? { missing: true } : {}),
+        ...(move.path ? { path: move.path } : {}),
+      };
     }
-    if (!stat.isDirectory()) {
-      return { ok: false, error: `not a directory: ${target}` };
-    }
-    const redirectedFromOwnRepo = guard.redirected ? guard.requestedCwd : undefined;
+    const target = move.cwd;
+    const redirectedFromOwnRepo = move.redirectedFrom;
     // A no-op move (the pre-filled default accepted verbatim, or `/cd .`) must be genuinely
     // harmless — askPath's own hint promises a bare Enter "keeps the default", so rotating the
     // session (fresh id, cleared transcript/todos, dropped repo map) for a directory the user is
@@ -1778,8 +1947,8 @@ export async function createSessionBridge(deps: BridgeDeps): Promise<SessionBrid
   const invokeDeps: InvokeDeps = {
     client,
     write,
-    ask: deps.ask,
-    confirm: deps.confirm,
+    ask: askText,
+    confirm: askConfirm,
     install: async (name, opts) => {
       const extra = (opts?.args ?? "").split(/\s+/).filter(Boolean);
       const outcome = await execVerb(
@@ -1801,6 +1970,18 @@ export async function createSessionBridge(deps: BridgeDeps): Promise<SessionBrid
     json: parsed.json,
     tuning: () => state.tuning,
     cwd: () => state.cwd,
+    /**
+     * `/fleet` — refresh first, then report.
+     *
+     * Refreshing is not politeness: the table is read at the exact moment a user noticed
+     * something on the bar, so a two-second-stale row is the difference between "peer 3 died"
+     * and a table that still lists it as working.
+     */
+    fleet: async () => {
+      if (!fleet) return [c.dim("this surface does not track other Prometheus windows")];
+      await fleet.refresh();
+      return fleetReport(fleet.peers(), fleet.meters(), Date.now());
+    },
     runVerb: async (tokens) => {
       const outcome = await execVerb(tokens, verbCtx);
       if (outcome.text) write(outcome.text);
@@ -1813,22 +1994,30 @@ export async function createSessionBridge(deps: BridgeDeps): Promise<SessionBrid
       state = repl.reduce(state, { type: "tune", patch });
     },
     effortResolution,
+    // `/think` reaches the SAME setter the trait rail uses, so the tier is persisted whichever
+    // way the user changed it. It used to write a bare tuning patch and be forgotten at exit.
+    setEffort: (tier) => {
+      setEffort(tier);
+    },
     getAuthLevel: () => authLevel,
-    setAuthLevel: (level) => {
+    setAuthLevel: (level, origin) => {
       authLevel = agent.authLevelMeta(level).level; // clamp 0–7
       permMode = agent.authLevelToMode(authLevel); // sync the coarse mode/indicator
-      saveAuthLevel(authLevel, deps.configHome); // last-set becomes the next-session default
+      if (origin === "user") saveAuthLevel(authLevel, deps.configHome);
     },
     /**
      * `/permission-mode` reaches the SAME dial Shift-Tab drives, including the authLevel sync.
      * Two ways to set one posture that disagreed about the companion level would show a
      * "⏸ plan mode on" indicator over an authLevel that still auto-approves edits.
+     *
+     * SESSION-SCOPED: the level moves in memory so the approval decisions follow the posture,
+     * but nothing is written. mode→level is lossy (five modes, eight levels), so persisting the
+     * derived value overwrote the user's explicit `/authorisation N` with a coarse approximation.
      */
     getPermMode: () => permMode,
     setPermMode: (mode) => {
       permMode = mode;
       authLevel = agent.modeToAuthLevel(mode);
-      saveAuthLevel(authLevel, deps.configHome);
     },
     control: (signal) => {
       if (signal === "quit") void doQuit();
@@ -1840,21 +2029,29 @@ export async function createSessionBridge(deps: BridgeDeps): Promise<SessionBrid
         write("(context cleared — fresh conversation)");
       }
     },
-    setCwd: (dir) => {
-      // `/cwd` moves in place (no session rotation), but it must be guarded exactly like `/cd`:
-      // Prometheus can never end up with a cwd inside its own repo, whichever command got it
-      // there.
-      const expanded = expandHome(dir);
-      const requested = isAbsolute(expanded) ? expanded : resolve(state.cwd, expanded);
-      const guard = guardOwnRepo(requested);
-      if (guard.redirected) {
+    setCwd: (dir, opts) => {
+      /**
+       * `/cwd` moves in place (no session rotation), but it is guarded and VALIDATED exactly
+       * like `/cd` — through the one shared resolver, because these two hosts each had their
+       * own copy of the sequence and only `/cd`'s had ever grown the existence check.
+       *
+       * Without it, `/cwd /definitely/not/here` printed a confident `cwd → …` and pointed the
+       * session, its agent files, its permission rules and its repo map at nothing.
+       *
+       * Returns the result instead of swallowing it: the COMMAND decides what to do about a
+       * missing directory (it can ask), the HOST owns the filesystem.
+       */
+      const move = resolveMoveMaybeCreating(dir, opts?.create === true);
+      if (!move.ok) return move;
+      if (move.redirectedFrom) {
         write(
-          `⚠ Prometheus refuses to operate inside its own repository (${guard.requestedCwd}) — redirected to ${guard.cwd}.`,
+          `⚠ Prometheus refuses to operate inside its own repository (${move.redirectedFrom}) — redirected to ${move.cwd}.`,
         );
       }
       // Moves in place AND re-points the project-scoped state — see `moveProjectRoot`. Doing
       // only the reduce here is what left the model reading the launch directory's rules.
-      moveProjectRoot(guard.cwd);
+      moveProjectRoot(move.cwd);
+      return move;
     },
     compact: async (focus) => {
       // manual /compact: summarize everything before the recent tail (force, regardless of size).
@@ -1916,9 +2113,9 @@ export async function createSessionBridge(deps: BridgeDeps): Promise<SessionBrid
         return "";
       }
     },
-    ask: deps.ask,
-    confirm: deps.confirm,
-    askPath: deps.askPath,
+    ask: askText,
+    confirm: askConfirm,
+    askPath: askFolder,
     ...(deps.focusTraitRail ? { focusTraitRail: deps.focusTraitRail } : {}),
     runSetup: runHostSetup,
     runPaths: runHostPaths,
@@ -1930,8 +2127,8 @@ export async function createSessionBridge(deps: BridgeDeps): Promise<SessionBrid
         cwd: state.cwd,
         caps: deps.caps ?? "none",
         write,
-        ask: deps.ask,
-        confirm: deps.confirm,
+        ask: askText,
+        confirm: askConfirm,
         localModels: async () => (endpoint?.model ? [endpoint.model] : []),
       }),
     runUpdates: async (rest) => {
@@ -1998,7 +2195,7 @@ export async function createSessionBridge(deps: BridgeDeps): Promise<SessionBrid
       }
       write(formatPicker(records));
       if (records.length === 0) return;
-      const ans = (await deps.ask("recall #: ")).trim();
+      const ans = (await askText("recall #: ")).trim();
       const n = Number(ans);
       if (!Number.isInteger(n) || n < 1 || n > records.length) {
         write("(cancelled)");
@@ -2132,7 +2329,9 @@ export async function createSessionBridge(deps: BridgeDeps): Promise<SessionBrid
     },
     // the git spawn seam for /worktree (CLI-054): the engine-bridge safe-env spawn (C5).
     git: realGitSpawn,
-    keymap: loadKeymap(home), // CLI-096: effective keymap for /keys, resolved from [keymap] config
+    // CLI-096: effective keymap for /keys, resolved from the [keymap] config table.
+    // `deps.configHome`, NOT `home` (the ~/.prometheus STATE tree) — see host.ts's twin.
+    keymap: loadKeymap(deps.configHome),
     // OSC 52 clipboard (CLI-068): raw passthrough to the tty (frame-safe — moves no cursor).
     copyToClipboard: (text) =>
       copyReplyStatus(text ?? lastAssistantReply(history), !!process.env.TMUX, (s) =>
@@ -2151,7 +2350,7 @@ export async function createSessionBridge(deps: BridgeDeps): Promise<SessionBrid
       for (const it of intents) {
         write(c.dim(`  • ${it.path ?? "(no path)"} · ${it.hunks.length} hunk(s) [${it.kind}]`));
       }
-      const ok = await deps.confirm(`apply ${intents.length} edit block(s) to disk?`);
+      const ok = await askConfirm(`apply ${intents.length} edit block(s) to disk?`);
       if (!ok) {
         write(c.dim("/apply: cancelled."));
         return;
@@ -2262,14 +2461,14 @@ export async function createSessionBridge(deps: BridgeDeps): Promise<SessionBrid
       },
     },
     // /cd — see `changeProjectDirectory`'s own header for the full rotation semantics.
-    changeProjectDirectory: (dir) => changeProjectDirectory(dir),
+    changeProjectDirectory: (dir, opts) => changeProjectDirectory(dir, opts),
   };
 
   const legacySlashCtx: LegacySlashCtx = {
     state,
     json: parsed.json,
     write,
-    confirm: deps.confirm,
+    confirm: askConfirm,
     execVerb: (tokens) => execVerb(tokens, verbCtx),
   };
 
@@ -2310,6 +2509,18 @@ export async function createSessionBridge(deps: BridgeDeps): Promise<SessionBrid
   const submit = async (input: string, opts?: { signal?: AbortSignal }): Promise<void> => {
     const trimmed = input.trim();
     if (!trimmed) return;
+    // Peers see this window as `working` for the WHOLE submission — a slash command that opens
+    // a folder prompt is every bit as much "busy, do not expect an answer from me" as a model
+    // turn. `finally`, so an abort or a thrown handler cannot strand the window as busy forever.
+    fleetState("working");
+    try {
+      return await runSubmit(trimmed, opts);
+    } finally {
+      fleetState("idle");
+    }
+  };
+
+  const runSubmit = async (trimmed: string, opts?: { signal?: AbortSignal }): Promise<void> => {
     state = repl.reduce(state, { type: "history", input: trimmed });
     const parsedInput = repl.parseSlash(trimmed);
     if (parsedInput.kind === "slash") {
@@ -2387,11 +2598,30 @@ export async function createSessionBridge(deps: BridgeDeps): Promise<SessionBrid
    * hard-coded default would quietly demote a `max` session to `medium` every time they glanced
    * at the rail.
    */
-  let lastThinkingTier: ai.EffortTier = "medium";
+  /**
+   * Seeded from the tuning the session actually OPENED with, not a literal.
+   *
+   * `state` still holds the seeded tuning at this point, so this picks up `--effort <tier>`, the
+   * tier restored from `effort.json`, and the profile's `[agent] effort` — in that precedence
+   * order. A hard-coded `"medium"` knew about none of them, so a `max` operator who pressed ⌃T
+   * down and up again came back at `medium`, and `setEffort` now PERSISTS that, ratcheting the
+   * demotion into the next session too — exactly what the docblock below says must not happen.
+   */
+  let lastThinkingTier: ai.EffortTier =
+    state.tuning.effort && state.tuning.effort !== "off" ? state.tuning.effort : "medium";
 
+  /**
+   * Set the tier the user ASKED for, and remember it for next time.
+   *
+   * `tier` — never a resolved/clamped value — is what reaches both the tuning and the disk. The
+   * clamp is a property of the model bound right now, not of the user's preference, and saving
+   * it would ratchet that preference down to whichever model happened to be loaded: one session
+   * on a small local model would rewrite a `max` operator to `medium`, permanently.
+   */
   const setEffort = (tier: ai.EffortTier): ai.EffortTier => {
     if (tier !== "off") lastThinkingTier = tier;
     state = repl.reduce(state, { type: "tune", patch: { effort: tier } });
+    cliProfiles.saveEffort(tier, deps.configHome); // last-set becomes the next-session default
     return tier;
   };
 
@@ -2426,6 +2656,7 @@ export async function createSessionBridge(deps: BridgeDeps): Promise<SessionBrid
     const u = sessionUsage(history, provider, model, isLocal, pricing);
     const cost =
       u.estTokens > 0 && u.cost !== null ? { estTokens: u.estTokens, estUsd: u.cost } : undefined;
+    const fleetModel = fleet?.model() ?? undefined;
     return {
       permMode,
       authLevel,
@@ -2447,6 +2678,9 @@ export async function createSessionBridge(deps: BridgeDeps): Promise<SessionBrid
       // chrome. `thinking` in that list is the precondition for the tier next to it meaning
       // anything at all, so the two belong in one glance rather than on separate chrome.
       ...(endpoint?.probedCapabilities ? { capabilities: endpoint.probedCapabilities } : {}),
+      // The other windows on this machine. Absent until the ticker has read the run directory
+      // once, and rendered as nothing at all while this is the only instance.
+      ...(fleetModel ? { fleet: fleetModel } : {}),
       ...(effortStatus() ?? {}),
     };
   };
@@ -2465,6 +2699,55 @@ export async function createSessionBridge(deps: BridgeDeps): Promise<SessionBrid
       },
     };
   };
+
+  /**
+   * The one-time legend, shown the first time this user ever sees a second window.
+   *
+   * Once, ever, and then never again: a legend you have already read is three rows of scrollback
+   * you did not ask for. It fires on the CHANGE that first makes the bar appear, so it lands
+   * directly above the thing it explains rather than at a startup the user has scrolled past.
+   */
+  let legendShown = loadSettings(home).fleetLegendSeen === true;
+  function maybeShowFleetLegend(): void {
+    if (legendShown) return;
+    const m = fleet?.model();
+    if (!m || m.peers.total <= 1) return;
+    legendShown = true;
+    write(["", ...fleetLegendLines(deps.caps ?? "none"), ""].join("\n"));
+    try {
+      saveSettings({ fleetLegendSeen: true }, home);
+    } catch {
+      /* an unwritable home costs the user a repeat legend, never a crashed session */
+    }
+  }
+
+  /**
+   * Register this window in the fleet and start watching the others.
+   *
+   * Started here, after the cwd and the model binding exist, because the very first heartbeat
+   * should already carry them — a peer that shows up as `—  —` for its first two seconds looks
+   * broken in exactly the table a user opened to check whether something is broken.
+   */
+  fleet = startFleetTicker({
+    home,
+    id: sessionId,
+    cwd: () => state.cwd,
+    model: () => state.tuning.model.modelId ?? "",
+    onChange: () => {
+      maybeShowFleetLegend();
+      deps.redraw?.();
+    },
+    // ACTIVE EVICTION: a Prometheus-managed local model server was force-stopped somewhere —
+    // this session's own watchdog, another CLI shell's, or the desktop app's — to prevent a
+    // machine-wide freeze. Every live session learns this, not just whichever one was mid-turn
+    // against it: `write` puts it straight into the transcript, same as the fleet legend above.
+    onEviction: (event) => {
+      write(
+        `\n⚠ Prometheus stopped ${event.name} to prevent a machine-wide freeze (${event.reason}). Some work may have been interrupted — it will restart automatically once resources are available.\n`,
+      );
+      deps.redraw?.();
+    },
+  });
 
   // The startup banner MUST include the ZEUS titan + PROMETHEUS wordmark — reuse the
   // host's exported `renderBanner` (the single source). NEVER replace it with a
@@ -2489,18 +2772,33 @@ export async function createSessionBridge(deps: BridgeDeps): Promise<SessionBrid
     submit,
     statusModel,
     getPermMode: () => permMode,
+    /**
+     * Shift-Tab / `/permission-mode`: SESSION-SCOPED, and that is why nothing here touches disk.
+     *
+     * The fine level still follows the coarse mode in memory, because every approval decision
+     * reads `authLevel` and a mode that did not move it would be decoration. But mode→level is
+     * lossy, so writing the derived value back to `authorisation.json` destroyed the user's
+     * explicit choice: `/authorisation 7` + one Shift-Tab used to persist 2, and a full cycle
+     * back to `default` persisted 1.
+     */
     setPermMode: (mode) => {
       permMode = mode;
-      // keep the fine autonomy level in sync when the user Shift-Tabs the coarse mode,
-      // and PERSIST it so the last posture is the default for the next session.
       authLevel = agent.modeToAuthLevel(mode);
-      saveAuthLevel(authLevel, deps.configHome);
+    },
+    // Both fields, neither derived from the other — see `setPosture`'s doc on the interface.
+    setPosture: (mode, level) => {
+      permMode = mode;
+      authLevel = agent.authLevelMeta(level).level; // clamp 0–7
     },
     getAuthLevel: () => authLevel,
-    setAuthLevel: (level) => {
+    setAuthLevel: (level, origin) => {
       authLevel = agent.authLevelMeta(level).level; // clamp 0–7
       permMode = agent.authLevelToMode(authLevel); // sync the coarse mode/indicator
-      saveAuthLevel(authLevel, deps.configHome); // last-set becomes the next-session default
+      // ONLY an explicit numbered choice becomes the next-session default. Restoring the saved
+      // level at startup, a `--authorisation` launch flag and a post-sudo clamp all arrive here
+      // as `session` — the startup call used to persist unconditionally, which made every read
+      // miss and every safety clamp permanent the moment it happened.
+      if (origin === "user") saveAuthLevel(authLevel, deps.configHome);
     },
     banner,
     revertLastEdit,
@@ -2528,6 +2826,9 @@ export async function createSessionBridge(deps: BridgeDeps): Promise<SessionBrid
       await dispatchInvoke(row, invokeDeps, args);
     },
     dispose: async (): Promise<void> => {
+      // The one path EVERY exit takes — see `teardownFleet` for why the heartbeat removal cannot
+      // live in `doQuit` alone.
+      await teardownFleet();
       await mcp?.close().catch(() => {});
     },
   };

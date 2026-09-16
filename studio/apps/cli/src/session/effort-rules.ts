@@ -25,6 +25,7 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 
 import { ai } from "@prometheus/core";
+import { prometheusHome } from "@prometheus/core/agent-system-host";
 
 /** Where a layer's file lives, relative to the layer's root. */
 const RULES_SUBPATH = join(".prometheus", ai.EFFORT_RULES_FILENAME);
@@ -87,7 +88,10 @@ export function loadEffortRules(cwd: string, home?: string): EffortRulesLoad {
   const notes: string[] = [];
   const sources: string[] = [];
 
-  const userPath = join(home ?? join(homedir(), ".prometheus"), ai.EFFORT_RULES_FILENAME);
+  // `prometheusHome()`, not a hand-spelled `~/.prometheus`: the hard-coded twin ignored
+  // $PROMETHEUS_HOME, so the one variable that sandboxes the product moved every other root and
+  // left this one reading the real machine's rules file.
+  const userPath = join(home ?? prometheusHome(), ai.EFFORT_RULES_FILENAME);
   const user = layer(userPath);
   notes.push(...user.notes);
   if (user.used) sources.push(userPath);

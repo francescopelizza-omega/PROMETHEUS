@@ -126,6 +126,7 @@ function SymbolRows({
                   padding: "1px 0",
                   overflow: "hidden",
                   textOverflow: "ellipsis",
+                  minWidth: 0, // flex/grid floor — without it the ellipsis is unreachable
                   whiteSpace: "nowrap",
                 }}
               >
@@ -222,6 +223,7 @@ export function OutlineView({ root }: { root: string }): ReactElement {
             fontFamily: "var(--font-mono, monospace)",
             overflow: "hidden",
             textOverflow: "ellipsis",
+            minWidth: 0, // flex/grid floor — without it the ellipsis is unreachable
             whiteSpace: "nowrap",
           }}
         >

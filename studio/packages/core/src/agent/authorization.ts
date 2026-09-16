@@ -149,6 +149,31 @@ export const AUTH_LEVELS: readonly AuthLevelMeta[] = Object.freeze([
 /** The default level when no `--authorisation` flag is given (matches the classic ask-for-changes posture). */
 export const DEFAULT_AUTH_LEVEL = 1;
 
+/**
+ * The highest valid level (7 — "run all").
+ *
+ * DERIVED from the ladder, and exported so the surfaces stop re-deriving it: the desktop store
+ * carried its own `AUTH_LEVELS.length - 1`, the CLI clamps wrote a bare `7`, and a ladder that
+ * ever grew an eighth tier would have left each of them capping somewhere different.
+ */
+export const MAX_AUTH_LEVEL = AUTH_LEVELS.length - 1;
+
+/**
+ * The lowest rung at which NETWORK / remote-code work runs without asking.
+ *
+ * Derived, never a literal. `classifyAuth` maps a tool's `openWorldHint` — "network /
+ * remote code" — onto the `install` category, so the network rung is simply the first
+ * level whose cumulative `auto` set contains it. Writing `5` by hand in each consumer is
+ * how a ladder change silently stops being enforced in one of them.
+ *
+ * Studio's Model Hub greys cloud endpoints below this level and labels them "A5+ only";
+ * `main/ai-ipc.ts` is what makes that label true.
+ */
+export const NETWORK_AUTH_LEVEL: number = Math.max(
+  0,
+  AUTH_LEVELS.findIndex((l) => l.auto.includes("install")),
+);
+
 /** Clamp any number to a valid level and return its metadata. */
 export function authLevelMeta(level: number): AuthLevelMeta {
   const i = Math.max(0, Math.min(Math.trunc(level), AUTH_LEVELS.length - 1));

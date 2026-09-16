@@ -42,7 +42,13 @@ import {
   safeFetch,
 } from "@prometheus/engine-bridge";
 
-import { agent as coreAgent, rules as coreRules, settings as coreSettings } from "@prometheus/core";
+import {
+  cliProfiles,
+  agent as coreAgent,
+  rules as coreRules,
+  settings as coreSettings,
+} from "@prometheus/core";
+import { DEFAULT_AUTH_LEVEL } from "@prometheus/core/agent-authorization";
 import { isHostDispatchTool } from "@prometheus/core/agent-system";
 import { isPathAllowed, pathArgsOf, scopedAbsolute } from "@prometheus/core/agent-system-host";
 import {
@@ -540,6 +546,35 @@ export function clampAuthLevelForPosture(
   return posture.autoApprove === false ? 0 : level;
 }
 
+/**
+ * The PERSISTED authorisation level is a CEILING the renderer may lower and never raise.
+ *
+ * `agent:systemTool` took the level straight off the request — and that level is what
+ * `run_command`'s OS sandbox consults to decide whether the call may reach the network. The
+ * renderer is the surface this whole file exists not to trust, so a compromised or merely
+ * buggy renderer could hand main an A7 and open egress on a machine whose operator had
+ * chosen A1. `main/ai-ipc.ts` already refuses a cloud model on the saved level; this is the
+ * same rule for the other transport that can leave the box.
+ *
+ * MIN, not "use the disk value": a session that wants to work at a LOWER level than its
+ * saved preference is a legitimate, safer choice, and clamping upward would undo it.
+ *
+ * Fail-CLOSED on an unreadable store: `readSavedAuthLevel` returns null, and the ladder's
+ * own default (A1) applies — the same value a first launch gets.
+ */
+export function clampAuthLevelToSaved(
+  level: number,
+  readSaved: () => number | null = cliProfiles.readSavedAuthLevel,
+): number {
+  let saved: number | null = null;
+  try {
+    saved = readSaved();
+  } catch {
+    /* unreadable ⇒ the default below */
+  }
+  return Math.min(level, saved ?? DEFAULT_AUTH_LEVEL);
+}
+
 export function clampAuthLevelForElevation(level: number): number {
   const elevated =
     process.env.SUDO_USER !== undefined ||
@@ -815,17 +850,37 @@ export function registerIdeIpcHandlers(wiring: IdeIpcWiring): () => void {
       return { ok: false, error: errString(e) };
     }
   });
+  /**
+   * Watch/unwatch carry the sensitive-path guard for the same reason `ide:fs.tree` above
+   * does. `fsWatchSchema` is a charset/length check on the string, nothing more, and
+   * `FsWatchHost.watch` applies no guard of its own — so a renderer-supplied `~/.ssh` was
+   * watched and every change under it streamed back over `onFsChange`. A recursive watcher
+   * is an enumeration channel with a subscription attached.
+   *
+   * Both handlers MUST guard identically: `FsWatchHost` keys its map by the exact string it
+   * is given, so normalising the root on watch but not on unwatch would strand live
+   * watchers under their canonical key with no way to remove them. `assertNotSensitivePath`
+   * already calls `uriToFsPath` internally and returns the canonical absolute path.
+   */
   ipcMain.handle(IPC.ideFsWatch, async (_e, arg: unknown): Promise<IdeOkResult> => {
     const v = validateFsWatch(arg);
     if (!v.ok) return { ok: false, error: v.error.message };
-    fsWatch.watch(v.value.root);
-    return { ok: true };
+    try {
+      fsWatch.watch(assertNotSensitivePath(v.value.root));
+      return { ok: true };
+    } catch (e) {
+      return { ok: false, error: errString(e) };
+    }
   });
   ipcMain.handle(IPC.ideFsUnwatch, async (_e, arg: unknown): Promise<IdeOkResult> => {
     const v = validateFsWatch(arg);
     if (!v.ok) return { ok: false, error: v.error.message };
-    fsWatch.unwatch(v.value.root);
-    return { ok: true };
+    try {
+      fsWatch.unwatch(assertNotSensitivePath(v.value.root));
+      return { ok: true };
+    } catch (e) {
+      return { ok: false, error: errString(e) };
+    }
   });
   // ── fs CRUD (leap #8): each path-guarded (assertNotSensitivePath) before any write ──
   ipcMain.handle(IPC.ideFsCreateFile, async (_e, arg: unknown): Promise<IdeOkResult> => {
@@ -1697,8 +1752,10 @@ export function registerIdeIpcHandlers(wiring: IdeIpcWiring): () => void {
         // network, and it is what the exec audit records. Absent ⇒ core's safe default.
         ...(typeof req.authLevel === "number"
           ? {
-              authLevel: clampAuthLevelForPosture(
-                clampAuthLevelForElevation(Math.max(0, Math.min(Math.trunc(req.authLevel), 7))),
+              authLevel: clampAuthLevelToSaved(
+                clampAuthLevelForPosture(
+                  clampAuthLevelForElevation(Math.max(0, Math.min(Math.trunc(req.authLevel), 7))),
+                ),
               ),
             }
           : {}),
@@ -2120,7 +2177,12 @@ export function registerIdeIpcHandlers(wiring: IdeIpcWiring): () => void {
     const v = validateCoverageImport(arg);
     if (!v.ok) return { ok: false, error: v.error.message };
     try {
-      const res = await runSidecar("coverage", "import", ["--in", v.value.path]);
+      // The sibling coverage.run above canonicalises its root through the same guard; this
+      // one handed the renderer's string to the sidecar untouched. `assertNotSensitivePath`
+      // both applies the denylist and returns an ABSOLUTE path, which also rules out a
+      // flag-shaped value being read as another argument. The throw is caught below.
+      const inPath = assertNotSensitivePath(v.value.path);
+      const res = await runSidecar("coverage", "import", ["--in", inPath]);
       return { ok: true, report: coerceReport(res.data) };
     } catch (e) {
       return { ok: false, error: errString(e) };
@@ -2586,7 +2648,10 @@ export function registerIdeIpcHandlers(wiring: IdeIpcWiring): () => void {
       return { ok: false, error: "root + uri + ts are required" };
     }
     try {
-      const path = assertNotSensitivePath(a.uri);
+      // Revert WRITES. `ide:history.list`/`read` above are reads and keep the denylist only,
+      // but every other write path in this file goes through the working-set grant as well —
+      // this one did not, so a renderer-supplied uri outside the granted roots was written.
+      const path = assertInsideWorkingSet(assertNotSensitivePath(a.uri));
       const content = history.read(a.root, path, a.ts);
       if (content === undefined) return { ok: false, error: "revision not found" };
       // capture the CURRENT on-disk state first (so the revert is itself undoable), then write.

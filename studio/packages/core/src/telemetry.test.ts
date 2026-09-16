@@ -2,12 +2,18 @@
  * telemetry.test.ts — local-first + opt-in + scrub (file 10 §8).
  */
 import assert from "node:assert/strict";
+import { join } from "node:path";
 import test from "node:test";
+
+import { configDir } from "./cli-profiles/paths.js";
 
 import { createTelemetry, eventsLogPath, scrub } from "./telemetry.js";
 
-test("eventsLogPath → ~/.config/prometheus-studio/events.jsonl", () => {
-  assert.equal(eventsLogPath("/home/u"), "/home/u/.config/prometheus-studio/events.jsonl");
+test("eventsLogPath → ~/.prometheus/config/events.jsonl (the ONE config root)", () => {
+  // Asserted through configDir, NOT by re-spelling the root: the literal is what let this
+  // path silently stay behind in the old tree while its own test kept passing.
+  assert.equal(eventsLogPath("/home/u"), join(configDir("/home/u"), "events.jsonl"));
+  assert.equal(eventsLogPath("/home/u"), "/home/u/.prometheus/config/events.jsonl");
 });
 
 test("scrub: $HOME paths → ~, URLs → [url], sensitive keys → [redacted]", () => {

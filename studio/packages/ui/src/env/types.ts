@@ -41,7 +41,8 @@ export interface EnvRowData {
   pythonVersion: string;
   active: boolean;
   managedBy: string; // 'studio' | 'engine' | 'external'
-  packageCount: number;
+  /** absent when the sidecar could not count them — NOT the same as zero. */
+  packageCount?: number;
   sizeBytes?: number;
   health: string; // 'ok' | 'degraded' | 'broken' | 'unknown'
   cuda?: { available: boolean; torchCuda?: string };

@@ -19,6 +19,8 @@ import {
 } from "node:fs";
 import { join } from "node:path";
 
+import { ai } from "@prometheus/core";
+
 export interface SessionRecord {
   id: string;
   /** ISO timestamp. */
@@ -397,6 +399,11 @@ function acctFile(home: string, id: string): string {
  * crash leaves a readable (possibly short) log, never a corrupt whole-array rewrite.
  */
 export function appendAccounting(home: string, sessionId: string, rec: AccountingRecord): void {
+  // The SHARED daily ledger first, and unconditionally: `budget.dailyUsd` is one number, and
+  // it used to be counted twice because this surface and the desktop each read only their own
+  // rows. Written even when the session id is unusable — a turn that cannot be attributed to a
+  // session was still money spent today.
+  ai.appendSharedSpend(join(home, "accounting"), rec);
   const id = safeSessionId(sessionId);
   if (!id) return;
   try {
@@ -443,20 +450,41 @@ function readAcctFile(path: string): AccountingRecord[] {
  * current session, where unreadable IS fatal.
  */
 export function readAccountingSince(home: string, sinceMs: number): AccountingRecord[] {
+  // The SHARED daily ledger is the primary source — both callers pass local midnight, which
+  // is exactly the window one day file covers. The per-session scan below is kept as a
+  // fallback so a user upgrading mid-day does not have this morning's spend disappear from
+  // the cap; rows present in both are counted once.
+  // Filtered by the ROW's own timestamp, not by the file's. `readSharedDay` returns the whole
+  // calendar day, and this function promises "since `sinceMs`" — both callers pass local
+  // midnight, where the two coincide, but the contract is the narrower one and a caller
+  // passing a shorter window must get it.
+  const shared = (
+    ai.readSharedDay(join(home, "accounting"), new Date(sinceMs).toISOString()) as AccountingRecord[]
+  ).filter((r) => {
+    const t = Date.parse(r.atIso);
+    return Number.isFinite(t) && t >= sinceMs;
+  });
+  const key = (r: AccountingRecord): string =>
+    `${r.atIso}|${r.model}|${r.promptTokens}|${r.completionTokens}`;
+  const seen = new Set(shared.map(key));
   const dir = sessionsDir(home);
   let names: string[];
   try {
     names = readdirSync(dir);
   } catch {
-    return []; // no sessions dir yet — nothing has ever been spent
+    return shared; // no sessions dir yet — the shared rows are still the answer
   }
-  const out: AccountingRecord[] = [];
+  const out: AccountingRecord[] = [...shared];
   for (const name of names) {
     if (!name.endsWith(".acct.jsonl")) continue;
     const path = join(dir, name);
     try {
       if (statSync(path).mtimeMs < sinceMs) continue; // cannot hold a record from today
-      out.push(...parseAcctLines(readFileSync(path, "utf8")));
+      for (const r of parseAcctLines(readFileSync(path, "utf8"))) {
+        if (seen.has(key(r))) continue; // already counted from the shared ledger
+        seen.add(key(r));
+        out.push(r);
+      }
     } catch {
       /* a single unreadable/vanished session file is skipped, not fatal for the whole window */
     }

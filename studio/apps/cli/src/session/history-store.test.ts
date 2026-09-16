@@ -592,11 +592,18 @@ test("the day window spans EVERY session, not just the current one", () => {
 });
 
 test("a session file older than the window is not even opened", () => {
-  // The cost bound: a file whose last write predates local midnight cannot hold today's records.
+  // The cost bound: a file whose last write predates the window cannot hold a record in it.
+  //
+  // The record's OWN `atIso` is backdated too, not just the file's mtime. mtime is a cheap
+  // proxy used to avoid opening the file at all; the shared daily ledger keys off the row's
+  // timestamp instead, so a fixture that backdated only the file described a record that is
+  // simultaneously "from yesterday" (by mtime) and "from four minutes ago" (by content). The
+  // two readers then disagreed, correctly. Backdating both makes the fixture mean one thing.
   const home = mkdtempSync(join(tmpdir(), "prom-acct-"));
-  appendAccounting(home, "old", acctRec());
+  const dayAgo = Date.now() - 86_400_000;
+  appendAccounting(home, "old", acctRec({ atIso: new Date(dayAgo).toISOString() }));
   const file = join(home, "sessions", "old.acct.jsonl");
-  const past = new Date(Date.now() - 86_400_000);
+  const past = new Date(dayAgo);
   utimesSync(file, past, past);
   assert.deepEqual(readAccountingSince(home, Date.now() - 3600_000), []);
 });

@@ -739,14 +739,27 @@ function defaultWatchIo(): WatchIo {
         for (const byte of buf) handler(byte);
       };
       stdin.on("data", listener);
-      return {
-        restore: () => {
-          stdin.off("data", listener);
-          stdin.setRawMode?.(wasRaw);
-          stdin.pause();
-          process.stdout.write(SHOW_CURSOR); // never leave the terminal in raw/no-cursor state
-        },
+      // The restore is idempotent AND wired to the ways a watch actually ends. Only the happy
+      // path called it, so a throw, a ^C or an exit left the terminal in RAW mode with the
+      // cursor hidden — the shell still running, but echoing nothing and showing no caret,
+      // which reads as a hung machine. `once`-style guarding matters because the exit and
+      // signal handlers can both fire.
+      let restored = false;
+      const restore = (): void => {
+        if (restored) return;
+        restored = true;
+        stdin.off("data", listener);
+        stdin.setRawMode?.(wasRaw);
+        stdin.pause();
+        process.stdout.write(SHOW_CURSOR); // never leave the terminal in raw/no-cursor state
+        process.off("exit", restore);
+        process.off("SIGINT", restore);
+        process.off("SIGTERM", restore);
       };
+      process.on("exit", restore);
+      process.on("SIGINT", restore);
+      process.on("SIGTERM", restore);
+      return { restore };
     },
     setTimer: (fn, ms) => setTimeout(fn, ms),
     clearTimer: (h) => clearTimeout(h as ReturnType<typeof setTimeout>),

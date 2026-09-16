@@ -175,8 +175,12 @@ export function runNemesis(
 
     if (opts.signal) opts.signal.addEventListener("abort", onAbort, { once: true });
 
-    child.stdout?.on("data", (b: Buffer) => {
-      stdout += b.toString();
+    // setEncoding, not per-chunk `b.toString()`: a multi-byte character split across a chunk
+    // boundary decodes to U+FFFD on both sides. This is the gate's OWN output — a corrupted
+    // path or finding in a verdict is a security report the user cannot act on.
+    child.stdout?.setEncoding("utf8");
+    child.stdout?.on("data", (chunk: string) => {
+      stdout += chunk;
       if (stdout.length > MAX_NEMESIS_STDOUT_BYTES) {
         finishReject(
           new EngineError(
@@ -186,8 +190,8 @@ export function runNemesis(
         );
       }
     });
-    child.stderr?.on("data", (b: Buffer) => {
-      const chunk = b.toString();
+    child.stderr?.setEncoding("utf8");
+    child.stderr?.on("data", (chunk: string) => {
       stderr += chunk;
       if (opts.onStderr) {
         let rest = stderrLineBuf + chunk;
@@ -468,15 +472,13 @@ async function gateStdinText(
     verdict,
     risk_score: risk,
     signed: json.signed === true,
-    // `blocking_reasons` are prose, not structured findings — map them into the Finding
-    // shape rather than inventing a parallel one, so every surface that already renders a
-    // verdict renders this one too.
-    findings: reasons.map((r) => ({
-      klass: "malware" as const,
-      severity: (verdict === "warn" ? "medium" : "high") as Finding["severity"],
-      rule: "nemesis",
-      where: r,
-    })),
+    // `blocking_reasons` are PROSE, and they stay prose. They used to be mapped into the
+    // Finding shape "so every surface that already renders a verdict renders this one too" —
+    // which required inventing a rule id (`"nemesis"`) and deriving a severity from the
+    // decision tier, the conflation handoff §4 names outright. A surface that wants to show
+    // them reads `blockingReasons` and renders them as reasons.
+    findings: [],
+    ...(reasons.length > 0 ? { blockingReasons: reasons } : {}),
     scannedAt: new Date().toISOString(),
     target: label,
   };

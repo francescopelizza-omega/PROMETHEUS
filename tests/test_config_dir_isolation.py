@@ -76,18 +76,82 @@ class TestConfigDirIsolation(unittest.TestCase):
                 "crash guard wrote into HOME despite PROMETHEUS_CONFIG_DIR",
             )
 
-    def test_default_is_still_the_xdg_style_home_path(self):
+    def test_default_is_the_one_prometheus_home(self):
+        """ONE HOME: with no override and no legacy dir, the engine lives in ~/.prometheus/config.
+
+        It used to resolve to `~/.config/prometheus` — a THIRD root beside `~/.prometheus`
+        (sessions, cache, logs, models) and the Studio's `~/.config/prometheus-studio`. Three
+        directories for one product is why "where does Prometheus keep my settings" had no
+        answer.
+        """
         with tempfile.TemporaryDirectory() as fake_home:
-            data = _run({"HOME": fake_home})
-            self.assertEqual(data["prom_dir"], str(Path(fake_home) / ".config" / "prometheus"))
+            data = _run({"HOME": fake_home, "PROMETHEUS_HOME": ""})
+            self.assertEqual(data["prom_dir"], str(Path(fake_home) / ".prometheus" / "config"))
+
+    def test_prometheus_home_sandboxes_the_engine_too(self):
+        """$PROMETHEUS_HOME moves the engine with everything else.
+
+        The engine ignored it outright, so the one variable that is supposed to sandbox the
+        whole product moved the Studio's trees and left the engine writing to the real home.
+        """
+        with tempfile.TemporaryDirectory() as fake_home, tempfile.TemporaryDirectory() as ph:
+            data = _run({"HOME": fake_home, "PROMETHEUS_HOME": ph})
+            self.assertEqual(data["prom_dir"], str(Path(ph) / "config"))
+            for key in ("skills", "trust", "url_pin_lock", "session_report", "purge", "config"):
+                self.assertTrue(
+                    data[key].startswith(ph),
+                    f"{key} escaped $PROMETHEUS_HOME: {data[key]}",
+                )
+
+    def test_an_existing_install_keeps_its_legacy_dir(self):
+        """A machine that already HAS ~/.config/prometheus keeps using it.
+
+        Repointing the root without this would silently start an existing install from nothing:
+        no trust store, no per-tier gate policy, no installed skills — exactly the "my setting
+        did not survive" failure the consolidation exists to end.
+        """
+        with tempfile.TemporaryDirectory() as fake_home:
+            legacy = Path(fake_home) / ".config" / "prometheus"
+            legacy.mkdir(parents=True)
+            (legacy / "trust.json").write_text("{}")
+            data = _run({"HOME": fake_home, "PROMETHEUS_HOME": ""})
+            self.assertEqual(data["prom_dir"], str(legacy))
+
+            # An EMPTY new root does NOT end the fallback. The Studio creates
+            # `~/.prometheus/config` for mcp-servers.json and its audit logs long before the
+            # engine writes anything, so a bare `.exists()` test would have declared the move
+            # complete on a machine where it had not started — orphaning trust.json, vault.json,
+            # pin.key, the installed skills and the managed repos in the old tree.
+            new_root = Path(fake_home) / ".prometheus" / "config"
+            new_root.mkdir(parents=True)
+            (new_root / "mcp-servers.json").write_text("{}")
+            still = _run({"HOME": fake_home, "PROMETHEUS_HOME": ""})
+            self.assertEqual(still["prom_dir"], str(legacy))
+
+            # …the ENGINE's own state at the new root is what ends it.
+            (new_root / "trust.json").write_text("{}")
+            moved = _run({"HOME": fake_home, "PROMETHEUS_HOME": ""})
+            self.assertEqual(moved["prom_dir"], str(new_root))
+            # an explicit override still beats both
+            with tempfile.TemporaryDirectory() as cfg:
+                over = _run({"HOME": fake_home, "PROMETHEUS_CONFIG_DIR": cfg})
+                self.assertEqual(over["prom_dir"], cfg)
 
     def test_source_keeps_one_definition_of_the_config_dir(self):
         src = ENGINE.read_text()
         hits = re.findall(r'HOME\s*/\s*"\.config"\s*/\s*"prometheus"', src)
         self.assertEqual(
             len(hits), 1,
-            "the config dir must be spelled once, inside _resolve_prom_dir(); "
+            "the LEGACY config dir must be spelled once, as LEGACY_PROM_DIR; "
             f"found {len(hits)} copies — a second one silently ignores the override",
+        )
+        # and the CURRENT root likewise: one definition, inside _resolve_prom_home(). A second
+        # `HOME / ".prometheus"` is how the model library and the effort rules came to ignore
+        # $PROMETHEUS_HOME while the config dir honoured it.
+        current = re.findall(r'HOME\s*/\s*"\.prometheus"', src)
+        self.assertEqual(
+            len(current), 1,
+            f"the one Prometheus home must be spelled once; found {len(current)} copies",
         )
 
     def test_pytest_run_is_sandboxed(self):

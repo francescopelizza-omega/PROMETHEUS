@@ -64,6 +64,34 @@ const targets = [
     entryPoints: [join(here, "src", "test", "suite", "index.ts")],
     outfile: join(here, "out", "test", "suite", "index.cjs"),
   },
+  {
+    /**
+     * engine-bridge's local-runner WATCHDOG entry.
+     *
+     * It is SPAWNED BY PATH (`node <path>`) and never imported, so nothing in the extension
+     * bundle's module graph pulls it in and it has to be an explicit entry point. Without it the
+     * file does not exist beside the bundle, and because the spawn is `stdio: "ignore"` and
+     * fire-and-forget the only symptom is that the 15-minute idle stop and the critical-RAM
+     * eviction silently never run.
+     *
+     * `format: "esm"` + a `.mjs` outfile, NOT `shared`: this file is executed by a fresh `node`,
+     * not required by the extension host, and it uses a top-level `import.meta.url` main-module
+     * guard. Inheriting `shared` would give it CJS plus the `import.meta.url` -> `__importMetaUrl`
+     * define, which rewrites that guard to compare against the WRONG file and would stop the poll
+     * loop from ever starting. `.mjs` (not `.js`) because this package is not `type: module`, so
+     * a bare `.js` here would be loaded as CJS. `watchdogEntryPath()` probes `.js` then `.mjs`.
+     */
+    bundle: true,
+    platform: "node",
+    target: "node20",
+    format: "esm",
+    sourcemap: true,
+    logLevel: "info",
+    entryPoints: [
+      join(here, "..", "..", "packages", "engine-bridge", "src", "ollama-watchdog-entry.ts"),
+    ],
+    outfile: join(here, "out", "ollama-watchdog-entry.mjs"),
+  },
 ];
 
 for (const t of targets) {

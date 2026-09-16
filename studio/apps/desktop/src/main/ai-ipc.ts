@@ -30,11 +30,14 @@ import type { IpcMain, WebContents } from "electron";
 import {
   PROBE_CACHE_TTL_MS,
   ai,
+  cliProfiles,
   settings as coreSettings,
   orchestration,
   probeContextWindow,
   secrets as secretsNs,
+  localKeepAliveField,
 } from "@prometheus/core";
+import { DEFAULT_AUTH_LEVEL, NETWORK_AUTH_LEVEL } from "@prometheus/core/agent-authorization";
 import { estimateTextTokens } from "@prometheus/core/agent-compact";
 import {
   IdleWatchdog,
@@ -56,8 +59,10 @@ import {
   fetchModelWithRetry,
   preflightContext,
 } from "@prometheus/core/ai-retry";
+import { type EvictionEvent, findRecentEviction, readEvictionEvents } from "@prometheus/engine-bridge";
 
 import { getBudgetGate, isLocalModelId } from "./budget-gate.js";
+import { touchModelActivity } from "./model-activity-store.js";
 
 /**
  * Native tool calls as they accumulate, keyed by the wire's GROUPING key rather than by
@@ -148,12 +153,32 @@ const inFlight = new Map<string, AbortController>();
 /**
  * `origin → model` for every LOCAL model we asked to stay resident.
  *
- * We send `keep_alive: "30m"` so a multi-round agent turn does not pay a cold weights
- * reload between rounds. The cost of that is real: without this ledger, quitting Studio
- * leaves several GB of a model pinned in RAM for half an hour, with nothing running that
- * could explain why. `freeLocalModels` reverses it on exit.
+ * We no longer pin `keep_alive` per request — see `localKeepAliveField` in
+ * `packages/core/src/ai/local-runners.ts` for why (a hardcoded "30m" overrode the user's own
+ * `OLLAMA_KEEP_ALIVE=60s` memory guard and left GBs resident for half an hour after the last
+ * prompt). The runner's configured default now decides, and a multi-round turn stays warm
+ * anyway because each request restarts the runner's idle timer.
+ *
+ * This ledger still matters: whatever the runner's timeout is, quitting Studio should not wait
+ * for it. `freeLocalModels` evicts on exit what we caused to be loaded.
  */
 const residentModels = new Map<string, Set<string>>();
+
+/**
+ * ACTIVE EVICTION: was `baseUrl`'s runner JUST force-stopped under critical RAM pressure?
+ * Checked at BOTH of `runAiStream`'s failure sites — the connection never even reaching the
+ * endpoint (the common case: a cold request made after the eviction) and a stream that dies
+ * mid-response (the rarer case: the eviction lands while this exact request was in flight) —
+ * so either one gets the same resumable "paused" treatment instead of a red error. Thin wrapper
+ * around engine-bridge's shared `findRecentEviction` (which takes an already-resolved runnerId,
+ * so it stays free of a `@prometheus/core` dependency) — this half just resolves the baseUrl.
+ */
+function findRecentEndpointEviction(
+  baseUrl: string,
+  readEvictions: typeof readEvictionEvents,
+): EvictionEvent | undefined {
+  return findRecentEviction(ai.runnerForBaseUrl(baseUrl)?.id, readEvictions);
+}
 
 /** The runner's ROOT (Ollama's native API lives there, not under the `/v1` OpenAI shim). */
 function originOf(baseUrl: string): string | null {
@@ -431,6 +456,43 @@ export async function runAiStream(
     idleWatchdogNow?: () => number;
     idleWatchdogSetTimeout?: (cb: () => void, ms: number) => ReturnType<typeof setTimeout>;
     idleWatchdogClearTimeout?: (handle: ReturnType<typeof setTimeout>) => void;
+    /**
+     * The saved authorisation level, injected.
+     *
+     * Production omits it and the shared on-disk store answers. It is a SEAM because the
+     * alternative is a policy test whose result depends on the level the developer happens
+     * to have saved on their own machine — which is exactly what happened when this gate
+     * landed: five existing cloud tests started failing on a box whose
+     * `~/.prometheus/config/authorisation.json` says `{"level": 1}`.
+     */
+    readAuthLevel?: () => number | null;
+    /**
+     * The Ollama-autostart gate, injected — OMITTED BY DEFAULT, the opposite of every other
+     * seam in this list.
+     *
+     * Every one of this file's existing tests drives a single-shape mocked `doFetch` and
+     * asserts an exact call count / exact canned response per attempt (a 4xx retried zero
+     * times, a 429 honouring `Retry-After`, …). Defaulting this to the real
+     * `ai.ensureOllamaRunning` would silently consume one of those calls for its own `/models`
+     * probe — wrong count — and, the moment that mocked probe reads as "unreachable", fall
+     * through to the REAL `canStart`/`listenersOnPort`/`startModelServer` (actual `lsof`/`which`
+     * shell-outs) from inside a unit test. So this is opt-in: production's one real call site
+     * (the `ai:stream` IPC handler below) passes `ai.ensureOllamaRunning` explicitly; every
+     * test that does not ask for this behaviour is completely unaffected by it.
+     */
+    ensureOllamaRunningFn?: typeof ai.ensureOllamaRunning;
+    /** LM Studio's twin of `ensureOllamaRunningFn` above — same opt-in reasoning, same real
+     *  production call site (the `ai:stream` handler passes `ai.ensureLmStudioRunning`). */
+    ensureLmStudioRunningFn?: typeof ai.ensureLmStudioRunning;
+    /**
+     * The shared eviction-log reader, injected — defaults to the real `readEvictionEvents`
+     * (unlike `ensureOllamaRunningFn` above, this is safe to default-on: a fail-soft local
+     * JSON read, never a spawn/shell-out, and a missing/empty log — the common case on any
+     * machine that has never evicted anything — makes this whole branch a no-op). Tests that
+     * want to exercise the ACTIVE EVICTION "mid-request" path inject a fake array instead of
+     * writing a real file.
+     */
+    readEvictionEventsFn?: typeof readEvictionEvents;
   } = {},
 ): Promise<AiStreamResult> {
   // §7.5 ENFORCEMENT: refuse a cloud endpoint before anything leaves the machine.
@@ -469,6 +531,54 @@ export async function runAiStream(
   }
 
   /**
+   * AUTHORISATION LADDER — the third policy floor, and the one Studio was only DRAWING.
+   *
+   * The Model Hub greys every cloud endpoint below A5 and labels it "key in keychain ·
+   * A5+ only" (handoff_3 §3). Nothing enforced it: `CLOUD_MIN_AUTH` drove an `opacity` and
+   * a note string and had no reader outside that view, so the label described an intention,
+   * not a control — and a user at A0 with a key in the keychain reached the cloud exactly as
+   * easily as one at A7.
+   *
+   * Enforced HERE for the same reason the two checks above are: the renderer is the
+   * untrusted side. The level is read from the shared on-disk store the CLI and the GUI both
+   * own, not from the request, so a renderer cannot hand us a level. The rung is derived from
+   * core's ladder (`NETWORK_AUTH_LEVEL`), not written as a `5` a second time.
+   *
+   * Fail-soft on the READ only: an unreadable store leaves `readSavedAuthLevel` null, which
+   * means "never chosen" — the ladder's own default applies, exactly as it does at startup.
+   */
+  if (locality === "cloud") {
+    const saved =
+      (retryOpts.readAuthLevel ?? cliProfiles.readSavedAuthLevel)() ?? DEFAULT_AUTH_LEVEL;
+    /**
+     * MIN of the persisted level and the live session level.
+     *
+     * The GUI's coarse posture dial is session-scoped by design — `plan` drives the level to
+     * 0 without writing the file, because mode→level is lossy and persisting it would
+     * overwrite an explicit `/authorisation 7`. The consequence was that main, which reads
+     * only the file, let a read-only `plan` posture ship a conversation to a cloud provider.
+     *
+     * Taking the MIN accepts a value from the untrusted renderer safely: it can lower the
+     * ceiling, never raise it. A missing field behaves exactly as before.
+     */
+    const session =
+      typeof req.sessionAuthLevel === "number" && Number.isFinite(req.sessionAuthLevel)
+        ? Math.max(0, Math.min(Math.trunc(req.sessionAuthLevel), 7))
+        : saved;
+    const level = Math.min(saved, session);
+    if (level < NETWORK_AUTH_LEVEL) {
+      return {
+        ok: false,
+        error:
+          `cloud endpoint "${req.endpoint.id}" refused: authorisation A${level} is below ` +
+          `A${NETWORK_AUTH_LEVEL} (network). Raise it with /authorisation to reach a cloud model.`,
+        text: "",
+        toolCalls: [],
+      };
+    }
+  }
+
+  /**
    * SPEND CAP (Task #1 item 2) — the desktop's half of the CLI's `checkBudgetGate`.
    *
    * Placed HERE, beside the other two policy refusals and BEFORE the request is built, so an
@@ -494,6 +604,45 @@ export async function runAiStream(
     // is that the user finds out BEFORE the cap, not when the turn stops working.
     if (budget.action === "warn" && budget.message) {
       emit(sender, { runId: req.runId, kind: "status", text: budget.message });
+    }
+  }
+
+  /**
+   * AUTOSTART: bring the endpoint's own local runner up if it's merely stopped, before the
+   * request below fails against it. The CLI has done this at session boot since onboarding.ts;
+   * desktop had nothing at all, so a stopped Ollama (or LM Studio) just failed with no
+   * explanation on the very first message.
+   *
+   * Dispatched on `runnerForBaseUrl(...).id` specifically, not merely "local" — an LM Studio
+   * endpoint must never have Ollama started underneath it, or vice versa; each `ensureXRunning`
+   * only ever touches its OWN runner's port. `req.endpoint.model` is threaded through so an
+   * already-picked model is never silently swapped for the zero-config default (see
+   * `ensureOllamaRunning`'s docstring) — this call is a no-op cost when the runner already answers.
+   */
+  const endpointRunnerId = ai.runnerForBaseUrl(req.endpoint.baseUrl)?.id;
+  const ensureRunnerRunningFn =
+    endpointRunnerId === "ollama"
+      ? retryOpts.ensureOllamaRunningFn
+      : endpointRunnerId === "lmstudio"
+        ? retryOpts.ensureLmStudioRunningFn
+        : undefined; // an unmatched/vLLM-style local endpoint: neither autostart ever applies.
+  if (locality === "local" && ensureRunnerRunningFn) {
+    const ensured = await ensureRunnerRunningFn({
+      modelId: req.endpoint.model,
+      fetchFn: doFetch,
+    });
+    // ACTIVE EVICTION / resource-ceiling: the machine is (still) too saturated to safely bring
+    // the runner back up — very possibly the SAME pressure that just force-stopped it. Report a
+    // PAUSED, resumable turn instead of attempting a request that can only fail against a dead
+    // endpoint: the prompt is never lost, just deferred (see AiStreamResult.pausedReason's doc).
+    if (ensured.reason === "resource-ceiling") {
+      return {
+        ok: true,
+        paused: true,
+        pausedReason: "resources-critical",
+        text: "",
+        toolCalls: [],
+      };
     }
   }
 
@@ -539,7 +688,7 @@ export async function runAiStream(
     // turn does not pay a cold reload per round. LOCAL only — a cloud endpoint never
     // receives a non-standard field. Recorded in `residentModels` so quitting gives the
     // RAM back rather than leaving it pinned for the next half hour.
-    ...(locality === "local" ? { keep_alive: "30m" } : {}),
+    ...localKeepAliveField(locality),
   };
   if (locality === "local") {
     const origin = originOf(req.endpoint.baseUrl);
@@ -726,6 +875,13 @@ export async function runAiStream(
         // failed one, which is what actually closes the backoff-sleep gap (see `outerAc`'s doc
         // comment above).
         userSignal: outerAc.signal,
+        // …but only the CALLER's signal means "the human stopped it". An idle-watchdog abort
+        // reaches `outerAc` too and must still count against the endpoint.
+        // Here `outerAc` IS the user's controller (it is what `ai:cancel` aborts), and the
+        // watchdog aborts the same one — so "was this the human?" is exactly "aborted, and
+        // the watchdog did NOT fire". Without the discriminator a silent endpoint read as a
+        // user cancel and never tripped the breaker.
+        userAborted: () => outerAc.signal.aborted && !watchdog.didFire(),
         // Fail fast on a dead endpoint instead of paying the full retry schedule on every
         // subsequent round — see `endpointBreaker`.
         breaker,
@@ -739,6 +895,7 @@ export async function runAiStream(
             text: `${info.reason} — retrying in ${Math.round(info.delayMs / 1000)}s`,
           });
         },
+        ...(locality === "local" ? { onLocalActivity: touchModelActivity } : {}),
       });
       const ticker = raceTicks(pending, WATCHDOG_FIRST_TICK_MS, () => {
         const s = Math.round((Date.now() - requestAt) / 1000);
@@ -758,6 +915,24 @@ export async function runAiStream(
       // reporting a graceful pause/cancel as `{ok:false, error:"...cancelled"}` and defeating
       // the whole point of the idle-watchdog for precisely its most likely firing phase.
       if (ac.signal.aborted) throw err;
+      // ACTIVE EVICTION: the connection attempt above never even reached the endpoint —
+      // exactly what "Ollama was just force-stopped" looks like the moment the NEXT request
+      // tries to use it (retries exhausted, still nothing listening). See the outer catch's
+      // matching branch for the "already streaming when it died" case; this is the far more
+      // common one, since a cold request after an eviction fails before ever connecting.
+      if (
+        locality === "local" &&
+        findRecentEndpointEviction(req.endpoint.baseUrl, retryOpts.readEvictionEventsFn ?? readEvictionEvents)
+      ) {
+        return {
+          ok: true,
+          paused: true,
+          pausedReason: "resources-critical",
+          text,
+          toolCalls: [],
+          breaker: breaker.snapshot(),
+        };
+      }
       /**
        * Was it refused BECAUSE it carried tools? Only this side can answer — the status and
        * the body both live here and neither survives the trip to the renderer as a string.
@@ -961,6 +1136,7 @@ export async function runAiStream(
         return {
           ok: true,
           paused: true,
+          pausedReason: "idle",
           text,
           /**
            * NOT `[]`.
@@ -983,6 +1159,26 @@ export async function runAiStream(
         };
       }
       return { ok: true, text, toolCalls: [], breaker: breaker.snapshot() };
+    }
+    // ACTIVE EVICTION, mid-request: a real connection failure (not an abort) against a LOCAL
+    // endpoint whose runner was JUST force-stopped under critical RAM pressure — the request
+    // above ran the ensureOllamaRunning autostart check BEFORE it started, so this only catches
+    // the (rarer) case of an eviction landing WHILE this exact request was already in flight.
+    // Reads very differently from an ordinary "the daemon was never running" failure: the
+    // prompt was interrupted BY Prometheus protecting the machine, not by a config problem, and
+    // deserves the same resumable "paused" treatment as an idle pause, not a red error.
+    if (
+      locality === "local" &&
+      findRecentEndpointEviction(req.endpoint.baseUrl, retryOpts.readEvictionEventsFn ?? readEvictionEvents)
+    ) {
+      return {
+        ok: true,
+        paused: true,
+        pausedReason: "resources-critical",
+        text,
+        toolCalls: harvestCalls(calls, { completeOnly: true }),
+        breaker: breaker.snapshot(),
+      };
     }
     return {
       ok: false,
@@ -1131,7 +1327,10 @@ export function registerAiIpc(ipc: IpcMain): void {
       return { ok: false, error: "ai:stream: malformed request", text: "", toolCalls: [] };
     }
     const sender = (evt as { sender?: WebContents } | undefined)?.sender;
-    return runAiStream(req, sender);
+    return runAiStream(req, sender, undefined, undefined, {
+      ensureOllamaRunningFn: ai.ensureOllamaRunning,
+      ensureLmStudioRunningFn: ai.ensureLmStudioRunning,
+    });
   });
 
   ipc.handle(IPC.aiCancel, (_evt: unknown, arg: unknown): boolean => {
@@ -1148,6 +1347,14 @@ export function registerAiIpc(ipc: IpcMain): void {
       const baseUrl = (arg as { baseUrl?: unknown } | null)?.baseUrl;
       if (typeof baseUrl !== "string" || baseUrl.length === 0) {
         return { ok: false, models: [], error: "ai:probeModels: malformed request" };
+      }
+      // LOCAL ONLY — the same rule its sibling `ai:probeEndpoint` states one handler below,
+      // and it was missing here. `GET {baseUrl}/models` at a cloud provider is unsolicited
+      // egress: it announces this installation to a third party without the user asking for
+      // inference, and the renderer chooses the URL. No key is attached, so this is a
+      // telemetry leak rather than a credential one — which is exactly why it went unnoticed.
+      if (localityOfUrl(baseUrl) !== "local") {
+        return { ok: false, models: [], error: "ai:probeModels: refused — probing is local-only" };
       }
       return probeServedModels(baseUrl);
     },

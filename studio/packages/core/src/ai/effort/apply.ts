@@ -52,6 +52,13 @@ const FORCED_VOCAB: Record<EffortTier, string> = {
   low: "low",
   medium: "medium",
   high: "high",
+  // Both vendors spell this one the same way, and the Ollama `/v1` shim accepts it too.
+  xhigh: "xhigh",
+  // Only the Ollama shim has been measured accepting `ultra`. Forcing is already "send it and
+  // let the provider decide" — the resolution's `degraded.reason` is literally "forced" and its
+  // message warns the request may be rejected — so the honest value here is the one the user
+  // asked for, not a quiet downgrade to a rung they did not choose.
+  ultra: "ultra",
   max: "max",
 };
 

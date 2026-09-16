@@ -89,6 +89,17 @@ export interface EffortLookup {
 const ALL: readonly EffortTier[] = EFFORT_TIERS;
 
 /**
+ * The five-rung ladder as it stood before `xhigh`/`ultra` were added.
+ *
+ * `ALL` means "every rung this ladder has", and it is the RIGHT answer only for a backend that
+ * genuinely accepts every one of them. When the ladder grew, three rules were spelled `ALL` —
+ * and two of them were measured against servers whose vocabulary does NOT include the new
+ * rungs, so leaving them as `ALL` would have turned a measured fact into a false claim and
+ * posted `think: "xhigh"` at a daemon that answers 400. Those two now name this set explicitly.
+ */
+const CLASSIC_FIVE: readonly EffortTier[] = ["off", "low", "medium", "high", "max"];
+
+/**
  * The seed rule table.
  *
  * Every enum vocabulary below is either measured against a live server or taken from the
@@ -119,9 +130,19 @@ export function builtinRules(): EffortRule[] {
         field: "reasoning_effort",
         supported: ALL,
         // Re-measured live: the daemon accepts minimal|low|medium|high|xhigh|ultra|max|none.
-        // Every value emitted here is in that set; the three we do not emit are a deliberate
-        // ladder choice (see the module header), not a limit of the server.
-        enumMap: { off: "none", low: "low", medium: "medium", high: "high", max: "max" },
+        // Every value emitted here is in that set. `minimal` is still not emitted — it is a
+        // deliberate ladder choice (see the module header), not a limit of the server — but
+        // `xhigh` and `ultra` now have rungs and are passed straight through: this is the one
+        // backend measured accepting `ultra`, which is why the rung exists at all.
+        enumMap: {
+          off: "none",
+          low: "low",
+          medium: "medium",
+          high: "high",
+          xhigh: "xhigh",
+          ultra: "ultra",
+          max: "max",
+        },
       },
     },
     {
@@ -132,7 +153,10 @@ export function builtinRules(): EffortRule[] {
         mechanism: "native-graded",
         // top-level, a SIBLING of `messages` — NOT inside `options` where sampling lives.
         field: "think",
-        supported: ALL,
+        // MEASURED against the daemon: `think` accepts "high"|"medium"|"low"|"max"|true|false.
+        // `xhigh`/`ultra` are NOT in that set — they exist only on the OpenAI-compatible `/v1`
+        // shim above — so this rule names the five explicitly instead of tracking the ladder.
+        supported: CLASSIC_FIVE,
         enumMap: { low: "low", medium: "medium", high: "high", max: "max" },
         offValue: false,
       },
@@ -274,9 +298,13 @@ export function builtinRules(): EffortRule[] {
     //   - `temperature` is REMOVED on the same generation that dropped `budget_tokens` — sending
     //     one is a 400, not a silently ignored field. That is what `noTemperature` is for.
     //
-    // `xhigh` exists on the provider and NOT on this ladder (see `EFFORT_TIERS`), so `max` maps
-    // to `max` and nothing maps to `xhigh`. Adding a sixth tier for one provider would push the
-    // vocabulary of the strongest backend onto every other one.
+    // `xhigh` DOES have a ladder rung now (see `EFFORT_TIERS`), and it is mapped on exactly the
+    // model set the vendor documents it for. The objection this comment used to record — that a
+    // sixth tier "would push the vocabulary of the strongest backend onto every other one" — was
+    // answered by `supported` + `nearestTier` rather than by keeping the rung out: a backend
+    // declares what it accepts, anything else clamps, and the clamp is reported. What made the
+    // objection true in practice was three rules spelled `supported: ALL`; they now name their
+    // measured sets (`CLASSIC_FIVE`).
     {
       id: "anthropic-effort-current",
       provenance: "published",
@@ -292,8 +320,16 @@ export function builtinRules(): EffortRule[] {
         // "disabled"}` is a DIFFERENT parameter, it is a 400 on Fable 5 outright, and on Opus 5
         // it is only accepted at effort `high` or below — a conditional second field is not
         // something a single patch can express honestly, so `off` clamps to `low` and says so.
-        supported: ["low", "medium", "high", "max"],
-        enumMap: { low: "low", medium: "medium", high: "high", max: "max" },
+        //
+        // `xhigh` is documented on EXACTLY this model set (Fable 5, Mythos 5, Opus 5, Opus 4.8,
+        // Opus 4.7, Sonnet 5) and is the vendor's recommended starting point for coding and
+        // agentic work on the Opus 4.7/4.8 generation. It is deliberately absent from the 4.6
+        // rule below, where the vendor lists `max` but not `xhigh`.
+        //
+        // `ultra` is NOT an Anthropic value and is not listed here: asking for it clamps to
+        // `xhigh` — the nearest rung this provider has — and `resolveEffort` reports the clamp.
+        supported: ["low", "medium", "high", "xhigh", "max"],
+        enumMap: { low: "low", medium: "medium", high: "high", xhigh: "xhigh", max: "max" },
         // A 400, not a no-op: this generation removed the sampling parameters entirely.
         constraints: { noTemperature: true },
         note: "Claude 4.7+ reasoning cannot be disabled (and rejects temperature)",
@@ -306,10 +342,13 @@ export function builtinRules(): EffortRule[] {
       cap: {
         mechanism: "effort-enum",
         field: "output_config.effort",
+        // `max` yes, `xhigh` NO. The vendor's own table lists 4.6 under `max` and omits it from
+        // `xhigh` ("some models that support `max` don't support `xhigh`"), so a ladder request
+        // for xhigh clamps here rather than posting a value this generation does not take.
         supported: ["low", "medium", "high", "max"],
         enumMap: { low: "low", medium: "medium", high: "high", max: "max" },
         // Temperature is still allowed on this generation — do NOT suppress it here.
-        note: "Claude 4.6 reasoning cannot be disabled",
+        note: "Claude 4.6 has low/medium/high/max (no xhigh) and cannot disable reasoning",
       },
     },
     {
@@ -379,7 +418,10 @@ export function builtinRules(): EffortRule[] {
       cap: {
         mechanism: "token-budget",
         field: "generationConfig.thinkingConfig.thinkingBudget",
-        supported: ALL,
+        // The five the budget map has numbers for. Tracking the ladder here would have claimed
+        // support for `xhigh`/`ultra` while `budgetMap` had no entry for either — a supported
+        // tier with no budget resolves to an undefined field value, not to a sensible default.
+        supported: CLASSIC_FIVE,
         budgetMap: { low: 1024, medium: 4096, high: 16384, max: 24576 },
         budgetBounds: { min: 0, max: 24576, disableWith: 0 },
         note: "Gemini 2.5 Flash takes a thinking token budget",
@@ -500,13 +542,43 @@ export function builtinRules(): EffortRule[] {
     {
       id: "openai-reasoning",
       provenance: "published",
-      match: { modelIdRegex: "^(o[1-9]|gpt-5|codex)" },
+      // The o-series. Kept at the conservative four: `reasoning.effort` is documented as
+      // model-dependent, the newer rungs arrived with the gpt-5 line, and an unsupported enum
+      // value here is a 400 rather than a no-op.
+      match: { modelIdRegex: "^o[1-9]" },
       cap: {
         mechanism: "effort-enum",
         field: "reasoning_effort",
         supported: ["off", "low", "medium", "high"],
         enumMap: { off: "none", low: "low", medium: "medium", high: "high" },
         note: "OpenAI exposes none/low/medium/high on this model",
+      },
+    },
+    {
+      id: "openai-reasoning-gpt5",
+      provenance: "published",
+      // gpt-5.x and codex. The published vocabulary is
+      // `none | minimal | low | medium | high | xhigh | max`, so this line reaches two rungs the
+      // o-series does not.
+      //
+      // `minimal` has no rung on this ladder ON PURPOSE — it is a shade of `low`, not a distinct
+      // depth, and the header explains why the BOTTOM of the ladder stays coarse. `ultra` is not
+      // an OpenAI value at all (it was measured on the local Ollama shim), so it clamps to
+      // `xhigh` and the clamp is reported.
+      match: { modelIdRegex: "^(gpt-5|codex)" },
+      cap: {
+        mechanism: "effort-enum",
+        field: "reasoning_effort",
+        supported: ["off", "low", "medium", "high", "xhigh", "max"],
+        enumMap: {
+          off: "none",
+          low: "low",
+          medium: "medium",
+          high: "high",
+          xhigh: "xhigh",
+          max: "max",
+        },
+        note: "OpenAI gpt-5/codex expose none/low/medium/high/xhigh/max",
       },
     },
     {

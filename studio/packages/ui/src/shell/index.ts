@@ -26,6 +26,17 @@ export {
   sidebarTitle,
 } from "./activities.js";
 
+export type { SubPanel } from "./subpanels.js";
+export {
+  EDITOR_SUBPANELS,
+  SUBPANELS,
+  subPanelsFor,
+  hasSubPanels,
+  defaultSubPanel,
+  isSubPanel,
+  resolveSubPanel,
+} from "./subpanels.js";
+
 export type {
   PaletteKind,
   PaletteVerdict,

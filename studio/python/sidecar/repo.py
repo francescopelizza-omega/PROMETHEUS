@@ -83,16 +83,52 @@ def repos_root() -> Path:
     """The Studio-managed repo root.
 
     ``$PROMETHEUS_REPOS_HOME`` overrides it outright (most specific wins). Otherwise the
-    root follows ``$PROMETHEUS_CONFIG_DIR`` — the SAME override the engine honours for
-    ``PROM_DIR`` — so one variable sandboxes the engine and its sidecars together instead
-    of isolating half of them.
+    root follows the engine's own config dir, resolved by the SAME rule ``PROM_DIR`` uses —
+    ``$PROMETHEUS_CONFIG_DIR``, else ``$PROMETHEUS_HOME``, else ``~/.prometheus/config``,
+    with the pre-consolidation ``~/.config/prometheus`` still honoured when it is the only
+    one that exists. One variable sandboxes the engine and its sidecars together instead of
+    isolating half of them, and one home holds them.
     """
     env = os.environ.get("PROMETHEUS_REPOS_HOME")
     if env:
         return Path(env).expanduser()
-    cfg = (os.environ.get("PROMETHEUS_CONFIG_DIR") or "").strip()
-    base = Path(cfg).expanduser() if cfg else Path.home() / ".config" / "prometheus"
-    return base / "repos"
+    return _engine_config_dir() / "repos"
+
+
+def _engine_config_dir() -> Path:
+    """The engine config root — a deliberate twin of ``prometheus.py``'s ``_resolve_prom_dir``.
+
+    The sidecar cannot import the engine (it is a separate process with its own entry
+    point), so the rule is spelled twice. ``test_repo_paths`` pins the two together; a
+    silent divergence here is how the sidecar would end up managing repos in a directory
+    the engine never looks at.
+    """
+    override = (os.environ.get("PROMETHEUS_CONFIG_DIR") or "").strip()
+    if override:
+        return Path(override).expanduser()
+    prom_home = (os.environ.get("PROMETHEUS_HOME") or "").strip()
+    root = Path(prom_home).expanduser() if prom_home else Path.home() / ".prometheus"
+    current = root / "config"
+    # An explicit `$PROMETHEUS_HOME` ENDS the legacy fallback — same guard, same reasoning as
+    # `prometheus.py`'s `_resolve_prom_dir` and core's `migrateLegacyConfigDir`. `legacy` below
+    # is derived from HOME, not from the override, and a fresh sandbox has no markers, so
+    # without this a sandboxed run reached back to the user's REAL repo store and managed it.
+    if prom_home:
+        return current
+    legacy = Path.home() / ".config" / "prometheus"
+    # Markers, not `.exists()` — the new root is shared with the Studio and is created for
+    # unrelated files long before the engine writes anything, so a directory test would declare
+    # the move complete while the managed repos were still in the old tree. Mirrors
+    # `prometheus.py`'s `_has_engine_state`.
+    markers = ("trust.json", "config.json", "vault.json", "pin.key", "repos")
+    try:
+        if any((legacy / m).exists() for m in markers) and not any(
+            (current / m).exists() for m in markers
+        ):
+            return legacy
+    except OSError:
+        pass
+    return current
 
 
 def stage_root() -> Path:

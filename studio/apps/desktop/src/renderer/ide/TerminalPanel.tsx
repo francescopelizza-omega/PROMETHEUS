@@ -21,8 +21,9 @@ import {
   useRef,
   useState,
 } from "react";
+import { createPortal } from "react-dom";
 
-import { Z } from "@prometheus/ui";
+import { Z, useAnchoredLayer } from "@prometheus/ui";
 import type { IdeEvent, IdeTerminalEnv, IdeTerminalMenuItem } from "../../shared/ipc-contract.js";
 import { ResizeHandle, useResizable } from "../shell/Resizable.js";
 import { useTheme } from "../shell/ThemeProvider.js";
@@ -138,6 +139,11 @@ export function TerminalPanel({ cwd }: { cwd: string }): ReactElement {
     axis: layout.direction === "row" ? "x" : "y",
     initial: 320,
     min: 140,
+    // Without a ceiling the divider could be dragged until the SECOND pane had no width
+    // left and its terminal sat off-screen with no way back. 0.6 of the axis leaves the
+    // other pane at least 40%; the floor keeps it sane on a tiny window.
+    max: () =>
+      Math.max(140, (layout.direction === "row" ? window.innerWidth : window.innerHeight) * 0.6),
     storageKey: "prometheus.ide.terminal.split-size.v1",
   });
 
@@ -553,6 +559,25 @@ function PaneStrip({
 }): ReactElement {
   // APP-090: torn-out sessions are hidden from the strip (they live in a float window).
   const shownSessions = visibleSessions(pane.sessions, floating);
+  /**
+   * The launcher menu is PORTALED, not absolutely positioned inside the strip.
+   *
+   * `position: absolute; top: 100%` put it inside three nested clipping boxes — the strip,
+   * BottomPanel's scrolling body (`overflow: auto`) and the panel section's `overflow:
+   * hidden`. A ~240px menu opening 26px down a 212px panel was simply cut off, so the AI-CLI
+   * and Environment groups at the bottom of the list could not be reached at all. A layer
+   * anchored to the button and mounted on `document.body` escapes every one of them, and
+   * `useAnchoredLayer` clamps it into the viewport.
+   */
+  const plusRef = useRef<HTMLButtonElement>(null);
+  const menuBox = useAnchoredLayer(plusRef, menuOpen, {
+    width: 230,
+    // The layer's EXPECTED height — the input useAnchoredLayer clamps against so a menu
+    // opening near the bottom edge is shifted up instead of running off-screen. Pairs with
+    // the menu's own maxHeight:240 + overflowY:auto.
+    height: 240, // layout-allow: a measurement input to the positioner, not a CSS pane height
+    placement: "below",
+  });
   return (
     <div
       role="tablist"
@@ -563,9 +588,10 @@ function PaneStrip({
         gap: 2,
         borderBottom: "1px solid var(--border-subtle)",
         background: "var(--bg-surface)",
-        // NO overflowX:auto — it coerces overflow-y to clip too, hiding the "+ ▾" launcher
-        // menu (position:absolute; top:100%). Wrap tabs to a second line instead so both the
-        // tabs AND the dropdown stay fully visible.
+        // Tabs WRAP rather than scroll. `overflowX: auto` coerces overflow-y to clip, and a
+        // clipped strip is the wrong shape for a row of tabs that must all stay reachable.
+        // (The launcher menu no longer depends on this: it is portaled to document.body, so
+        // the clipper that used to eat it — BottomPanel's scroller — cannot reach it.)
         flexWrap: "wrap",
         flexShrink: 0,
       }}
@@ -643,6 +669,7 @@ function PaneStrip({
       })}
       <div style={{ position: "relative", display: "flex", alignItems: "center", gap: 2 }}>
         <button
+          ref={plusRef}
           type="button"
           aria-label="new terminal"
           title="New terminal — shell or AI CLI"
@@ -682,8 +709,10 @@ function PaneStrip({
             ⊗
           </button>
         )}
-        {menuOpen && (
-          <>
+        {menuOpen &&
+          menuBox &&
+          createPortal(
+            <>
             <button
               type="button"
               aria-label="close menu"
@@ -694,25 +723,30 @@ function PaneStrip({
                 background: "transparent",
                 border: "none",
                 cursor: "default",
-                zIndex: Z.raise,
+                // Z.dropdown, not Z.raise: the menu it dismisses is a dropdown, and a
+                // backdrop one rung BELOW its own menu leaves everything between the two
+                // rungs clickable through it.
+                zIndex: Z.dropdown,
               }}
             />
             <div
               role="menu"
               style={{
-                position: "absolute",
-                top: "100%",
-                // right-anchored: the controls sit at the far right, so grow leftward into
-                // the viewport (left:0 pushed a ≥230px menu off the right edge).
-                right: 0,
-                marginTop: 2,
+                // fixed + measured, so no ancestor's overflow can clip it. `useAnchoredLayer`
+                // clamps into the viewport, which also replaces the old right:0 hack.
+                position: "fixed",
+                left: menuBox.left,
+                top: menuBox.top,
+                width: menuBox.width,
                 minWidth: 230,
                 background: "var(--bg-surface-2)",
                 border: "1px solid var(--border-strong)",
                 borderRadius: "var(--radius-md, 6px)",
                 boxShadow: "var(--elevation-e3)",
                 padding: 4,
-                zIndex: Z.raise,
+                zIndex: Z.dropdown,
+                maxHeight: 240,
+                overflowY: "auto",
                 fontSize: "0.78rem",
               }}
             >
@@ -775,8 +809,9 @@ function PaneStrip({
                 );
               })}
             </div>
-          </>
-        )}
+            </>,
+            document.body,
+          )}
       </div>
     </div>
   );

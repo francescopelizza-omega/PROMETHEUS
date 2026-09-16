@@ -65,11 +65,31 @@ export function writeTextAtomic(file: string, text: string): void {
   renameSync(tmp, file);
 }
 
-/** The persisted active-profile name (S005 config `profile.active`), or undefined if unset. */
-export function getActiveProfileName(home?: string): string | undefined {
-  const table = cliProfiles.parseToml(readConfigRaw(cliProfiles.configPath(home)));
+/** Read `profile.active` out of one config TOML path; undefined if unset/unreadable. */
+function activeProfileNameAt(path: string): string | undefined {
+  const table = cliProfiles.parseToml(readConfigRaw(path));
   const v = cliProfiles.getPath(table, cliProfiles.PROFILE_ACTIVE_KEY);
   return typeof v === "string" && v.length > 0 ? v : undefined;
+}
+
+/**
+ * The persisted active-profile name (S005 config `profile.active`), or undefined if unset.
+ *
+ * The current root wins over the legacy one whenever it holds a value, same as
+ * `readSavedAuthLevel`/`readSavedEffort` — an unmigrated or migration-skipped install (a
+ * read-only home, a container) must not have its chosen profile silently revert to the default
+ * just because nothing ever copied the file forward.
+ *
+ * `$PROMETHEUS_HOME` is NOT such a case, and listing it here was wrong: the legacy root resolves
+ * to the real OS home whatever that variable says, so falling back to it inside a sandbox read
+ * the developer's real active profile on every run. `hasLegacyConfigDir` is the shared predicate
+ * that keeps this in step with the migration, which refuses the same thing on the write side.
+ */
+export function getActiveProfileName(home?: string): string | undefined {
+  const current = activeProfileNameAt(cliProfiles.configPath(home));
+  if (current !== undefined) return current;
+  if (!cliProfiles.hasLegacyConfigDir(home)) return undefined;
+  return activeProfileNameAt(cliProfiles.legacyConfigPath(home));
 }
 
 /** Persist the active-profile name into the S005 config (read-modify-write atomic). */
@@ -80,24 +100,54 @@ export function setActiveProfileName(name: string, home?: string): void {
   writeTextAtomic(file, cliProfiles.stringifyToml(table));
 }
 
-/** The user profile file base-names (without `.toml`) under `profilesDir()`; [] when absent. */
-export function listUserProfileNames(home?: string): string[] {
+/** The `.toml` base-names directly under one profiles directory; [] when it is absent. */
+function profileNamesAt(dir: string): string[] {
   try {
-    return readdirSync(cliProfiles.profilesDir(home))
+    return readdirSync(dir)
       .filter((f) => f.endsWith(".toml"))
-      .map((f) => f.slice(0, -".toml".length))
-      .sort();
+      .map((f) => f.slice(0, -".toml".length));
   } catch {
     return [];
   }
 }
 
-/** Load a profile by name — a user TOML SHADOWS a same-named builtin; undefined if neither. */
+/**
+ * The user profile file base-names (without `.toml`); [] when there are none.
+ *
+ * Unions the current root with the pre-consolidation one, for the same reason
+ * `getActiveProfileName` falls back: a name the active-profile config still resolves must be
+ * listable, or `/profile` shows a set that does not include the profile the session is running.
+ */
+export function listUserProfileNames(home?: string): string[] {
+  const names = new Set(profileNamesAt(cliProfiles.profilesDir(home)));
+  if (cliProfiles.hasLegacyConfigDir(home)) {
+    for (const n of profileNamesAt(cliProfiles.legacyProfilesDir(home))) names.add(n);
+  }
+  return [...names].sort();
+}
+
+/**
+ * Load a profile by name — a user TOML SHADOWS a same-named builtin; undefined if neither.
+ *
+ * The legacy profiles directory is tried between the two. Without it the halves of profile
+ * resolution disagreed: the active-profile NAME had a legacy fallback while the profile FILES did
+ * not, so an install whose migration was skipped or failed resolved the name `mine`, found no
+ * `~/.prometheus/config/profiles/mine.toml`, and silently ran the BUILTIN default — a different
+ * tool set, authorisation posture and effort pin than the user configured, while `/profile` still
+ * reported `mine`. Current root first, so a stale legacy copy can never shadow a newer profile.
+ */
 export function loadProfile(name: string, home?: string): cliProfiles.CliProfile | undefined {
   const p = cliProfiles.profilePath(name, home);
   if (existsSync(p)) {
     const parsed = cliProfiles.parseProfile(readConfigRaw(p), name);
     if (parsed) return parsed;
+  }
+  if (cliProfiles.hasLegacyConfigDir(home)) {
+    const legacy = cliProfiles.legacyProfilePath(name, home);
+    if (existsSync(legacy)) {
+      const parsed = cliProfiles.parseProfile(readConfigRaw(legacy), name);
+      if (parsed) return parsed;
+    }
   }
   return cliProfiles.getCliProfile(name);
 }
