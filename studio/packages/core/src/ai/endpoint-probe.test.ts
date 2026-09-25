@@ -146,10 +146,12 @@ test("a SUCCESS is cached — a second attach for the same model makes no reques
 });
 
 test("the cache is keyed on the MODEL, not just the runner — one daemon serves many", async () => {
+  // Only the /api/show POSTs carry a model; the probe also GETs /api/ps to learn what the
+  // daemon actually SERVES (which may be less than the weights allow).
   const seen: string[] = [];
   const fetchLike = (async (url: string, init?: { body?: string }) => {
-    seen.push(JSON.parse(init?.body ?? "{}").model as string);
     const model = JSON.parse(init?.body ?? "{}").model as string;
+    if (url.endsWith("/api/show")) seen.push(model);
     return {
       ok: true,
       json: async () => showPayload(model === "gemma4:12b" ? 8192 : 262_144, ["tools", "thinking"]),
@@ -195,8 +197,10 @@ test("two concurrent attaches for the same model share ONE request", async () =>
     release = r;
   });
   let calls = 0;
-  const fetchLike = (async () => {
-    calls += 1;
+  const fetchLike = (async (url: string) => {
+    // the /api/ps question is part of one probe; count the /api/show POSTs, which are the
+    // expensive, dedupable ones
+    if (url.endsWith("/api/show")) calls += 1;
     await gate;
     return { ok: true, json: async () => showPayload(262_144, ["thinking"]) };
   }) as unknown as never;

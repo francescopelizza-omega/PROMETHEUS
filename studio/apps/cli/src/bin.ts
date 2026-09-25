@@ -14,9 +14,10 @@ import { cliProfiles } from "@prometheus/core";
 import { createEngineClient } from "@prometheus/engine-bridge";
 
 import { installChildReaper } from "./child-reaper.js";
-import { startOrchestrationResourceGuard } from "./orchestration/resource-guard.js";
 import { prometheusHome } from "./home.js";
 import { dispatch } from "./index.js";
+import { armLaunchNoiseErase } from "./launch-noise.js";
+import { startOrchestrationResourceGuard } from "./orchestration/resource-guard.js";
 import { bootOrphanGuard, stopSentinel } from "./orphan-guard-boot.js";
 import { type ParsedArgs, parseArgs } from "./parse.js";
 import {
@@ -37,6 +38,11 @@ import { readStdinPrompt, stdinPromptSink } from "./stdin.js";
 import { isTerminalChatLaunch, routeTerminalChat } from "./terminal/chat-route.js";
 import { launchTmuxSession } from "./tmux/multiplexer.js";
 import { TUI_NOT_TTY, launchTui } from "./tui/index.js";
+
+// FIRST, before anything below can print: the launcher's rebuild log (bin/prometheus) is
+// erased at the CLI's first visible write — the TUI/REPL banner, or an earlier warning — and
+// the request is removed from the environment so no child repeats it. See launch-noise.ts.
+armLaunchNoiseErase();
 
 /**
  * A readline typed-confirm for a one-shot bypass LAUNCH (never-force). Resolves

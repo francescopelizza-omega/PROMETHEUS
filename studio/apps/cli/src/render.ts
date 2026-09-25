@@ -201,6 +201,29 @@ export interface BoxOpts {
  * from the VISIBLE length of each line (ANSI-safe), so colored content aligns. The
  * border uses ╭─╮│╰╯; content is padded to a common inner width.
  */
+/** One SGR escape (`\x1b[…m`) — the only kind the colour helpers above emit. */
+const SGR_RE = /\x1b\[[0-9;]*m/g;
+
+/**
+ * Carry colour state across the rows `wrapLine` split ONE logical line into.
+ *
+ * `wrapLine` breaks by display cells and neither closes nor re-opens an SGR run at a break.
+ * So a dim run broken across two rows left row 1 with `\x1b[2m` still open (the padding and the
+ * box's right border came out dimmed) and row 2 with no style at all. Each row now starts with
+ * the styles still open from the rows before it and ends with a reset if any are left open.
+ * Escapes are zero-width in every width helper, so this changes no row's width.
+ */
+function carrySgr(rows: string[]): string[] {
+  let open = "";
+  return rows.map((row) => {
+    const out = open + row;
+    for (const m of row.matchAll(SGR_RE)) {
+      open = m[0] === "\x1b[0m" || m[0] === "\x1b[m" ? "" : open + m[0];
+    }
+    return open ? `${out}\x1b[0m` : out;
+  });
+}
+
 export function box(lines: string[], opts: BoxOpts = {}): string {
   const pad = opts.pad ?? 1;
   const content = lines.length > 0 ? lines : [""];
@@ -216,7 +239,7 @@ export function box(lines: string[], opts: BoxOpts = {}): string {
   // measured this.)
   const cols = process.stdout.columns;
   const cap = Math.max(20, (typeof cols === "number" && cols > 0 ? cols : 80) - 2 - pad * 2);
-  const wrapped = content.flatMap((line) => wrapLine(line, cap));
+  const wrapped = content.flatMap((line) => carrySgr(wrapLine(line, cap)));
   const inner = Math.min(cap, Math.max(opts.minWidth ?? 0, ...wrapped.map(visibleLen)));
   // CLI-097: ASCII box on a dumb terminal (─│╭╮╰╯ → -|+); unchanged on a unicode terminal.
   const bar = glyph("─", "-").repeat(inner + pad * 2);

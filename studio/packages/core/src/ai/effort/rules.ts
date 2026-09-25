@@ -378,7 +378,13 @@ export function builtinRules(): EffortRule[] {
         budgetBounds: { min: 1024, max: 32000 },
         // The headroom is what keeps the tiers DISTINCT: without it every tier above low
         // collapsed onto `max_tokens - 1` and the answer got a single token.
-        constraints: { budgetUnderMaxTokens: true, budgetAnswerHeadroom: 4096 },
+        //
+        // It is ALSO the answer's entire budget: `max_tokens = thinking + headroom`, so a
+        // headroom of 4096 meant that at `max` effort the model could think for 32,000 tokens
+        // and then had 4,096 left to actually answer in — on a model that serves 64,000. The
+        // headroom now matches the thinking ceiling, so 32k of reasoning still leaves 32k of
+        // answer and the total stays inside the model's documented 64,000 output limit.
+        constraints: { budgetUnderMaxTokens: true, budgetAnswerHeadroom: 32_000 },
         note: "Claude 4.5 takes a thinking token budget, not an effort level",
       },
     },

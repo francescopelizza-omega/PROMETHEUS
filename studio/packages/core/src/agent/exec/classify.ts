@@ -152,9 +152,12 @@ export function classifyCommand(cmd: ParsedCommand): ClassifyResult {
   }
 
   // Writing to a file is a mutation whatever the program is: `echo x > ~/.zshrc` must not
-  // classify as `read` merely because `echo` does.
+  // classify as `read` merely because `echo` does. That includes STDERR: since exec-runner
+  // really opens a `2> file` target (with "w", so it truncates), `ls 2> src/main.ts` is a
+  // write. Counting only stdout left it `read`, auto-approved at the default level 1.
+  // `kind === "file"` keeps `2>&1` (kind "merge") out; `< file` (stdin) only reads.
   const writesFile = stages.some((s) =>
-    s.redirects.some((r) => r.kind === "file" && r.stream === "stdout"),
+    s.redirects.some((r) => r.kind === "file" && r.stream !== "stdin"),
   );
 
   let tier = classes.reduce<ExecTier>(

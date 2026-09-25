@@ -88,6 +88,17 @@ export function measurePairs(scheme: ColorScheme): ContrastPair[] {
     const tinted = blend(s[role], s["bg-surface"], 0.14);
     pairs.push(pair(`${role} on its 14% tint`, s[role], tinted, AA_UI, "verdict", role));
   }
+
+  // The label colour on each solid role fill (buttons, chips, toggles). resolveScheme computes
+  // on-* unless a scheme sets them explicitly, and its doc names THIS report as the place an
+  // explicit value is checked — which was not true: no on-* pair was ever measured, so a custom
+  // or imported theme could ship an illegible label on every primary button. Body text on a
+  // fill, so AA text (4.5); every built-in clears it (worst measured 4.51). Reported, not a
+  // save blocker (see saveBlockers).
+  for (const role of ["brand", "accent", "ok", "warn", "danger", "info"] as const) {
+    const on = `on-${role}` as const;
+    pairs.push(pair(`${on} on ${role}`, s[on], s[role], AA_TEXT, "role", on));
+  }
   return pairs;
 }
 

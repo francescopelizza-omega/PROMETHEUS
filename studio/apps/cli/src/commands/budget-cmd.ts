@@ -42,6 +42,7 @@ import {
   latestAccountingSession,
   readAccounting,
   readAccountingSince,
+  withLocalRowsFree,
 } from "../session/history-store.js";
 import { isLocalModelId } from "../session/host.js";
 
@@ -117,8 +118,12 @@ export function handleStatus(
   const priceFor = makePriceFor(pricing);
 
   const latestSessionId = latestAccountingSession(home);
-  const sessionRecords = latestSessionId ? readAccounting(home, latestSessionId) : [];
-  const dayRecords = readAccountingSince(home, ai.startOfLocalDayMs(nowIso));
+  // Priced by the SAME rule as the gate (withLocalRowsFree), or status would call a local turn
+  // "unpriced" while the gate lets it through.
+  const sessionRecords = withLocalRowsFree(
+    latestSessionId ? readAccounting(home, latestSessionId) : [],
+  );
+  const dayRecords = withLocalRowsFree(readAccountingSince(home, ai.startOfLocalDayMs(nowIso)));
 
   const sessionSummary = ai.summarizeSpend(sessionRecords, nowIso, priceFor);
   const daySummary = ai.summarizeSpend(dayRecords, nowIso, priceFor);

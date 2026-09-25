@@ -202,6 +202,26 @@ export interface PreflightResult {
  */
 export const PREFLIGHT_MARGIN = 1.15;
 
+/**
+ * How much of the window a caller that names no `maxTokens` still reserves for the REPLY.
+ *
+ * With no reserve the check answers "does the prompt fit", which stays true right up to the
+ * last token of the window — so a request could pass with no room left to answer in. Measured
+ * 2026-09-24: a 7,254-token prompt into an 8,192-token serving window left ~900 tokens, a
+ * thinking model spent them, and the turn came back empty with no explanation.
+ */
+export const MIN_REPLY_RESERVE_TOKENS = 512;
+export const REPLY_RESERVE_FRACTION = 0.15;
+
+/** The reply reserve for a window: the caller's own `maxTokens`, else a share of the window. */
+export function replyReserveFor(contextWindow: number, maxTokens?: number): number {
+  if (maxTokens !== undefined && maxTokens > 0) return maxTokens;
+  if (!contextWindow || !Number.isFinite(contextWindow) || contextWindow <= 0) {
+    return MIN_REPLY_RESERVE_TOKENS;
+  }
+  return Math.max(MIN_REPLY_RESERVE_TOKENS, Math.floor(contextWindow * REPLY_RESERVE_FRACTION));
+}
+
 export function preflightContext(opts: {
   estimatedPromptTokens: number;
   contextWindow: number;

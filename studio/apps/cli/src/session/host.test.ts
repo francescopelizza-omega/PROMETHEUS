@@ -139,6 +139,17 @@ function runSession(
   return p.then((code) => ({ code, out: out.join(""), rl }));
 }
 
+test("/ls in the readline host lists the session folder", async () => {
+  const { mkdtempSync, writeFileSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const base = mkdtempSync(join(tmpdir(), "prom-host-ls-"));
+  writeFileSync(join(base, "marker-file.md"), "x");
+  const { out } = await runSession(["/ls", "/quit"], {}, { argsOver: { cwd: base } });
+  assert.match(out, /marker-file\.md/);
+  assert.match(out, /0 dirs, 1 file/);
+});
+
 test("seedTuning: default profile + flags win (gate-mode/dry-run/yes layered on)", () => {
   const base = seedTuning(args());
   assert.equal(base.gateMode, "warn"); // default profile ships gate=warn

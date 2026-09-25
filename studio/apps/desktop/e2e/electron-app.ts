@@ -20,6 +20,8 @@ export interface LaunchedApp {
   app: ElectronApplication;
   page: Page;
   userDataDir: string;
+  /** the per-run temp PROMETHEUS_HOME, when launched with `isolateHome` (else undefined). */
+  prometheusHome?: string;
   /** the main-process stderr collected so far (for failure diagnostics). */
   stderr(): string;
   close(): Promise<void>;
@@ -36,7 +38,14 @@ export interface LaunchAppOptions {
    * `settings.json` so a hook is already configured when main's settings-ipc does its
    * startup `publish()`. Runs after the temp dir exists, before `electron.launch`.
    */
-  beforeLaunch?: (userDataDir: string) => void | Promise<void>;
+  beforeLaunch?: (userDataDir: string, prometheusHome?: string) => void | Promise<void>;
+  /**
+   * Give the app a per-run temp `PROMETHEUS_HOME` as well as a temp userData. The global
+   * settings layer (hooks, gateStrict, budget.*) lives in `$PROMETHEUS_HOME/config/settings.json`
+   * now, shared with the CLI, so a spec that seeds settings must seed THERE — and must not do
+   * it in the developer's real `~/.prometheus`, where a test hook would become a real one.
+   */
+  isolateHome?: boolean;
 }
 
 /**
@@ -44,10 +53,18 @@ export interface LaunchAppOptions {
  * stderr if the first window never appears within `timeoutMs`.
  */
 export async function launchApp(opts: number | LaunchAppOptions = {}): Promise<LaunchedApp> {
-  const { timeoutMs = 30_000, beforeLaunch } =
-    typeof opts === "number" ? { timeoutMs: opts } : opts;
+  const {
+    timeoutMs = 30_000,
+    beforeLaunch,
+    isolateHome = false,
+  } = typeof opts === "number" ? { timeoutMs: opts } : opts;
   const userDataDir = mkdtempSync(join(tmpdir(), "prom-e2e-"));
-  if (beforeLaunch) await beforeLaunch(userDataDir);
+  const prometheusHome = isolateHome ? mkdtempSync(join(tmpdir(), "prom-e2e-home-")) : undefined;
+  const cleanup = (): void => {
+    rmSync(userDataDir, { recursive: true, force: true });
+    if (prometheusHome) rmSync(prometheusHome, { recursive: true, force: true });
+  };
+  if (beforeLaunch) await beforeLaunch(userDataDir, prometheusHome);
   const args = [
     MAIN_ENTRY,
     `--user-data-dir=${userDataDir}`,
@@ -62,6 +79,7 @@ export async function launchApp(opts: number | LaunchAppOptions = {}): Promise<L
       PROM_E2E_WIDTH: String(WINDOW.width),
       PROM_E2E_HEIGHT: String(WINDOW.height),
       PROM_E2E_SCALE: String(WINDOW.scale),
+      ...(prometheusHome ? { PROMETHEUS_HOME: prometheusHome } : {}),
     },
   });
 
@@ -95,7 +113,7 @@ export async function launchApp(opts: number | LaunchAppOptions = {}): Promise<L
     ]);
   } catch (e) {
     await app.close().catch(() => {});
-    rmSync(userDataDir, { recursive: true, force: true });
+    cleanup();
     throw e;
   }
 
@@ -142,10 +160,11 @@ export async function launchApp(opts: number | LaunchAppOptions = {}): Promise<L
     app,
     page,
     userDataDir,
+    ...(prometheusHome ? { prometheusHome } : {}),
     stderr: () => stderr,
     close: async () => {
       await app.close().catch(() => {});
-      rmSync(userDataDir, { recursive: true, force: true });
+      cleanup();
     },
   };
 }

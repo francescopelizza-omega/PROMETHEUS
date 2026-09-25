@@ -15,6 +15,7 @@
 import {
   type CSSProperties,
   Fragment,
+  type KeyboardEvent,
   type ReactElement,
   useCallback,
   useEffect,
@@ -135,17 +136,39 @@ export function TerminalPanel({ cwd }: { cwd: string }): ReactElement {
   const { activeSchemeId } = useTheme();
 
   // divider between the first pane and the rest (2-pane case). One stable hook.
+  const splitRef = useRef<HTMLDivElement>(null);
   const rz = useResizable({
     axis: layout.direction === "row" ? "x" : "y",
     initial: 320,
     min: 140,
     // Without a ceiling the divider could be dragged until the SECOND pane had no width
-    // left and its terminal sat off-screen with no way back. 0.6 of the axis leaves the
-    // other pane at least 40%; the floor keeps it sane on a tiny window.
-    max: () =>
-      Math.max(140, (layout.direction === "row" ? window.innerWidth : window.innerHeight) * 0.6),
+    // left and its terminal sat off-screen with no way back. The bound is the SPLIT
+    // CONTAINER, not the window: a bottom panel is ~212px tall and a row split shares the
+    // width with the sidebar and the rail, so a window fraction left pane 2 no room at all.
+    // It must bound the STATE, not only the CSS: a CSS max alone left the stored size above
+    // what was painted, so the divider had a dead zone and aria-valuenow lied. The window
+    // fraction still applies before the container has been laid out.
+    max: () => {
+      const row = layout.direction === "row";
+      const winCap = (row ? window.innerWidth : window.innerHeight) * 0.6;
+      const el = splitRef.current;
+      const box = el ? (row ? el.clientWidth : el.clientHeight) : 0;
+      return Math.max(140, box > 0 ? Math.min(box - 140, winCap) : winCap);
+    },
     storageKey: "prometheus.ide.terminal.split-size.v1",
   });
+  // …and re-clamp when the CONTAINER changes size (the panel is resized, the sidebar or rail
+  // opens), which useResizable's window-resize listener cannot see.
+  const rzRef = useRef(rz);
+  rzRef.current = rz;
+  const multiPane = layout.panes.length > 1;
+  useEffect(() => {
+    const el = splitRef.current;
+    if (!multiPane || !el || typeof ResizeObserver === "undefined") return;
+    const ro = new ResizeObserver(() => rzRef.current.setSize(rzRef.current.size));
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [multiPane]);
 
   /** Open a session in a specific pane (defaults to the focused pane). */
   const create = useCallback(
@@ -396,9 +419,10 @@ export function TerminalPanel({ cwd }: { cwd: string }): ReactElement {
     [cwd],
   );
 
-  const multi = layout.panes.length > 1;
+  const multi = multiPane;
   return (
     <div
+      ref={splitRef}
       style={{
         display: "flex",
         flexDirection: layout.direction === "row" ? "row" : "column",
@@ -421,8 +445,9 @@ export function TerminalPanel({ cwd }: { cwd: string }): ReactElement {
               // the FIRST pane is sized by the divider (2-pane case); the rest flex equally.
               ...(multi && i === 0
                 ? layout.direction === "row"
-                  ? { width: rz.size, flex: "0 0 auto" }
-                  : { height: rz.size, flex: "0 0 auto" }
+                  ? // the CSS max is only a backstop between a container resize and its re-clamp
+                    { width: rz.size, maxWidth: "calc(100% - 140px)", flex: "0 0 auto" }
+                  : { height: rz.size, maxHeight: "calc(100% - 140px)", flex: "0 0 auto" }
                 : { flex: 1 }),
               outline:
                 multi && pane.id === layout.focusedPaneId ? "1px solid var(--accent)" : "none",
@@ -578,6 +603,41 @@ function PaneStrip({
     height: 240, // layout-allow: a measurement input to the positioner, not a CSS pane height
     placement: "below",
   });
+  /**
+   * Keyboard reach for the portaled menu. Inline, it was the next thing in DOM order after the
+   * `+ ▾` button, so Tab walked into it. Portaled to <body> it sits after the whole app, so a
+   * keyboard user who opened it could not get to a single item. So: focus the first item on
+   * open, Arrow keys move between items, Escape closes and hands focus back to the button.
+   */
+  const menuRef = useRef<HTMLDivElement>(null);
+  const menuShown = menuOpen && menuBox !== null;
+  useEffect(() => {
+    if (menuShown) menuRef.current?.querySelector<HTMLElement>('[role="menuitem"]')?.focus();
+  }, [menuShown]);
+  const onMenuKeyDown = (e: KeyboardEvent<HTMLDivElement>): void => {
+    const items = [
+      ...(menuRef.current?.querySelectorAll<HTMLElement>('[role="menuitem"]') ?? []),
+    ];
+    if (items.length === 0) return;
+    const i = items.indexOf(document.activeElement as HTMLElement);
+    if (e.key === "Escape") {
+      e.preventDefault();
+      onCloseMenu();
+      plusRef.current?.focus();
+    } else if (e.key === "ArrowDown") {
+      e.preventDefault();
+      items[(i + 1) % items.length]?.focus();
+    } else if (e.key === "ArrowUp") {
+      e.preventDefault();
+      items[(i - 1 + items.length) % items.length]?.focus();
+    } else if (e.key === "Home") {
+      e.preventDefault();
+      items[0]?.focus();
+    } else if (e.key === "End") {
+      e.preventDefault();
+      items[items.length - 1]?.focus();
+    }
+  };
   return (
     <div
       role="tablist"
@@ -730,7 +790,10 @@ function PaneStrip({
               }}
             />
             <div
+              ref={menuRef}
               role="menu"
+              aria-label="new terminal"
+              onKeyDown={onMenuKeyDown}
               style={{
                 // fixed + measured, so no ancestor's overflow can clip it. `useAnchoredLayer`
                 // clamps into the viewport, which also replaces the old right:0 hack.

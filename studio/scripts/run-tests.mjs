@@ -80,8 +80,19 @@ if (files.length === 0) {
 // Several suites also target a live ollama on :11434, which loads a multi-GB model
 // (observed: llama-server 8.7 GB -> 17 GB in two seconds).
 // Scope the run. Override only with local model runtimes stopped.
+//
+// The memory half of the guard (changed 2026-09-22) refuses on REAL pressure, as the kernel
+// reports it. It used to refuse below 4 GB of free + speculative pages, but on this 64 GB Mac
+// that is the normal state: the file cache keeps free + speculative at 0.9–1.5 GB while the
+// kernel reports ~90% of memory free (it only aims to keep 62 MB free). So every scoped run was
+// refused for the wrong reason. The rule matches handoffs/mem-guard-lib.sh, which the
+// ram-guard and sentinel watchdogs use to decide when to kill a model server.
 const MAX_UNSCOPED = 120;
-const MIN_FREE_MB = 4096;
+const MIN_KERNEL_FREE_PCT = 25; // kern.memorystatus_level: refuse at or below this
+// free + speculative: the fallback floor, used only when the kernel figures cannot be read.
+// On its own it is not evidence (loading a large model drains free pages to ~50 MB while the
+// kernel still reports ~50% free), and with the kernel readable, level <= 25% already refuses.
+const MIN_FREE_FLOOR_MB = 256;
 const OVERRIDE = process.env.PROMETHEUS_ALLOW_FULL_SUITE === "1";
 
 function freeMemMB() {
@@ -117,6 +128,39 @@ function freeMemMB() {
   } catch {
     return Number.POSITIVE_INFINITY;
   }
+}
+
+// Absolute path: the minimal-PATH case above also drops /usr/sbin.
+function sysctlInt(name) {
+  const res = spawnSync("/usr/sbin/sysctl", ["-n", name], { encoding: "utf8" });
+  if (res.error || res.status !== 0 || typeof res.stdout !== "string") return null;
+  const n = Number.parseInt(res.stdout.trim(), 10);
+  return Number.isFinite(n) ? n : null;
+}
+
+/** Why memory is too tight to start a run, or null. All three figures go in the message. */
+function memoryRefusal() {
+  if (process.platform !== "darwin") return null;
+  // kern.memorystatus_vm_pressure_level: 1 normal, 2 warning, 4 critical.
+  const pressure = sysctlInt("kern.memorystatus_vm_pressure_level");
+  const level = sysctlInt("kern.memorystatus_level");
+  const freeMB = freeMemMB();
+  if (pressure === null || level === null) {
+    console.error(
+      `run-tests: WARNING — cannot read the kernel memory figures (sysctl); only the ${MIN_FREE_FLOOR_MB} MB free-memory floor is active for this run. Check: memory_pressure -Q`,
+    );
+  }
+  const figures = `pressure=${pressure ?? "?"} kernel-free=${level ?? "?"}% free+speculative=${freeMB} MB`;
+  if (pressure !== null && pressure >= 2) {
+    return `kernel memory pressure is ${pressure >= 4 ? "critical" : "warning"} (${figures})`;
+  }
+  if (level !== null && level <= MIN_KERNEL_FREE_PCT) {
+    return `kernel reports ${level}% memory free, need more than ${MIN_KERNEL_FREE_PCT}% (${figures})`;
+  }
+  if ((pressure === null || level === null) && freeMB < MIN_FREE_FLOOR_MB) {
+    return `free + speculative is below the ${MIN_FREE_FLOOR_MB} MB floor (${figures})`;
+  }
+  return null;
 }
 
 /**
@@ -189,11 +233,11 @@ if (!OVERRIDE) {
     );
     process.exit(2);
   }
-  const freeMB = freeMemMB();
-  if (freeMB < MIN_FREE_MB) {
+  const memWhy = memoryRefusal();
+  if (memWhy) {
     console.error(
-      `run-tests: REFUSING — only ${freeMB} MB RAM free, need ${MIN_FREE_MB} MB.\n` +
-        `  Check what is holding it:  ollama ps ; pgrep -fl llama-server ; vm_stat | head -5`,
+      `run-tests: REFUSING — ${memWhy}.\n` +
+        `  Check what is holding it:  ollama ps ; pgrep -xl llama-server ; memory_pressure -Q`,
     );
     process.exit(2);
   }

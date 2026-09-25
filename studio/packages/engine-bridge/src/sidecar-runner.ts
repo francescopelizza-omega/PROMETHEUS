@@ -307,7 +307,15 @@ export function runSidecar<T extends SidecarEnvelope = SidecarEnvelope>(
         while (nl !== -1) {
           const line = stderrLineBuf.slice(0, nl).replace(/\r$/, "");
           stderrLineBuf = stderrLineBuf.slice(nl + 1);
-          if (line) opts.onStderr(line);
+          if (line) {
+            // A throwing sink (a progress callback sending to a closed window) must not escape
+            // this 'data' listener as an uncaughtException, nor strand the rest of the chunk.
+            try {
+              opts.onStderr(line);
+            } catch {
+              /* the sink's failure is its own; keep pumping */
+            }
+          }
           nl = stderrLineBuf.indexOf("\n");
         }
       }

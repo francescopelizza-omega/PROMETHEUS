@@ -375,7 +375,7 @@ test("CLI-092 formatSummaryLine: TTY \\r-rewrite (no newline) vs piped plain lin
 /** A fake WatchIo the test drives: emit change/key events + flush the (fake) debounce timer. */
 function fakeWatchIo() {
   let onChange: ((f: string | null) => void) | null = null;
-  let onKey: ((b: number) => void) | null = null;
+  let onKey: ((b: number, exitCode?: number) => void) | null = null;
   const timers: Array<{ fn: () => void; live: boolean }> = [];
   const state = { writes: [] as string[], closed: 0, restored: 0 };
   const io: WatchIo = {
@@ -404,6 +404,8 @@ function fakeWatchIo() {
     state,
     emitChange: (f: string | null) => onChange?.(f),
     emitKey: (b: number) => onKey?.(b),
+    /** what defaultWatchIo does on a real SIGINT/SIGTERM: the Ctrl-C path plus 128 + signo. */
+    emitSignal: (exitCode: number) => onKey?.(0x03, exitCode),
     // fire the single live (trailing-edge) debounce timer + let its async cycle settle.
     flush: async () => {
       for (const t of timers) {
@@ -455,6 +457,19 @@ test("CLI-092 debounce: 3 rapid saves of one test file → exactly ONE sidecar r
   assert.equal(runs[0]?.path, "tests/test_foo.py");
   drive.emitKey(0x71); // q
   assert.equal((await done).exitCode, 0);
+});
+
+test("CLI-092 a real SIGTERM tears the watch down AND exits 143, not 0", async () => {
+  // Any SIGTERM listener switches off Node's default termination, and the child reaper defers
+  // to it; the watch used to resolve 0, so a supervisor stopping it saw a clean success.
+  const drive = fakeWatchIo();
+  const { deps } = watchDeps({ known: ["tests/test_foo.py"] });
+  const done = runWatch(makeCtx(["test", "watch"], ["pkg"]), deps, drive.io);
+  await new Promise((r) => setTimeout(r, 0));
+  drive.emitSignal(143);
+  assert.equal((await done).exitCode, 143);
+  assert.equal(drive.state.closed, 1, "the watcher was closed");
+  assert.equal(drive.state.restored, 1, "the terminal was restored");
 });
 
 test("CLI-092 unmappable change → exactly one FULL run with the fallback notice", async () => {

@@ -37,6 +37,7 @@ import {
   VerdictSheet,
   Z,
   gateToVerdict,
+  useFocusTrap,
 } from "@prometheus/ui";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { type ReactElement, useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -197,6 +198,14 @@ export function CatalogRoute(): ReactElement {
     surface: CatalogAppLifecycleRequest["surface"];
     version: string;
   } | null>(null);
+  // Both full-screen dialogs below declare aria-modal, so both must MEAN it: Tab stays inside
+  // and Escape dismisses. (aria-modal without a trap tells assistive tech the catalog behind
+  // is inert while Tab still walks into its Install/Audit buttons.) aria-modal is also what
+  // makes the shell refuse ⌘K underneath them (App.tsx anotherModalOpen).
+  const tutorialRef = useRef<HTMLDivElement>(null);
+  useFocusTrap(tutorialRef, tutorial !== null, () => setTutorial(null));
+  const rollbackRef = useRef<HTMLDivElement>(null);
+  useFocusTrap(rollbackRef, rollbackPick !== null, () => setRollbackPick(null));
   const runSeq = useRef(0);
   const activeRunIdRef = useRef<string | null>(null);
   activeRunIdRef.current = activeRun?.runId ?? null;
@@ -1136,6 +1145,10 @@ export function CatalogRoute(): ReactElement {
         // biome-ignore lint/a11y/useSemanticElements: overlay picker follows the app's WAI-ARIA dialog pattern (no native <dialog> in use).
         <div
           role="dialog"
+          ref={rollbackRef}
+          // It blocks the page, so it says so: assistive tech treats the rest as inert, and the
+          // shell refuses to open the ⌘K palette underneath it (App.tsx anotherModalOpen).
+          aria-modal="true"
           aria-label={`Roll back ${rollbackPick.tool}`}
           style={{
             position: "fixed",
@@ -1230,6 +1243,10 @@ export function CatalogRoute(): ReactElement {
         // biome-ignore lint/a11y/useSemanticElements: full-screen tutorial reader is the WAI-ARIA dialog pattern; the app does not use native <dialog>.
         <div
           role="dialog"
+          ref={tutorialRef}
+          // A full-screen reader over the page: modal, trapped (above), and so ⌘K is refused
+          // under it rather than opening a hidden, focused palette.
+          aria-modal="true"
           aria-label={`Tutorial: ${tutorial.id}`}
           style={{
             position: "fixed",

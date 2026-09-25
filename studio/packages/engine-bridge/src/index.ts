@@ -670,3 +670,25 @@ export {
 
 export type { McpGateTargetKind, McpGateVerdict } from "./security/mcp-gate.js";
 export { createMcpGateRunner } from "./security/mcp-gate.js";
+
+// --- memory admission (2026-09-25) -----------------------------------------
+// The kernel's own view of free memory, so the app, the watchdogs and the test runner finally
+// agree on what "memory is tight" means; plus an HTTP census of which model servers are up and
+// what they hold, which works unchanged against a REMOTE host.
+export type { MemorySnapshot } from "./memory-probe.js";
+export {
+  DEFAULT_HEADROOM_BYTES,
+  localMemorySnapshot,
+  parseMemAvailable,
+  parseSysctlNumbers,
+  underMemoryPressure,
+} from "./memory-probe.js";
+export type { ResidentModelInfo, RunnerProbe, RunnerStatus } from "./runner-census.js";
+export {
+  DEFAULT_RUNNERS,
+  parseOllamaPs,
+  parseOpenAiModels,
+  probeRunner,
+  residentBytes,
+  runnerCensus,
+} from "./runner-census.js";

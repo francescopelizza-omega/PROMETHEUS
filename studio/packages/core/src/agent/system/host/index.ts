@@ -198,3 +198,14 @@ export {
 // overwrite / patch?" card the three destructive mutators had no way to draw. Binary-safe,
 // size-capped, and it never follows a symlink out of the tree it is describing.
 export { PREVIEW_MAX_BYTES, PREVIEW_MAX_ENTRIES, nodePreviewIo } from "./preview-io.js";
+
+// The external-tool inventory: which of `HOST_TOOLS` are on PATH. Pure `access(X_OK)`, never a
+// spawn, cached for the process — an inventory consulted once per turn cannot afford fourteen
+// forks per turn on this machine (CLAUDE.md §2.3). It also repairs a GUI-launched PATH, which
+// is why it sees the Homebrew tools that `whichTool` reports as missing.
+export {
+  clearHostToolCache,
+  lookPath,
+  probeHostTools,
+  searchPath,
+} from "./host-tool-probe.js";

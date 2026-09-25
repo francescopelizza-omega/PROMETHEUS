@@ -1256,7 +1256,10 @@ test("an UNTERMINATED thought never becomes the answer", async () => {
     undefined,
     doFetch,
   );
-  assert.equal(res.text, "");
+  // The thought is still not the answer — and the turn now SAYS it produced no answer, rather
+  // than handing the pane an empty string it silently drops (the 2026-09-24 incident).
+  assert.doesNotMatch(res.text, /I was cut off/);
+  assert.match(res.text, /only reasoning this turn/);
 });
 
 /* ── V0: the probe cache (four hook consumers, one request) ─────────────────*/
@@ -1286,7 +1289,9 @@ test("repeat probes for the same model make ONE request — four panes, one POST
   ).then((results) => {
     for (const r of results) assert.equal(r.contextWindow, 262144);
     assert.equal(probeRequestCount(), 1, "four callers must share one probe");
-    assert.ok(calls <= 1, "and one fetch");
+    // One probe now asks TWO questions: /api/show (what the weights allow) and /api/ps (what
+    // the daemon actually serves). Four callers must still share that one probe.
+    assert.ok(calls <= 2, `and one probe's worth of fetches, got ${calls}`);
   });
 });
 

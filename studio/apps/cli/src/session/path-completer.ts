@@ -181,6 +181,11 @@ export const PATH_ARG_COMMANDS: ReadonlyMap<string, { dirsOnly: boolean }> = new
   ["cd", { dirsOnly: true }],
   ["cwd", { dirsOnly: true }],
   ["add-dir", { dirsOnly: true }],
+  // `/in` names a DESTINATION folder, so it completes like /cd and /cwd, not like /cat.
+  ["in", { dirsOnly: true }],
+  ["ls", { dirsOnly: true }],
+  // `/cat` takes a FILE, so it is the one path-arg command that must offer files too.
+  ["cat", { dirsOnly: false }],
   ["mention", { dirsOnly: false }],
   ["export", { dirsOnly: false }],
 ]);

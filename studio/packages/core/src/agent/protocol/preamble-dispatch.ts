@@ -73,6 +73,17 @@ export interface PreambleCtx {
 
   /** chars-per-token, matching `agent/compact.ts`'s / `preamble.ts`'s estimator. */
   charsPerToken?: number;
+
+  /**
+   * PRE-RENDERED manifest of the external tools installed on this machine
+   * (`agent/host-tools.ts` → `renderHostToolManifest`), or absent when the host did not probe.
+   *
+   * A string rather than the probe result because this context is documented PURE and the probe
+   * reads the filesystem: the host probes once, off this path, and hands the text in. Being a
+   * plain string is also what lets the sandboxed desktop renderer carry a manifest that only
+   * the main process could have computed.
+   */
+  hostTools?: string;
 }
 
 export type PreambleMergeTarget = "persona" | "block";

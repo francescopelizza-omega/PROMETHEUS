@@ -43,6 +43,17 @@ test("liveToSession groups a flat transcript into SessionTurns (one per user pro
   );
 });
 
+test("a LOCAL turn (/ls output) is never archived, so a resumed session never feeds it to the model", () => {
+  const withLocal: AiTurn[] = [
+    { role: "assistant", content: "**/ls** — `/w` · 1 folder, 2 files", local: true },
+    ...LIVE.slice(0, 2),
+    { role: "assistant", content: "**/ls** — `/w/src` · 0 folders, 3 files", local: true },
+    ...LIVE.slice(2),
+  ];
+  const s = liveToSession(META, withLocal);
+  assert.deepEqual(sessionToLive(s), LIVE, "exactly the conversation, no listing");
+});
+
 test("sessionToLive ∘ liveToSession round-trips the flat transcript", () => {
   const s = liveToSession(META, LIVE);
   assert.deepEqual(sessionToLive(s), LIVE);

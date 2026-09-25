@@ -21,6 +21,13 @@ export * from "./guardrails/index.js";
 export * from "./repoint/index.js";
 export * from "./effort/index.js";
 export { mergeWireUsage, type WireUsage } from "./usage.js";
+export {
+  type TurnOutcomeContext,
+  type TurnStopReason,
+  emptyTurnNotice,
+  estimateRequestTokens,
+  truncationNotice,
+} from "./turn-outcome.js";
 
 // Resilience for a model request: what a failure MEANS, and one retrying POST for all four
 // transports. `resilience/retry.ts` had backoff, jitter and abort support with zero callers.
@@ -36,7 +43,10 @@ export {
   isRetryableAiError,
   isRetryableStatus,
   parseRetryAfter,
+  MIN_REPLY_RESERVE_TOKENS,
+  REPLY_RESERVE_FRACTION,
   preflightContext,
+  replyReserveFor,
   retryDelayMs,
 } from "./retry-policy.js";
 export type { ModelRequestInit, ModelRequestOptions, ModelResponseLike } from "./request.js";
@@ -120,3 +130,60 @@ export {
   OPENAI_WIRE,
   selectWire,
 } from "./wire.js";
+
+// --- memory admission (2026-09-25) -----------------------------------------
+// Whether a model fits, computed from geometry verified against ollama's own allocation, and
+// the two rules that follow from it: one model server at a time, and nothing starts that does
+// not fit. Host-parameterised throughout, so a remote model is judged by the REMOTE host's RAM.
+export type {
+  Admission,
+  KvCacheType,
+  KvGeometry,
+  MemoryBudget,
+  ModelFootprint,
+} from "./model-footprint.js";
+export {
+  FALLBACK_KV_BYTES_PER_TOKEN,
+  RUNNER_OVERHEAD_BYTES,
+  admitModel,
+  bytesPerElement,
+  humanBytes,
+  kvBytesForContext,
+  modelFootprint,
+  parseKvGeometry,
+} from "./model-footprint.js";
+export type {
+  AdmissionDecision,
+  AdmissionRequest,
+  AffordableModel,
+  ModelCandidate,
+  ResidentServer,
+} from "./model-admission.js";
+export {
+  admitModelLoad,
+  affordableModels,
+  footprintOf,
+  reclaimableBytes,
+  renderRefusal,
+} from "./model-admission.js";
+export type { InstalledModel } from "./ollama-inventory.js";
+export {
+  fetchModelGeometry,
+  inventoryCandidates,
+  listInstalledModels,
+  ollamaRoot,
+} from "./ollama-inventory.js";
+
+// --- self-hosted remote model servers (2026-09-25) --------------------------
+// A GPU box you own is not a cloud provider. DEFAULT DENY: a host is trusted only once
+// declared by hand; nothing is inferred from a private IP range.
+export type { RemoteHost } from "./remote-hosts.js";
+export {
+  findRemoteHost,
+  hostOf,
+  isDeclaredRemoteHost,
+  isPrivateAddress,
+  localityWithRemotes,
+  normalizeHost,
+  warnings as remoteHostWarnings,
+} from "./remote-hosts.js";

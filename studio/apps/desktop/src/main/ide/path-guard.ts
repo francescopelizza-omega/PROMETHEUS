@@ -151,18 +151,31 @@ export function assertNotSensitivePath(uri: string): string {
   const fsPath = uriToFsPath(uri);
   // canonical() runs resolve() → relative paths become absolute (against cwd) here.
   const abs = canonical(fsPath);
-  if (SENSITIVE_BASENAMES.has(basename(abs))) {
+  // Compare CASE-FOLDED where the filesystem is case-insensitive (macOS and Windows by
+  // default). `realpathSync` keeps the caller's letter case for every non-symlink component,
+  // and every check below was an exact string match — so `~/.SSH`, `~/.AWS/credentials` or
+  // `.../ID_RSA` named the very same files and walked straight past the denylist, into
+  // ide:fs.read and ide:fs.watch. The returned path keeps its spelling; only the comparison
+  // is folded, so working-set and grant keys are unaffected.
+  const fold = caseInsensitiveFs() ? (s: string) => s.toLowerCase() : (s: string) => s;
+  const key = fold(abs);
+  if (SENSITIVE_BASENAMES.has(fold(basename(abs)))) {
     throw new Error(`refusing access to a sensitive key file: ${basename(abs)}`);
   }
-  if (sensitiveFiles().has(abs)) {
-    throw new Error("refusing access to a sensitive credential/rc file");
+  for (const file of sensitiveFiles()) {
+    if (key === fold(file)) throw new Error("refusing access to a sensitive credential/rc file");
   }
   for (const dir of sensitiveDirs()) {
-    if (isUnder(abs, dir)) {
+    if (isUnder(key, fold(dir))) {
       throw new Error(`refusing access under a sensitive directory: ${dir}`);
     }
   }
   return abs;
+}
+
+/** macOS (APFS/HFS+ default) and Windows (NTFS default) resolve names case-insensitively. */
+function caseInsensitiveFs(): boolean {
+  return process.platform === "darwin" || process.platform === "win32";
 }
 
 /* ────────────────────────────────────────────────────────────────────────────

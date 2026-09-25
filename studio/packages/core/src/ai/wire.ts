@@ -148,6 +148,18 @@ export interface WireEvent {
   /** the stream is finished (the format's terminal marker). */
   done?: boolean;
   /**
+   * Why the model STOPPED, when the provider says so (OpenAI `finish_reason`, Anthropic
+   * `stop_reason`). `"length"` is the one that matters: the reply was CUT OFF because the
+   * context (or a max-token cap) ran out.
+   *
+   * It is not an `error` — the HTTP call succeeded and a truncated answer is still an answer —
+   * but it must not be silence either. Dropping it is how a local thinking model that spent
+   * its whole remaining window on reasoning ended a turn with no text, no tool call and no
+   * explanation: measured 2026-09-24 against ollama (`n_tokens = 8191, truncated = 1`), where
+   * the user saw only the thinking stream and then nothing at all.
+   */
+  stopReason?: "length" | "stop" | "content_filter" | "tool_calls" | "other";
+  /**
    * The provider reported a failure MID-STREAM, after a 200.
    *
    * All three formats can do this and all three used to parse it to silence: Anthropic sends
@@ -158,6 +170,17 @@ export interface WireEvent {
    * explanation, which reads as the model refusing to speak.
    */
   error?: string;
+}
+
+/** Map a provider's stop/finish reason onto the small set the agent acts on. */
+export function normalizeStopReason(raw: string): NonNullable<WireEvent["stopReason"]> {
+  const r = raw.toLowerCase();
+  // Anthropic says "max_tokens", OpenAI and ollama say "length" — the same event.
+  if (r === "length" || r === "max_tokens" || r === "model_length") return "length";
+  if (r === "stop" || r === "end_turn" || r === "stop_sequence") return "stop";
+  if (r === "content_filter" || r === "safety" || r === "refusal") return "content_filter";
+  if (r === "tool_calls" || r === "tool_use" || r === "function_call") return "tool_calls";
+  return "other";
 }
 
 export interface WireBodyOptions {
@@ -425,6 +448,8 @@ export const OPENAI_WIRE: WireFormat = {
         delta?: { content?: unknown; tool_calls?: unknown };
         text?: unknown;
       };
+      const fr = (first as { finish_reason?: unknown }).finish_reason;
+      if (typeof fr === "string" && fr) out.stopReason = normalizeStopReason(fr);
       const c = first.delta?.content;
       if (typeof c === "string" && c) out.delta = c;
       else if (typeof first.text === "string" && first.text) out.delta = first.text;
@@ -479,10 +504,52 @@ export const ANTHROPIC_VERSION = "2023-06-01";
 /**
  * Anthropic REQUIRES `max_tokens`; there is no "as much as you like".
  *
- * A default has to exist or every request without an explicit cap 400s. 4096 is the same
- * order as the other formats' implicit behaviour and small enough not to surprise a bill.
+ * A default has to exist or every request without an explicit cap 400s — but the default this
+ * repo shipped was **4096**, chosen because it was "small enough not to surprise a bill". That
+ * is a COST choice wearing a capability choice's clothes, and it was the only place in the
+ * entire codebase that truncated a model's answer: OpenAI omits `max_tokens`, Gemini omits
+ * `generationConfig`, and ollama (driven through the OpenAI /v1 shim) gets no output cap at
+ * all. No caller ever passes `maxTokens`, so EVERY Claude turn from EVERY surface stopped at
+ * 4,096 tokens on models that serve sixteen times that.
+ *
+ * A cap that silently ends the answer is not a safety device — it is the same class of bug as
+ * the 8192 serving context that produced empty turns on 2026-09-24 (CLAUDE.md §2.8). The
+ * default is now the model's OWN documented maximum.
+ *
+ * Why a table and not one big number: `max_tokens` above what the model allows is a 400, so
+ * "just send a million" breaks every request instead of none. Entries are the published output
+ * ceilings; `ANTHROPIC_FALLBACK_MAX_TOKENS` covers an unrecognised model conservatively enough
+ * to be accepted by any of them.
  */
-export const ANTHROPIC_DEFAULT_MAX_TOKENS = 4096;
+export const ANTHROPIC_MAX_OUTPUT: readonly { re: RegExp; maxTokens: number }[] = Object.freeze([
+  { re: /^claude-(sonnet|haiku)-4-5/, maxTokens: 64_000 },
+  { re: /^claude-(sonnet|haiku|opus)-5/, maxTokens: 64_000 },
+  { re: /^claude-opus-4/, maxTokens: 32_000 },
+  { re: /^claude-(sonnet|haiku)-4/, maxTokens: 64_000 },
+  { re: /^claude-3-7/, maxTokens: 64_000 },
+  { re: /^claude-3-5/, maxTokens: 8_192 },
+  { re: /^claude-3/, maxTokens: 4_096 },
+]);
+
+/**
+ * The default for a Claude model this table has never heard of.
+ *
+ * 8192 rather than 64000 on purpose: an unknown model is most likely a NEW one (where a bigger
+ * ceiling would be accepted) or an OLD one (where it would 400). Refusing to guess high keeps
+ * an unrecognised model working; the table is how a model gets its real ceiling.
+ */
+export const ANTHROPIC_FALLBACK_MAX_TOKENS = 8_192;
+
+/** @deprecated The old flat cap. Kept only so an external importer does not break. */
+export const ANTHROPIC_DEFAULT_MAX_TOKENS = ANTHROPIC_FALLBACK_MAX_TOKENS;
+
+/** The published output ceiling for a Claude model id. */
+export function anthropicMaxTokensFor(modelId: string): number {
+  const id = modelId.toLowerCase();
+  return (
+    ANTHROPIC_MAX_OUTPUT.find((r) => r.re.test(id))?.maxTokens ?? ANTHROPIC_FALLBACK_MAX_TOKENS
+  );
+}
 
 /**
  * Render one message as Anthropic content blocks.
@@ -582,7 +649,7 @@ export const ANTHROPIC_WIRE: WireFormat = {
     return {
       model: opts.model,
       // Required by the API. Omitting it is a 400, not a default.
-      max_tokens: opts.maxTokens ?? ANTHROPIC_DEFAULT_MAX_TOKENS,
+      max_tokens: opts.maxTokens ?? anthropicMaxTokensFor(opts.model),
       messages: turns,
       stream: true,
       ...(system ? { system } : {}),
@@ -696,7 +763,14 @@ export const ANTHROPIC_WIRE: WireFormat = {
     }
     if (type === "message_delta") {
       const u = usageFrom(o.usage);
-      return u ? { usage: u } : {};
+      // `message_delta` is also where Anthropic reports WHY it stopped ("max_tokens" =
+      // truncated), the counterpart of OpenAI's finish_reason.
+      const d = isRecord(o.delta) ? o.delta : undefined;
+      const sr = d && typeof d.stop_reason === "string" ? d.stop_reason : undefined;
+      return {
+        ...(u ? { usage: u } : {}),
+        ...(sr ? { stopReason: normalizeStopReason(sr) } : {}),
+      };
     }
     return {};
   },

@@ -35,6 +35,8 @@ export interface SettingsNodeView {
   /** APP-058: every layer that sets the key, in precedence order (the "overrides …" chain). */
   definedIn?: ("default" | "global" | "profile" | "workspace" | "unset")[];
   searchTerms?: string[];
+  /** the closed set of valid values, for a `select`. Carried from `SettingsNode.options`. */
+  options?: readonly { value: string; label: string }[];
   children?: SettingsNodeView[];
 }
 

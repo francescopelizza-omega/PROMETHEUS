@@ -82,6 +82,8 @@ export const PROGRAMS: Readonly<Record<string, ProgramSpec>> = Object.freeze({
   df: { tier: "read" },
   pwd: { tier: "read" },
   echo: { tier: "read" },
+  // `printf` is echo with a format string; the format is data, not code.
+  printf: { tier: "read" },
   date: { tier: "read" },
   uname: { tier: "read" },
   whoami: { tier: "read" },
@@ -140,6 +142,9 @@ export const PROGRAMS: Readonly<Record<string, ProgramSpec>> = Object.freeze({
     // GNU grep can run a program per match via --devices/--directories? No — but -f reads a
     // pattern FILE, which is fine. The real risk is none; kept explicit for review.
   },
+  // the deprecated spellings are still what a model reaches for; same tier as `grep`.
+  egrep: { tier: "read" },
+  fgrep: { tier: "read" },
   rg: { tier: "read", denyFlags: [{ re: /^--pre$|^--pre=/, why: RUNS_CODE("rg --pre") }] },
   find: {
     tier: "read",
@@ -321,6 +326,136 @@ export const PROGRAMS: Readonly<Record<string, ProgramSpec>> = Object.freeze({
     ],
   },
   scp: { tier: "install" },
+
+  /* ── media, documents and OCR ────────────────────────────────────────────
+   *
+   * These are the host tools a model reaches for when asked to convert an image, pull text
+   * out of a PDF, or fetch a video — the ones this registry had never heard of, so every one
+   * of them classified `destructive` and prompted. They are allowlisted here at the tier that
+   * matches what they actually do: `read` when the program only reads, `command` as soon as it
+   * writes a file of its own, `install` when it needs the network.
+   *
+   * Half of them can execute arbitrary code given the right flag, and those flags are the
+   * point of this block — see each `denyFlags` entry. What CANNOT be caught by argv (an
+   * ImageMagick delegate triggered by a crafted input file, an ffmpeg demuxer bug) is left to
+   * the layer built for it: the OS sandbox, which confines writes to the working set and
+   * denies the network below A5.
+   */
+  // Readers. No output file of their own, so they stay at the bottom of the ladder.
+  pdfgrep: { tier: "read" },
+  identify: { tier: "read" },
+  ffprobe: { tier: "read" },
+
+  // ImageMagick. `@file` is a FILE-REFERENCE primitive: `convert @/etc/passwd …` reads a path
+  // the caller never named, and `msl:`/`mvg:` are ImageMagick's own scripting languages —
+  // `msl:script.xml` is an interpreter, not an image.
+  magick: {
+    tier: "command",
+    denyFlags: [
+      { re: /^@/, why: "`@file` makes ImageMagick read a file the command never named" },
+      { re: /^(msl|mvg|ephemeral):/i, why: RUNS_CODE("an MSL/MVG script") },
+    ],
+  },
+  convert: {
+    tier: "command",
+    denyFlags: [
+      { re: /^@/, why: "`@file` makes ImageMagick read a file the command never named" },
+      { re: /^(msl|mvg|ephemeral):/i, why: RUNS_CODE("an MSL/MVG script") },
+    ],
+  },
+  // `-protocol_whitelist` re-enables `file:`/`concat:` inside a playlist, the long-standing
+  // route from "transcode this HLS stream" to "read an arbitrary local file into the output".
+  ffmpeg: {
+    tier: "command",
+    denyFlags: [
+      {
+        re: /^-protocol_whitelist$/,
+        why: "`-protocol_whitelist` re-enables file:/concat: inside a playlist, which reads arbitrary local files",
+      },
+    ],
+  },
+  // Ghostscript's `-dSAFER` is the sandbox; the two flags that switch it off are the escape.
+  gs: {
+    tier: "command",
+    denyFlags: [
+      { re: /^-dNOSAFER$|^-dDELAYSAFER$/, why: RUNS_CODE("ghostscript with -dSAFER disabled") },
+    ],
+  },
+  qpdf: { tier: "command" },
+  pdftoppm: { tier: "command" },
+  dwebp: { tier: "command" },
+  /**
+   * The sqlite3 CLI is a shell with a database attached, and the escapes are POSITIONAL, not
+   * flags: `sqlite3 db ".shell id"` runs `id`, `.system` is its twin, `.once |cmd` and
+   * `.output |cmd` pipe a query's output INTO a command, `.load` loads a binary extension
+   * (arbitrary native code), and `.import`/`.excel`/`.expert` each read or spawn. `-cmd` is the
+   * same thing spelled as a flag.
+   *
+   * It stays at `command` rather than `read` for the same reason: a plain `SELECT` is harmless,
+   * but a write statement is indistinguishable from one by argv alone.
+   */
+  sqlite3: {
+    tier: "command",
+    denyFlags: [
+      { re: /^-cmd$/, why: RUNS_CODE("sqlite3 -cmd") },
+      {
+        re: /^\s*\.(shell|system|once|output|load|import|excel|expert)\b/i,
+        why: RUNS_CODE("a sqlite3 dot-command (.shell/.system/.load pipe into or load code)"),
+      },
+      { re: /\|/, why: "a sqlite3 argument containing `|` pipes output into a command" },
+    ],
+  },
+  // Both filter flags run a program; `--pdf-engine` launches one, which is exactly the
+  // argv[0]-invisible indirection that put `env` and `timeout` in FORBIDDEN.
+  pandoc: {
+    tier: "command",
+    denyFlags: [
+      { re: /^--lua-filter$|^--filter$/, why: RUNS_CODE("a pandoc filter") },
+      { re: /^--pdf-engine$/, why: "`--pdf-engine` launches another program under pandoc's name" },
+    ],
+  },
+  cwebp: { tier: "command" },
+  optipng: { tier: "command" },
+  jpegoptim: { tier: "command" },
+  tesseract: { tier: "command" },
+  pdftotext: { tier: "command" },
+  // exiftool is Perl, and three of its options take PERL: `-config` loads a Perl config file,
+  // `-if` evaluates a Perl condition, and `-p`'s advanced formatting `${tag;expr}` evaluates
+  // `expr`. Without these it is the most capable metadata tool available; with them it is perl.
+  exiftool: {
+    tier: "command",
+    denyFlags: [
+      { re: /^-config$/, why: RUNS_CODE("an exiftool -config file (it is Perl)") },
+      { re: /^-if$/, why: RUNS_CODE("exiftool -if (the condition is Perl)") },
+      { re: /^-p$/, why: RUNS_CODE("exiftool -p (${tag;expr} formatting evaluates Perl)") },
+      { re: /^-@$/, why: "`-@ argfile` takes arguments from a file, past every check here" },
+    ],
+  },
+  // yt-dlp: `install` because it needs the NETWORK, and the sandbox ties network to A5 — at
+  // A5+ a "download this video" request therefore runs end to end with no prompt, which is the
+  // whole point. Its deny list is the longest here because it has the most ways out:
+  //   --exec / --exec-before-download  run an arbitrary shell command per download
+  //   --downloader / --external-downloader  hand the transfer to another binary
+  //   --plugin-dirs  loads Python plugins from a directory
+  //   --config-location / --config  a config file may contain any of the above
+  //   --load-info-json  same, via a JSON field
+  //   --cookies-from-browser / --cookies  send the user's session cookies to whatever host
+  //     the URL names — credential exfiltration with no other symptom
+  // `-o`, `-P` and `--paths` are deliberately NOT denied: they are how `/in` aims the download.
+  "yt-dlp": {
+    tier: "install",
+    denyFlags: [
+      { re: /^--exec(-before-download)?(=|$)/, why: RUNS_CODE("yt-dlp --exec") },
+      { re: /^--(external-)?downloader(-args)?(=|$)/, why: RUNS_CODE("an external downloader") },
+      { re: /^--plugin-dirs(=|$)/, why: RUNS_CODE("yt-dlp plugins") },
+      { re: /^--config(-location)?(=|$)/, why: RUNS_CODE("a yt-dlp config file") },
+      { re: /^--load-info-json(=|$)/, why: RUNS_CODE("a yt-dlp info JSON") },
+      {
+        re: /^--cookies(-from-browser)?(=|$)/,
+        why: "sending your browser session cookies to the download host — do it yourself if you mean to",
+      },
+    ],
+  },
 
   /* ── interpreters: a shell by any other name ─────────────────────────────*/
   python: { tier: "destructive", denyFlags: [{ re: /^-c$/, why: RUNS_CODE("python -c") }] },

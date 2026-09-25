@@ -33,7 +33,7 @@ export interface CheckboxProps
 }
 
 export const Checkbox = forwardRef<HTMLInputElement, CheckboxProps>(function Checkbox(
-  { checked, onCheckedChange, label, disabled, id, className, ...rest },
+  { checked, onCheckedChange, label, disabled, id, className, onFocus, onBlur, style, ...rest },
   ref,
 ) {
   const autoId = useId();
@@ -54,6 +54,11 @@ export const Checkbox = forwardRef<HTMLInputElement, CheckboxProps>(function Che
     >
       <span style={{ position: "relative", display: "inline-flex" }}>
         <input
+          // `rest` FIRST, and the caller's onFocus/onBlur chained below — the same fix Input,
+          // Textarea, Button, IconButton and Slider got. Spread last, a caller's onFocus/onBlur
+          // replaced the handlers that paint the focus ring, and with `outline: none` inline a
+          // keyboard user lost every trace of focus.
+          {...rest}
           ref={ref}
           id={inputId}
           type="checkbox"
@@ -70,14 +75,18 @@ export const Checkbox = forwardRef<HTMLInputElement, CheckboxProps>(function Che
             background: checked ? v("brand") : v("bg-inset"),
             outline: "none",
             cursor: disabled ? "not-allowed" : "pointer",
+            // merged LAST, like Input and Slider — with `rest` spread first, a caller's style
+            // would otherwise be silently replaced by the literal above
+            ...style,
           }}
           onFocus={(e) => {
             e.currentTarget.style.boxShadow = FOCUS_RING;
+            onFocus?.(e);
           }}
           onBlur={(e) => {
             e.currentTarget.style.boxShadow = "none";
+            onBlur?.(e);
           }}
-          {...rest}
         />
         {checked && (
           <span

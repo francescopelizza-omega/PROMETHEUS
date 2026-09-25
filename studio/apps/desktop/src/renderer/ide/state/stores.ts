@@ -232,6 +232,19 @@ export interface AiTurn {
   content: string;
   /** APP-051: the pre-turn workspace checkpoint id (user turns only) → per-turn revert. */
   checkpointId?: string;
+  /**
+   * A LOCAL turn: output of a command the pane answered itself (`/ls`), not the model's. It is
+   * shown in the transcript but never sent to the model as history and never archived.
+   */
+  local?: boolean;
+  /**
+   * Render `content` VERBATIM (one code block), with no markdown pass at all.
+   *
+   * For `/cat`: markdown-parse.ts opens a fence on `^```` and closes it only on a line that is
+   * exactly ```, so a file containing a fence would end the block early and render its own
+   * remainder as markdown. File text is data, not markup.
+   */
+  pre?: boolean;
 }
 
 /** A pending agent run_command task card (§7.3 — confirm-gated). */

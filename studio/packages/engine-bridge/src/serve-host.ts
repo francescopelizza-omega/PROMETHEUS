@@ -271,7 +271,12 @@ export function createServeHost(deps: ServeHostDeps = {}): ServeHostApi {
     // record a new server inside that window — writing back a filtered pre-grace snapshot
     // would erase it from serve-state.json while the process itself keeps running, leaving an
     // untracked server nothing can stop.
-    const prune = () => save(load().filter((r) => r.profileId !== profileId));
+    // Match the record's IDENTITY (profile + pid), not the profile alone: once the old pid is
+    // dead its port is free, and another process's start() may re-record the SAME profileId
+    // with a NEW pid inside this grace window. Pruning by profileId deleted that live record
+    // and left a running server nobody tracks.
+    const prune = () =>
+      save(load().filter((r) => !(r.profileId === profileId && r.pid === rec.pid)));
     if (!isAlive(rec.pid)) {
       prune(); // stale/dead pid ⇒ self-heal, honest success
       return { ok: true, found: true, wasStale: true };
@@ -315,9 +320,13 @@ export function createServeHost(deps: ServeHostDeps = {}): ServeHostApi {
     // writing it wholesale would drop any server recorded during them. Only the entries this
     // pass actually examined are removed.
     if (survivors.length !== servers.length) {
-      const keep = new Set(survivors.map((r) => r.profileId));
-      const examined = new Set(servers.map((r) => r.profileId));
-      save(load().filter((r) => keep.has(r.profileId) || !examined.has(r.profileId)));
+      // Keyed by identity (profile + pid), for the same reason as stop()'s prune: a dead
+      // record examined here must not take down a NEW record for the same profile written by
+      // a concurrent start() during the awaited probes.
+      const id = (r: ServeRecord): string => `${r.profileId}:${r.pid}`;
+      const keep = new Set(survivors.map(id));
+      const examined = new Set(servers.map(id));
+      save(load().filter((r) => keep.has(id(r)) || !examined.has(id(r))));
     }
     return live;
   };

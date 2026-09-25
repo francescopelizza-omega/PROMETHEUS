@@ -21,7 +21,12 @@ export type TransportMode = "native" | "text";
 
 /** Where the context-window number came from — mirrors `ContextWindowSource`, plus "declared"
  *  for a cloud endpoint (or a local one never probed), which is never measured, only stated. */
-export type ContextWindowOrigin = "ollama" | "openai-models" | "default" | "declared";
+export type ContextWindowOrigin =
+  | "ollama"
+  | "ollama-loaded"
+  | "openai-models"
+  | "default"
+  | "declared";
 
 /** One endpoint's health, as of the last turn that touched it. */
 export interface EndpointHealthRecord {
@@ -98,6 +103,7 @@ const TRANSPORT_MODES: ReadonlySet<string> = new Set(["native", "text"]);
 const LOCALITIES: ReadonlySet<string> = new Set(["local", "cloud"]);
 const CONTEXT_WINDOW_ORIGINS: ReadonlySet<string> = new Set([
   "ollama",
+  "ollama-loaded",
   "openai-models",
   "default",
   "declared",
@@ -185,6 +191,11 @@ export function describeContextWindow(r: EndpointHealthRecord): string {
     return `${n} tokens (⚠ unmeasured — probe failed, this is a guessed floor)`;
   }
   if (r.contextWindowSource === "declared") return `${n} tokens (declared)`;
+  // "ollama-loaded" = the daemon serves LESS than the weights allow (OLLAMA_CONTEXT_LENGTH).
+  // Saying so is the difference between "my model has 262k" and the 8k actually in force.
+  if (r.contextWindowSource === "ollama-loaded") {
+    return `${n} tokens (as SERVED by ollama — the model itself allows more; raise OLLAMA_CONTEXT_LENGTH to use it)`;
+  }
   return `${n} tokens (measured via ${r.contextWindowSource})`;
 }
 

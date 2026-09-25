@@ -120,6 +120,7 @@ async function notebookCardResult(
     data: { exitCode: out.ok ? 0 : 1 },
   };
 }
+import { hasFolderOpen } from "../../../routes/no-folder-guard.js";
 import { expandCommandFile, matchCommandFileInvocation } from "./command-files.js";
 import { effortFor, useEffortStore } from "./effort-store.js";
 import { ensureLocalServerStarted, useActiveEndpoint } from "./endpoint-hook.js";
@@ -129,7 +130,22 @@ import {
   endpointMeta,
   formatContextWindow,
 } from "./endpoints.js";
-import { Markdown } from "./markdown.js";
+import {
+  BUILTIN_SLASH_ROWS,
+  type CatInvocation,
+  type InInvocation,
+  type LsInvocation,
+  extractInDirective,
+  formatCatTurn,
+  formatInTurn,
+  formatLsTurn,
+  lsTarget,
+  matchCatCommand,
+  matchInCommand,
+  matchLsCommand,
+  outputDirNote,
+} from "./local-commands.js";
+import { Markdown, Verbatim } from "./markdown.js";
 import { createMemoryBlock } from "./memory-block.js";
 import {
   type ActiveMention,
@@ -443,6 +459,14 @@ export function AgentPane({
   const sessionCreatedRef = useRef<Map<string, string>>(new Map());
 
   const [input, setInput] = useState("");
+  /**
+   * `/in` — the session output folder for produced files, or null for the workspace folder.
+   *
+   * Component state, not the persisted session store: the write approval it rides on is
+   * itself session-scoped and cleared when the roots change, so persisting the folder across
+   * a reload would show a destination the agent is no longer allowed to write to.
+   */
+  const [outputDir, setOutputDir] = useState<string | null>(null);
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
   // Task #5 (desktop parity): custom slash commands from markdown — the list itself is
   // populated once `workspaceRoot` is in scope, just below.
@@ -453,6 +477,8 @@ export function AgentPane({
   // executing immediately (a custom command isn't an action, it's a prompt template).
   const commandRows = useMemo(
     () => [
+      // local built-ins FIRST (`/ls`): answered here, no model call — see local-commands.ts
+      ...BUILTIN_SLASH_ROWS,
       ...commandPaletteRows(undefined, readStoredOverrides()),
       ...customCommands.map((c) => ({
         id: `custom:${c.file.name}`,
@@ -898,8 +924,141 @@ export function AgentPane({
     height: ENDPOINT_H,
   });
 
+  /**
+   * `/ls` — answered LOCALLY, no model call: the files in the folder the agent works in, the
+   * same check the terminal TUI's `/ls` gives, so the user can confirm Prometheus is on the
+   * right project. Posted as a LOCAL turn: shown here, never sent to the model, never archived.
+   */
+  const runLocalLs = useCallback(
+    async (inv: LsInvocation | { error: string }): Promise<void> => {
+      const sid = activeId;
+      if ("error" in inv) {
+        pushTurn(sid, { role: "assistant", content: `**/ls** — ${inv.error}`, local: true });
+        return;
+      }
+      const root = useTabsStore.getState().workspaceRoot;
+      const folderOpen = hasFolderOpen(root);
+      // The same fallback the agent itself uses (`workspaceRoot || "."`), so /ls shows exactly
+      // the folder a tool call would run in.
+      const dir = lsTarget(folderOpen && root ? root : ".", inv.path);
+      let nodes: Awaited<ReturnType<Window["prometheus"]["ide"]["fsTree"]>> = [];
+      try {
+        nodes = (await ide()?.fsTree(dir)) ?? [];
+      } catch {
+        /* an IPC failure reads as "(empty, or not readable)", never as a crash */
+      }
+      pushTurn(sid, {
+        role: "assistant",
+        content: formatLsTurn({ dir, nodes, all: inv.all, folderOpen }),
+        local: true,
+      });
+    },
+    [activeId, pushTurn],
+  );
+
+  /**
+   * `/cat <file>` — answered LOCALLY, the pane's twin of the terminal's `/cat`. The turn is
+   * posted with `pre: true` so the file renders VERBATIM: file text is data, and a markdown
+   * pass over it would mangle any file that contains a fence (see local-commands.ts).
+   */
+  const runLocalCat = useCallback(
+    async (inv: CatInvocation | { error: string }): Promise<void> => {
+      const sid = activeId;
+      if ("error" in inv) {
+        pushTurn(sid, { role: "assistant", content: `**/cat** — ${inv.error}`, local: true });
+        return;
+      }
+      const root = useTabsStore.getState().workspaceRoot;
+      // lsTarget resolves a sub-path against the workspace folder exactly as /ls does, so both
+      // commands agree on what a relative path means.
+      const path = lsTarget(hasFolderOpen(root) && root ? root : ".", inv.path);
+      let read: Awaited<ReturnType<Window["prometheus"]["ide"]["fsRead"]>> = {
+        ok: false,
+        error: "the IDE bridge is unavailable",
+      };
+      try {
+        read = (await ide()?.fsRead(path)) ?? read;
+      } catch (e) {
+        read = { ok: false, error: e instanceof Error ? e.message : String(e) };
+      }
+      pushTurn(sid, {
+        role: "assistant",
+        content: formatCatTurn({ path, read, all: inv.all }),
+        local: true,
+        pre: read.ok,
+      });
+    },
+    [activeId, pushTurn],
+  );
+
+  /**
+   * `/in <folder>` — where produced files go (downloads, conversions), the pane's twin of the
+   * terminal's `/in`.
+   *
+   * Setting it APPROVES that folder for writing via `approveOutsideWorkingSet(path,"session")`.
+   * That call is the sanctioned way to widen the agent's write scope — one explicit path,
+   * cleared when the roots change — and it is legitimate here precisely because the human typed
+   * the path into the composer. `ide:workingSet.set` deliberately cannot do this.
+   */
+  const runLocalIn = useCallback(
+    async (inv: InInvocation): Promise<void> => {
+      const sid = activeId;
+      const root = useTabsStore.getState().workspaceRoot || ".";
+      if ("error" in inv) {
+        pushTurn(sid, { role: "assistant", content: `**/in** — ${inv.error}`, local: true });
+        return;
+      }
+      if (inv.action === "show") {
+        pushTurn(sid, { role: "assistant", content: formatInTurn(outputDir, root), local: true });
+        return;
+      }
+      if (inv.action === "clear") {
+        setOutputDir(null);
+        pushTurn(sid, {
+          role: "assistant",
+          content: `**/in** — cleared. Produced files go to \`${root}\`.`,
+          local: true,
+        });
+        return;
+      }
+      const dir = lsTarget(root, inv.path);
+      const res = await ide()
+        ?.approveOutsideWorkingSet(dir, "session")
+        .catch((e: unknown) => ({ ok: false, error: e instanceof Error ? e.message : String(e) }));
+      if (!res?.ok) {
+        pushTurn(sid, {
+          role: "assistant",
+          content: `**/in** — ${res?.error ?? "could not approve that folder"}`,
+          local: true,
+        });
+        return;
+      }
+      setOutputDir(dir);
+      pushTurn(sid, { role: "assistant", content: formatInTurn(dir, root), local: true });
+    },
+    [activeId, pushTurn, outputDir],
+  );
+
   const acceptSlash = useCallback(
     (id: string) => {
+      if (id === "builtin:ls") {
+        setInput("");
+        setSlashActive(0);
+        void runLocalLs({ path: "", all: false });
+        return;
+      }
+      // `/cat` needs a filename, so picking it from the popup FILLS the composer rather than
+      // running — the same rule custom commands follow a few lines down.
+      if (id === "builtin:cat") {
+        setInput("/cat ");
+        setSlashActive(0);
+        return;
+      }
+      if (id === "builtin:in") {
+        setInput("/in ");
+        setSlashActive(0);
+        return;
+      }
       // Task #5 (desktop parity): a custom command isn't an action to RUN, it's a prompt
       // template — fill the composer with `/name ` so the user types args and Enter sends it
       // (send() below does the actual expansion), instead of executing + clearing like a
@@ -917,7 +1076,7 @@ export function AgentPane({
       const el = inputRef.current;
       if (el) el.style.height = "auto";
     },
-    [onRunCommand],
+    [onRunCommand, runLocalLs],
   );
 
   // APP-092: Cmd/Ctrl-L "attach selection" → read the active editor selection and add a
@@ -1104,8 +1263,58 @@ export function AgentPane({
   const send = useCallback(async () => {
     const sid = activeId;
     const store = useAiSessionStore.getState();
+    // `/ls [path] [-a]` typed out (or with the popup closed) is answered locally, before any
+    // model gating: it needs no endpoint and never becomes a prompt.
+    const ls = matchLsCommand(input);
+    if (ls && !store.sessions[sid]?.busy) {
+      setInput("");
+      void runLocalLs(ls);
+      return;
+    }
+    // `/cat <file>` likewise: no endpoint needed, never becomes a prompt.
+    const cat = matchCatCommand(input);
+    if (cat && !store.sessions[sid]?.busy) {
+      setInput("");
+      void runLocalCat(cat);
+      return;
+    }
+    // `/in [folder]` on its own line: a local setting, never a prompt.
+    const inCmd = matchInCommand(input);
+    if (inCmd && !store.sessions[sid]?.busy) {
+      setInput("");
+      void runLocalIn(inCmd);
+      return;
+    }
     if (!active || !input.trim() || store.sessions[sid]?.busy) return;
     let text = input.trim();
+    // `/in <folder>` INLINE — "download this video … and save it /in ~/Downloads". Pulled out
+    // of the message, approved for writing, and replaced by a plain statement of where to write,
+    // exactly as the terminal hosts do (apps/cli/src/session/in.ts `applyInDirective`).
+    // Read into a LOCAL: `setOutputDir` below does not land before this turn is assembled, so
+    // an inline `/in` would not reach the model on the very turn that asked for it.
+    let turnOutputDir = outputDir;
+    {
+      const { prompt, dir } = extractInDirective(text);
+      if (dir !== null) {
+        text = prompt;
+        const abs = lsTarget(useTabsStore.getState().workspaceRoot || ".", dir);
+        const res = await ide()
+          ?.approveOutsideWorkingSet(abs, "session")
+          .catch(() => ({ ok: false }));
+        if (res?.ok) {
+          turnOutputDir = abs;
+          setOutputDir(abs);
+        } else {
+          // Reported, never silent: the turn still runs and the files land in the workspace
+          // folder, which is far better than writing somewhere the user did not expect.
+          pushTurn(sid, {
+            role: "assistant",
+            content: `**/in** — could not use \`${abs}\`; using the workspace folder.`,
+            local: true,
+          });
+        }
+      }
+    }
     // Task #5 (desktop parity): a typed `/name args…` that matches a loaded custom command
     // EXPANDS into the prompt the agent receives — the same `@file`/`!cmd` resolution + LAST
     // argument substitution as the CLI's `/name`. Expansion happens here (send time), not at
@@ -1127,15 +1336,21 @@ export function AgentPane({
       });
       text = expanded.prompt;
     }
+    // Tell the model where to write. Appended to the USER message, not injected as a preamble:
+    // it costs tokens only on turns that actually have an output folder, and it stays visible in
+    // the transcript so a later reader can see why a file landed where it did.
+    if (turnOutputDir) text = `${text}\n\n${outputDirNote(turnOutputDir)}`;
     setInput("");
     setActiveMention(null);
     // capture the prior transcript BEFORE we append the new user turn (so the message
     // list carries the new prompt exactly once).
-    const priorTurns = store.sessions[sid]?.turns ?? [];
+    const allTurns = store.sessions[sid]?.turns ?? [];
+    // LOCAL turns (`/ls` output) are the user's own view, never model context.
+    const priorTurns = allTurns.filter((t) => !t.local);
     // APP-051: snapshot the workspace BEFORE this turn runs → a per-turn revert point.
     // Bounded walk (skip-and-warn, never blocks); the checkpoint id rides on the user turn.
     const root0 = useTabsStore.getState().workspaceRoot || ".";
-    const turnNumber = priorTurns.length;
+    const turnNumber = allTurns.length;
     let checkpointId: string | undefined;
     try {
       const snap = await snapshotWorkspace(root0);
@@ -1415,6 +1630,10 @@ export function AgentPane({
     takeCheckpoint,
     persistSession,
     chips,
+    runLocalLs,
+    runLocalCat,
+    runLocalIn,
+    outputDir,
   ]);
 
   // APP-052: load the disk-archived sessions on mount / workspace change (fail-soft).
@@ -2193,7 +2412,15 @@ export function AgentPane({
             }}
           >
             {/* assistant replies render as (safe) markdown; user text stays literal (#12). */}
-            {t.role === "assistant" ? <Markdown source={t.content} /> : t.content}
+            {t.role === "assistant" ? (
+              t.pre ? (
+                <Verbatim text={t.content} />
+              ) : (
+                <Markdown source={t.content} />
+              )
+            ) : (
+              t.content
+            )}
             <button
               type="button"
               aria-label="copy message"

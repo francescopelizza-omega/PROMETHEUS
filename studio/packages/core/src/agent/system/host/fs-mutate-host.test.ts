@@ -104,6 +104,45 @@ test("a move CREATES missing parent directories", () => {
   assert.equal(readFileSync(join(dir, "deep", "er", "a.txt"), "utf8"), "A");
 });
 
+test("a text move claims BOTH ends, so /revert can put it back", () => {
+  const dir = ws();
+  writeFileSync(join(dir, "a.txt"), "A");
+  const captured: FsPreImage[] = [];
+  const out = runFsMutateTool(
+    "move_file",
+    { from: "a.txt", to: "b.txt" },
+    { cwd: dir, onPreImage: (r) => captured.push(r) },
+  );
+  assert.equal(out?.ok, true);
+  assert.deepEqual(
+    captured.map((r) => [r.path, r.preImage, r.existed]),
+    [
+      // destination first, source last: a one-step undo restores the source before anything
+      // is deleted
+      [join(dir, "b.txt"), "", false],
+      [join(dir, "a.txt"), "A", true],
+    ],
+  );
+});
+
+test("a BINARY move claims nothing: /revert must never delete the only copy", () => {
+  // The destination record alone ("did not exist → delete it") made /revert rm the moved PNG
+  // and restore nothing at the source, because a binary source has no text pre-image.
+  const dir = ws();
+  const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0xff, 0xfe, 0x00]);
+  writeFileSync(join(dir, "a.png"), png);
+  const captured: FsPreImage[] = [];
+  const out = runFsMutateTool(
+    "move_file",
+    { from: "a.png", to: "assets/a.png" },
+    { cwd: dir, onPreImage: (r) => captured.push(r) },
+  );
+  assert.equal(out?.ok, true);
+  assert.match(out?.summary ?? "", /not revertible/);
+  assert.deepEqual(captured, [], "no half-claim that a revert would act on");
+  assert.deepEqual(readFileSync(join(dir, "assets", "a.png")), png, "moved byte-identical");
+});
+
 /* ── mkdir ─────────────────────────────────────────────────────────────────*/
 
 test("mkdir is RECURSIVE and an existing directory is a success", () => {

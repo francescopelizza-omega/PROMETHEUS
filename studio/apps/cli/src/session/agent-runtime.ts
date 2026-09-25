@@ -49,7 +49,6 @@ import {
   lstatSync,
   mkdirSync,
   openSync,
-  readFileSync,
   renameSync,
   rmSync,
   statSync,
@@ -83,7 +82,11 @@ import type {
   SseTokenUsage,
   WorkspacePolicy,
 } from "@prometheus/core";
-import { readTextExact } from "@prometheus/core/agent-system-host";
+import {
+  clearHostToolCache,
+  probeHostTools,
+  readTextExact,
+} from "@prometheus/core/agent-system-host";
 
 import {
   type EngineClient,
@@ -92,6 +95,7 @@ import {
   findRecentEviction,
   safeFetch,
 } from "@prometheus/engine-bridge";
+import { loadSettings } from "../home.js";
 import { hasMeteredConsent } from "../metered-consent.js";
 // syntax highlighting for code inside the reasoning stream (Pelly scheme). Pure, self-contained.
 import { CODE_STATE, detectLanguage, highlightLine, isHighlightable } from "../tui/highlight.js";
@@ -105,6 +109,7 @@ import {
   appendAccounting,
   readAccounting,
   readAccountingSince,
+  withLocalRowsFree,
 } from "./history-store.js";
 import { touchModelActivity } from "./model-activity-store.js";
 import { recordEndpointHealth } from "./model-health-store.js";
@@ -449,6 +454,64 @@ export function measuredSessionUsage(
  * confirm fn (default = deny), and a write sink the host points at stdout.
  * ------------------------------------------------------------------------- */
 
+/**
+ * The external-tool manifest for this process, rendered once — the getter the terminal hosts
+ * put on `SessionCtx.hostTools`.
+ *
+ * Memoised on top of the probe's own cache so the STRING is built once too: it lands inside the
+ * prompt-cache prefix, so it must be byte-identical every turn or the cache misses on each one.
+ * `clearHostToolCache()` + `resetHostToolManifest()` (after an install) is what makes it
+ * recompute, which is exactly when a cache miss is the correct outcome.
+ */
+let hostToolManifestCache: string | null | undefined;
+export function hostToolManifest(): string | null {
+  if (hostToolManifestCache === undefined) {
+    hostToolManifestCache = agent.renderHostToolManifest(probeHostTools(), externalToolDefaults());
+  }
+  return hostToolManifestCache;
+}
+
+/**
+ * The per-tool defaults, read from `settings.json` over the shipped ones.
+ *
+ * Stated in the manifest so the model applies them rather than inventing a JPEG quality per
+ * turn. FLAT dotted keys (`tools.externalTools.imageFormat`) because the CLI's `saveSettings`
+ * is a shallow merge that rewrites the whole file — a nested blob would lose its siblings on
+ * the first terminal-side write. A value outside the allowed set is IGNORED rather than passed
+ * through: this string reaches the model, and `validateSettings` does not run at load time.
+ */
+function externalToolDefaults(): agent.ExternalToolDefaults {
+  const raw = loadSettings();
+  const d = { ...agent.DEFAULT_EXTERNAL_TOOLS };
+  const str = (k: keyof agent.ExternalToolDefaults, allowed?: readonly string[]): void => {
+    const v = raw[`tools.externalTools.${k}`];
+    if (typeof v === "string" && v.trim() && (!allowed || allowed.includes(v))) {
+      (d as Record<string, unknown>)[k] = v;
+    }
+  };
+  const num = (k: keyof agent.ExternalToolDefaults, min: number, max: number): void => {
+    const v = raw[`tools.externalTools.${k}`];
+    if (typeof v === "number" && Number.isFinite(v) && v >= min && v <= max) {
+      (d as Record<string, unknown>)[k] = v;
+    }
+  };
+  str("imageFormat", agent.EXTERNAL_TOOL_CHOICES.imageFormat);
+  str("imageResizeFilter", agent.EXTERNAL_TOOL_CHOICES.imageResizeFilter);
+  str("videoContainer", agent.EXTERNAL_TOOL_CHOICES.videoContainer);
+  str("ocrLang");
+  str("ytdlpFormat");
+  num("imageQuality", 1, 100);
+  num("pdfDpi", 1, 2400);
+  num("videoMaxHeight", 0, 8192);
+  return d;
+}
+
+/** Forget the rendered manifest (after `/install`), so the next turn re-probes. */
+export function resetHostToolManifest(): void {
+  hostToolManifestCache = undefined;
+  clearHostToolCache();
+}
+
 /** The minimal context every in-session unit receives. */
 export interface SessionCtx {
   /** the single JS→engine gateway (C5) — never spawn python elsewhere. */
@@ -573,6 +636,17 @@ export interface SessionCtx {
    * as a dedicated system-context block, or null when OFF / not yet built. A getter (not a value)
    * so `/repomap on|off|refresh` toggles + rebuilds live without reconstructing the SessionCtx. */
   repoMap?: () => string | null;
+  /**
+   * The external-tool manifest (`agent/host-tools.ts`): which of `HOST_TOOLS` are on PATH here,
+   * as ~100 tokens of names, or null when this host did not probe.
+   *
+   * A getter for the same reason `repoMap` and `steering` are: `/install` clears the probe cache
+   * and the NEXT turn must see the newly installed tool without rebuilding the SessionCtx. It is
+   * also the seam that keeps turn assembly deterministic in tests — a fixture that does not
+   * supply it gets no block, so a suite's expectations never depend on what the CI box happens
+   * to have installed.
+   */
+  hostTools?: () => string | null;
   /** assembled AGENTS.md/CLAUDE.md/PROMETHEUS.md steering (CLI-061): a getter returning the rules
    * block to inject as a dedicated system-context block, or null/"" when none loaded. A getter so
    * `/memory edit`→reload re-assembles it for the NEXT turn without reconstructing the SessionCtx. */
@@ -674,9 +748,12 @@ export function checkBudgetGate(
    */
   const warned = b.warned;
   try {
-    const sessionRecords = readRecords(home, sessionId);
+    // Local rows are priced as the free rows they are (see withLocalRowsFree).
+    const sessionRecords = withLocalRowsFree(readRecords(home, sessionId));
     const dayRecords =
-      b.config.dailyUsd !== undefined ? readDay(home, ai.startOfLocalDayMs(nowIso)) : undefined;
+      b.config.dailyUsd !== undefined
+        ? withLocalRowsFree(readDay(home, ai.startOfLocalDayMs(nowIso)))
+        : undefined;
     return ai.decideBudget({
       sessionRecords,
       ...(dayRecords ? { dayRecords } : {}),
@@ -1519,6 +1596,13 @@ async function* toolTurn(
   // set when THIS watchdog (not the user) ends the turn — a PAUSE, never a discard (root
   // cause 1's fix: was a flat, hardcoded 180s "abort and lose the turn").
   let pausedByIdle = false;
+  // WHY the model stopped, when the provider says (OpenAI finish_reason / Anthropic
+  // stop_reason). "length" means the reply was cut off — the difference between a silent
+  // empty turn and one that can explain itself.
+  let stopReason: ai.WireEvent["stopReason"];
+  let sawReasoning = false;
+  // Hoisted: the notice at the end of the turn reports the same budget the preflight checked.
+  let estimatedPromptTokens = 0;
   const watchdog = new agent.idleWatchdog.IdleWatchdog({
     idleTimeoutMs: aux.idleTimeoutMs,
     onIdle: () => outerAc.abort(),
@@ -1658,6 +1742,16 @@ async function* toolTurn(
     // mandatory `anthropic-version` for Anthropic, `x-goog-api-key` for Gemini. Hard-coding
     // the bearer here is what authenticated every Anthropic request incorrectly.
     Object.assign(headers, wire.headers(key));
+    // The tool SCHEMAS are part of the prompt (they travel in the body's `tools:[]`, not in the
+    // messages), and the window must hold the ANSWER too — neither was counted, so a prompt that
+    // filled 89% of the real window passed a check that thought it used 9% and reserved nothing.
+    const wireTools = toWireTools(tools);
+    estimatedPromptTokens = ai.estimateRequestTokens(
+      messages.map((m) => m.content),
+      wireTools,
+    );
+    // Reserve room for the ANSWER, not just the prompt (ai/retry-policy.ts explains why).
+    const replyReserve = ai.replyReserveFor(endpoint.contextWindow);
     const requestBody = JSON.stringify(
       applyEffort(
         {
@@ -1679,12 +1773,14 @@ async function* toolTurn(
               : toWireMessages(applyEffortToMessages(messages, effort))) as ai.WireMessage[],
             {
               model,
-              tools: toWireTools(tools),
+              tools: wireTools,
               // Ask for a terminal usage frame so an AGENTIC turn is accounted like a chat
-              // one. Gated to cloud for the same reason the GUI gates it: a strict local
-              // server (llama.cpp, older proxies) 400s on the unknown field — and local
-              // tokens are free, so the estimate costs nothing there.
-              includeUsage: endpoint.locality === "cloud",
+              // one — for LOCAL endpoints too. "local tokens are free so an estimate costs
+              // nothing" was wrong in the one way that matters: the estimate is also what the
+              // context budget and the truncation notice read, and it under-counted a real
+              // 7,254-token prompt as 755. ollama's /v1 accepts the field; a server that does
+              // not simply omits the frame and the estimate below still applies.
+              includeUsage: true,
             },
           ),
           // Ollama extension (ignored by other endpoints): keep the model resident 30m so a
@@ -1718,8 +1814,9 @@ async function* toolTurn(
      * as a bug in Prometheus.
      */
     const pre = ai.preflightContext({
-      estimatedPromptTokens: agent.estimateTextTokens(messages.map((m) => m.content)),
+      estimatedPromptTokens,
       contextWindow: endpoint.contextWindow,
+      maxTokens: replyReserve,
     });
     if (!pre.ok) {
       yield { kind: "text", text: `model error: ${pre.reason}` };
@@ -1931,8 +2028,12 @@ async function* toolTurn(
           done = true;
           break;
         }
+        if (ev.stopReason) stopReason = ev.stopReason;
         const reasoning = reasoningFromPayload(payload);
-        if (reasoning) yield { kind: "reasoning", text: reasoning };
+        if (reasoning) {
+          sawReasoning = true;
+          yield { kind: "reasoning", text: reasoning };
+        }
         if (ev.delta) {
           /**
            * Split inline `<think>…</think>` OUT of the content first.
@@ -1951,7 +2052,10 @@ async function* toolTurn(
           // any of it: the provider billed every one of these bytes, whatever we do with them.
           observed.receivedText += ev.delta;
           const split = reasoningSplitter.push(ev.delta);
-          if (split.reasoning) yield { kind: "reasoning", text: split.reasoning };
+          if (split.reasoning) {
+            sawReasoning = true;
+            yield { kind: "reasoning", text: split.reasoning };
+          }
           if (split.text) {
             // Scanned even here. A small model handed a working native channel very often
             // answers with `<tool_call>` prose anyway; dropping those reads to the user as the
@@ -2016,10 +2120,45 @@ async function* toolTurn(
     yield { kind: "paused", idleMs: watchdog.idleForMs() };
     return;
   }
-  // `final` ONLY when nothing was called. This yielded unconditionally, which — combined with
-  // the loop's old `if (sawFinal || …) break` — meant every native tool turn was single-round:
-  // the tool ran, its result was discarded, and the model was never shown what it returned.
-  if (observed.nativeCalls === 0 && observed.textCalls === 0) yield { kind: "final" };
+  /**
+   * A turn that produced NOTHING says so.
+   *
+   * Nothing downstream could tell "the model answered with silence" from "the model was cut off
+   * mid-thought": both arrived as a bare `final` with no text, the hosts skip an empty reply,
+   * and the transcript recorded only `{"kind":"done"}`. The user saw the thinking stream, then
+   * the clock, then nothing — and concluded Prometheus had stopped working.
+   *
+   * Yielded as `text` so it IS the turn's reply: visible in the pane, persisted in the
+   * transcript, and carried into the next prompt, where it tells the model its previous attempt
+   * was truncated rather than leaving a hole in the conversation.
+   */
+  if (observed.nativeCalls === 0 && observed.textCalls === 0) {
+    if (observed.receivedText.trim() === "") {
+      yield {
+        kind: "text",
+        text: ai.emptyTurnNotice({
+          ...(stopReason ? { stopReason } : {}),
+          sawReasoning,
+          promptTokens: estimatedPromptTokens,
+          contextWindow: endpoint.contextWindow,
+          runtime,
+        }),
+      };
+    } else if (stopReason === "length") {
+      // There IS an answer, but the provider says it was cut short: flag it rather than let a
+      // half-written file or a truncated explanation read as complete.
+      yield {
+        kind: "text",
+        text: `\n\n${ai.truncationNotice({
+          stopReason,
+          promptTokens: estimatedPromptTokens,
+          contextWindow: endpoint.contextWindow,
+          runtime,
+        })}`,
+      };
+    }
+    yield { kind: "final" };
+  }
 }
 
 /** Stream scanned prose, collecting any tool calls found in it. Shared by both transports. */
@@ -2405,6 +2544,10 @@ export function makeLlmClient(endpoint: AiEndpoint, deps: LlmClientDeps = {}): L
         // background summarizer) with that gap, so a cold-loading or wedged model on THIS path
         // hung forever instead of pausing like `toolTurn` already did.
         for await (const chunk of client.chat(flattenToolRoles(messages), {
+          // With tools exposed, an empty turn is CORRECTED (the synthetic "nothing usable"
+          // call below) rather than narrated; with none, there is nothing to correct toward,
+          // so the client's own notice is what keeps the turn from ending in silence.
+          emptyTurnNotice: transport === "none",
           ...(signal ? { signal } : {}),
           ...(effort ? { effort } : {}),
           ...(deps.idleTimeoutMs !== undefined ? { idleTimeoutMs: deps.idleTimeoutMs } : {}),
@@ -2845,7 +2988,7 @@ function applyWriteFile(
   roots: string[] | undefined,
   cwd: string,
   approvedOutside?: ReadonlySet<string>,
-): { outcome: ToolOutcome; record?: EditRecord } {
+): { outcome: ToolOutcome; record?: EditRecord; unrevertable?: string } {
   const rawPath = typeof args.path === "string" ? args.path : "";
   if (!rawPath || rawPath.startsWith("-")) {
     return { outcome: { ok: false, summary: `write_file: refusing invalid path: ${rawPath}` } };
@@ -2870,14 +3013,24 @@ function applyWriteFile(
       },
     };
   }
-  // capture the pre-image (for revert): existing content, or "" when the file is new.
+  // Capture the pre-image (for revert): existing content, or "" when the file is new.
+  // `readTextExact`, not `readFileSync(abs, "utf8")`: the raw read never throws on binary, it
+  // returns U+FFFD mush, and /revert then wrote that mush over the original bytes (the same
+  // defect already closed for delete_file, move_file and redirects). And `existed` comes from
+  // existsSync, not from the read succeeding: an existing but unreadable file was recorded as
+  // "did not exist", so /revert DELETED it. A file whose bytes do not round-trip is simply not
+  // revertible, and no record is kept for it.
+  const existed = existsSync(abs);
   let preImage = "";
-  let existed = false;
-  try {
-    preImage = readFileSync(abs, "utf8");
-    existed = true;
-  } catch {
-    preImage = "";
+  let revertible = true;
+  if (existed) {
+    try {
+      const text = readTextExact(abs);
+      if (text === null) revertible = false;
+      else preImage = text;
+    } catch {
+      revertible = false;
+    }
   }
   // a new file may name directories that don't exist yet — create the parent chain.
   try {
@@ -2894,10 +3047,14 @@ function applyWriteFile(
   }
   const verb = existed ? "overwrote" : "created";
   const lines = content.length === 0 ? 0 : content.split("\n").length;
+  const note = revertible ? "" : " — not revertible: the old contents were binary or unreadable";
   return {
-    outcome: { ok: true, summary: `${verb} ${rawPath} (${lines} line${lines === 1 ? "" : "s"})` },
+    outcome: {
+      ok: true,
+      summary: `${verb} ${rawPath} (${lines} line${lines === 1 ? "" : "s"})${note}`,
+    },
     // `existed` is what makes a CREATE revertible to nothing rather than to an empty file.
-    record: { path: abs, preImage, existed },
+    ...(revertible ? { record: { path: abs, preImage, existed } } : { unrevertable: abs }),
   };
 }
 
@@ -2951,15 +3108,34 @@ function applyMultiFilePatch(
     abs.set(f.path, r.abs);
   }
   const preImages = new Map<string, string>();
+  // `readTextExact`, not `readFileSync(..., "utf8")` — the same fix propose_edit, write_file,
+  // delete_file and move_file already carry. The raw read never throws on non-UTF-8 bytes; it
+  // returns U+FFFD mush, so one hunk in the ASCII part of a Latin-1 file rewrote every other
+  // byte of it, reported ok, and recorded the mush as the pre-image /revert would restore.
+  let nonText: string | undefined;
   const result = agent.resolvePatch(files, (p) => {
     try {
-      const text = readFileSync(abs.get(p) as string, "utf8");
+      const text = readTextExact(abs.get(p) as string);
+      if (text === null) {
+        nonText ??= p;
+        return null;
+      }
       preImages.set(p, text);
       return text;
     } catch {
       return null;
     }
   });
+  // Checked before `result.ok`: a null read would otherwise be reported as a missing file.
+  if (nonText !== undefined) {
+    return {
+      outcome: {
+        ok: false,
+        summary: `apply_patch: nothing was written — ${nonText} is not a UTF-8 text file; refusing to edit it`,
+      },
+      records: [],
+    };
+  }
   if (!result.ok) {
     // `result.message` already carries its own `hunk N:` label (0-based, from the edit ladder).
     // Prefixing a second, 1-BASED one produced "src/math.ts hunk 1: hunk 0: old text not found"
@@ -3110,11 +3286,36 @@ function captureIntoCheckpoint(hook: CheckpointHook, rec: EditRecord): void {
   const existing = hook.store.get(hook.turnId);
   const files = existing ? { ...existing.files } : {};
   const absent = new Set(existing?.absent ?? []);
+  const unrevertable = existing?.unrevertable ?? [];
   // FIRST-touch only — keep the truly pre-turn state. A path already known either way has
-  // already been captured at its earliest point in the turn.
-  if (rec.path in files || absent.has(rec.path)) return;
+  // already been captured at its earliest point in the turn (an unrevertable one included:
+  // its pre-turn bytes are gone, and a later capture would only record an intermediate state).
+  if (rec.path in files || absent.has(rec.path) || unrevertable.includes(rec.path)) return;
   if (rec.existed === false) absent.add(rec.path);
   else files[rec.path] = rec.preImage;
+  recordTurnCheckpoint(hook, files, [...absent], unrevertable);
+}
+
+/**
+ * A path this turn changed but could not capture still CLAIMS the turn: without a checkpoint
+ * for it, `/revert` fell through to the previous turn and undid accepted work there. It is
+ * reported by /revert as not revertible, and it blocks later first-touch captures of the path.
+ */
+function claimUnrevertable(hook: CheckpointHook, path: string): void {
+  const existing = hook.store.get(hook.turnId);
+  const files = existing ? { ...existing.files } : {};
+  const absent = existing?.absent ?? [];
+  const unrevertable = existing?.unrevertable ?? [];
+  if (path in files || absent.includes(path) || unrevertable.includes(path)) return;
+  recordTurnCheckpoint(hook, files, absent, [...unrevertable, path]);
+}
+
+function recordTurnCheckpoint(
+  hook: CheckpointHook,
+  files: Record<string, string>,
+  absent: string[],
+  unrevertable: string[],
+): void {
   const cp = makeCheckpoint(
     hook.turnId,
     hook.sessionId,
@@ -3124,7 +3325,11 @@ function captureIntoCheckpoint(hook: CheckpointHook, rec: EditRecord): void {
     {},
     `turn ${hook.turnNumber}`,
   );
-  hook.store.record(absent.size > 0 ? { ...cp, absent: [...absent] } : cp);
+  hook.store.record({
+    ...cp,
+    ...(absent.length > 0 ? { absent } : {}),
+    ...(unrevertable.length > 0 ? { unrevertable } : {}),
+  });
 }
 
 /**
@@ -3135,7 +3340,14 @@ function captureIntoCheckpoint(hook: CheckpointHook, rec: EditRecord): void {
 export function restoreCheckpoint(
   cp: Checkpoint,
   opts: { roots?: string[]; currentPaths?: string[] } = {},
-): { restored: string[]; deleted: string[]; skipped: string[] } {
+): {
+  restored: string[];
+  deleted: string[];
+  skipped: string[];
+  failed: string[];
+  /** paths the turn changed but could not capture (binary/unreadable) — nothing to write back */
+  unrevertable: string[];
+} {
   const plan = restorePlan(cp, opts.currentPaths ?? Object.keys(cp.files));
   const allowed = (p: string): boolean =>
     !opts.roots || opts.roots.length === 0 || isPathAllowed(p, opts.roots);
@@ -3152,20 +3364,36 @@ export function restoreCheckpoint(
    * command whose entire purpose is to bring them back.
    */
   const skipped: string[] = [];
+  /** Paths that could not be written or deleted, or whose delete was WITHHELD (below). */
+  const failed: string[] = [];
   for (const [path, content] of Object.entries(plan.write)) {
     if (!allowed(path)) {
       skipped.push(path);
       continue;
     }
     try {
+      // A revert write may target a path whose DIRECTORY is gone (a moved-away file's old
+      // folder, deleted later in the same turn). atomicWrite never creates it, so the write
+      // threw ENOENT and the file could not come back. The path passed the scope guard, and
+      // so does its parent.
+      mkdirSync(dirname(path), { recursive: true });
       atomicWrite(path, content);
       restored.push(path);
     } catch {
       // An un-writable path is REPORTED, not swallowed: `/revert` counted it as neither
       // restored nor skipped, so the caller saw a clean return, dropped the checkpoint, and the
       // pre-image of a file that was never actually rewritten went with it.
-      skipped.push(path);
+      failed.push(path);
     }
+  }
+  // Deletes run only once EVERY write-back succeeded. A move is recorded as a pair — write
+  // the source back, delete the destination — and running the delete after the write failed
+  // (or was out of scope) removed the moved file at BOTH paths. Withheld, the checkpoint is
+  // kept and a later /revert can finish the job.
+  const unrevertable = [...(cp.unrevertable ?? [])];
+  if (skipped.length > 0 || failed.length > 0) {
+    failed.push(...plan.delete);
+    return { restored, deleted, skipped, failed, unrevertable };
   }
   for (const path of plan.delete) {
     if (!allowed(path)) {
@@ -3177,10 +3405,27 @@ export function restoreCheckpoint(
       deleted.push(path);
     } catch (e) {
       // "already gone" IS success for a delete; anything else failed and must be reported.
-      if ((e as NodeJS.ErrnoException)?.code !== "ENOENT") skipped.push(path);
+      if ((e as NodeJS.ErrnoException)?.code !== "ENOENT") failed.push(path);
     }
   }
-  return { restored, deleted, skipped };
+  return { restored, deleted, skipped, failed, unrevertable };
+}
+
+/**
+ * Where a turn's usage goes: this session's accounting file always, and the SHARED daily ledger
+ * the desktop's budget gate prices only for a METERED turn. A local row carries a bare model id
+ * ("gemma3:4b") that the desktop prices as unknown, so one local CLI turn blocked every Studio
+ * cloud call for the day. Exported so a test exercises the exact decision the turn runs.
+ */
+export function accountingSink(
+  ctx: Pick<SessionCtx, "accounting" | "endpoint">,
+): ((rec: AccountingRecord) => void) | undefined {
+  const acct = ctx.accounting;
+  if (!acct) return undefined;
+  return (rec) =>
+    appendAccounting(acct.home, acct.sessionId, rec, {
+      metered: ctx.endpoint?.locality !== "local",
+    });
 }
 
 /** The URL-fetch seam (default = engine-bridge safeFetch); injected in tests. CLI-011. */
@@ -3458,7 +3703,7 @@ export function makeToolRunner(
     // write_file: CREATE a new file or OVERWRITE an existing one (path-guarded, atomic,
     // pre-image kept). Reaches here only AFTER human confirm (destructiveHint ⇒ always confirm).
     if (tool.name === "write_file") {
-      const { outcome, record } = applyWriteFile(
+      const { outcome, record, unrevertable } = applyWriteFile(
         args,
         roots,
         opts.cwd ?? process.cwd?.() ?? ".",
@@ -3467,6 +3712,8 @@ export function makeToolRunner(
       if (record) {
         if (opts.editHistory) opts.editHistory.push(record);
         if (opts.checkpoint) captureIntoCheckpoint(opts.checkpoint, record);
+      } else if (unrevertable && opts.checkpoint) {
+        claimUnrevertable(opts.checkpoint, unrevertable);
       }
       return outcome;
     }
@@ -3941,16 +4188,7 @@ export async function runMessageTurn(
         }
       : {}),
     ...(deps.signal ? { signal: deps.signal } : {}),
-    ...(ctx.accounting
-      ? {
-          onUsage: (rec) =>
-            appendAccounting(
-              (ctx.accounting as { home: string }).home,
-              (ctx.accounting as { sessionId: string }).sessionId,
-              rec,
-            ),
-        }
-      : {}),
+    ...(accountingSink(ctx) ? { onUsage: accountingSink(ctx) } : {}),
   };
   // ctx.endpoint is defined here (the offline branch above returned otherwise).
   const llm = deps.llm ?? makeLlmClient(ctx.endpoint as AiEndpoint, llmDeps);
@@ -4242,6 +4480,12 @@ export async function runMessageTurn(
     authLevel: ctx.authLevel,
     permissionMode: ctx.tuning.permissionMode,
     gateMode: ctx.tuning.gateMode,
+    // Which external tools this machine has (agent/host-tools.ts). Read through the ctx getter,
+    // never probed here: `PreambleCtx` is documented pure, and the probe reads the filesystem.
+    ...((): { hostTools?: string } => {
+      const m = ctx.hostTools?.();
+      return m ? { hostTools: m } : {};
+    })(),
   };
   const assembled = agent.protocol.assemblePreamble(
     [...agent.protocol.CORE_TURN_CONTRIBUTORS, ...hostTurnContributors(ctx)],

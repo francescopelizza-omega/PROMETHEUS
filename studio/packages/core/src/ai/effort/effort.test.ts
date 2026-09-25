@@ -534,7 +534,10 @@ test("a thinking budget is clamped UNDER a CALLER's max_tokens, leaving room for
     thinking: { budget_tokens: number };
   };
   assert.equal(tight.max_tokens, 8000, "a caller's ceiling is never raised");
-  assert.equal(tight.thinking.budget_tokens, 8000 - 4096);
+  // A TIGHT ceiling is split down the middle rather than charged the full declared headroom:
+  // at 32,000 headroom the budget floor would be 1, silently degrading `max` to the provider
+  // minimum — the mirror of the bug the headroom exists to prevent.
+  assert.equal(tight.thinking.budget_tokens, 4000, "half to thinking, half to the answer");
   const roomy = applyEffort(
     { max_tokens: 64000 },
     resolveEffort("max", cap, { maxTokens: 64000 }),

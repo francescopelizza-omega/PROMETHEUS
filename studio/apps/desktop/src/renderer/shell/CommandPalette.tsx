@@ -148,7 +148,10 @@ export function CommandPalette({
         alignItems: "flex-start",
         paddingTop: "12vh",
         background: "rgba(0,0,0,.45)",
-        zIndex: Z.modal,
+        // Z.palette, one rung BELOW every decision surface (packages/ui tokens/layers.ts), the
+        // same rung ide/CommandPalette.tsx uses. At Z.modal it tied with the dialogs and won by
+        // rendering later, so it painted over the catalog's rollback decision.
+        zIndex: Z.palette,
       }}
       onClick={(e) => {
         if (e.target === e.currentTarget) onClose();

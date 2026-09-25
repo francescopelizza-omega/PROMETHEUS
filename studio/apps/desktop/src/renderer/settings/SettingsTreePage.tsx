@@ -214,6 +214,7 @@ export function SettingsTreePage({ workspaceRoot }: SettingsTreePageProps): Reac
                 ) : (
                   <EditableValue
                     control={selected.control}
+                    {...(selected.options ? { options: selected.options } : {})}
                     // seed the editor from the scope's own value if set, else the effective.
                     value={
                       rawAtScope(selected, scope).set
@@ -258,6 +259,7 @@ function scopeTabStyle(active: boolean): CSSProperties {
  *  deletes the key at that scope (enabled only when this scope actually sets it). */
 function EditableValue({
   control,
+  options,
   value,
   pending,
   writeScope,
@@ -268,6 +270,8 @@ function EditableValue({
   onReset,
 }: {
   control: string | undefined;
+  /** the closed set of valid values for a `select`; absent ⇒ free text (see tree.ts). */
+  options?: readonly { value: string; label: string }[];
   value: unknown;
   pending: boolean;
   writeScope: "global" | "workspace";
@@ -293,6 +297,29 @@ function EditableValue({
           />
           {value === true ? "on" : "off"}
         </label>
+      ) : control === "select" && options && options.length > 0 ? (
+        // A CLOSED SET is offered as a closed set. Before this branch existed, `control:
+        // "select"` fell through to the text input below, so a "choice" setting was free text
+        // that nothing validated — the tree declared an intent the UI never honoured.
+        <select
+          value={String(value ?? "")}
+          disabled={locked}
+          onChange={(e) => onSet(e.currentTarget.value, writeScope)}
+          style={{
+            background: "var(--bg-inset)",
+            color: "var(--text-primary)",
+            border: "1px solid var(--border-strong)",
+            borderRadius: "var(--radius-sm, 4px)",
+            padding: "var(--space-2, 4px)",
+            fontFamily: "var(--font-ui)",
+          }}
+        >
+          {options.map((o) => (
+            <option key={o.value} value={o.value}>
+              {o.label}
+            </option>
+          ))}
+        </select>
       ) : (
         <input
           value={draft}

@@ -882,3 +882,59 @@ test("the persistence deny-list covers Prometheus's OWN state and agent hook con
     );
   }
 });
+
+/* ── the `/in` output folder (2026-09-24) ───────────────────────────────────
+ * `/in <folder>` grants a directory in the working set so produced files — a download, a
+ * converted image — can be written there. The sandbox is what makes that grant real, and
+ * these are the two halves of the contract, verified live against `sandbox-exec` on
+ * 2026-09-24 with a yt-dlp download: a write inside the folder succeeded, writes outside it
+ * and into `~/.prometheus` were denied, and the network was reachable only at A5+.
+ */
+
+test("an /in folder is writable, and the network opens only at A5+", () => {
+  const out = "/private/tmp/prom-in-demo-test";
+  // seams, like every other plan test here: no real filesystem is involved.
+  const req = {
+    writableRoots: [out],
+    platform: "darwin" as const,
+    exists: () => true,
+    realpath: (x: string) => x,
+    tmpDirs: ["/tmp"],
+    home: "/Users/x",
+  };
+  const a1 = planExecSandbox({ ...req, authLevel: 1 });
+  const a5 = planExecSandbox({ ...req, authLevel: 5 });
+  assert.equal(a1.kind, "seatbelt");
+  assert.equal(a5.kind, "seatbelt");
+  if (a1.kind !== "seatbelt" || a5.kind !== "seatbelt") return;
+
+  // the granted folder is writable at BOTH levels — /in is a write grant, not a network one
+  assert.ok(a1.writable.includes(out), "the /in folder must be writable");
+  assert.ok(a5.writable.includes(out), "the /in folder must be writable");
+
+  // …but only A5 may reach the network, which is why yt-dlp is registered at the `install`
+  // tier: below A5 a download cannot work however it is approved at the app layer.
+  assert.equal(a1.network, false, "A1 must not reach the network");
+  assert.equal(a5.network, true, "A5 auto-approves `install`, so the network is open");
+  assert.match(a5.profile, /\(allow network\*\)/);
+  assert.doesNotMatch(a1.profile, /\(allow network\*\)/);
+});
+
+test("granting an /in folder does NOT make the grants file writable", () => {
+  // The standing rule: a confined command that could write ~/.prometheus would grant itself
+  // permission for every later session. Verified live — the write was denied.
+  const plan = planExecSandbox({
+    writableRoots: ["/private/tmp/prom-in-demo-test"],
+    platform: "darwin",
+    home: "/Users/x",
+    authLevel: 5,
+    exists: () => true,
+    realpath: (x: string) => x,
+  });
+  assert.equal(plan.kind, "seatbelt");
+  if (plan.kind !== "seatbelt") return;
+  assert.ok(
+    plan.denied.some((d) => d.endsWith("/.prometheus")),
+    plan.denied.join(", "),
+  );
+});

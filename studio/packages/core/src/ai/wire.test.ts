@@ -16,10 +16,12 @@ import { test } from "node:test";
 
 import {
   ANTHROPIC_DEFAULT_MAX_TOKENS,
+  ANTHROPIC_FALLBACK_MAX_TOKENS,
   ANTHROPIC_WIRE,
   GEMINI_WIRE,
   OPENAI_WIRE,
   type WireMessage,
+  anthropicMaxTokensFor,
   selectWire,
 } from "./wire.js";
 
@@ -593,4 +595,53 @@ test("EVERY tool call in a frame is parsed, not just the first", () => {
   );
   assert.equal(one.toolCalls?.length, 1);
   assert.equal(one.toolCall?.name, "x");
+});
+
+/* ══ output is NOT capped (2026-09-25) ═══════════════════════════════════════
+ * A cap on how much the model may SAY is the one cap this product cannot have: it ends the
+ * answer mid-sentence and reads as the model failing. These tests exist so the 4096 default
+ * cannot come back by accident.
+ */
+
+test("OpenAI, Gemini and ollama carry NO output cap at all", () => {
+  const convo: WireMessage[] = [{ role: "user", content: "hi" }];
+  const openai = OPENAI_WIRE.body(convo, { model: "gpt-x" }) as Record<string, unknown>;
+  assert.equal(openai.max_tokens, undefined, "OpenAI must not cap the answer");
+  // ollama is driven through the same OpenAI /v1 shim, so this covers it too.
+  const gemini = selectWire("gemini").body(convo, { model: "gemini-x" }) as Record<string, unknown>;
+  assert.equal(gemini.generationConfig, undefined, "Gemini must not cap the answer");
+});
+
+test("Anthropic's required max_tokens is the MODEL's ceiling, never a flat 4096", () => {
+  const convo: WireMessage[] = [{ role: "user", content: "hi" }];
+  const of = (model: string): number =>
+    (ANTHROPIC_WIRE.body(convo, { model }) as { max_tokens: number }).max_tokens;
+  // The shipped default was 4096 on models that serve sixteen times that.
+  assert.equal(of("claude-sonnet-4-5"), 64_000);
+  assert.equal(of("claude-haiku-4-5"), 64_000);
+  assert.equal(of("claude-opus-5"), 64_000);
+  assert.equal(of("claude-opus-4-1"), 32_000);
+  // Older models keep their real, smaller ceilings — sending more is a 400, not a favour.
+  assert.equal(of("claude-3-5-sonnet-20241022"), 8_192);
+  assert.equal(of("claude-3-opus-20240229"), 4_096);
+  for (const id of ["claude-sonnet-4-5", "claude-3-5-sonnet-20241022"]) {
+    assert.ok(of(id) > 0 && Number.isInteger(of(id)), id);
+  }
+});
+
+test("an unrecognised Claude model gets a conservative ceiling, not a guess", () => {
+  const convo: WireMessage[] = [{ role: "user", content: "hi" }];
+  const body = ANTHROPIC_WIRE.body(convo, { model: "claude-something-new" }) as {
+    max_tokens: number;
+  };
+  assert.equal(body.max_tokens, ANTHROPIC_FALLBACK_MAX_TOKENS);
+  assert.equal(anthropicMaxTokensFor("CLAUDE-SONNET-4-5"), 64_000, "id match is case-insensitive");
+});
+
+test("an explicit caller ceiling still wins — this is a default, not an override", () => {
+  const convo: WireMessage[] = [{ role: "user", content: "hi" }];
+  const body = ANTHROPIC_WIRE.body(convo, { model: "claude-sonnet-4-5", maxTokens: 1000 }) as {
+    max_tokens: number;
+  };
+  assert.equal(body.max_tokens, 1000);
 });

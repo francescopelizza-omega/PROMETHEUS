@@ -14,7 +14,15 @@
  */
 
 import { Button, Panel, Z, clampToViewport, useFocusTrap } from "@prometheus/ui";
-import { type ReactElement, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  type CSSProperties,
+  type ReactElement,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 
 import type {
   IdeGitChange,
@@ -786,6 +794,23 @@ function PullRequests({ root }: { root: string }): ReactElement | null {
     </div>
   );
 }
+
+/** One operation-error banner inside the fixed error stack. */
+const ERROR_BANNER: CSSProperties = {
+  padding: "6px 10px",
+  background: "var(--bg-surface-2)",
+  border: "1px solid var(--danger)",
+  borderRadius: "var(--radius-sm, 3px)",
+  color: "var(--danger)",
+  fontSize: "0.72rem",
+};
+const ERROR_DISMISS: CSSProperties = {
+  marginLeft: 6,
+  background: "transparent",
+  border: "none",
+  color: "var(--text-secondary)",
+  cursor: "pointer",
+};
 
 export function GitPanel({ root }: { root: string }): ReactElement {
   const status = useGitStore((s) => s.status);
@@ -1792,42 +1817,58 @@ export function GitPanel({ root }: { root: string }): ReactElement {
         </p>
       )}
 
-      {/* APP-037: op error surfaced inline (a fixed banner so it survives log scroll). */}
-      {commitError && (
+      {/*
+        APP-037 / APP-082: operation errors, in ONE fixed stack so they survive log scroll and
+        never overlap. They used to be two fixed boxes, the second pinned at top:44 to clear the
+        first — which only works while the first is ONE line. Raw git stderr and the conflict
+        message routinely wrap to two lines inside maxWidth:480, and the second banner then
+        printed over the first. In one column they stack by normal flow, whatever their height.
+        Z.toast, not Z.modal: a banner exists to say WHY an operation failed, and it must outrank
+        the dialog that failed. Tied at Z.modal, DOM order decided — and the dialogs come later in
+        this file, so they painted over the reason.
+      */}
+      {(commitError || rebaseError) && (
         <div
           style={{
             position: "fixed",
             top: 8,
             left: "50%",
             transform: "translateX(-50%)",
-            // Z.toast, not Z.modal: this banner exists to say WHY the operation failed, and
-            // it must outrank the dialog that failed. Tied at Z.modal, DOM order decided —
-            // and the dialogs come later in this file, so they painted over the reason.
             zIndex: Z.toast,
+            display: "flex",
+            flexDirection: "column",
+            gap: 6,
             maxWidth: 480,
-            padding: "6px 10px",
-            background: "var(--bg-surface-2)",
-            border: "1px solid var(--danger)",
-            borderRadius: "var(--radius-sm, 3px)",
-            color: "var(--danger)",
-            fontSize: "0.72rem",
+            // the gaps between banners must not swallow clicks meant for what is underneath
+            pointerEvents: "none",
           }}
         >
-          {commitError}{" "}
-          <button
-            type="button"
-            aria-label="dismiss error"
-            onClick={() => setCommitError(null)}
-            style={{
-              marginLeft: 6,
-              background: "transparent",
-              border: "none",
-              color: "var(--text-secondary)",
-              cursor: "pointer",
-            }}
-          >
-            ✕
-          </button>
+          {commitError && (
+            <div style={{ ...ERROR_BANNER, pointerEvents: "auto" }}>
+              {commitError}{" "}
+              <button
+                type="button"
+                aria-label="dismiss error"
+                onClick={() => setCommitError(null)}
+                style={ERROR_DISMISS}
+              >
+                ✕
+              </button>
+            </div>
+          )}
+          {rebaseError && (
+            <div role="alert" style={{ ...ERROR_BANNER, pointerEvents: "auto" }}>
+              {rebaseError}{" "}
+              <button
+                type="button"
+                aria-label="dismiss rebase error"
+                onClick={() => setRebaseError(null)}
+                style={ERROR_DISMISS}
+              >
+                ✕
+              </button>
+            </div>
+          )}
         </div>
       )}
 
@@ -1854,7 +1895,9 @@ export function GitPanel({ root }: { root: string }): ReactElement {
             style={{
               position: "fixed",
               inset: 0,
-              zIndex: Z.modal,
+              // Z.dropdown: a context menu is the dropdown rung (as FileTree's). At Z.modal this
+              // click-away sat ABOVE the ⌘K palette (Z.palette) and swallowed every click on it.
+              zIndex: Z.dropdown,
               background: "transparent",
               border: "none",
               cursor: "default",
@@ -1870,7 +1913,7 @@ export function GitPanel({ root }: { root: string }): ReactElement {
               ...(({ x, y }) => ({ left: x, top: y }))(
                 clampToViewport(commitMenu.x, commitMenu.y, 190, 240),
               ),
-              zIndex: Z.modal,
+              zIndex: Z.dropdown,
               minWidth: 180,
               padding: 4,
               background: "var(--bg-surface-2)",
@@ -2249,49 +2292,6 @@ export function GitPanel({ root }: { root: string }): ReactElement {
             </div>
           </div>
         </>
-      )}
-
-      {/* APP-082: rebase op error (fixed so it survives log scroll). */}
-      {rebaseError && (
-        <div
-          role="alert"
-          style={{
-            position: "fixed",
-            // 44, not 8: the merge-conflict banner above already owns top:8 at the same
-            // Z.toast rung, and two fixed banners at identical coordinates print on top of
-            // each other. Stacked, both stay readable when a rebase fails mid-merge.
-            top: 44,
-            left: "50%",
-            transform: "translateX(-50%)",
-            // Z.toast, not Z.modal: this banner exists to say WHY the operation failed, and
-            // it must outrank the dialog that failed. Tied at Z.modal, DOM order decided —
-            // and the dialogs come later in this file, so they painted over the reason.
-            zIndex: Z.toast,
-            maxWidth: 480,
-            padding: "6px 10px",
-            background: "var(--bg-surface-2)",
-            border: "1px solid var(--danger)",
-            borderRadius: "var(--radius-sm, 3px)",
-            color: "var(--danger)",
-            fontSize: "0.72rem",
-          }}
-        >
-          {rebaseError}{" "}
-          <button
-            type="button"
-            aria-label="dismiss rebase error"
-            onClick={() => setRebaseError(null)}
-            style={{
-              marginLeft: 6,
-              background: "transparent",
-              border: "none",
-              color: "var(--text-secondary)",
-              cursor: "pointer",
-            }}
-          >
-            ✕
-          </button>
-        </div>
       )}
     </div>
   );

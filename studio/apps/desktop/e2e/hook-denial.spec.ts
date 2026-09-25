@@ -14,7 +14,7 @@
  * production CSP silently dropping every local runner); that bug is now fixed (Task #18, see
  * `model-probe.spec.ts`) and `fake-model-server.ts` answers the probe for real.
  */
-import { existsSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { expect, test } from "@playwright/test";
@@ -41,11 +41,17 @@ test.beforeAll(async () => {
   );
 
   launched = await launchApp({
-    beforeLaunch: (userDataDir) => {
+    // The global settings layer is `$PROMETHEUS_HOME/config/settings.json` (shared with the
+    // CLI), no longer `<userData>/settings.json`. Seeding the old path relied on the one-time
+    // migration to fold it in — into the developer's REAL ~/.prometheus, where this test hook
+    // then ran on every write_file. A per-run home keeps the fixture in the sandbox.
+    isolateHome: true,
+    beforeLaunch: (_userDataDir, prometheusHome) => {
+      if (!prometheusHome) throw new Error("isolateHome did not provide a PROMETHEUS_HOME");
       // A REAL settings.json, written before the app process ever starts, exactly the file
-      // `apps/desktop/src/main/settings-store.ts` reads as the global layer. The hook denies
-      // ONE specific path (`grep` against the PreToolUse JSON on stdin — `{tool, args}`, see
-      // `packages/core/src/agent/hooks.ts`) — a nonzero exit is the ONLY thing that denies.
+      // main reads as the global layer (settings-path.ts sharedGlobalSettingsPath). The hook
+      // denies ONE specific path (`grep` against the PreToolUse JSON on stdin — `{tool, args}`,
+      // see `packages/core/src/agent/hooks.ts`) — a nonzero exit is the ONLY thing that denies.
       const settings = {
         hooks: [
           {
@@ -55,7 +61,11 @@ test.beforeAll(async () => {
           },
         ],
       };
-      writeFileSync(join(userDataDir, "settings.json"), JSON.stringify(settings, null, 2));
+      mkdirSync(join(prometheusHome, "config"), { recursive: true });
+      writeFileSync(
+        join(prometheusHome, "config", "settings.json"),
+        JSON.stringify(settings, null, 2),
+      );
     },
   });
 

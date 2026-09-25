@@ -464,7 +464,7 @@ export interface ModelHealthRecordView {
   breakerFailures: number;
   breakerOpenedAt: number | null;
   contextWindow: number;
-  contextWindowSource: "ollama" | "openai-models" | "default" | "declared";
+  contextWindowSource: "ollama" | "ollama-loaded" | "openai-models" | "default" | "declared";
   lastUsedIso: string;
 }
 
@@ -1187,7 +1187,7 @@ export interface AiProbeEndpointResult {
   ok: boolean;
   contextWindow: number;
   /** `"ollama"` / `"openai-models"` ⇒ measured. `"default"` ⇒ the probe failed. */
-  source: "ollama" | "openai-models" | "default";
+  source: "ollama" | "ollama-loaded" | "openai-models" | "default";
   /** the runner's own capability array, when it reported one. */
   capabilities?: string[];
   /** opaque build identity for cache invalidation — see core's `ContextWindowResult.revision`. */
@@ -4959,6 +4959,8 @@ export interface SettingsRowView {
   /** APP-058: every layer that sets the key, precedence order — the "overrides …" chain. */
   definedIn?: SettingsLayer[];
   searchTerms?: string[];
+  /** the closed value set for a `select` control, so the editor can render a real dropdown. */
+  options?: readonly { value: string; label: string }[];
   children?: SettingsRowView[];
 }
 

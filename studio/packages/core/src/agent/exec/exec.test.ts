@@ -236,6 +236,19 @@ test("writing to a file lifts a read command to `command`", () => {
   assert.equal(c.ok && c.tier, "command");
 });
 
+test("a STDERR file redirect is a write too, but `2>&1` and `< file` are not", () => {
+  // exec-runner opens a `2> file` target with "w": `ls 2> src/main.ts` truncates it. As a
+  // `read` it was auto-approved at the default auth level 1 with no prompt.
+  for (const line of ["ls 2> src/main.ts", "cat x 2>> ~/.zshrc", "ls > out 2> err"]) {
+    const c = tierOf(line);
+    assert.equal(c.ok && c.tier, "command", line);
+  }
+  const merged = tierOf("ls 2>&1");
+  assert.equal(merged.ok && merged.tier, "read", "`2>&1` writes no file");
+  const input = tierOf("wc -l < notes.txt");
+  assert.equal(input.ok && input.tier, "read", "`< file` only reads");
+});
+
 test("a versioned interpreter inherits its family's deny-flags", () => {
   // `python3.11 -c` is exactly as much of a shell as `python3 -c`; classifying it as an
   // unknown program would technically still prompt, but it would lose the deny-flag.
@@ -354,6 +367,45 @@ const REDTEAM: [label: string, line: string][] = [
   ["awk cmd | getline", `awk 'BEGIN{"id" | getline x; print x}'`],
   ["awk print redirected to a file", `awk 'BEGIN{printf "x" > "/tmp/owned"}'`],
   ["awk close()", `awk 'BEGIN{close("/tmp/x")}'`],
+
+  /* ── the media/document tools added 2026-09-24 ───────────────────────────
+   * Every one of these programs is newly allowlisted, so every one of them needed its
+   * escapes closed in the same change. Before the registry knew them they classified
+   * `destructive` and prompted; the risk of allowlisting is precisely that the prompt
+   * goes away, and these rows are what pays for it.
+   */
+  ["yt-dlp --exec runs a shell command per download", "yt-dlp --exec 'rm -rf ~' https://x"],
+  ["yt-dlp --exec with =", "yt-dlp --exec=id https://x"],
+  ["yt-dlp --exec-before-download", "yt-dlp --exec-before-download id https://x"],
+  ["yt-dlp hands the transfer to another binary", "yt-dlp --downloader /bin/sh https://x"],
+  ["yt-dlp --external-downloader", "yt-dlp --external-downloader aria2c https://x"],
+  ["yt-dlp loads python plugins", "yt-dlp --plugin-dirs /tmp/evil https://x"],
+  ["yt-dlp config file may contain --exec", "yt-dlp --config-location /tmp/c https://x"],
+  ["yt-dlp info json may contain --exec", "yt-dlp --load-info-json /tmp/i.json"],
+  ["yt-dlp ships browser cookies to the host", "yt-dlp --cookies-from-browser chrome https://x"],
+  ["yt-dlp cookies file", "yt-dlp --cookies /tmp/c.txt https://x"],
+  ["ImageMagick @file reads an unnamed path", "convert @/etc/passwd out.png"],
+  ["ImageMagick MSL is an interpreter", "magick msl:/tmp/script.xml"],
+  ["ImageMagick MVG", "convert mvg:/tmp/x.mvg out.png"],
+  [
+    "ffmpeg protocol whitelist re-enables file:",
+    "ffmpeg -protocol_whitelist file,http -i p.m3u8 o.mp4",
+  ],
+  ["ghostscript with -dSAFER off", "gs -dNOSAFER -sDEVICE=pdfwrite -o o.pdf in.pdf"],
+  ["ghostscript delayed safer", "gs -dDELAYSAFER -o o.pdf in.pdf"],
+  ["pandoc lua filter", "pandoc --lua-filter /tmp/f.lua in.md -o out.pdf"],
+  ["pandoc filter", "pandoc --filter /tmp/f in.md -o out.html"],
+  ["pandoc pdf-engine launches a program", "pandoc --pdf-engine /bin/sh in.md -o out.pdf"],
+  ["exiftool -config is Perl", "exiftool -config /tmp/evil.cfg a.jpg"],
+  ["exiftool -if evaluates Perl", "exiftool -if 'system(\"id\")' a.jpg"],
+  ["exiftool -p formatting evaluates Perl", "exiftool -p '${a;system(\"id\")}' a.jpg"],
+  ["exiftool -@ argfile bypasses every check here", "exiftool -@ /tmp/args a.jpg"],
+  // sqlite3 is a shell with a database attached, and its escapes are POSITIONAL arguments.
+  ["sqlite3 .shell", `sqlite3 db.sqlite ".shell id"`],
+  ["sqlite3 .system", `sqlite3 db.sqlite ".system id"`],
+  ["sqlite3 .load loads native code", `sqlite3 db.sqlite ".load /tmp/evil.dylib"`],
+  ["sqlite3 .once pipes into a command", `sqlite3 db.sqlite ".once |sh"`],
+  ["sqlite3 -cmd", `sqlite3 -cmd ".shell id" db.sqlite`],
 ];
 
 /*
@@ -455,3 +507,47 @@ for (const line of ALLOWED) {
     }
   });
 }
+
+/* ══ the media tools, on the ladder ══════════════════════════════════════════
+ * The claim these entries make is behavioural, not just tabular: at A5 and above a
+ * "download this video" turn must run END TO END with no prompt, because that is the
+ * level at which the sandbox already permits the network. If this drifts, the feature
+ * silently degrades into "the model asks permission for every download".
+ */
+
+test("yt-dlp is `install`: it prompts below A5 and runs unattended at A5+", () => {
+  const c = tierOf("yt-dlp -o /Users/me/Downloads/%(title)s.%(ext)s https://youtu.be/x");
+  assert.ok(c.ok, "a plain yt-dlp download must classify, not refuse");
+  assert.equal(c.ok && c.tier, "install", "it needs the network, and network is the install tier");
+  assert.equal(execAuthDecision(1, "install"), "ask");
+  assert.equal(execAuthDecision(4, "install"), "ask");
+  for (const level of [5, 6, 7]) {
+    assert.equal(execAuthDecision(level, "install"), "allow", `A${level} must not prompt`);
+  }
+});
+
+test("aiming a download with -o / -P / --paths is NOT denied — that is how /in works", () => {
+  for (const line of [
+    "yt-dlp -o /tmp/out/%(title)s.%(ext)s https://x",
+    "yt-dlp -P /tmp/out https://x",
+    "yt-dlp --paths home:/tmp/out https://x",
+  ]) {
+    assert.ok(tierOf(line).ok, `${line} must classify, not refuse`);
+  }
+});
+
+test("the media converters are `command`: real work, below the network tier", () => {
+  for (const [line, tier] of [
+    ["magick in.png -resize 50% out.jpg", "command"],
+    ["ffmpeg -i in.mov -vcodec libx264 out.mp4", "command"],
+    ["tesseract scan.png out", "command"],
+    ["pdftotext report.pdf -", "command"],
+    ["pdfgrep -i invoice *.pdf", "read"],
+    ["ffprobe -show_format in.mp4", "read"],
+    ["identify in.png", "read"],
+  ] as const) {
+    const c = tierOf(line);
+    assert.ok(c.ok, `${line} must classify`);
+    assert.equal(c.ok && c.tier, tier, line);
+  }
+});

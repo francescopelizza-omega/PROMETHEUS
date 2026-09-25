@@ -60,9 +60,12 @@ function CodeBlock({ text }: { text: string }): ReactElement {
       <pre
         style={{
           margin: 0,
-          // right gutter reserves room for the ⧉ copy button, which otherwise sits on top of
-          // the first line of code.
-          padding: "8px 30px 8px 8px",
+          // A top band, not a right gutter, reserves room for the ⧉ copy button (~18px tall at
+          // top:4). A <pre> never wraps and a scroll box clips at its PADDING edge, so a right
+          // gutter only protected first lines that already fit: any longer line (most of them in
+          // the 330px rail) still painted straight under the button. Nothing is drawn above
+          // the first line at any scroll position.
+          padding: "24px 8px 8px 8px",
           overflow: "auto",
           background: "var(--bg-inset)",
           borderRadius: "var(--radius-md, 6px)",
@@ -118,6 +121,14 @@ export function Markdown({ source }: { source: string }): ReactElement {
       )}
     </>
   );
+}
+
+/**
+ * Render text VERBATIM as a single code block — no markdown parsing, no inline `code`, no
+ * bold. For content that is DATA rather than prose: a file printed by `/cat`.
+ */
+export function Verbatim({ text }: { text: string }): ReactElement {
+  return <CodeBlock text={text} />;
 }
 
 export default Markdown;

@@ -8,6 +8,8 @@
  * 09's layering (defaults ◀ global ◀ profile ◀ workspace). Pure data + pure helpers.
  */
 
+import { EXTERNAL_TOOL_CHOICES } from "../agent/host-tools.js";
+
 /** The control a settings node renders as (§2.7). */
 export type SettingsControl =
   | "page"
@@ -33,6 +35,15 @@ export interface SettingsNode {
   scope: SettingsScope;
   children?: SettingsNode[];
   searchTerms?: string[]; // power the Settings search box
+  /**
+   * The allowed values for a `select`, so the editor can offer a real dropdown.
+   *
+   * Until this existed, `control: "select"` rendered as a PLAIN TEXT INPUT — the tree could say
+   * "this is a choice" and the UI had no way to act on it, so every "choice" setting was in
+   * practice free text that nothing validated (`validateSettings` is exported but never called
+   * at runtime). A setting whose valid values are a closed set must be able to say so.
+   */
+  options?: readonly { value: string; label: string }[];
 }
 
 function node(
@@ -195,7 +206,60 @@ export const SETTINGS_TREE: readonly SettingsNode[] = Object.freeze([
         searchTerms: [".http", "request", "response"],
       }),
       node("tools.externalTools", "External Tools", "Tools", "13", "page", {
-        searchTerms: ["command", "menu"],
+        searchTerms: ["command", "menu", "imagemagick", "ffmpeg", "yt-dlp", "ocr", "pdf"],
+        // ONE LEAF PER EDITABLE VALUE: `resolveRichRows` walks `flattenTree()` and skips any
+        // node without a `schemaKey`, so a single page node would persist nothing at all.
+        children: [
+          node("tools.externalTools.imageFormat", "Image output format", "Tools", "13", "select", {
+            schemaKey: "tools.externalTools.imageFormat",
+            options: EXTERNAL_TOOL_CHOICES.imageFormat?.map((v) => ({ value: v, label: v })),
+            searchTerms: ["png", "jpg", "webp", "convert", "imagemagick"],
+          }),
+          node(
+            "tools.externalTools.imageQuality",
+            "Image quality (1-100)",
+            "Tools",
+            "13",
+            "number",
+            {
+              schemaKey: "tools.externalTools.imageQuality",
+              searchTerms: ["jpeg", "webp", "compression"],
+            },
+          ),
+          node("tools.externalTools.imageResizeFilter", "Resize filter", "Tools", "13", "select", {
+            schemaKey: "tools.externalTools.imageResizeFilter",
+            options: EXTERNAL_TOOL_CHOICES.imageResizeFilter?.map((v) => ({ value: v, label: v })),
+            searchTerms: ["lanczos", "resample", "scale"],
+          }),
+          node("tools.externalTools.pdfDpi", "PDF raster DPI", "Tools", "13", "number", {
+            schemaKey: "tools.externalTools.pdfDpi",
+            searchTerms: ["pdf", "dpi", "render", "ghostscript", "poppler"],
+          }),
+          node("tools.externalTools.ocrLang", "OCR language", "Tools", "13", "text", {
+            schemaKey: "tools.externalTools.ocrLang",
+            searchTerms: ["tesseract", "ocr", "language", "eng", "ita"],
+          }),
+          node("tools.externalTools.videoContainer", "Video container", "Tools", "13", "select", {
+            schemaKey: "tools.externalTools.videoContainer",
+            options: EXTERNAL_TOOL_CHOICES.videoContainer?.map((v) => ({ value: v, label: v })),
+            searchTerms: ["mp4", "mkv", "webm", "ffmpeg"],
+          }),
+          node(
+            "tools.externalTools.videoMaxHeight",
+            "Max video height (0 = no cap)",
+            "Tools",
+            "13",
+            "number",
+            {
+              schemaKey: "tools.externalTools.videoMaxHeight",
+              searchTerms: ["1080", "720", "resolution", "yt-dlp"],
+            },
+          ),
+          node("tools.externalTools.ytdlpFormat", "yt-dlp format selector", "Tools", "13", "text", {
+            schemaKey: "tools.externalTools.ytdlpFormat",
+            searchTerms: ["yt-dlp", "format", "bestvideo", "download"],
+          }),
+        ],
       }),
       node("tools.diffMerge", "Diff & Merge", "Tools", "07", "page", {
         searchTerms: ["diff", "3-way", "merge"],

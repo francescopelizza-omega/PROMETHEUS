@@ -198,7 +198,15 @@ export function runNemesis(
         let nl = rest.indexOf("\n");
         while (nl !== -1) {
           const line = rest.slice(0, nl).replace(/\r$/, "");
-          if (line.length) opts.onStderr(line);
+          if (line.length) {
+            // A throwing sink (e.g. a send to a closed window) must not escape this 'data'
+            // listener, drop the rest of the chunk, or skip the line-buffer bookkeeping below.
+            try {
+              opts.onStderr(line);
+            } catch {
+              /* the sink's failure is its own */
+            }
+          }
           rest = rest.slice(nl + 1);
           nl = rest.indexOf("\n");
         }
@@ -230,7 +238,15 @@ export function runNemesis(
       if (settled) return;
       settled = true;
       cleanup();
-      if (opts.onStderr && stderrLineBuf.trim()) opts.onStderr(stderrLineBuf.trim());
+      if (opts.onStderr && stderrLineBuf.trim()) {
+        // Before `resolve`: a throw here left the gate promise (and its IPC call) unsettled
+        // forever, since `settled` is already true.
+        try {
+          opts.onStderr(stderrLineBuf.trim());
+        } catch {
+          /* the sink's failure is its own */
+        }
+      }
       resolve({
         exitCode: code ?? 2, // null (signalled) => error tier
         stdout,

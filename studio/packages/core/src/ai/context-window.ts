@@ -36,7 +36,7 @@ const MIN_PLAUSIBLE = 512;
 const MAX_PLAUSIBLE = 10_000_000;
 
 /** Where a window came from — so a caller never presents a default as a measurement. */
-export type ContextWindowSource = "ollama" | "openai-models" | "default";
+export type ContextWindowSource = "ollama" | "ollama-loaded" | "openai-models" | "default";
 
 export interface ContextWindowResult {
   contextWindow: number;
@@ -128,6 +128,28 @@ function plausible(n: unknown): number | null {
  * matched by SUFFIX rather than enumerated. Enumerating would mean this silently returns the
  * default for every architecture released after it was written.
  */
+/**
+ * The context the loaded model is ACTUALLY being served with, from `/api/ps`.
+ *
+ * `/api/show` reports what the weights could do (`qwen3moe.context_length: 262144`); the daemon
+ * may serve far less, because `OLLAMA_CONTEXT_LENGTH` caps it — this repo's own
+ * `handoffs/ollama-safe-limits.sh` and `PROMETHEUS_OLLAMA_CAPS` both set 8192. Budgeting
+ * against the declared number is how a 7,254-token prompt was built for an 8,192-token slot:
+ * the preamble and instruction budgets scale with the window, so believing 262144 INFLATED the
+ * prompt that then did not fit. `ollama ps` shows this number in its CONTEXT column.
+ */
+export function contextFromOllamaPs(payload: unknown, model: string): number | null {
+  if (!isRecord(payload)) return null;
+  const models = Array.isArray(payload.models) ? payload.models : [];
+  const rows = models.filter(isRecord);
+  const row = rows.find((m) => m.name === model || m.model === model) ?? rows[0];
+  if (!row) return null;
+  const n = plausible(row.context_length);
+  if (n !== null) return n;
+  const details = row.details;
+  return isRecord(details) ? plausible(details.context_length) : null;
+}
+
 export function contextFromOllamaShow(payload: unknown): number | null {
   if (!isRecord(payload)) return null;
   const info = payload.model_info;
@@ -199,6 +221,22 @@ export function contextFromModelsEntry(entry: unknown): number | null {
   return null;
 }
 
+/** `/api/ps` → the loaded model's served context, or null when it is not loaded (or too old). */
+async function servedContextWindow(
+  root: string,
+  model: string,
+  doFetch: FetchLike,
+  timeoutMs: number,
+): Promise<number | null> {
+  const res = await bounded(doFetch, `${root}/api/ps`, {}, timeoutMs);
+  if (!res?.ok) return null;
+  try {
+    return contextFromOllamaPs(await res.json(), model);
+  } catch {
+    return null; // not JSON / an older daemon — the declared window stays the answer
+  }
+}
+
 /**
  * Ask a LOCAL runner what the model's context length is.
  *
@@ -231,9 +269,15 @@ export async function probeContextWindow(
         if (n !== null) {
           const capabilities = capabilitiesFromOllamaShow(payload);
           const revision = revisionFromOllamaShow(payload);
+          // What the daemon SERVES wins over what the weights allow: it is the number the
+          // request is actually measured against. Only when it is smaller — a loaded model is
+          // never served more context than the architecture declares, and if /api/ps says
+          // otherwise the declared number stays the safer budget.
+          const served = await servedContextWindow(root, model, doFetch, timeoutMs);
+          const effective = served !== null ? Math.min(n, served) : n;
           return {
-            contextWindow: n,
-            source: "ollama",
+            contextWindow: effective,
+            source: served !== null && served < n ? "ollama-loaded" : "ollama",
             ...(capabilities ? { capabilities } : {}),
             ...(revision ? { revision } : {}),
           };

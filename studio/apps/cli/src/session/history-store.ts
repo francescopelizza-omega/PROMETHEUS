@@ -389,6 +389,22 @@ export interface AccountingRecord {
   cacheCreate?: number;
 }
 
+/**
+ * Present a LOCAL turn's row to a price lookup as the known-free row it is.
+ *
+ * A local turn records `model` as the bare runner id ("gemma3:4b"): no pricing table has it,
+ * and `isLocalModelId` only recognises prefixed ids. So with `daily_usd` set, one local turn
+ * this morning made every cloud turn this afternoon fail the daily gate as "unpriced" until
+ * midnight. Every local endpoint id is `local:<runner>:<model>`, which `isLocalModelId` prices
+ * as free, so the row is priced by its endpoint id instead. Apply it to EVERY record set a
+ * price lookup sees (session and day alike), so merges keyed on `model` stay consistent.
+ */
+export function withLocalRowsFree(records: AccountingRecord[]): AccountingRecord[] {
+  return records.map((r) =>
+    r.endpointId.startsWith("local:") && r.model !== r.endpointId ? { ...r, model: r.endpointId } : r,
+  );
+}
+
 function acctFile(home: string, id: string): string {
   return join(sessionsDir(home), `${id}.acct.jsonl`);
 }
@@ -398,12 +414,23 @@ function acctFile(home: string, id: string): string {
  * never mixes with the transcript). One `JSON.stringify+"\n"` per append — a mid-stream
  * crash leaves a readable (possibly short) log, never a corrupt whole-array rewrite.
  */
-export function appendAccounting(home: string, sessionId: string, rec: AccountingRecord): void {
-  // The SHARED daily ledger first, and unconditionally: `budget.dailyUsd` is one number, and
-  // it used to be counted twice because this surface and the desktop each read only their own
-  // rows. Written even when the session id is unusable — a turn that cannot be attributed to a
-  // session was still money spent today.
-  ai.appendSharedSpend(join(home, "accounting"), rec);
+export function appendAccounting(
+  home: string,
+  sessionId: string,
+  rec: AccountingRecord,
+  opts: { metered?: boolean } = {},
+): void {
+  // The SHARED daily ledger first: `budget.dailyUsd` is one number, and it used to be counted
+  // twice because this surface and the desktop each read only their own rows. Written even when
+  // the session id is unusable — a turn that cannot be attributed to a session was still money
+  // spent today.
+  //
+  // METERED turns only (`metered: false` = a local endpoint), mirroring the desktop's
+  // DesktopBudgetGate.record(), which skips locality "local". A local row carries a bare model
+  // id ("gemma3:4b") that the desktop prices as UNKNOWN, so with budget.dailyUsd set one local
+  // CLI turn blocked every Studio cloud call for the rest of the day ("unpriced"). Local turns
+  // still land in the per-session file below, which readAccountingSince also reads.
+  if (opts.metered !== false) ai.appendSharedSpend(join(home, "accounting"), rec);
   const id = safeSessionId(sessionId);
   if (!id) return;
   try {

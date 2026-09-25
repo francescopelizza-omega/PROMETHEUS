@@ -13,9 +13,12 @@
  */
 import type { agent } from "@prometheus/core";
 
+import type { SecurityVerdict } from "@prometheus/engine-bridge";
 import { resolveKeymap } from "../../tui/keys.js";
 import type { SlashCtx } from "../slash-registry.js";
 import { createWorkingSet } from "../working-set.js";
+
+import { createOutputDir } from "../in.js";
 
 const TUNING = {
   model: { provider: "ollama", modelId: "qwen2.5-coder" },
@@ -47,6 +50,9 @@ export function makeFakeSlashCtx() {
      *  `/recall`, `/condense`) — recorded so a suite can tell "delegated to the host" apart
      *  from "did nothing at all". */
     delegated: [] as string[],
+    /** `/install`: the argv that would have been spawned, and the paths gated. */
+    spawns: [] as string[][],
+    gated: [] as string[],
   };
   let subagents = 3;
   let authLevel = 3;
@@ -142,6 +148,18 @@ export function makeFakeSlashCtx() {
       list: () => ws.list(),
       add: (dir) => ws.add(dir, cwd),
       remove: (dir) => ws.remove(dir, cwd),
+    },
+    outputDir: createOutputDir(ws, () => cwd),
+    // `/install` seams. A fixture NEVER spawns a package manager or runs nemesis: the spawn
+    // records the argv so a suite can assert what WOULD have run, and the gate answers a clean
+    // verdict so the install path is exercised without a scanner on the box.
+    spawnTool: async (cmd, args) => {
+      calls.spawns.push([cmd, ...args]);
+      return { code: 0, stdout: "/tmp/fake-cache/pkg.bottle.tar.gz", stderr: "" };
+    },
+    gateTarget: async (target) => {
+      calls.gated.push(target);
+      return { verdict: "allow", target, findings: [], riskScore: 0 } as unknown as SecurityVerdict;
     },
     repoMap: {
       stats: () => {

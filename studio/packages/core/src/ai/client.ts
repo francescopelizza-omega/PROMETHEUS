@@ -20,15 +20,16 @@
 
 import { estimateTextTokens } from "../agent/compact.js";
 import { IdleWatchdog } from "../agent/idle-watchdog.js";
-import { localKeepAliveField } from "./local-runners.js";
 import { applyEffort, applyEffortToMessages } from "./effort/apply.js";
 import { runtimeFromBaseUrl } from "./effort/rules.js";
 import type { EffortResolution } from "./effort/types.js";
+import { localKeepAliveField } from "./local-runners.js";
 import { applyPromptCache, cacheDialectFor } from "./prompt-cache.js";
 import { endpointBreaker, fetchModelWithRetry } from "./request.js";
-import { ContextOverflowError, preflightContext } from "./retry-policy.js";
+import { ContextOverflowError, preflightContext, replyReserveFor } from "./retry-policy.js";
+import { emptyTurnNotice, truncationNotice } from "./turn-outcome.js";
 import { mergeWireUsage } from "./usage.js";
-import { selectWire } from "./wire.js";
+import { type WireEvent, selectWire } from "./wire.js";
 
 /* ------------------------------------------------------------------------- *
  * Endpoint, policy, and message types (file 07 §7)
@@ -95,6 +96,14 @@ export interface ChatOpts {
    * OpenAI, Anthropic and Gemini.
    */
   promptCache?: boolean;
+  /**
+   * Append a one-line explanation when the turn produced NO text (default true).
+   *
+   * Off for a caller that has its own empty-turn handling — the CLI's tool transports answer an
+   * empty turn by correcting the model rather than by telling the user. The TRUNCATION notice
+   * (a real answer, cut short) is never suppressed: nothing else reports it.
+   */
+  emptyTurnNotice?: boolean;
   /**
    * This request's inactivity-pause threshold — see `agent/idle-watchdog.ts`. Undefined ⇒
    * `DEFAULT_IDLE_TIMEOUT_MS` (10 minutes).
@@ -491,6 +500,9 @@ export function createAiClient(
     messages: Msg[],
     opts: ChatOpts,
     onUsage?: (u: SseTokenUsage) => void,
+    // WHY the model stopped, when the provider says so. "length" = the reply was cut off;
+    // without it a truncated answer (or an answer truncated to NOTHING) is pure silence.
+    onStop?: (r: NonNullable<WireEvent["stopReason"]>) => void,
   ): AsyncGenerator<string, void, unknown> {
     // C5/privacy: refuse a cloud endpoint up-front; nothing has left the machine.
     enforcePolicy();
@@ -562,7 +574,9 @@ export function createAiClient(
     const pre = preflightContext({
       estimatedPromptTokens: estimateTextTokens(effMessages.map((m) => m.content)),
       contextWindow: endpoint.contextWindow,
-      ...(opts.maxTokens !== undefined ? { maxTokens: opts.maxTokens } : {}),
+      // A reply needs room too. With no `maxTokens` the reserve was 0, so "it fits" stayed true
+      // until the last token of the window and the answer had nowhere to go.
+      maxTokens: replyReserveFor(endpoint.contextWindow, opts.maxTokens),
     });
     if (!pre.ok) throw new ContextOverflowError(pre, endpoint.contextWindow);
 
@@ -750,6 +764,7 @@ export function createAiClient(
             if (ev.usage && onUsage) onUsage(ev.usage);
             throw new ProviderStreamError(endpoint.id, ev.error, streamed);
           }
+          if (ev.stopReason && onStop) onStop(ev.stopReason);
           if (ev.done) return;
           if (ev.usage && onUsage) onUsage(ev.usage);
           if (ev.delta) {
@@ -766,6 +781,7 @@ export function createAiClient(
           if (ev.usage && onUsage) onUsage(ev.usage);
           throw new ProviderStreamError(endpoint.id, ev.error, streamed);
         }
+        if (ev.stopReason && onStop) onStop(ev.stopReason);
         if (ev.done) return;
         if (ev.usage && onUsage) onUsage(ev.usage);
         if (ev.delta) {
@@ -821,10 +837,49 @@ export function createAiClient(
   return {
     async *chat(messages: Msg[], opts: ChatOpts = {}): AsyncIterable<ChatChunk> {
       let usage: SseTokenUsage | undefined;
-      for await (const delta of stream(messages, opts, (u) => {
-        usage = mergeWireUsage(usage, u);
-      })) {
+      let stopReason: NonNullable<WireEvent["stopReason"]> | undefined;
+      let text = "";
+      for await (const delta of stream(
+        messages,
+        opts,
+        (u) => {
+          usage = mergeWireUsage(usage, u);
+        },
+        (r) => {
+          stopReason = r;
+        },
+      )) {
+        text += delta;
         yield { delta };
+      }
+      /**
+       * A turn that produced NOTHING, or was cut off mid-answer, says so.
+       *
+       * Every surface on this transport (Studio's pane, the VS Code sidebar) skips an empty
+       * reply, so a model that spent its whole remaining window on reasoning ended the turn with
+       * nothing on screen at all and no way to tell that from "the model had nothing to say".
+       */
+      const notice =
+        text.trim() === ""
+          ? opts.emptyTurnNotice === false
+            ? ""
+            : emptyTurnNotice({
+                ...(stopReason ? { stopReason } : {}),
+                promptTokens: estimateTextTokens(messages.map((m) => m.content)),
+                contextWindow: endpoint.contextWindow,
+                runtime: runtimeFromBaseUrl(endpoint.baseUrl),
+              })
+          : stopReason === "length"
+            ? `\n\n${truncationNotice({
+                stopReason,
+                promptTokens: estimateTextTokens(messages.map((m) => m.content)),
+                contextWindow: endpoint.contextWindow,
+                runtime: runtimeFromBaseUrl(endpoint.baseUrl),
+              })}`
+            : "";
+      if (notice) {
+        text += notice;
+        yield { delta: notice };
       }
       yield { delta: "", done: true, ...(usage ? { usage } : {}) };
     },

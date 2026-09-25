@@ -545,7 +545,8 @@ export interface WatchIo {
   /** watch `root`; call `onChange(absPathOrNull)` per fs event (null filename ⇒ rescan). */
   createWatcher: (root: string, onChange: (file: string | null) => void) => { close: () => void };
   /** register a raw-mode key handler; `restore` undoes raw mode + shows the cursor. */
-  onKey: (handler: (byte: number) => void) => { restore: () => void };
+  /** `exitCode` is set when the "key" is really a SIGINT/SIGTERM (130/143, 128 + signo). */
+  onKey: (handler: (byte: number, exitCode?: number) => void) => { restore: () => void };
   setTimer: (fn: () => void, ms: number) => unknown;
   clearTimer: (h: unknown) => void;
   write: (s: string) => void;
@@ -654,15 +655,18 @@ export async function runWatch(
       // trailing-edge debounce: collapse a save burst (rename+change+temp) into ONE run.
       debounce = io.setTimer(() => {
         debounce = null;
-        void runCycle();
+        // A rejected sidecar run must not become an unhandled rejection that kills the watch.
+        void runCycle().catch(() => {});
       }, DEBOUNCE_MS);
     };
 
-    const onKey = (byte: number): void => {
+    const onKey = (byte: number, exitCode?: number): void => {
       if (byte === KEY_Q || byte === KEY_CTRL_C) {
         teardown();
         io.write("\n");
-        resolve({ exitCode: 0 });
+        // A quit key is a clean exit; a real signal keeps the 128 + signo status a supervisor
+        // or task runner reads (the child reaper defers to this listener, so nothing else sets it).
+        resolve({ exitCode: exitCode ?? 0 });
       }
     };
 
@@ -744,7 +748,17 @@ function defaultWatchIo(): WatchIo {
       // cursor hidden — the shell still running, but echoing nothing and showing no caret,
       // which reads as a hung machine. `once`-style guarding matters because the exit and
       // signal handlers can both fire.
+      //
+      // A signal goes through the SAME path as `q`/Ctrl-C. Registering any SIGINT/SIGTERM
+      // listener switches off Node's default terminate-on-signal, and the listener used to be
+      // `restore` alone: it un-rawed stdin and returned, so an external `kill` left the process
+      // alive with the fs watchers still open, re-running tests on every save, and `q` dead
+      // (stdin paused, listener gone). handler(KEY_CTRL_C) runs the watch's own teardown —
+      // watchers closed, in-flight sidecar aborted, keys restored — and resolves the command.
+      // `once`: a second signal gets Node's default and terminates.
       let restored = false;
+      const onInt = (): void => handler(KEY_CTRL_C, 130);
+      const onTerm = (): void => handler(KEY_CTRL_C, 143);
       const restore = (): void => {
         if (restored) return;
         restored = true;
@@ -753,12 +767,12 @@ function defaultWatchIo(): WatchIo {
         stdin.pause();
         process.stdout.write(SHOW_CURSOR); // never leave the terminal in raw/no-cursor state
         process.off("exit", restore);
-        process.off("SIGINT", restore);
-        process.off("SIGTERM", restore);
+        process.off("SIGINT", onInt);
+        process.off("SIGTERM", onTerm);
       };
       process.on("exit", restore);
-      process.on("SIGINT", restore);
-      process.on("SIGTERM", restore);
+      process.once("SIGINT", onInt);
+      process.once("SIGTERM", onTerm);
       return { restore };
     },
     setTimer: (fn, ms) => setTimeout(fn, ms),

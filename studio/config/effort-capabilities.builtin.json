@@ -23,7 +23,15 @@
       "cap": {
         "mechanism": "effort-enum",
         "field": "reasoning_effort",
-        "supported": ["off", "low", "medium", "high", "xhigh", "ultra", "max"],
+        "supported": [
+          "off",
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "ultra",
+          "max"
+        ],
         "enumMap": {
           "off": "none",
           "low": "low",
@@ -45,7 +53,13 @@
       "cap": {
         "mechanism": "native-graded",
         "field": "think",
-        "supported": ["off", "low", "medium", "high", "max"],
+        "supported": [
+          "off",
+          "low",
+          "medium",
+          "high",
+          "max"
+        ],
         "enumMap": {
           "low": "low",
           "medium": "medium",
@@ -209,7 +223,13 @@
       "cap": {
         "mechanism": "effort-enum",
         "field": "output_config.effort",
-        "supported": ["low", "medium", "high", "xhigh", "max"],
+        "supported": [
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ],
         "enumMap": {
           "low": "low",
           "medium": "medium",
@@ -233,7 +253,12 @@
       "cap": {
         "mechanism": "effort-enum",
         "field": "output_config.effort",
-        "supported": ["low", "medium", "high", "max"],
+        "supported": [
+          "low",
+          "medium",
+          "high",
+          "max"
+        ],
         "enumMap": {
           "low": "low",
           "medium": "medium",
@@ -253,7 +278,11 @@
       "cap": {
         "mechanism": "effort-enum",
         "field": "output_config.effort",
-        "supported": ["low", "medium", "high"],
+        "supported": [
+          "low",
+          "medium",
+          "high"
+        ],
         "enumMap": {
           "low": "low",
           "medium": "medium",
@@ -272,7 +301,12 @@
       "cap": {
         "mechanism": "token-budget",
         "field": "thinking.budget_tokens",
-        "supported": ["low", "medium", "high", "max"],
+        "supported": [
+          "low",
+          "medium",
+          "high",
+          "max"
+        ],
         "budgetMap": {
           "low": 1024,
           "medium": 4096,
@@ -285,7 +319,7 @@
         },
         "constraints": {
           "budgetUnderMaxTokens": true,
-          "budgetAnswerHeadroom": 4096
+          "budgetAnswerHeadroom": 32000
         },
         "note": "Claude 4.5 takes a thinking token budget, not an effort level"
       }
@@ -313,7 +347,11 @@
       "cap": {
         "mechanism": "effort-enum",
         "field": "generationConfig.thinkingConfig.thinkingLevel",
-        "supported": ["low", "medium", "high"],
+        "supported": [
+          "low",
+          "medium",
+          "high"
+        ],
         "enumMap": {
           "low": "low",
           "medium": "medium",
@@ -332,7 +370,13 @@
       "cap": {
         "mechanism": "token-budget",
         "field": "generationConfig.thinkingConfig.thinkingBudget",
-        "supported": ["off", "low", "medium", "high", "max"],
+        "supported": [
+          "off",
+          "low",
+          "medium",
+          "high",
+          "max"
+        ],
         "budgetMap": {
           "low": 1024,
           "medium": 4096,
@@ -357,7 +401,12 @@
       "cap": {
         "mechanism": "token-budget",
         "field": "generationConfig.thinkingConfig.thinkingBudget",
-        "supported": ["low", "medium", "high", "max"],
+        "supported": [
+          "low",
+          "medium",
+          "high",
+          "max"
+        ],
         "budgetMap": {
           "low": 1024,
           "medium": 4096,
@@ -380,7 +429,10 @@
       "cap": {
         "mechanism": "prompt-soft-switch",
         "promptSlot": "user-append",
-        "supported": ["off", "medium"],
+        "supported": [
+          "off",
+          "medium"
+        ],
         "promptMap": {
           "off": "/no_think",
           "medium": "/think"
@@ -398,7 +450,10 @@
       "cap": {
         "mechanism": "system-prompt-line",
         "promptSlot": "system-append",
-        "supported": ["off", "medium"],
+        "supported": [
+          "off",
+          "medium"
+        ],
         "promptMap": {
           "off": "detailed thinking off",
           "medium": "detailed thinking on"
@@ -415,7 +470,10 @@
       "cap": {
         "mechanism": "binary-toggle",
         "field": "thinking.type",
-        "supported": ["off", "medium"],
+        "supported": [
+          "off",
+          "medium"
+        ],
         "onValue": "enabled",
         "offValue": "disabled",
         "note": "GLM thinking is on/off only, with no depth control"
@@ -430,7 +488,10 @@
       "cap": {
         "mechanism": "binary-toggle",
         "field": "thinking.type",
-        "supported": ["off", "medium"],
+        "supported": [
+          "off",
+          "medium"
+        ],
         "onValue": "enabled",
         "offValue": "disabled",
         "constraints": {
@@ -448,7 +509,10 @@
       "cap": {
         "mechanism": "binary-toggle",
         "field": "thinking",
-        "supported": ["off", "medium"],
+        "supported": [
+          "off",
+          "medium"
+        ],
         "note": "Granite thinking is on/off only"
       }
     },
@@ -461,7 +525,12 @@
       "cap": {
         "mechanism": "effort-enum",
         "field": "reasoning_effort",
-        "supported": ["off", "low", "medium", "high"],
+        "supported": [
+          "off",
+          "low",
+          "medium",
+          "high"
+        ],
         "enumMap": {
           "off": "none",
           "low": "low",
@@ -480,7 +549,14 @@
       "cap": {
         "mechanism": "effort-enum",
         "field": "reasoning_effort",
-        "supported": ["off", "low", "medium", "high", "xhigh", "max"],
+        "supported": [
+          "off",
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max"
+        ],
         "enumMap": {
           "off": "none",
           "low": "low",
@@ -501,7 +577,11 @@
       "cap": {
         "mechanism": "effort-enum",
         "field": "reasoning_effort",
-        "supported": ["low", "medium", "high"],
+        "supported": [
+          "low",
+          "medium",
+          "high"
+        ],
         "enumMap": {
           "low": "low",
           "medium": "medium",
@@ -519,7 +599,11 @@
       "cap": {
         "mechanism": "system-prompt-line",
         "promptSlot": "system-append",
-        "supported": ["low", "medium", "high"],
+        "supported": [
+          "low",
+          "medium",
+          "high"
+        ],
         "promptMap": {
           "low": "Reasoning: low",
           "medium": "Reasoning: medium",
@@ -537,7 +621,10 @@
       "cap": {
         "mechanism": "template-kwarg",
         "kwarg": "enable_thinking",
-        "supported": ["off", "medium"],
+        "supported": [
+          "off",
+          "medium"
+        ],
         "optimistic": true,
         "note": "llama.cpp only toggles thinking for templates that branch on enable_thinking"
       }
@@ -551,7 +638,10 @@
       "cap": {
         "mechanism": "template-kwarg",
         "kwarg": "enable_thinking",
-        "supported": ["off", "medium"],
+        "supported": [
+          "off",
+          "medium"
+        ],
         "optimistic": true,
         "note": "vLLM only toggles thinking for templates that branch on enable_thinking"
       }
@@ -566,7 +656,10 @@
       "cap": {
         "mechanism": "template-kwarg",
         "kwarg": "enable_thinking",
-        "supported": ["off", "medium"],
+        "supported": [
+          "off",
+          "medium"
+        ],
         "optimistic": true,
         "reasoningTag": "think",
         "note": "llama.cpp only toggles thinking for templates that branch on enable_thinking"
@@ -582,7 +675,10 @@
       "cap": {
         "mechanism": "template-kwarg",
         "kwarg": "enable_thinking",
-        "supported": ["off", "medium"],
+        "supported": [
+          "off",
+          "medium"
+        ],
         "optimistic": true,
         "reasoningTag": "think",
         "note": "vLLM only toggles thinking for templates that branch on enable_thinking"

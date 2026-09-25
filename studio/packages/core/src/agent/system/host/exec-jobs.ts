@@ -20,7 +20,11 @@
 
 import type { ExecTier } from "../../exec/index.js";
 
-import type { ExecPipelineResult, RunPipelineOptions } from "./exec-runner.js";
+import {
+  type ExecPipelineResult,
+  MAX_BACKGROUND_TIMEOUT_MS,
+  type RunPipelineOptions,
+} from "./exec-runner.js";
 
 /** A job's lifecycle. `killed` is distinct from `failed` — the human ended it deliberately. */
 export type JobState = "running" | "done" | "failed" | "killed" | "timeout";
@@ -45,8 +49,18 @@ export interface JobRecord {
 const MAX_JOB_OUTPUT = 64 * 1024;
 /** How many finished jobs are kept for polling before the oldest is forgotten. */
 const MAX_FINISHED = 20;
-/** A background job's own ceiling, independent of the per-call timeout. */
-export const MAX_BACKGROUND_MS = 30 * 60_000;
+/**
+ * A background job's own watchdog: a backstop, never the limit a caller actually hits.
+ *
+ * It was 30 min while `execTimeoutMs` grants a background call up to MAX_BACKGROUND_TIMEOUT_MS
+ * (6 h), so every job asked to run longer than 30 min was aborted at 30 min. It also came
+ * through the signal, not the runner's own timer, so the job reported "killed" (the state for a
+ * deliberate job_kill) instead of "timeout". Now it is the same 6 h ceiling plus a minute of
+ * grace. The runner's own timer is per PIPELINE, so a multi-part `a && b` job can still
+ * outlive this watchdog without either part timing out — which is why startJob records that
+ * the watchdog fired, and reports "timeout" for it, rather than trusting timer order.
+ */
+export const MAX_BACKGROUND_MS = MAX_BACKGROUND_TIMEOUT_MS + 60_000;
 
 const jobs = new Map<string, JobRecord>();
 const cancels = new Map<string, () => void>();
@@ -113,8 +127,14 @@ export function startJob(args: StartJobArgs): JobRecord {
 
   const ac = new AbortController();
   cancels.set(id, () => ac.abort());
+  // Latched, so a watchdog abort is reported as the "timeout" it is, never as "killed" (the
+  // state for a deliberate job_kill), whichever timer happened to fire first.
+  let expired = false;
   const deadline = setTimeout(
-    () => ac.abort(),
+    () => {
+      expired = true;
+      ac.abort();
+    },
     Math.min(args.timeoutMs ?? MAX_BACKGROUND_MS, MAX_BACKGROUND_MS),
   );
   if (typeof deadline.unref === "function") deadline.unref();
@@ -126,13 +146,14 @@ export function startJob(args: StartJobArgs): JobRecord {
       if (r.stdout) appendOutput(job, r.stdout);
       if (r.stderr) appendOutput(job, r.stderr);
       job.truncated ||= r.truncated;
-      job.state = r.timedOut
-        ? "timeout"
-        : ac.signal.aborted
-          ? "killed"
-          : r.exitCode === 0
-            ? "done"
-            : "failed";
+      job.state =
+        r.timedOut || expired
+          ? "timeout"
+          : ac.signal.aborted
+            ? "killed"
+            : r.exitCode === 0
+              ? "done"
+              : "failed";
     })
     .catch((e: unknown) => {
       job.state = "failed";

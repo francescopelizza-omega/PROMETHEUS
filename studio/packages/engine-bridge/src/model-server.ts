@@ -190,12 +190,28 @@ export interface StartResult {
  *
  * An explicit value already in the environment WINS: if the user exported
  * `OLLAMA_CONTEXT_LENGTH=16384`, that is a deliberate choice and we do not overrule it.
+ *
+ * The context is NOT capped to a small number any more. 8192 could not hold Prometheus's own
+ * prompt — system text plus ~46 tool schemas measured 7,254 tokens on 2026-09-24 — so a thinking
+ * model had ~900 tokens to answer in, spent them reasoning, and was cut off mid-thought
+ * (`n_tokens = 8191, truncated = 1`): turns that produced nothing at all. A limit that stops the
+ * work is not a safety device.
+ *
+ * What a large window actually costs, measured rather than assumed (ollama's own log for a 36B
+ * MoE at 32768: `llama_kv_cache: size = 340.00 MiB ( 32768 cells, 10 layers …)`, K and V q8_0):
+ * 10.6 KB/token, i.e. ~2.7 GB for a full 262,144-token context. Models that keep KV on a subset
+ * of layers (MoE/hybrid) or on a sliding window (gemma) cost GBs, not tens of GBs.
+ *
+ * So the value here is generous, and the REAL protections stay: one model resident, one request
+ * at a time, a q8_0 KV cache with flash attention, and `handoffs/ram-guard.sh`, which kills a
+ * model server on actual kernel memory pressure. `handoffs/ollama-safe-limits.sh` goes further
+ * on a real machine: it asks the installed models what they support and uses that.
  */
 export const PROMETHEUS_OLLAMA_CAPS: Readonly<Record<string, string>> = {
   OLLAMA_MAX_LOADED_MODELS: "1",
   OLLAMA_NUM_PARALLEL: "1",
   OLLAMA_KEEP_ALIVE: "60s",
-  OLLAMA_CONTEXT_LENGTH: "8192",
+  OLLAMA_CONTEXT_LENGTH: "131072",
   OLLAMA_FLASH_ATTENTION: "1",
   OLLAMA_KV_CACHE_TYPE: "q8_0",
   OLLAMA_MAX_QUEUE: "8",

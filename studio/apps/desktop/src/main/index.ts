@@ -791,6 +791,23 @@ async function runHeadlessSmoke(): Promise<void> {
     providersConfigPath: bundledConfig("providers.config.json"),
     serveProfilesPath: SERVE_PROFILES_PATH,
   });
+  // Migrate BEFORE the posture is adopted: a locked-down posture that exists only in the old
+  // app-private layer must be in the shared file when adoptSecurityPosture reads it.
+  // The global SETTINGS layer had the identical split, so it gets the identical one-time,
+  // additive adoption: leaves the shared file already defines are left alone (the CLI's
+  // `hooks` must not be clobbered by a stale desktop copy), and the old file is renamed
+  // to settings.json.migrated so the fold runs once.
+  // Not in a sandbox: a set $PROMETHEUS_HOME must neither import the REAL userData layer nor
+  // retire it (rename) — the same rule migrateLegacyConfigDir follows — or the user's real
+  // gateStrict/hooks/budget.* would land only in a throwaway home.
+  const adoptedSettings = cliProfiles.hasLegacyConfigDir()
+    ? migrateGlobalSettings(app.getPath("userData"))
+    : 0;
+  if (adoptedSettings > 0) {
+    console.info(
+      `[settings] adopted ${adoptedSettings} setting(s) from the old app-private global layer into ${sharedGlobalSettingsPath()}`,
+    );
+  }
   // The FULL security surface (file 03 §5,§7) — its own handler set + disposer.
   //
   // The posture is adopted BEFORE the AI handlers exist, and awaited. `registerSettingsIpcHandlers`
@@ -909,15 +926,6 @@ async function runHeadlessSmoke(): Promise<void> {
   if (adoptedMcp > 0) {
     console.info(
       `[mcp] adopted ${adoptedMcp} connector(s) from the old app-private store into ${sharedMcpStorePath()}`,
-    );
-  }
-  // The global SETTINGS layer had the identical split, so it gets the identical one-time,
-  // additive adoption: leaves the shared file already defines are left alone (the CLI's
-  // `hooks` must not be clobbered by a stale desktop copy), and the old file stays on disk.
-  const adoptedSettings = migrateGlobalSettings(app.getPath("userData"));
-  if (adoptedSettings > 0) {
-    console.info(
-      `[settings] adopted ${adoptedSettings} setting(s) from the old app-private global layer into ${sharedGlobalSettingsPath()}`,
     );
   }
   disposeMcpIpc = registerMcpIpcHandlers({ storePath: sharedMcpStorePath() });
@@ -1266,8 +1274,14 @@ async function bootstrap(): Promise<void> {
   }
   // The global SETTINGS layer had the identical split, so it gets the identical one-time,
   // additive adoption: leaves the shared file already defines are left alone (the CLI's
-  // `hooks` must not be clobbered by a stale desktop copy), and the old file stays on disk.
-  const adoptedSettings = migrateGlobalSettings(app.getPath("userData"));
+  // `hooks` must not be clobbered by a stale desktop copy), and the old file is renamed
+  // to settings.json.migrated so the fold runs once.
+  // Not in a sandbox: a set $PROMETHEUS_HOME must neither import the REAL userData layer nor
+  // retire it (rename) — the same rule migrateLegacyConfigDir follows — or the user's real
+  // gateStrict/hooks/budget.* would land only in a throwaway home.
+  const adoptedSettings = cliProfiles.hasLegacyConfigDir()
+    ? migrateGlobalSettings(app.getPath("userData"))
+    : 0;
   if (adoptedSettings > 0) {
     console.info(
       `[settings] adopted ${adoptedSettings} setting(s) from the old app-private global layer into ${sharedGlobalSettingsPath()}`,

@@ -34,9 +34,11 @@ export {
 } from "./pre-write-recheck.js";
 export { effortText, effortTextContributor } from "./effort-text.js";
 export { toolCatalogContributor } from "./tool-catalog.js";
+export { hostToolsContributor } from "./host-tools.js";
 
 import type { PreambleContributor } from "../preamble-dispatch.js";
 import { effortTextContributor } from "./effort-text.js";
+import { hostToolsContributor } from "./host-tools.js";
 import { preWriteRecheckContributor } from "./pre-write-recheck.js";
 import { toolCatalogContributor } from "./tool-catalog.js";
 import { toolDisciplineContributor } from "./tool-discipline.js";
@@ -45,6 +47,9 @@ export const CORE_TURN_CONTRIBUTORS: readonly PreambleContributor[] = [
   toolDisciplineContributor,
   preWriteRecheckContributor,
   effortTextContributor,
+  // Environment reference data, like the repo map. Fires only when the host probed and passed
+  // a manifest in, so a host that has not wired it is simply unaffected.
+  hostToolsContributor,
 ];
 
 export const CORE_ROUND_CONTRIBUTORS: readonly PreambleContributor[] = [toolCatalogContributor];

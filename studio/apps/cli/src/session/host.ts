@@ -52,7 +52,12 @@ import {
 
 import type { ConfirmResult } from "@prometheus/core/agent-loop";
 import type { ToolAnnotations } from "@prometheus/core/agent-tools";
-import { type EngineClient, createEngineClient } from "@prometheus/engine-bridge";
+import {
+  type EngineClient,
+  createEngineClient,
+  execCapture,
+  gate,
+} from "@prometheus/engine-bridge";
 import { defaultOpenEditor, loadEffectiveStartupProfileWithNotes } from "../profile-store.js";
 
 import { PROM_VERSION } from "../commands/help.js";
@@ -122,6 +127,7 @@ import {
   compactSession,
   confirmPrompt,
   effectiveTools,
+  hostToolManifest,
   makeSummarizer,
   measuredSessionUsage,
   rebuildThread,
@@ -141,7 +147,9 @@ import { type LoadedCommand, expandCommand, loadCommandFiles } from "./command-f
 import { loadEffortRules } from "./effort-rules.js";
 import { loadGrantsInto, saveGrants } from "./grants-store.js";
 import { type HooksSource, loadHooksDetailed } from "./hooks-config.js";
+import { applyInDirective, createOutputDir } from "./in.js";
 import { type McpSession, openMcpSession, withMcpTools } from "./mcp-session.js";
+import { admitEndpoint, setRemoteHostLookup } from "./model-admission-host.js";
 import { modelCandidates, resolveModelCandidate } from "./model-candidates.js";
 import {
   type Backends,
@@ -161,6 +169,7 @@ import {
   startDetachedRun,
 } from "./orchestrator.js";
 import { completePath, completeSlashArg } from "./path-completer.js";
+import { loadRemoteHosts } from "./remote-hosts-store.js";
 import { applyRepoMapVerb, makeRepoMapState, repoMapStats } from "./repo-map-state.js";
 import { type SessionCtx as LegacySlashCtx, type SlashResult, execSlash } from "./slash-exec.js";
 import {
@@ -610,6 +619,13 @@ export async function launchSession(parsed: ParsedArgs, deps: SessionDeps = {}):
   // per-session working set of extra readable dirs (/add-dir, CLI-004). `let`: /cd resets it for
   // the new project — see session-bridge.ts's identical fix/comment.
   let ws = createWorkingSet();
+  // `/in` — the session OUTPUT directory. Reads `ws` through a closure rather than capturing it,
+  // because `/cd` REPLACES the working set below and a captured reference would keep granting
+  // writes into the previous project's folder.
+  // `/remote`: let the memory gate resolve a declared host's size. Read through a getter
+  // so `/remote add` takes effect on the NEXT switch without restarting the session.
+  setRemoteHostLookup((url) => ai.findRemoteHost(url, loadRemoteHosts()));
+  const outputDir = createOutputDir({ add: (dir, base) => ws.add(dir, base) }, () => state.cwd);
   // pre-image log for applied propose_edit calls (CLI-010).
   const editHistory: EditRecord[] = [];
   // turn-atomic workspace checkpoints for /revert + /checkpoints (CLI-015).
@@ -732,8 +748,25 @@ export async function launchSession(parsed: ParsedArgs, deps: SessionDeps = {}):
      */
     toolCapability = agent.protocol.initialCapability();
     endpoint = next;
-    // pre-load the local model NOW (fire-and-forget) so the user's next prompt is warm.
-    warmupLocalModel(next, home);
+    /**
+     * MEMORY ADMISSION — the gate in front of the only line that actually allocates.
+     *
+     * Fire-and-forget like the warm-up it guards, so a slow probe never delays `/model`; the
+     * warm-up simply does not happen when the model would not fit. The endpoint is still
+     * adopted: refusing to even talk to it would strand a user whose machine got busy, and the
+     * turn itself will report honestly if the load then fails.
+     */
+    void admitEndpoint(next, contextWindowSetting)
+      .then((verdict) => {
+        for (const line of verdict.lines) {
+          writeLine(verdict.allow ? c.dim(line) : c.yellow(line));
+        }
+        if (verdict.allow) warmupLocalModel(next, home);
+      })
+      .catch(() => {
+        // Could not decide ⇒ behave exactly as before this gate existed.
+        warmupLocalModel(next, home);
+      });
     const settled = endpointProbe
       .attach(next)
       .then((r) => {
@@ -1288,6 +1321,9 @@ export async function launchSession(parsed: ParsedArgs, deps: SessionDeps = {}):
     commandFiles = loadCommandFiles(target, new Set(allSlashNames()), home);
     permissionRules = loadPermissionRules({ home: deps.configHome, cwd: target });
     ws = createWorkingSet();
+    // Same reason the working set is reset: an output folder chosen for the OLD project
+    // must not keep catching the new project's downloads.
+    outputDir.clear();
     // A stale map (or one still pointing at the OLD root) injected into the NEW project's
     // context would be actively misleading — off, and rebuilt fresh, until the user re-enables.
     repoMapState.enabled = false;
@@ -1399,7 +1435,12 @@ export async function launchSession(parsed: ParsedArgs, deps: SessionDeps = {}):
     // wrapping at all) and fell back to caps "none" (paint() returns plain text) — the
     // non-raw REPL printed unwrapped monochrome while the raw TUI printed neither.
     // Re-read per turn: turnCtxFor is re-invoked on every turn, so a resize is picked up.
-    width: Math.max(20, (process.stdout.columns ?? 80) - 1),
+    // Only on a real terminal, the same rule as colour (defaultColorEnabled): with stdout piped
+    // (`prometheus --plain > log`) `columns` is undefined and the old `?? 80` hard-wrapped every
+    // reply line at 79 cols, fenced code included. No width = no wrapping, as before the fix.
+    ...(process.stdout.isTTY === true && process.stdout.columns
+      ? { width: Math.max(20, process.stdout.columns - 1) }
+      : {}),
     caps: detectColorCaps(process.env, !parsed.json && !parsed.noColor && defaultColorEnabled()),
     /**
      * Resolve a cloud endpoint's key, lazily, per request.
@@ -1530,6 +1571,8 @@ export async function launchSession(parsed: ParsedArgs, deps: SessionDeps = {}):
     checkpoint: { store: checkpointStore, sessionId },
     // the built-in repo map (CLI-053): inject the rendered block only while enabled (getter → live).
     repoMap: () => (repoMapState.enabled ? repoMapState.rendered : null),
+    // the external-tool manifest (agent/host-tools.ts) — ~100 tokens of names, cached.
+    hostTools: hostToolManifest,
     // steering (CLI-061): the assembled AGENTS.md/CLAUDE.md/PROMETHEUS.md block, re-read per turn.
     steering: () => steering.block(),
     // durable cross-session memory: the `memory_write`-authored index, re-read per turn.
@@ -1771,7 +1814,10 @@ export async function launchSession(parsed: ParsedArgs, deps: SessionDeps = {}):
   };
 
   /** Run ONE message through the agent loop (the default branch + the /macro sink). */
-  const runAgentMessage = async (input: string): Promise<void> => {
+  const runAgentMessage = async (rawInput: string): Promise<void> => {
+    // `/in` — honour an inline "… save it /in <folder>" and tell the model where to write.
+    // Done once, here, so the directive behaves identically in both terminal hosts.
+    const input = applyInDirective(rawInput, outputDir, writeLine);
     // orchestrator: under tmux, the main agent decides whether 3 subagents are enough.
     // The turn's DELEGATION CAP — see the TUI host's twin. `/agents N` was a printed
     // number with no consumer; this is what makes it the real `maxSpawns`.
@@ -1844,6 +1890,12 @@ export async function launchSession(parsed: ParsedArgs, deps: SessionDeps = {}):
     updateSessionSummary(home, sessionId, turnSummaryOf(input, res.events));
     if (res.reply.trim()) {
       state = repl.reduce(state, { type: "message", role: "prometheus", text: res.reply });
+    } else if (!res.events.some((e) => e.kind === "tool_result" || e.kind === "blocked")) {
+      // NEVER end a turn in silence. A turn that produced no reply and did no work used to
+      // print only the elapsed-time line, which reads as "Prometheus stopped working" — the
+      // transports name the real cause (cut off at the context limit, reasoning only, empty
+      // reply); this is the backstop for any path that does not.
+      writeLine(c.yellow("⚠ the model returned no answer this turn — nothing was changed."));
     }
     /**
      * Carry the WHOLE turn forward, tool results included — not a user/assistant text pair.
@@ -1913,6 +1965,12 @@ export async function launchSession(parsed: ParsedArgs, deps: SessionDeps = {}):
     session = res.session;
     if (res.reply.trim()) {
       state = repl.reduce(state, { type: "message", role: "prometheus", text: res.reply });
+    } else if (!res.events.some((e) => e.kind === "tool_result" || e.kind === "blocked")) {
+      // NEVER end a turn in silence. A turn that produced no reply and did no work used to
+      // print only the elapsed-time line, which reads as "Prometheus stopped working" — the
+      // transports name the real cause (cut off at the context limit, reasoning only, empty
+      // reply); this is the backstop for any path that does not.
+      writeLine(c.yellow("⚠ the model returned no answer this turn — nothing was changed."));
     }
     /**
      * A continuation carries its thread forward too — it used to keep only the text.
@@ -2096,6 +2154,9 @@ export async function launchSession(parsed: ParsedArgs, deps: SessionDeps = {}):
   const slashCtx: SlashCtx = {
     write: writeLine,
     json: parsed.json,
+    // colour level for commands that render content themselves (/cat). Same expression the
+    // banner and the tool cards use, so one session never mixes two colour decisions.
+    caps: detectColorCaps(process.env, !parsed.json && !parsed.noColor && defaultColorEnabled()),
     tuning: () => state.tuning,
     cwd: () => state.cwd,
     /** `/fleet` — refresh, then report. See the TUI bridge's twin: one renderer, both hosts. */
@@ -2466,23 +2527,33 @@ export async function launchSession(parsed: ParsedArgs, deps: SessionDeps = {}):
       add: (dir) => ws.add(dir, state.cwd),
       remove: (dir) => ws.remove(dir, state.cwd),
     },
+    outputDir,
     checkpoints: {
       revert: () => {
         const last = checkpointStore.list(sessionId).at(-1);
         if (!last) return "nothing to revert";
-        const { restored, deleted, skipped } = restoreCheckpoint(last, {
+        const { restored, deleted, skipped, failed, unrevertable } = restoreCheckpoint(last, {
           roots: [state.cwd, ...ws.list()],
         });
-        // KEEP the checkpoint when anything was skipped: those entries are the only surviving
-        // copy of the original bytes, and deleting it would destroy exactly the pre-images
-        // `/revert` exists to restore. Say so — a silent "reverted 0 file(s)" reads as "there
-        // was nothing to do", not as "I could not touch your file".
-        if (skipped.length === 0) checkpointStore.delete(last.id);
-        const note = skipped.length
+        // KEEP the checkpoint when anything was skipped or failed: those entries are the only
+        // surviving copy of the original bytes, and deleting it would destroy exactly the
+        // pre-images `/revert` exists to restore. Say so — a silent "reverted 0 file(s)" reads as
+        // "there was nothing to do", not as "I could not touch your file". The two causes get
+        // different advice: a path outside the working set needs /add-dir, a failed write does not.
+        if (skipped.length === 0 && failed.length === 0) checkpointStore.delete(last.id);
+        const outOfScope = skipped.length
           ? ` · ${skipped.length} outside the working set NOT reverted (checkpoint kept — ` +
             `/add-dir ${skipped[0]} then /revert again)`
           : "";
-        return `↩ reverted ${restored.length} file(s)${deleted.length ? ` · deleted ${deleted.length}` : ""}${note}`;
+        const notDone = failed.length
+          ? ` · ${failed.length} could not be written back or removed yet, e.g. ${failed[0]} (checkpoint kept — /revert again once it is fixed)`
+          : "";
+        // A turn that changed a binary/unreadable file still owns this checkpoint (so /revert
+        // never falls through to an earlier turn); say plainly that those bytes are not back.
+        const lost = unrevertable.length
+          ? ` · ${unrevertable.length} could not be reverted (binary or unreadable when changed), e.g. ${unrevertable[0]}`
+          : "";
+        return `↩ reverted ${restored.length} file(s)${deleted.length ? ` · deleted ${deleted.length}` : ""}${outOfScope}${notDone}${lost}`;
       },
       list: () => {
         const cps = checkpointStore.list(sessionId);
@@ -2506,6 +2577,11 @@ export async function launchSession(parsed: ParsedArgs, deps: SessionDeps = {}):
     },
     // the git spawn seam for /worktree (CLI-054): the engine-bridge safe-env spawn (C5).
     git: realGitSpawn,
+    // `/install`: the same engine-bridge safe-env capture, for an arbitrary host tool,
+    // plus nemesis on the STAGED bytes before anything is installed (C5: engine-bridge
+    // owns child_process, and the gate is never skipped).
+    spawnTool: (cmd, args) => execCapture(cmd, args, { timeoutMs: 300_000 }),
+    gateTarget: (target) => gate(target),
     // the effective TUI keymap (CLI-096): resolved once from `[keymap]` config at session start.
     // `deps.configHome`, NOT `home` — `home` is prometheusHome() (the ~/.prometheus STATE tree),
     // so this resolved `<state>/.prometheus/config/config.toml`, a path nothing creates. The

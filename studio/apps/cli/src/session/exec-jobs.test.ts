@@ -244,6 +244,35 @@ test("describeJob is a single readable line", () => {
   assert.match(describeJob(job), /^job-1 \[running · \d+s · install\] pip install torch$/);
 });
 
+test("a job ended by its WATCHDOG reports timeout, never killed", async () => {
+  // The runner's timer is per pipeline, so a multi-part `a && b` job can outlive the job
+  // watchdog without either part timing out. The watchdog's abort then arrived through the
+  // signal and was reported as "killed" — the state for a deliberate job_kill.
+  const job = startJob({
+    command: "make deps && make all",
+    tier: "command",
+    timeoutMs: 20,
+    run: ({ signal }) =>
+      new Promise((resolve) => {
+        signal.addEventListener("abort", () =>
+          resolve({
+            exitCode: 130,
+            stdout: "",
+            stderr: "",
+            timedOut: false, // no single part hit ITS timeout
+            truncated: false,
+            durationMs: 20,
+            argvExecuted: [],
+          }),
+        );
+      }),
+  });
+  for (let i = 0; i < 100 && job.state === "running"; i++) {
+    await new Promise((r) => setTimeout(r, 5));
+  }
+  assert.equal(job.state, "timeout");
+});
+
 test("killJob on an unknown handle returns false rather than throwing", () => {
   assert.equal(killJob("nope"), false);
 });

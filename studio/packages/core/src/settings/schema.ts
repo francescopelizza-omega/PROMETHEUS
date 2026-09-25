@@ -11,7 +11,7 @@ import { type EffortTier, isEffortTier } from "../ai/effort/types.js";
 
 export type { HookSpec };
 
-export interface Settings {
+export interface Settings extends ExternalToolSettings, RemoteHostSettings {
   /** active profile id (§7.1). */
   profileId?: string;
   /** scheme id, or "system" to follow the OS (file 08 §6). */
@@ -108,6 +108,37 @@ export interface Settings {
 
 /** The shipped defaults (lowest layer, §7.1). Per-language format flags default ON so
  *  the master toggle alone enables every language; a user opts a language OUT (APP-019). */
+/**
+ * Per-tool defaults for the external tools (`agent/host-tools.ts`), FLAT dotted keys rather
+ * than a nested `tools: { externalTools: {…} }` blob.
+ *
+ * Flat on purpose: the CLI's `saveSettings` in `apps/cli/src/home.ts` is a shallow
+ * `{...loadSettings(), ...patch}` that rewrites the whole file, so writing one key of a nested
+ * object from the terminal would silently drop its siblings.
+ */
+export interface ExternalToolSettings {
+  "tools.externalTools.imageFormat"?: "png" | "jpg" | "webp";
+  "tools.externalTools.imageQuality"?: number;
+  "tools.externalTools.imageResizeFilter"?: "Lanczos" | "Mitchell" | "Triangle" | "Point";
+  "tools.externalTools.pdfDpi"?: number;
+  "tools.externalTools.ocrLang"?: string;
+  "tools.externalTools.videoContainer"?: "mp4" | "mkv" | "webm";
+  "tools.externalTools.videoMaxHeight"?: number;
+  "tools.externalTools.ytdlpFormat"?: string;
+}
+
+/**
+ * Self-hosted model servers on other machines (`ai/remote-hosts.ts`).
+ *
+ * Stored as a JSON string rather than a nested object for the same reason the external-tool
+ * defaults are flat keys: the CLI's `saveSettings` is a shallow merge that rewrites the whole
+ * file, so a nested structure written from the terminal would drop its siblings.
+ */
+export interface RemoteHostSettings {
+  /** JSON array of `RemoteHost`. Empty/absent means no remote host is trusted. */
+  "models.remoteHosts"?: string;
+}
+
 export const DEFAULT_SETTINGS: Settings = {
   theme: "system",
   density: "comfortable",

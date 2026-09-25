@@ -20,7 +20,7 @@
  * and `spawn-capture.ts` already do.
  */
 
-import { openSync } from "node:fs";
+import { closeSync, openSync } from "node:fs";
 import { createRequire } from "node:module";
 // aliased: the plain name is shadowed by the Promise executor's own `resolve` in this scope.
 import { resolve as resolvePath } from "node:path";
@@ -276,18 +276,34 @@ async function runOnePipeline(
       // wrapper). Only a REAL spawn reaches `sandboxArgv`, and `sandboxRefusal` above has
       // already guaranteed that a real spawn carries a plan.
       const argv = opts.spawnImpl ? [...stage.argv] : sandboxArgv(opts.sandbox, stage.argv);
-      const child = spawn(argv[0] as string, argv.slice(1), {
-        cwd: opts.cwd,
-        shell: false,
-        env: safeChildEnv(),
-        // own process group: a timeout must be able to kill grandchildren too
-        detached: true,
-        stdio: [
-          inFd !== undefined ? inFd : idx === 0 ? "ignore" : "pipe",
-          outFd !== undefined ? outFd : "pipe",
-          errFd !== undefined ? errFd : "pipe",
-        ],
-      });
+      let child: ReturnType<typeof spawn>;
+      try {
+        child = spawn(argv[0] as string, argv.slice(1), {
+          cwd: opts.cwd,
+          shell: false,
+          env: safeChildEnv(),
+          // own process group: a timeout must be able to kill grandchildren too
+          detached: true,
+          stdio: [
+            inFd !== undefined ? inFd : idx === 0 ? "ignore" : "pipe",
+            outFd !== undefined ? outFd : "pipe",
+            errFd !== undefined ? errFd : "pipe",
+          ],
+        });
+      } finally {
+        // The child got its own duplicates of these at fork time. The parent's copies were
+        // never closed, so every redirect leaked one fd (and held the target open) in the
+        // long-lived CLI/desktop host. After this point `outFd` is only ever compared with
+        // `undefined`, never used as a descriptor.
+        for (const fd of [inFd, outFd, errFd]) {
+          if (fd === undefined) continue;
+          try {
+            closeSync(fd);
+          } catch {
+            /* already closed */
+          }
+        }
+      }
       children.push(child);
       if (typeof child.pid === "number") {
         // The registry stamps its own pid-reuse identity (the process START TIME, read from

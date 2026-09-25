@@ -2,7 +2,15 @@
  * history-store.test.ts — the /recall session-history descriptor + record/list/format.
  */
 import assert from "node:assert/strict";
-import { appendFileSync, chmodSync, mkdtempSync, rmSync, utimesSync } from "node:fs";
+import {
+  appendFileSync,
+  chmodSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  utimesSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -589,6 +597,24 @@ test("the day window spans EVERY session, not just the current one", () => {
   appendAccounting(home, "todaysession", acctRec({ model: "b" }));
   const all = readAccountingSince(home, 0);
   assert.deepEqual(all.map((r) => r.model).sort(), ["a", "b"]);
+});
+
+test("a LOCAL turn stays out of the shared ledger but still counts for the CLI", () => {
+  // The desktop gate prices shared rows; a bare local id ("gemma3:4b") prices as UNKNOWN there,
+  // so one local CLI turn blocked every Studio cloud call for the day with budget.dailyUsd set.
+  const home = mkdtempSync(join(tmpdir(), "prom-acct-"));
+  appendAccounting(home, "s1", acctRec({ model: "gemma3:4b" }), { metered: false });
+  appendAccounting(home, "s1", acctRec({ model: "claude-x" }));
+  const sharedDir = join(home, "accounting");
+  const sharedRows = readdirSync(sharedDir)
+    .flatMap((f) => readFileSync(join(sharedDir, f), "utf8").split("\n"))
+    .filter(Boolean)
+    .map((l) => (JSON.parse(l) as { model: string }).model);
+  assert.deepEqual(sharedRows, ["claude-x"], "only the metered row is shared");
+  const mine = readAccountingSince(home, 0)
+    .map((r) => r.model)
+    .sort();
+  assert.deepEqual(mine, ["claude-x", "gemma3:4b"], "the CLI's own window still sees both");
 });
 
 test("a session file older than the window is not even opened", () => {

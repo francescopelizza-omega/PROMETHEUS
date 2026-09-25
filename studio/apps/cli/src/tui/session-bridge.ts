@@ -33,7 +33,13 @@ import {
   resolveEffectiveHooks,
   runSystemTool,
 } from "@prometheus/core/agent-system-host";
-import { type EngineClient, createEngineClient, verdictReasons } from "@prometheus/engine-bridge";
+import {
+  type EngineClient,
+  createEngineClient,
+  execCapture,
+  gate,
+  verdictReasons,
+} from "@prometheus/engine-bridge";
 import { type HooksSource, loadHooksDetailed } from "../session/hooks-config.js";
 import { createKeyResolver, keychainProviders } from "../session/key-resolver.js";
 
@@ -78,6 +84,7 @@ import {
   compactSession,
   confirmPrompt,
   effectiveTools,
+  hostToolManifest,
   makeSummarizer,
   measuredSessionUsage,
   rebuildThread,
@@ -121,7 +128,9 @@ import {
 } from "../session/history-store.js";
 import { makeBudgetGuard, banner as renderBanner, seedTuningWithNotes } from "../session/host.js";
 import { loadIdleTimeoutMs, saveIdleTimeoutMs } from "../session/idle-timeout-setting.js";
+import { applyInDirective, createOutputDir } from "../session/in.js";
 import { type McpSession, openMcpSession, withMcpTools } from "../session/mcp-session.js";
+import { admitEndpoint, setRemoteHostLookup } from "../session/model-admission-host.js";
 import { modelCandidates, resolveModelCandidate } from "../session/model-candidates.js";
 import {
   type Backends,
@@ -140,6 +149,7 @@ import {
   spawnCapFor,
   startDetachedRun,
 } from "../session/orchestrator.js";
+import { loadRemoteHosts } from "../session/remote-hosts-store.js";
 import { applyRepoMapVerb, makeRepoMapState, repoMapStats } from "../session/repo-map-state.js";
 import { maybeStopServicesOnExit } from "../session/service-shutdown.js";
 import { newSessionId } from "../session/session-id.js";
@@ -614,8 +624,25 @@ export async function createSessionBridge(deps: BridgeDeps): Promise<SessionBrid
      */
     toolCapability = agent.protocol.initialCapability();
     endpoint = next;
-    // pre-load the local model NOW (fire-and-forget) so the user's next prompt is warm.
-    warmupLocalModel(next, home);
+    /**
+     * MEMORY ADMISSION — the gate in front of the only line that actually allocates.
+     *
+     * Fire-and-forget like the warm-up it guards, so a slow probe never delays `/model`; the
+     * warm-up simply does not happen when the model would not fit. The endpoint is still
+     * adopted: refusing to even talk to it would strand a user whose machine got busy, and the
+     * turn itself will report honestly if the load then fails.
+     */
+    void admitEndpoint(next, contextWindowSetting)
+      .then((verdict) => {
+        for (const line of verdict.lines) {
+          write(verdict.allow ? c.dim(line) : c.yellow(line));
+        }
+        if (verdict.allow) warmupLocalModel(next, home);
+      })
+      .catch(() => {
+        // Could not decide ⇒ behave exactly as before this gate existed.
+        warmupLocalModel(next, home);
+      });
     const settled = endpointProbe
       .attach(next)
       .then((r) => {
@@ -718,6 +745,13 @@ export async function createSessionBridge(deps: BridgeDeps): Promise<SessionBrid
   // deliberately reset with a comment justifying it; this was the one omission, so a directory
   // granted access in the OLD project silently kept its read/write scope in an unrelated new one.
   let ws = createWorkingSet();
+  // `/in` — the session OUTPUT directory. Reads `ws` through a closure rather than capturing it,
+  // because `/cd` REPLACES the working set below and a captured reference would keep granting
+  // writes into the previous project's folder.
+  // `/remote`: let the memory gate resolve a declared host's size. Read through a getter
+  // so `/remote add` takes effect on the NEXT switch without restarting the session.
+  setRemoteHostLookup((url) => ai.findRemoteHost(url, loadRemoteHosts()));
+  const outputDir = createOutputDir({ add: (dir, base) => ws.add(dir, base) }, () => state.cwd);
   // pre-image log for applied propose_edit calls (CLI-010) → /revert.
   const editHistory: EditRecord[] = [];
   // turn-atomic workspace checkpoints for /revert + /checkpoints (CLI-015).
@@ -1443,6 +1477,8 @@ export async function createSessionBridge(deps: BridgeDeps): Promise<SessionBrid
       ...(budgetGuard ? { budget: budgetGuard } : {}),
       // the built-in repo map (CLI-053): inject the rendered block only while enabled (getter → live).
       repoMap: () => (repoMapState.enabled ? repoMapState.rendered : null),
+      // the external-tool manifest (agent/host-tools.ts) — ~100 tokens of names, cached.
+      hostTools: hostToolManifest,
       // steering (CLI-061): the assembled AGENTS.md/CLAUDE.md/PROMETHEUS.md block, re-read per turn.
       steering: () => steering.block(),
       // durable cross-session memory: the `memory_write`-authored index, re-read per turn.
@@ -1461,7 +1497,13 @@ export async function createSessionBridge(deps: BridgeDeps): Promise<SessionBrid
     return revertEdit(rec) ? rec.path : undefined;
   };
 
-  const runAgentMessage = async (input: string, opts?: { signal?: AbortSignal }): Promise<void> => {
+  const runAgentMessage = async (
+    rawInput: string,
+    opts?: { signal?: AbortSignal },
+  ): Promise<void> => {
+    // `/in` — honour an inline "… save it /in <folder>" and tell the model where to write.
+    // Done once, here, so the directive behaves identically in both terminal hosts.
+    const input = applyInDirective(rawInput, outputDir, write);
     /**
      * The turn's DELEGATION CAP — a number that now does something.
      *
@@ -1529,6 +1571,12 @@ export async function createSessionBridge(deps: BridgeDeps): Promise<SessionBrid
     updateSessionSummary(home, sessionId, turnSummaryOf(input, res.events));
     if (res.reply.trim()) {
       state = repl.reduce(state, { type: "message", role: "prometheus", text: res.reply });
+    } else if (!res.events.some((e) => e.kind === "tool_result" || e.kind === "blocked")) {
+      // NEVER end a turn in silence. A turn that produced no reply and did no work used to
+      // print only the elapsed-time line, which reads as "Prometheus stopped working" — the
+      // transports name the real cause (cut off at the context limit, reasoning only, empty
+      // reply); this is the backstop for any path that does not.
+      deps.write(c.yellow("⚠ the model returned no answer this turn — nothing was changed."));
     }
     /**
      * Carry the WHOLE turn forward — tool results included. See the readline host's twin.
@@ -1592,6 +1640,12 @@ export async function createSessionBridge(deps: BridgeDeps): Promise<SessionBrid
     updateSessionSummary(home, sessionId, turnSummaryOf("/continue", res.events));
     if (res.reply.trim()) {
       state = repl.reduce(state, { type: "message", role: "prometheus", text: res.reply });
+    } else if (!res.events.some((e) => e.kind === "tool_result" || e.kind === "blocked")) {
+      // NEVER end a turn in silence. A turn that produced no reply and did no work used to
+      // print only the elapsed-time line, which reads as "Prometheus stopped working" — the
+      // transports name the real cause (cut off at the context limit, reasoning only, empty
+      // reply); this is the backstop for any path that does not.
+      deps.write(c.yellow("⚠ the model returned no answer this turn — nothing was changed."));
     }
     /**
      * A continuation carries its thread forward too — see the readline host's twin.
@@ -1867,6 +1921,9 @@ export async function createSessionBridge(deps: BridgeDeps): Promise<SessionBrid
     commandFiles = loadCommandFiles(target, new Set(allSlashNames()), home);
     permissionRules = loadPermissionRules({ home: deps.configHome, cwd: target });
     ws = createWorkingSet();
+    // Same reason the working set is reset: an output folder chosen for the OLD project
+    // must not keep catching the new project's downloads.
+    outputDir.clear();
     repoMapState.enabled = false;
     repoMapState.root = target;
     repoMapState.map = null;
@@ -1968,6 +2025,8 @@ export async function createSessionBridge(deps: BridgeDeps): Promise<SessionBrid
   const slashCtx: SlashCtx = {
     write,
     json: parsed.json,
+    // colour level for commands that render content themselves (/cat).
+    caps: deps.caps ?? "none",
     tuning: () => state.tuning,
     cwd: () => state.cwd,
     /**
@@ -2289,19 +2348,28 @@ export async function createSessionBridge(deps: BridgeDeps): Promise<SessionBrid
       revert: () => {
         const last = checkpointStore.list(sessionId).at(-1);
         if (!last) return "nothing to revert";
-        const { restored, deleted, skipped } = restoreCheckpoint(last, {
+        const { restored, deleted, skipped, failed, unrevertable } = restoreCheckpoint(last, {
           roots: [state.cwd, ...ws.list()],
         });
-        // KEEP the checkpoint when anything was skipped: those entries are the only surviving
-        // copy of the original bytes, and deleting it would destroy exactly the pre-images
-        // `/revert` exists to restore. Say so — a silent "reverted 0 file(s)" reads as "there
-        // was nothing to do", not as "I could not touch your file".
-        if (skipped.length === 0) checkpointStore.delete(last.id);
-        const note = skipped.length
+        // KEEP the checkpoint when anything was skipped or failed: those entries are the only
+        // surviving copy of the original bytes, and deleting it would destroy exactly the
+        // pre-images `/revert` exists to restore. Say so — a silent "reverted 0 file(s)" reads as
+        // "there was nothing to do", not as "I could not touch your file". The two causes get
+        // different advice: a path outside the working set needs /add-dir, a failed write does not.
+        if (skipped.length === 0 && failed.length === 0) checkpointStore.delete(last.id);
+        const outOfScope = skipped.length
           ? ` · ${skipped.length} outside the working set NOT reverted (checkpoint kept — ` +
             `/add-dir ${skipped[0]} then /revert again)`
           : "";
-        return `↩ reverted ${restored.length} file(s)${deleted.length ? ` · deleted ${deleted.length}` : ""}${note}`;
+        const notDone = failed.length
+          ? ` · ${failed.length} could not be written back or removed yet, e.g. ${failed[0]} (checkpoint kept — /revert again once it is fixed)`
+          : "";
+        // A turn that changed a binary/unreadable file still owns this checkpoint (so /revert
+        // never falls through to an earlier turn); say plainly that those bytes are not back.
+        const lost = unrevertable.length
+          ? ` · ${unrevertable.length} could not be reverted (binary or unreadable when changed), e.g. ${unrevertable[0]}`
+          : "";
+        return `↩ reverted ${restored.length} file(s)${deleted.length ? ` · deleted ${deleted.length}` : ""}${outOfScope}${notDone}${lost}`;
       },
       list: () => {
         const cps = checkpointStore.list(sessionId);
@@ -2319,6 +2387,7 @@ export async function createSessionBridge(deps: BridgeDeps): Promise<SessionBrid
       add: (dir) => ws.add(dir, state.cwd),
       remove: (dir) => ws.remove(dir, state.cwd),
     },
+    outputDir,
     // the built-in repo map (CLI-053): stats (no-arg) + on|off|refresh; walks the current cwd.
     repoMap: {
       stats: () => repoMapStats(repoMapState),
@@ -2329,6 +2398,11 @@ export async function createSessionBridge(deps: BridgeDeps): Promise<SessionBrid
     },
     // the git spawn seam for /worktree (CLI-054): the engine-bridge safe-env spawn (C5).
     git: realGitSpawn,
+    // `/install`: the same engine-bridge safe-env capture, for an arbitrary host tool,
+    // plus nemesis on the STAGED bytes before anything is installed (C5: engine-bridge
+    // owns child_process, and the gate is never skipped).
+    spawnTool: (cmd, args) => execCapture(cmd, args, { timeoutMs: 300_000 }),
+    gateTarget: (target) => gate(target),
     // CLI-096: effective keymap for /keys, resolved from the [keymap] config table.
     // `deps.configHome`, NOT `home` (the ~/.prometheus STATE tree) — see host.ts's twin.
     keymap: loadKeymap(deps.configHome),

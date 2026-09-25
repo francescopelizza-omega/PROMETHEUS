@@ -133,6 +133,26 @@ test("/cd: a valid target rotates the session (fresh id echoed, tuning untouched
   await bridge.dispose();
 });
 
+test("/ls in the TUI lists the session folder, and follows it after /cwd", async () => {
+  const base = mkdtempSync(join(tmpdir(), "prom-bridge-ls-"));
+  writeFileSync(join(base, "top-level.txt"), "x");
+  mkdirSync(join(base, "inner"), { recursive: true });
+  writeFileSync(join(base, "inner", "nested.txt"), "x");
+  const out: string[] = [];
+  const bridge = await makeBridge({ parsed: args({ cwd: base }) }, (s) => out.push(s));
+
+  await bridge.submit("/ls");
+  assert.match(out.join("\n"), /top-level\.txt/);
+  assert.match(out.join("\n"), /inner\//);
+
+  out.length = 0;
+  await bridge.submit(`/cwd ${join(base, "inner")}`);
+  await bridge.submit("/ls");
+  assert.match(out.join("\n"), /nested\.txt/, "lists the NEW working directory");
+  assert.doesNotMatch(out.join("\n"), /top-level\.txt/);
+  await bridge.dispose();
+});
+
 test("/cd: a nonexistent target reports the error and leaves the session untouched", async () => {
   const base = mkdtempSync(join(tmpdir(), "prom-bridge-cd-bad-"));
   const out: string[] = [];

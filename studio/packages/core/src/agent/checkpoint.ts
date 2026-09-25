@@ -32,6 +32,14 @@ export interface Checkpoint {
    * nullable so an older checkpoint on disk still loads and still means what it meant.
    */
   absent?: string[];
+  /**
+   * Paths this turn CHANGED but could not capture — a binary or unreadable file overwritten
+   * by write_file. Nothing can be written back for them, but they still claim the turn: a
+   * turn whose only change was one of these had no checkpoint at all, so /revert silently
+   * undid the PREVIOUS turn instead. They also claim the path for first-touch, so a later
+   * edit in the same turn cannot pass off an intermediate state as the pre-turn one.
+   */
+  unrevertable?: string[];
 }
 
 /** What to never snapshot (secrets / build dirs / large binaries; E2 / §2.6 #4). */
@@ -136,7 +144,7 @@ export function restorePlan(checkpoint: Checkpoint, currentPaths: readonly strin
  * most wants to know how much a revert is about to move.
  */
 export function checkpointSize(cp: Checkpoint): number {
-  return new Set([...Object.keys(cp.files), ...(cp.absent ?? [])]).size;
+  return new Set([...Object.keys(cp.files), ...(cp.absent ?? []), ...(cp.unrevertable ?? [])]).size;
 }
 
 /** Paths that changed between a checkpoint and the current files (added/modified/deleted). */

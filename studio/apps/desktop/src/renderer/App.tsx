@@ -340,8 +340,10 @@ function SettingsOverlay({
         alignItems: "flex-start",
         justifyContent: "center",
         paddingTop: "8vh",
-        // A modal is a DECISION surface: it must outrank the ⌘K palette (Z.palette) and the
-        // auth picker (Z.modal), both of which painted over the open Settings dialog.
+        // A modal is a DECISION surface: it must outrank the ⌘K palette (Z.palette, one rung
+        // below) and tie the auth picker (Z.modal), winning that tie by rendering later in the
+        // DOM. Both used to paint over the open Settings dialog. ⌘K is also refused while this
+        // is open (see `anotherModalOpen`), so the palette cannot open, focused, underneath it.
         zIndex: Z.modal,
       }}
     >
@@ -410,6 +412,20 @@ function cycleShellFocus(dir: 1 | -1): void {
   const activeEl = document.activeElement;
   const current = regions.findIndex((r) => r === activeEl || r.contains(activeEl));
   regions[nextRegion(regions.length, current, dir)]?.focus();
+}
+
+/**
+ * Is a modal decision other than the ⌘K palette currently VISIBLE? Every such surface in this
+ * renderer declares `aria-modal="true"`; the visibility test (a rendered box) keeps a dialog that
+ * is mounted but hidden from blocking ⌘K for good.
+ */
+function anotherModalOpen(): boolean {
+  if (typeof document === "undefined") return false;
+  for (const el of document.querySelectorAll<HTMLElement>('[aria-modal="true"]')) {
+    if (el.getAttribute("aria-label") === "Command palette") continue;
+    if (el.getClientRects().length > 0) return true;
+  }
+  return false;
 }
 
 function App(): ReactElement {
@@ -728,10 +744,24 @@ function App(): ReactElement {
   // Stable across renders (all useState setters are stable) so the keydown listener and
   // the palette share one identity. Editor-scoped commands navigate to the editor and
   // re-dispatch through the window bus the editor route already listens on.
+  // The pointer entry points (TopBar pill, StatusBar) obey the same rule as ⌘K: never open the
+  // palette under another modal. History/Bookmarks have no backdrop, so the pill stays
+  // clickable while they are open, and it opened a hidden, focused palette beneath them.
+  const openPalette = useCallback((): void => {
+    if (!anotherModalOpen()) setPaletteOpen(true);
+  }, []);
+
   const cmdCtx = useMemo<CommandContext>(
     () => ({
       navigate: (id) => setActivity(id),
-      togglePalette: () => setPaletteOpen((v) => !v),
+      // CLOSING always works; OPENING is refused while another modal decision is on screen.
+      // The palette focuses its input on open, so opening it under Settings (or the catalog's
+      // rollback dialog) put keyboard focus in a palette nobody could see: typing filtered it
+      // and Enter ran a command blind.
+      togglePalette: () => {
+        const blocked = anotherModalOpen();
+        setPaletteOpen((v) => (v ? false : !blocked));
+      },
       toggleSidebar: toggleSidebarForActivity,
       toggleRightRail: () => toggleRail(),
       toggleBottomPanel: () => setBottomCollapsed((v) => !v),
@@ -978,7 +1008,7 @@ function App(): ReactElement {
       <TopBar
         {...(projectName ? { project: projectName } : {})}
         {...(branch ? { branch } : {})}
-        onCommandPalette={() => setPaletteOpen(true)}
+        onCommandPalette={openPalette}
         enginePill={enginePill}
         onEngineStatus={openHealth}
         onRun={() => executeCommandId("run.config", cmdCtx)}
@@ -1224,7 +1254,7 @@ function App(): ReactElement {
               : undefined
           }
           onShieldClick={() => setActivity("security")}
-          onCommandPalette={() => setPaletteOpen(true)}
+          onCommandPalette={openPalette}
         />
       </div>
 

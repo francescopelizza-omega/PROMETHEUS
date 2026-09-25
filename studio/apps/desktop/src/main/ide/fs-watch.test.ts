@@ -169,17 +169,37 @@ test("FsWatchHost re-arms the debounce on each event (only the final quiet fires
   host.dispose();
 });
 
-test("FsWatchHost.watch is idempotent; unwatch closes the underlying handle", () => {
+test("FsWatchHost.watch shares one watcher per root and closes it on the LAST unwatch", () => {
+  // Home's explorer and the editor's watch the same root. The first to unmount used to close
+  // the shared watcher under the other, which then never refreshed again.
   const timers = new FakeTimers();
   const fk = fakeFactory();
   const host = new FsWatchHost({ watcherFactory: fk.factory, debounceMs: 200, timers });
   host.watch("/proj");
-  host.watch("/proj"); // no-op second watch
+  host.watch("/proj"); // a second subscriber shares the one watcher
+  assert.deepEqual(host.list(), ["/proj"]);
+  host.unwatch("/proj");
+  assert.equal(fk.closed(), false, "the other subscriber is still watching");
   assert.deepEqual(host.list(), ["/proj"]);
   host.unwatch("/proj");
   assert.equal(fk.closed(), true);
   assert.deepEqual(host.list(), []);
+  host.unwatch("/proj"); // an extra unwatch is harmless
   host.dispose();
+});
+
+test("FsWatchHost.dispose closes every watcher whatever its reference count", () => {
+  const fk = fakeFactory();
+  const host = new FsWatchHost({
+    watcherFactory: fk.factory,
+    debounceMs: 200,
+    timers: new FakeTimers(),
+  });
+  host.watch("/proj");
+  host.watch("/proj");
+  host.dispose();
+  assert.equal(fk.closed(), true);
+  assert.deepEqual(host.list(), []);
 });
 
 test("fsWalk: flat file list, prunes ignore dirs, skips binaries + a symlink loop", async () => {

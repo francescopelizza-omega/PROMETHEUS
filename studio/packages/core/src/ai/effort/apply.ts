@@ -360,9 +360,23 @@ export function applyEffort(
     ) {
       out.max_tokens = wanted + headroom;
     }
+    /**
+     * The headroom the CLAMP may actually charge, never more than half the ceiling.
+     *
+     * The declared headroom is a target for a roomy ceiling ("leave the answer 32k next to 32k
+     * of thinking"). Charged literally against a TIGHT caller ceiling it inverts: with
+     * `max_tokens: 8000` and a 32,000 headroom the budget floor is 1, so a `max`-effort request
+     * silently degrades to the 1024-token provider minimum — the mirror image of the bug the
+     * headroom was raised to fix. Splitting a tight ceiling down the middle keeps BOTH halves
+     * proportional, and leaves the roomy case exactly as declared.
+     */
+    const clampHeadroom =
+      typeof out.max_tokens === "number"
+        ? Math.max(1, Math.min(headroom, Math.floor(out.max_tokens / 2)))
+        : headroom;
     const budgetCap =
       r.constraints?.budgetUnderMaxTokens && typeof out.max_tokens === "number"
-        ? Math.max(1, out.max_tokens - headroom)
+        ? Math.max(1, out.max_tokens - clampHeadroom)
         : undefined;
     const clamped =
       budgetCap !== undefined && wanted !== undefined ? Math.min(wanted, budgetCap) : r.patch.value;

@@ -18,7 +18,16 @@
 #                         an explicit bundle path is trusted as-is.
 #   PROMETHEUS_SKIP_BUILD set (to anything) to skip the staleness check and always
 #                         launch whatever dist/bin.js currently is, even if stale.
+#
+# Set BY this launcher, never by the user:
+#   PROMETHEUS_LAUNCH_ERASE_ROWS  after a successful rebuild on a terminal, how many screen
+#                         rows the rebuild log took. The CLI erases exactly those rows at its
+#                         first visible write (studio/apps/cli/src/launch-noise.ts), so the log
+#                         is shown while it matters and gone once the session is up.
 set -eu
+
+# Only THIS launch's own log may ever be erased — never act on a value inherited from a parent.
+unset PROMETHEUS_LAUNCH_ERASE_ROWS
 
 MIN_NODE_MAJOR=20
 
@@ -113,24 +122,99 @@ bundle_is_stale() {
   return 1
 }
 
+rebuild_cli() {
+  (
+    cd "$ROOT/studio" \
+      && { [ -d node_modules ] || pnpm install; } \
+      && pnpm --filter @prometheus/cli run prepack
+  )
+}
+
+# Passes the rebuild log through UNCHANGED while counting the terminal rows it occupies (long
+# lines wrap; wide glyphs such as ⚡ take two cells), then writes the count to the file named by
+# its argument. A heredoc with a quoted delimiter, so the shell touches none of it.
+ROW_COUNTER=$(
+  cat <<'JS'
+const fs = require("fs");
+const out = process.stdout;
+const cols = (out.isTTY && out.columns) || Number(process.env.COLUMNS) || 80;
+const ESC = /\x1b\[[0-?]*[ -\/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[@-Z\\-_]/g;
+function cells(cp) {
+  if (cp === 0x200d || (cp >= 0x300 && cp <= 0x36f) || (cp >= 0xfe00 && cp <= 0xfe0f)) return 0;
+  if ((cp >= 0x1100 && cp <= 0x115f) || (cp >= 0x2600 && cp <= 0x27bf) ||
+      (cp >= 0x2e80 && cp <= 0xa4cf) || (cp >= 0xac00 && cp <= 0xd7a3) ||
+      (cp >= 0xf900 && cp <= 0xfaff) || (cp >= 0xfe30 && cp <= 0xfe4f) ||
+      (cp >= 0xff00 && cp <= 0xff60) || (cp >= 0xffe0 && cp <= 0xffe6) ||
+      (cp >= 0x1f300 && cp <= 0x1faff) || (cp >= 0x20000 && cp <= 0x3fffd)) return 2;
+  return 1;
+}
+function rowsOf(line) {
+  const trimmed = line.replace(/\r+$/, "");
+  const shown = trimmed.slice(trimmed.lastIndexOf("\r") + 1).replace(ESC, "");
+  let w = 0;
+  for (const ch of shown) w += ch === "\t" ? 8 - (w % 8) : cells(ch.codePointAt(0));
+  return Math.max(1, Math.ceil(w / cols));
+}
+let rows = 0;
+let buf = "";
+process.stdin.setEncoding("utf8");
+process.stdin.on("data", (d) => {
+  buf += d;
+  let nl = buf.indexOf("\n");
+  while (nl !== -1) {
+    const line = buf.slice(0, nl);
+    buf = buf.slice(nl + 1);
+    out.write(`${line}\n`);
+    rows += rowsOf(line);
+    nl = buf.indexOf("\n");
+  }
+});
+process.stdin.on("end", () => {
+  if (buf) {
+    out.write(`${buf}\n`);
+    rows += rowsOf(buf);
+  }
+  try {
+    fs.writeFileSync(process.argv[1], String(rows));
+  } catch {}
+});
+JS
+)
+
 # Skipped when PROMETHEUS_CLI_JS pins an explicit bundle (nothing to compare it
 # against), when PROMETHEUS_SKIP_BUILD is set, or when this isn't a source checkout
 # at all (a published npm install ships dist/bin.js with no src/ next to it).
 if [ -z "${PROMETHEUS_CLI_JS:-}" ] && [ -z "${PROMETHEUS_SKIP_BUILD:-}" ] \
   && [ -d "$ROOT/studio/apps/cli/src" ] && bundle_is_stale; then
-  echo "prometheus: source changed since the last build — rebuilding…" >&2
-  if command -v pnpm >/dev/null 2>&1 || corepack enable >/dev/null 2>&1; then
-    if (
-      cd "$ROOT/studio" \
-        && { [ -d node_modules ] || pnpm install; } \
-        && pnpm --filter @prometheus/cli run prepack
-    ) >&2; then
+  if ! { command -v pnpm >/dev/null 2>&1 || corepack enable >/dev/null 2>&1; }; then
+    echo "prometheus: source changed since the last build — rebuilding…" >&2
+    echo "prometheus: pnpm not found — skipping rebuild (run \`corepack enable\`)." >&2
+  elif [ -t 2 ] && tidy=$(mktemp -d "${TMPDIR:-/tmp}/prometheus-launch.XXXXXX" 2>/dev/null); then
+    # On a terminal: show the log live AND count its rows, so the CLI can wipe exactly those
+    # rows once it is up — above a running session the log is only noise. Only a SUCCESSFUL
+    # rebuild is wiped: a failure's log is the one record of why, so it stays on screen.
+    {
+      echo "prometheus: source changed since the last build — rebuilding…"
+      if rebuild_cli 2>&1; then
+        echo "prometheus: rebuild done."
+        : >"$tidy/ok"
+      else
+        echo "prometheus: rebuild failed — launching the existing build instead."
+      fi
+    } | "$NODE" -e "$ROW_COUNTER" "$tidy/rows" >&2 || true
+    if [ -f "$tidy/ok" ] && [ -s "$tidy/rows" ]; then
+      PROMETHEUS_LAUNCH_ERASE_ROWS=$(cat "$tidy/rows")
+      export PROMETHEUS_LAUNCH_ERASE_ROWS
+    fi
+    rm -rf "$tidy"
+  else
+    # Not a terminal (captured, CI): the log goes out plain and is never erased.
+    echo "prometheus: source changed since the last build — rebuilding…" >&2
+    if rebuild_cli >&2; then
       echo "prometheus: rebuild done." >&2
     else
       echo "prometheus: rebuild failed — launching the existing build instead." >&2
     fi
-  else
-    echo "prometheus: pnpm not found — skipping rebuild (run \`corepack enable\`)." >&2
   fi
 fi
 

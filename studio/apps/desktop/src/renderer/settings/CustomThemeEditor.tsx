@@ -51,7 +51,17 @@ export function CustomThemeEditor({
   onSaved,
 }: CustomThemeEditorProps): ReactElement {
   const [name, setName] = useState(`${baseScheme.name} (custom)`);
-  const [overrides, setOverrides] = useState<Record<string, string>>({ ...baseScheme.tokens });
+  // Seeded WITHOUT the derived on-* label colours. Derived built-ins carry explicit
+  // `on-accent: onFill(accent, bg)` (and five siblings) in their tokens; copied in as overrides,
+  // resolveScheme treats them as the user's choice and never recomputes them, so editing
+  // accent/ok/warn/danger/brand/info or bg-app kept the BASE scheme's label colour on the new
+  // fill. Left out, they are recomputed from the fills actually painted (identical at first).
+  const [overrides, setOverrides] = useState<Record<string, string>>(
+    () =>
+      Object.fromEntries(
+        Object.entries(baseScheme.tokens).filter(([k]) => !k.startsWith("on-")),
+      ) as Record<string, string>,
+  );
 
   // the working scheme = base + edits; everything below derives from it.
   const scheme: ColorScheme = useMemo(

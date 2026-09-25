@@ -32,10 +32,10 @@ import {
   ai,
   cliProfiles,
   settings as coreSettings,
+  localKeepAliveField,
   orchestration,
   probeContextWindow,
   secrets as secretsNs,
-  localKeepAliveField,
 } from "@prometheus/core";
 import { DEFAULT_AUTH_LEVEL, NETWORK_AUTH_LEVEL } from "@prometheus/core/agent-authorization";
 import { estimateTextTokens } from "@prometheus/core/agent-compact";
@@ -59,7 +59,11 @@ import {
   fetchModelWithRetry,
   preflightContext,
 } from "@prometheus/core/ai-retry";
-import { type EvictionEvent, findRecentEviction, readEvictionEvents } from "@prometheus/engine-bridge";
+import {
+  type EvictionEvent,
+  findRecentEviction,
+  readEvictionEvents,
+} from "@prometheus/engine-bridge";
 
 import { getBudgetGate, isLocalModelId } from "./budget-gate.js";
 import { touchModelActivity } from "./model-activity-store.js";
@@ -808,6 +812,10 @@ export async function runAiStream(
   );
   /** a provider failure reported mid-stream, after the 200 — see the wire's `error` event. */
   let streamError: string | undefined;
+  // WHY the model stopped, when the provider says so; and whether it thought at all. Without
+  // them a turn cut off at the context limit is indistinguishable from one with nothing to say.
+  let stopReason: ai.WireEvent["stopReason"];
+  let sawReasoning = false;
 
   try {
     /**
@@ -922,7 +930,10 @@ export async function runAiStream(
       // common one, since a cold request after an eviction fails before ever connecting.
       if (
         locality === "local" &&
-        findRecentEndpointEviction(req.endpoint.baseUrl, retryOpts.readEvictionEventsFn ?? readEvictionEvents)
+        findRecentEndpointEviction(
+          req.endpoint.baseUrl,
+          retryOpts.readEvictionEventsFn ?? readEvictionEvents,
+        )
       ) {
         return {
           ok: true,
@@ -1054,15 +1065,20 @@ export async function runAiStream(
             done = true;
             break;
           }
+          if (ev.stopReason) stopReason = ev.stopReason;
           if (ev.usage) usage = ai.mergeWireUsage(usage, ev.usage);
           const thinking = reasoningFrom(payload);
-          if (thinking) emit(sender, { runId: req.runId, kind: "reasoning", text: thinking });
+          if (thinking) {
+            sawReasoning = true;
+            emit(sender, { runId: req.runId, kind: "reasoning", text: thinking });
+          }
           if (ev.delta) {
             // the FIRST content delta is where generation actually starts; everything
             // before it is load, however the runner spent it.
             firstTokenAt ??= Date.now();
             const split = reasoningSplitter.push(ev.delta);
             if (split.reasoning) {
+              sawReasoning = true;
               emit(sender, { runId: req.runId, kind: "reasoning", text: split.reasoning });
             }
             if (split.text) {
@@ -1088,6 +1104,32 @@ export async function runAiStream(
       if (tail.text) {
         text += tail.text;
         emit(sender, { runId: req.runId, kind: "text", text: tail.text });
+      }
+      /**
+       * A turn that produced NOTHING, or was cut off mid-answer, says so.
+       *
+       * The pane appends nothing for an empty answer (`commitStreaming` short-circuits on an
+       * empty buffer), so a model that spent its whole remaining window on reasoning left the
+       * transcript untouched — no answer, no error, nothing to act on.
+       */
+      if (!streamError && harvestCalls(calls).length === 0) {
+        const budget = {
+          ...(stopReason ? { stopReason } : {}),
+          promptTokens:
+            usage?.inputTokens ?? ai.estimateRequestTokens(req.messages.map((m) => m.content)),
+          contextWindow: req.endpoint.contextWindow,
+          runtime: ai.runtimeFromBaseUrl(req.endpoint.baseUrl, locality),
+        };
+        const notice =
+          text.trim() === ""
+            ? ai.emptyTurnNotice({ ...budget, sawReasoning })
+            : stopReason === "length"
+              ? `\n\n${ai.truncationNotice(budget)}`
+              : "";
+        if (notice) {
+          text += notice;
+          emit(sender, { runId: req.runId, kind: "text", text: notice });
+        }
       }
     } finally {
       await reader.cancel().catch(() => {});
@@ -1169,7 +1211,10 @@ export async function runAiStream(
     // deserves the same resumable "paused" treatment as an idle pause, not a red error.
     if (
       locality === "local" &&
-      findRecentEndpointEviction(req.endpoint.baseUrl, retryOpts.readEvictionEventsFn ?? readEvictionEvents)
+      findRecentEndpointEviction(
+        req.endpoint.baseUrl,
+        retryOpts.readEvictionEventsFn ?? readEvictionEvents,
+      )
     ) {
       return {
         ok: true,

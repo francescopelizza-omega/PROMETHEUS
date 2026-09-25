@@ -767,6 +767,48 @@ test("CLI-097 TERM=dumb: unicode glyphs degrade to ASCII (sym + box borders)", (
   }
 });
 
+test("box(): a style broken across wrapped rows is re-opened, and never bleeds into the border", () => {
+  // wrapLine splits by cells and left row 1 with an SGR still open (dimming its padding and the
+  // right border) and row 2 with no style at all.
+  setColorEnabled(true);
+  setUnicodeEnabled(true);
+  try {
+    const long = `\x1b[2m${"lorem ipsum ".repeat(14).trim()}\x1b[0m`; // ~167 cols, wraps
+    const rows = box([long], { border: "brand" }).split("\n").slice(1, -1);
+    assert.ok(rows.length >= 2, "the line wrapped");
+    for (const row of rows) {
+      // Replay the SGR stream: which visible cells are dim?
+      let dim = false;
+      const cells: Array<[string, boolean]> = [];
+      for (let i = 0; i < row.length; ) {
+        const m = /^\x1b\[([0-9;]*)m/.exec(row.slice(i));
+        if (m) {
+          if (m[1] === "2") dim = true;
+          else if (m[1] === "0" || m[1] === "") dim = false;
+          i += m[0].length;
+          continue;
+        }
+        cells.push([row[i] as string, dim]);
+        i++;
+      }
+      const letters = cells.filter(([ch]) => /[a-z]/.test(ch));
+      assert.ok(letters.length > 0);
+      assert.ok(
+        letters.every(([, d]) => d),
+        `every word stays dim: ${JSON.stringify(row)}`,
+      );
+      const right = cells[cells.length - 1];
+      assert.deepEqual(
+        right,
+        ["│", false],
+        `the right border is not dimmed: ${JSON.stringify(row)}`,
+      );
+    }
+  } finally {
+    setColorEnabled(true);
+  }
+});
+
 test("CLI-097: color/unicode default predicates honor NO_COLOR presence + FORCE_COLOR precedence", () => {
   const save = {
     NO_COLOR: process.env.NO_COLOR,

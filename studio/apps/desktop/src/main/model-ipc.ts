@@ -109,14 +109,37 @@ async function launchBlockReason(): Promise<string | null> {
   }
 }
 
-/** Extract the renderer's WebContents `sender` WITHOUT importing the electron type. */
+/**
+ * Extract the renderer's WebContents `sender` WITHOUT importing the electron type — wrapped so
+ * a send to a CLOSED window is a no-op instead of a throw.
+ *
+ * Since #52 made download/pull/install progress actually fire, these sends run synchronously
+ * inside the sidecar's stderr pump (a stream 'data' listener). Closing the window mid-pull
+ * destroyed the WebContents while a multi-GB transfer kept streaming, so every later progress
+ * line threw out of that listener as an uncaughtException. Guarding here covers every send
+ * site in this file at once — the #47 pattern (`isDestroyed?.()`), plus a catch for the
+ * window closing between the check and the send.
+ */
 function senderOf(
   evt: unknown,
 ): { send(channel: string, payload: ModelProgressEvent): void } | undefined {
   if (!evt || typeof evt !== "object") return undefined;
   const sender = (evt as { sender?: unknown }).sender;
   if (sender && typeof (sender as { send?: unknown }).send === "function") {
-    return sender as { send(channel: string, payload: ModelProgressEvent): void };
+    const wc = sender as {
+      send(channel: string, payload: ModelProgressEvent): void;
+      isDestroyed?(): boolean;
+    };
+    return {
+      send(channel, payload) {
+        if (wc.isDestroyed?.()) return;
+        try {
+          wc.send(channel, payload);
+        } catch {
+          /* the window went away between the check and the send */
+        }
+      },
+    };
   }
   return undefined;
 }

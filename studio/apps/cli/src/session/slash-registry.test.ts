@@ -562,9 +562,54 @@ test("/copy copies the last assistant reply via the clipboard hook (CLI-068)", a
   assert.match(calls.writes.join("\n"), /terminal clipboard/);
 });
 
+test("/ls lists the SESSION cwd (not process.cwd): dirs first with a slash, dotfiles hidden unless -a", async () => {
+  const { mkdirSync, writeFileSync } = await import("node:fs");
+  const dir = mkdtempSync(join(tmpdir(), "prom-ls-"));
+  mkdirSync(join(dir, "src"));
+  mkdirSync(join(dir, "docs"));
+  writeFileSync(join(dir, "README.md"), "x");
+  writeFileSync(join(dir, "a.ts"), "x");
+  writeFileSync(join(dir, ".env"), "SECRET=1");
+  setColorEnabled(false);
+  try {
+    const { ctx, calls, setCwd } = fakeCtx();
+    setCwd(dir);
+    const cmd = findSlash("ls");
+    assert.ok(cmd, "/ls is registered");
+    await cmd.run("", ctx);
+    const out = calls.writes.join("\n");
+    assert.match(out, new RegExp(`${dir.split("/").pop()}`), "the header names the directory");
+    assert.match(out, /2 dirs, 2 files, 1 hidden \(\/ls -a\)/);
+    // dirs first, then files, each alphabetical; dirs carry a trailing slash
+    assert.ok(out.indexOf("docs/") < out.indexOf("src/"));
+    assert.ok(out.indexOf("src/") < out.indexOf("README.md"));
+    assert.doesNotMatch(out, /\.env/, "dotfiles hidden by default");
+
+    calls.writes.length = 0;
+    await cmd.run("-a", ctx);
+    assert.match(calls.writes.join("\n"), /\.env/, "-a shows them");
+
+    calls.writes.length = 0;
+    await cmd.run("src", ctx); // relative to the SESSION cwd
+    assert.match(calls.writes.join("\n"), /0 dirs, 0 files/);
+    assert.match(calls.writes.join("\n"), /\(empty\)/);
+
+    calls.writes.length = 0;
+    await cmd.run("nope", ctx);
+    assert.match(calls.writes.join("\n"), /no such directory: .*nope/);
+
+    calls.writes.length = 0;
+    await cmd.run("-x", ctx);
+    assert.match(calls.writes.join("\n"), /unknown option -x/);
+  } finally {
+    setColorEnabled(true);
+  }
+});
+
 test("findSlash resolves names AND aliases", () => {
   assert.equal(findSlash("scan")?.name, "scan");
-  assert.equal(findSlash("ls")?.name, "list"); // alias
+  assert.equal(findSlash("ls")?.name, "ls"); // its own command now: the directory listing
+  assert.equal(findSlash("list")?.name, "list"); // the catalog keeps its name
   assert.equal(findSlash("new")?.name, "reset"); // alias (clear → reset, flavored primary)
   assert.equal(findSlash("clear")?.name, "reset"); // old Claude-Code name kept as alias
   assert.equal(findSlash("compact")?.name, "condense"); // alias preserved

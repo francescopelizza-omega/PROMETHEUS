@@ -318,6 +318,8 @@ interface Watch {
   handle: WatchHandle;
   pending: Set<string>;
   timer?: unknown;
+  /** How many subscribers asked for this root (see `watch`). */
+  refs: number;
 }
 
 /**
@@ -350,13 +352,21 @@ export class FsWatchHost extends EventEmitter {
   }
 
   /**
-   * Start watching `root` recursively (file 07 §6, `fs:watch`). Idempotent: a
-   * second watch of the same root is a no-op. Change bursts inside the debounce
+   * Start watching `root` recursively (file 07 §6, `fs:watch`). REFERENCE-COUNTED: a second
+   * watch of the same root shares the one watcher, and it is closed only when every watch
+   * has been matched by an `unwatch`. It used to be a plain no-op, so two views on the same
+   * root (Home's explorer and the editor's, both mounted) shared one watcher and the first
+   * to unmount closed it under the other: the editor's explorer silently stopped
+   * auto-refreshing on the default navigation path. Change bursts inside the debounce
    * window coalesce into a single `change` event carrying the distinct paths.
    */
   watch(root: string): void {
-    if (this.watches.has(root)) return;
-    const entry: Watch = { root, handle: { close: () => {} }, pending: new Set() };
+    const existing = this.watches.get(root);
+    if (existing) {
+      existing.refs += 1;
+      return;
+    }
+    const entry: Watch = { root, handle: { close: () => {} }, pending: new Set(), refs: 1 };
     entry.handle = this.factory(
       root,
       (relPath) => this.onRawEvent(entry, relPath),
@@ -365,10 +375,17 @@ export class FsWatchHost extends EventEmitter {
     this.watches.set(root, entry);
   }
 
-  /** Stop watching a root (and flush nothing — the renderer re-lists on demand). */
+  /** Release one watch of a root; the watcher closes when the last one is released (and
+   *  flushes nothing — the renderer re-lists on demand). */
   unwatch(root: string): void {
     const entry = this.watches.get(root);
     if (!entry) return;
+    entry.refs -= 1;
+    if (entry.refs > 0) return;
+    this.close(root, entry);
+  }
+
+  private close(root: string, entry: Watch): void {
     if (entry.timer !== undefined) this.timers.clearTimeout(entry.timer);
     try {
       entry.handle.close();
@@ -401,9 +418,9 @@ export class FsWatchHost extends EventEmitter {
     return [...this.watches.keys()];
   }
 
-  /** Stop every watcher (app shutdown). */
+  /** Stop every watcher, whatever its reference count (app shutdown). */
   dispose(): void {
-    for (const root of [...this.watches.keys()]) this.unwatch(root);
+    for (const [root, entry] of [...this.watches]) this.close(root, entry);
   }
 }
 

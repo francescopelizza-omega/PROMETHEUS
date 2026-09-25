@@ -131,6 +131,9 @@ export function toRowView(
     ...(node.schemaKey ? { schemaKey: node.schemaKey } : {}),
     scope: node.scope,
     ...(node.searchTerms ? { searchTerms: node.searchTerms } : {}),
+    // the closed value set for a `select` — without it the renderer falls back to a free
+    // text input and the "choice" is a choice in name only.
+    ...(node.options ? { options: node.options } : {}),
     ...(row ? { value: row.value, layer: row.layer } : {}),
     ...(row?.rawByScope ? { rawByScope: row.rawByScope } : {}),
     ...(row?.definedIn ? { definedIn: row.definedIn } : {}),

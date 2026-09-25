@@ -155,6 +155,10 @@ function makeFakeIpcMain() {
  *  registration/dispose (`.on`/`.off` for the event multiplex) — none of its
  *  per-handler bodies run in this test, so a bare EventEmitter satisfies every host
  *  registerIdeIpcHandlers actually calls at this stage. */
+/** The mocked `ipcMain`, kept by the first test that mocks electron. The mock is module-wide and
+ *  ide-ipc.js binds `ipcMain` once, at import, so a later test must reach the SAME fake. */
+let electronIpcMain: ReturnType<typeof makeFakeIpcMain> | undefined;
+
 function makeWiring(): IdeIpcWiring {
   return {
     lsp: new EventEmitter() as unknown as LspHost,
@@ -167,6 +171,7 @@ function makeWiring(): IdeIpcWiring {
 
 test("registerIdeIpcHandlers: register -> dispose -> register again never throws (Task #10)", async () => {
   const fakeIpcMain = makeFakeIpcMain();
+  electronIpcMain = fakeIpcMain;
   mock.module("electron", {
     exports: {
       ipcMain: fakeIpcMain,
@@ -269,4 +274,38 @@ test("a no-auto-approve posture clamps the ladder to ask-before-everything", asy
   // absent or true ⇒ the operator's level stands
   assert.equal(clampAuthLevelForPosture(7, { autoApprove: true }), 7);
   assert.equal(clampAuthLevelForPosture(7, {}), 7);
+});
+
+test("ide:fs.watch guards the root but keeps the renderer's OWN string as the watch key", async () => {
+  // FileTree filters change events with `ev.root === root` (the raw root it asked for). Keying
+  // the watcher by the canonical path broke that for any /tmp, /var, symlinked or trailing-slash
+  // root, and the explorer silently stopped auto-refreshing. The guard must still refuse ~/.ssh.
+  assert.ok(electronIpcMain, "runs after the test that mocks electron");
+  const ipc = electronIpcMain as ReturnType<typeof makeFakeIpcMain>;
+  const { registerIdeIpcHandlers } = await import("./ide-ipc.js");
+  const { homedir } = await import("node:os");
+  const { join } = await import("node:path");
+  const calls: Array<[string, string]> = [];
+  const fsWatch = Object.assign(new EventEmitter(), {
+    watch: (root: string) => calls.push(["watch", root]),
+    unwatch: (root: string) => calls.push(["unwatch", root]),
+  }) as unknown as FsWatchHost;
+  const dispose = registerIdeIpcHandlers({ ...makeWiring(), fsWatch });
+  try {
+    const watch = ipc.handlerFor(IPC.ideFsWatch);
+    const unwatch = ipc.handlerFor(IPC.ideFsUnwatch);
+    assert.ok(watch && unwatch);
+    const raw = "/tmp/prom-watch-root/"; // realpath is /private/tmp/…, and a trailing slash
+    assert.deepEqual(await watch({}, { root: raw }), { ok: true });
+    assert.deepEqual(await unwatch({}, { root: raw }), { ok: true });
+    assert.deepEqual(calls, [
+      ["watch", raw],
+      ["unwatch", raw],
+    ]);
+    const secret = (await watch({}, { root: join(homedir(), ".ssh") })) as { ok: boolean };
+    assert.equal(secret.ok, false, "a sensitive root is still refused");
+    assert.equal(calls.length, 2, "…and never reaches the watcher");
+  } finally {
+    dispose();
+  }
 });

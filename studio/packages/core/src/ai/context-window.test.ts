@@ -91,6 +91,38 @@ test("Ollama's /api/show is asked first and its answer is labelled as measured",
   assert.equal(seen[0], "http://127.0.0.1:11434/api/show");
 });
 
+test("the SERVED context wins over the model's declared maximum", async () => {
+  // The 2026-09-24 incident: /api/show reports what the WEIGHTS allow (262144) while the daemon
+  // serves OLLAMA_CONTEXT_LENGTH (8192). Budgeting against the declared number is what built a
+  // 7,254-token prompt for an 8,192-token slot — the preamble budgets scale with the window.
+  const { fetchLike } = stub({
+    "/api/show": { model_info: { "qwen3moe.context_length": 262144 } },
+    "/api/ps": { models: [{ name: "qwen3.6", context_length: 8192 }] },
+  });
+  const r = await probeContextWindow("http://127.0.0.1:11434/v1", "qwen3.6", fetchLike);
+  assert.equal(r.contextWindow, 8192);
+  assert.equal(r.source, "ollama-loaded", "and it says the number is the SERVED one");
+});
+
+test("a model that is not loaded keeps the declared window", async () => {
+  const { fetchLike } = stub({
+    "/api/show": { model_info: { "qwen3moe.context_length": 262144 } },
+    "/api/ps": { models: [] },
+  });
+  const r = await probeContextWindow("http://127.0.0.1:11434/v1", "qwen3.6", fetchLike);
+  assert.deepEqual(r, { contextWindow: 262144, source: "ollama" });
+});
+
+test("an /api/ps that reports MORE than the weights allow does not raise the budget", async () => {
+  const { fetchLike } = stub({
+    "/api/show": { model_info: { "gemma3.context_length": 8192 } },
+    "/api/ps": { models: [{ model: "m", context_length: 131072 }] },
+  });
+  const r = await probeContextWindow("http://x/v1", "m", fetchLike);
+  assert.equal(r.contextWindow, 8192, "the smaller, safer number stays");
+  assert.equal(r.source, "ollama");
+});
+
 test("it falls back to /v1/models, matching the requested model", async () => {
   const { fetchLike } = stub({
     "/v1/models": {

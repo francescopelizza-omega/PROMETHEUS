@@ -29,7 +29,14 @@
 import { randomBytes } from "node:crypto";
 import { isAbsolute, resolve } from "node:path";
 
-import { agent, ai, cliProfiles, loadPricing, orchestration } from "@prometheus/core";
+import {
+  agent,
+  ai,
+  cliProfiles,
+  loadPricing,
+  orchestration,
+  probeContextWindow,
+} from "@prometheus/core";
 import {
   createHookRunner,
   isPathAllowed,
@@ -178,7 +185,7 @@ export async function runOneShot(
     hasKeychainKey: (id) => cloudKeys.has(id),
   });
   // Local first when it exists — free, private, already warm — then any configured provider.
-  const endpoint = backends.localEndpoint ?? cloudEndpoints[0]?.endpoint;
+  let endpoint = backends.localEndpoint ?? cloudEndpoints[0]?.endpoint;
   if (!endpoint) {
     return {
       ok: false,
@@ -189,6 +196,34 @@ export async function runOneShot(
         "no model is available — start a local runner (e.g. `ollama serve`), " +
         "or connect a provider with `prometheus provider connect <id>`",
     };
+  }
+
+  /**
+   * MEASURE the context window, exactly as the two interactive hosts do.
+   *
+   * A headless run budgeted against `DEFAULT_CONTEXT_WINDOW` (8192) whatever the model really
+   * served, because only the TUI and the readline host ever attached the probe. That floor is
+   * also what every context-sized budget reads, so a scripted run against a 32k model refused
+   * its own second round ("this request is about 8012 tokens but the model's context window is
+   * 8192") while the server had room to spare — measured 2026-09-24.
+   *
+   * Bounded and fail-soft: an unreachable runner leaves the floor in place, as before.
+   */
+  try {
+    const probed = await probeContextWindow(
+      endpoint.baseUrl,
+      endpoint.model ?? endpoint.id,
+      fetch as never,
+    );
+    if (probed.source !== "default") {
+      endpoint = {
+        ...endpoint,
+        contextWindow: probed.contextWindow,
+        ...(probed.capabilities ? { probedCapabilities: [...probed.capabilities] } : {}),
+      };
+    }
+  } catch {
+    /* fail-soft: the documented floor stands */
   }
 
   const cwd = resolveCwd(parsed.cwd, write);

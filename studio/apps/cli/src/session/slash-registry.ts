@@ -16,6 +16,8 @@
  * dispatches. Pure data + thin closures — fully unit-testable with a fake SlashCtx.
  */
 import { COMMAND_SPECS, agent, ai, tokenEconomy } from "@prometheus/core";
+import { lookPath, probeHostTools } from "@prometheus/core/agent-system-host";
+import { type SecurityVerdict, localMemorySnapshot, runnerCensus } from "@prometheus/engine-bridge";
 
 import type { CwdMove } from "../cwd-guard.js";
 import {
@@ -25,10 +27,18 @@ import {
   loadSettings,
   saveSettings,
 } from "../home.js";
+import { shortCwd } from "../path-display.js";
 import { c } from "../render.js";
 import { type KeymapResolution, renderKeymap } from "../tui/keys.js";
+import type { ColorCaps } from "../tui/palette.js";
 import { clipToWidth, stringWidth } from "../tui/width.js";
-import { type ContextComponent, type UsageStats, contextBreakdown } from "./agent-runtime.js";
+import {
+  type ContextComponent,
+  type UsageStats,
+  contextBreakdown,
+  resetHostToolManifest,
+} from "./agent-runtime.js";
+import { formatCat, parseCatArgs, readTextFile } from "./cat.js";
 import { CONTEXT_WINDOW_PRESETS, parseContextWindowInput } from "./context-window-setting.js";
 import { renderFaq } from "./faq.js";
 import {
@@ -49,6 +59,15 @@ import {
   truncateDiff,
 } from "./git-helpers.js";
 import { IDLE_TIMEOUT_PRESETS_MIN, parseIdleTimeoutInput } from "./idle-timeout-setting.js";
+import { formatInStatus, parseInArgs } from "./in.js";
+import {
+  type ToolSpawn,
+  detectPackageManager,
+  findHostTool,
+  installHostTool,
+} from "./install-tools.js";
+import { formatListing, listDirectory, parseLsArgs } from "./ls.js";
+import { servingHost } from "./model-admission-host.js";
 import {
   type ModelCandidate,
   renderModelCandidates,
@@ -56,6 +75,13 @@ import {
 } from "./model-candidates.js";
 import { runModelHealthCommand } from "./model-health-command.js";
 import { MAX_SUBAGENTS } from "./orchestrator.js";
+import {
+  loadRemoteHosts,
+  parseRemoteArgs,
+  removeRemoteHost,
+  saveRemoteHosts,
+  upsertRemoteHost,
+} from "./remote-hosts-store.js";
 import { type SteeringFile, renderSteeringList } from "./steering.js";
 import type { ResolveResult } from "./working-set.js";
 
@@ -417,6 +443,30 @@ export interface SlashCtx {
     /** list stored checkpoints (label · time · file count). */
     list: () => string;
   };
+  /**
+   * The terminal's colour capability, resolved once per host by `detectColorCaps`.
+   *
+   * Optional because a non-interactive host (and every test fixture) has none; absent is read
+   * as `"none"`, which makes `highlightLine` and `paint` identities — the same degrade rule the
+   * rest of the TUI follows, so piped and NO_COLOR output stays byte-clean.
+   */
+  caps?: ColorCaps;
+  /**
+   * The session OUTPUT directory (`/in`) — where produced files go.
+   *
+   * Separate from `cwd()`, which is where the agent READS. `set` also grants the directory in
+   * the working set, because the exec sandbox's writable roots are `[cwd, ...workingSet]` and a
+   * download aimed outside them is refused by the OS, not by us. Only ever called with a path
+   * the HUMAN typed.
+   */
+  outputDir: {
+    /** the absolute output dir, or null when produced files go to the session cwd. */
+    get: () => string | null;
+    /** validate, grant in the working set, and set. Returns the resolve result. */
+    set: (dir: string) => ResolveResult;
+    /** back to the session cwd. The working-set grant is deliberately NOT revoked. */
+    clear: () => void;
+  };
   /** the session working set — extra dirs the agent may read (CLI-004). cwd is implicit. */
   workingSet: {
     /** resolved added dirs, insertion order (does NOT include the implicit cwd). */
@@ -437,6 +487,12 @@ export interface SlashCtx {
   /** the git spawn seam for `/worktree` (CLI-054): the host injects the engine-bridge safe-env
    *  spawn; tests inject a fake so the registry never spawns real git. */
   git: GitSpawn;
+  /** the same seam for `/install` — shell-free capture of an arbitrary host tool. Separate from
+   *  `git` only because it takes the program name; the host binds both to `execCapture`. */
+  spawnTool: ToolSpawn;
+  /** nemesis on a real filesystem path, for `/install`'s stage→gate→install. Fail-closed:
+   *  `verdict: "error"` blocks exactly like `"block"`. */
+  gateTarget: (target: string) => Promise<SecurityVerdict>;
   /** the effective TUI keymap (CLI-096) for `/keys` — resolved from `[keymap]` config at session
    *  start; carries the bindings, per-action source (default|user), and any load diagnostics. */
   keymap: KeymapResolution;
@@ -1039,6 +1095,72 @@ async function runGitPane(rest: string, ctx: SlashCtx): Promise<void> {
 
 /* ------------------------------ the registry ------------------------------ */
 
+/**
+ * `/deps install <tool>` — the human-driven installer.
+ *
+ * NOT `/install`: that name belongs to the engine's plugin installer (`COMMAND_SPECS`), and two
+ * commands answering to one word is how a user ends up installing the wrong thing.
+ *
+ * Deliberately a human command: a package install is unreachable from `run_command` at every
+ * authorization level (see install-tools.ts for the four layers that stop it). The model's part
+ * is to notice a tool is missing and say so.
+ */
+async function installExternalTool(arg: string, ctx: SlashCtx): Promise<void> {
+  const id = arg.trim();
+  if (!id) {
+    ctx.write(c.dim("usage: /deps install <tool>   ·  /deps lists what can be installed"));
+    return;
+  }
+  const tool = findHostTool(id);
+  if (!tool) {
+    ctx.write(c.red(`unknown tool "${id}" — /deps lists what can be installed`));
+    return;
+  }
+  const which = (bin: string): string | null => lookPath(bin);
+  const already = tool.bins.find((b: string) => which(b) !== null);
+  if (already) {
+    ctx.write(c.dim(`${tool.id} is already installed (${already})`));
+    return;
+  }
+  const manager = detectPackageManager(which);
+  if (!manager) {
+    ctx.write(c.red("no supported package manager found (brew/apt/dnf/pacman)"));
+    return;
+  }
+  const pkg = agent.installPackage(tool, manager);
+  ctx.write(`${c.bold(tool.id)} — ${tool.purpose}`);
+  ctx.write(c.dim(`  ${manager} package: ${pkg ?? "(none)"}`));
+  ctx.write(
+    c.dim("  it will be downloaded first, scanned by nemesis, and installed only if clean"),
+  );
+  if (!(await ctx.confirm(`Install ${tool.id} with ${manager}?`))) {
+    ctx.write(c.dim("cancelled"));
+    return;
+  }
+  ctx.write(c.dim("downloading and scanning…"));
+  const out = await installHostTool(tool.id, {
+    spawn: ctx.spawnTool,
+    gate: ctx.gateTarget,
+    which,
+    platform: process.platform,
+    isRoot: typeof process.getuid === "function" && process.getuid() === 0,
+  });
+  if (out.kind === "installed") {
+    // The manifest is cached and lands in the prompt-cache prefix; a new tool is exactly
+    // when it must be rebuilt, so the NEXT turn tells the model the truth.
+    resetHostToolManifest();
+    ctx.write(c.green(`✓ ${out.tool.id} installed (${out.manager} ${out.pkg})`));
+    ctx.write(c.dim(`  nemesis: ${out.verdict.verdict}`));
+  } else if (out.kind === "already") {
+    ctx.write(c.dim(`${out.tool.id} is already installed (${out.found})`));
+  } else if (out.kind === "manual") {
+    ctx.write(c.yellow(`${out.why}. Run this yourself:`));
+    ctx.write(`  ${out.command}`);
+  } else {
+    ctx.write(c.red(`install refused: ${out.error}`));
+  }
+}
+
 export const SLASH_REGISTRY: readonly SlashCmd[] = Object.freeze([
   /* ---- session / lifecycle ---- */
   {
@@ -1142,6 +1264,78 @@ export const SLASH_REGISTRY: readonly SlashCmd[] = Object.freeze([
       // silently redirects away from Prometheus's own repo (printing its own warning first),
       // so echoing `dir` verbatim could show a path Prometheus never actually moved to.
       ctx.write(c.dim(`cwd → ${move.cwd}`));
+    },
+  },
+  {
+    name: "ls",
+    group: "session",
+    summary:
+      "List the files in the session's working directory (dirs first) — check Prometheus is on the right folder.",
+    args: "[path] [-a]",
+    // The SESSION cwd (`ctx.cwd()`, moved by /cd and /cwd), never process.cwd(): the CLI never
+    // chdir's, so the process directory is still wherever `prometheus` was launched.
+    run: (rest, ctx) => {
+      const args = parseLsArgs(rest, ctx.cwd());
+      if (!args.ok) {
+        ctx.write(c.red(args.error));
+        return;
+      }
+      const cols = process.stdout.columns;
+      const width = Math.min(typeof cols === "number" && cols > 0 ? cols : 80, 120);
+      for (const line of formatListing(listDirectory(args.dir, { all: args.all }), width)) {
+        ctx.write(line);
+      }
+    },
+  },
+  {
+    name: "cat",
+    group: "session",
+    summary: "Print a file into the transcript, syntax-highlighted.",
+    args: "<file> [--plain] [--max N] [-a]",
+    // Resolves against the SESSION cwd like /ls, reads the file itself (never shells out to
+    // `cat`), and refuses binaries. The line-number gutter is load-bearing, not decoration:
+    // it is what stops the TUI's markdown pass reading a `#` comment as a heading.
+    run: (rest, ctx) => {
+      const args = parseCatArgs(rest, ctx.cwd());
+      if (!args.ok) {
+        ctx.write(c.red(args.error));
+        return;
+      }
+      const result = readTextFile(args.file, args.opts);
+      for (const line of formatCat(result, ctx.caps ?? "none", args.opts)) ctx.write(line);
+    },
+  },
+  {
+    name: "in",
+    group: "session",
+    summary: "Set where produced files are written (downloads, conversions) — /in <folder>.",
+    args: "[folder] | --clear",
+    // `/cd` moves where Prometheus READS; `/in` moves where it WRITES what it produces. Setting
+    // it also GRANTS the folder in the working set, because the exec sandbox's writable roots
+    // are [cwd, ...workingSet] — without the grant the download is refused by Seatbelt, not by
+    // us, and the model cannot see why. Only ever a path the human typed.
+    run: (rest, ctx) => {
+      const args = parseInArgs(rest);
+      if (!args.ok) {
+        ctx.write(c.red(args.error));
+        return;
+      }
+      if (args.action === "show") {
+        for (const line of formatInStatus(ctx.outputDir.get(), ctx.cwd())) ctx.write(line);
+        return;
+      }
+      if (args.action === "clear") {
+        ctx.outputDir.clear();
+        ctx.write(c.dim(`output folder cleared — produced files go to ${shortCwd(ctx.cwd())}`));
+        return;
+      }
+      const res = ctx.outputDir.set(args.dir);
+      if (!res.ok || !res.resolved) {
+        ctx.write(c.red(`in: ${res.error ?? "could not set that folder"}`));
+        return;
+      }
+      ctx.write(c.green(`✓ produced files → ${shortCwd(res.resolved)}`));
+      ctx.write(c.dim(`  granted for writing; reading still happens in ${shortCwd(ctx.cwd())}`));
     },
   },
   {
@@ -1459,6 +1653,223 @@ export const SLASH_REGISTRY: readonly SlashCmd[] = Object.freeze([
   },
 
   /* ---- model / tuning ---- */
+  {
+    name: "remote",
+    group: "model",
+    summary: "Model servers on other machines you own (a GPU box on the LAN).",
+    args: "[add <url> [--ram GB] | remove <host> | test <host>]",
+    // DEFAULT DENY: a host is reachable only once declared here. Nothing is inferred from a
+    // private IP range — "it is on 192.168/16 so it must be mine" is exactly the assumption
+    // that makes a coffee-shop network dangerous.
+    run: async (rest, ctx) => {
+      const toks = rest.trim().split(/\s+/).filter(Boolean);
+      const verb = toks[0] ?? "";
+      const hosts = loadRemoteHosts();
+
+      if (!verb) {
+        if (hosts.length === 0) {
+          ctx.write(c.dim("no remote model servers declared"));
+          ctx.write(c.dim("  /remote add gpu-box.lan --ram 128     (a machine you own)"));
+          ctx.write(c.dim("  until a host is declared it is treated as a third party and refused"));
+          return;
+        }
+        ctx.write(`${c.bold("Remote model servers")}  ${c.dim(`${hosts.length} declared`)}`);
+        for (const h of hosts) {
+          const ram = h.totalMemoryBytes ? ai.humanBytes(h.totalMemoryBytes) : "size unknown";
+          ctx.write(`  ${c.cyan(h.host)}  ${c.dim(`${h.baseUrl} · ${ram}`)}`);
+        }
+        return;
+      }
+
+      if (verb === "add") {
+        const parsed = parseRemoteArgs(toks.slice(1).join(" "));
+        if (!parsed.ok) {
+          ctx.write(c.red(parsed.error));
+          return;
+        }
+        const { entry: e } = parsed;
+        ctx.write(`${c.bold(e.host)}  ${c.dim(e.baseUrl)}`);
+        for (const w of ai.remoteHostWarnings(e)) ctx.write(c.yellow(`  ! ${w}`));
+        if (!(await ctx.confirm(`Trust ${e.host} as your own model server?`))) {
+          ctx.write(c.dim("cancelled"));
+          return;
+        }
+        saveRemoteHosts(upsertRemoteHost(e, hosts));
+        ctx.write(c.green(`✓ ${e.host} declared — its models are now selectable`));
+        return;
+      }
+
+      if (verb === "remove") {
+        const target = toks[1];
+        if (!target) {
+          ctx.write(c.dim("usage: /remote remove <host>"));
+          return;
+        }
+        const { hosts: next, removed } = removeRemoteHost(target, hosts);
+        if (!removed) {
+          ctx.write(c.red(`${target} is not declared`));
+          return;
+        }
+        saveRemoteHosts(next);
+        ctx.write(c.green(`✓ ${target} removed — it is a third party again`));
+        return;
+      }
+
+      if (verb === "test") {
+        const target = toks[1];
+        const entry = target
+          ? hosts.find((h) => ai.normalizeHost(h.host) === ai.normalizeHost(target))
+          : hosts[0];
+        if (!entry) {
+          ctx.write(c.red(target ? `${target} is not declared` : "no remote host declared"));
+          return;
+        }
+        ctx.write(c.dim(`probing ${entry.baseUrl} …`));
+        const root = ai.ollamaRoot(entry.baseUrl);
+        const census = await runnerCensus([{ id: "ollama", baseUrl: root, api: "ollama" }], {
+          timeoutMs: 4000,
+          host: entry.host,
+        }).catch(() => []);
+        if (census.length === 0) {
+          ctx.write(c.red(`  no answer from ${entry.host} — is the runner up and reachable?`));
+          return;
+        }
+        const resident = census.flatMap((r) => r.models);
+        ctx.write(c.green(`  ✓ ${entry.host} answered`));
+        for (const m of resident) {
+          ctx.write(
+            `    ${c.green("●")} ${m.id} ${c.dim(`loaded, ${ai.humanBytes(m.sizeBytes)}`)}`,
+          );
+        }
+        if (resident.length === 0) ctx.write(c.dim("    no model loaded there right now"));
+        const models = await ai.listInstalledModels(root, { timeoutMs: 4000 }).catch(() => []);
+        ctx.write(c.dim(`    ${models.length} model(s) installed on that host`));
+        if (!entry.totalMemoryBytes) {
+          ctx.write(
+            c.yellow(
+              "    ! no memory size declared — /remote add <url> --ram <GB> to enable fit checks",
+            ),
+          );
+        }
+        return;
+      }
+
+      ctx.write(c.dim("usage: /remote [add <url> [--ram GB]] | remove <host> | test <host>"));
+    },
+  },
+  {
+    name: "ram",
+    // No aliases: "fit" and "models" both already belong to engine verbs, and two commands
+    // answering to one word is how a user runs the wrong one.
+    group: "model",
+    summary: "Memory: what this machine has, what is loaded, and which models actually fit.",
+    args: "[--all]",
+    // The answer to "why was that model refused?" and "then what CAN I run?", in one place.
+    // Same probe, same arithmetic and same catalog the admission gate uses, so what is listed
+    // here is exactly what the gate will decide.
+    run: async (rest, ctx) => {
+      const arg = rest.trim();
+      if (arg && arg !== "--all") {
+        ctx.write(c.dim("usage: /ram [--all]"));
+        return;
+      }
+      const baseUrl = ctx.modelPicker?.candidates().find((m) => m.endpoint.locality === "local")
+        ?.endpoint.baseUrl;
+      const root = ai.ollamaRoot(baseUrl ?? "http://127.0.0.1:11434");
+      const host = servingHost(root);
+      // The context the models would be SERVED at; the cache scales with it, so the fit
+      // verdict is only meaningful next to a number.
+      const ctxTokens =
+        ctx.modelPicker?.candidates().find((m) => m.endpoint.locality === "local")?.endpoint
+          .contextWindow ?? 262144;
+
+      const [snap, census] = await Promise.all([
+        localMemorySnapshot().catch(() => null),
+        runnerCensus([{ id: "ollama", baseUrl: root, api: "ollama" }], { timeoutMs: 2000 }).catch(
+          () => [],
+        ),
+      ]);
+      if (!snap) {
+        ctx.write(c.red("could not read this machine's memory"));
+        return;
+      }
+      const gb = (n: number) => ai.humanBytes(n);
+      const pressure =
+        snap.pressureLevel === undefined
+          ? ""
+          : snap.pressureLevel >= 4
+            ? c.red(" · pressure CRITICAL")
+            : snap.pressureLevel >= 2
+              ? c.yellow(" · pressure warning")
+              : c.dim(" · pressure normal");
+      ctx.write(
+        `${c.bold(`Memory${host ? ` on ${host}` : ""}`)}  ${c.dim(
+          `${gb(snap.availableBytes)} free of ${gb(snap.totalBytes)}`,
+        )}${pressure}`,
+      );
+      ctx.write(
+        c.dim(
+          `  ${gb(snap.headroomBytes)} kept for the system · ${gb(
+            Math.max(0, snap.availableBytes - snap.headroomBytes),
+          )} offered to a model · read from the ${snap.source}`,
+        ),
+      );
+
+      const resident = census.flatMap((r) => r.models);
+      if (resident.length > 0) {
+        for (const r of census) {
+          for (const m of r.models) {
+            ctx.write(
+              `  ${c.green("●")} ${m.id} ${c.dim(`loaded in ${r.runner}${m.sizeBytes ? `, ${gb(m.sizeBytes)}` : ""}`)}`,
+            );
+          }
+        }
+      } else {
+        ctx.write(c.dim("  no model is loaded right now"));
+      }
+
+      const candidates = await ai
+        .inventoryCandidates(root, ctxTokens, { runner: "ollama", resident, timeoutMs: 4000 })
+        .catch(() => [] as ai.ModelCandidate[]);
+      if (candidates.length === 0) {
+        ctx.write(c.dim("  (no local models installed, or the runner did not answer)"));
+        return;
+      }
+      const budget = {
+        totalBytes: snap.totalBytes,
+        availableBytes: snap.availableBytes + resident.reduce((n, m) => n + m.sizeBytes, 0),
+        headroomBytes: snap.headroomBytes,
+        ...(host ? { host } : {}),
+      };
+      const rows = ai.affordableModels(candidates, budget);
+      ctx.write(
+        `${c.bold("Models")}  ${c.dim(`at a ${ctxTokens.toLocaleString("en-US")}-token context`)}`,
+      );
+      for (const row of rows) {
+        const mark = row.fits ? c.green("✓") : c.red("✗");
+        const note =
+          row.footprint.source === "estimated"
+            ? c.dim(" est.")
+            : row.footprint.source === "measured"
+              ? c.dim(" measured")
+              : "";
+        const detail = c.dim(
+          `${gb(row.footprint.weightsBytes)} weights + ${gb(row.footprint.kvBytes)} cache`,
+        );
+        ctx.write(
+          `  ${mark} ${row.candidate.id.padEnd(26)} ${gb(row.footprint.totalBytes).padStart(8)}${note}  ${detail}`,
+        );
+      }
+      const short = rows.filter((r) => !r.fits);
+      if (short.length > 0) {
+        ctx.write(
+          c.dim(
+            `  ${short.length} model${short.length === 1 ? "" : "s"} too large — a smaller /context window shrinks the cache`,
+          ),
+        );
+      }
+    },
+  },
   {
     name: "worker",
     aliases: ["model"],
@@ -1784,6 +2195,44 @@ export const SLASH_REGISTRY: readonly SlashCmd[] = Object.freeze([
     run: (_r, ctx) => ctx.runSetup(),
   },
   {
+    name: "deps",
+    aliases: ["externals", "hosttools"],
+    group: "config",
+    summary: "External tools (imagemagick, ffmpeg, yt-dlp, …): list them, or install one.",
+    args: "[--refresh] | install <tool>",
+    // The human-readable twin of the manifest the model is given (agent/host-tools.ts). Same
+    // probe, same catalog — so what the user sees here is exactly what the model was told.
+    run: async (rest, ctx) => {
+      const toks = rest.trim().split(/\s+/).filter(Boolean);
+      if (toks[0] === "install") {
+        await installExternalTool(toks.slice(1).join(" "), ctx);
+        return;
+      }
+      const arg = toks.join(" ");
+      if (arg && arg !== "--refresh") {
+        ctx.write(c.dim("usage: /deps [--refresh] | /deps install <tool>"));
+        return;
+      }
+      if (arg === "--refresh") resetHostToolManifest();
+      const statuses = probeHostTools();
+      const present = statuses.filter((s) => s.found !== null);
+      const absent = statuses.filter((s) => s.found === null);
+      ctx.write(
+        `${c.bold("External tools")}  ${c.dim(`${present.length} installed, ${absent.length} missing`)}`,
+      );
+      for (const s of statuses) {
+        const mark = s.found ? c.green("✓") : c.dim("·");
+        const name = s.found ? s.tool.id : c.dim(s.tool.id);
+        ctx.write(`  ${mark} ${name.padEnd(s.found ? 22 : 31)} ${c.dim(s.tool.purpose)}`);
+      }
+      if (absent.length > 0) {
+        ctx.write(
+          c.dim(`  install a missing one with  /deps install ${absent[0]?.tool.id ?? "<name>"}`),
+        );
+      }
+    },
+  },
+  {
     name: "paths",
     group: "config",
     summary: "View/repoint heavy-download folders (models/videos/files).",
@@ -2081,7 +2530,9 @@ export const SLASH_REGISTRY: readonly SlashCmd[] = Object.freeze([
     args: "[filter]",
     run: (rest, ctx) => ctx.runInvoke(rest),
   },
-  verb("list", "catalog", "List the installable plugin/agent catalog.", { aliases: ["ls"] }),
+  // No `ls` alias any more: `/ls` lists the working directory (the check a user reaches for
+  // first), in the terminal and in Studio alike. The catalog is `/list`.
+  verb("list", "catalog", "List the installable plugin/agent catalog."),
   verb("info", "catalog", "Show details for one plugin.", { args: "<name>" }),
   verb("describe", "catalog", "Rich card for any catalog id.", { args: "<id>" }),
   verb("tutorial", "catalog", "Deep dossier ('Learn more') for an id.", { args: "<id>" }),
@@ -2604,6 +3055,9 @@ export function renderHelp(): string {
     ["/restore · /stats", "past-session picker · session usage"],
     ["/reset · /compress · /quit", "fresh start · reclaim context · exit"],
     ["/cd <dir> · /cwd <dir>", "switch project (fresh session) · move in place (keeps context)"],
+    ["/ls [path] [-a]", "list the working directory — is Prometheus on the right folder?"],
+    ["/cat <file>", "print a file here, syntax-highlighted"],
+    ["/in <folder>", "where produced files go — also works inline: “… save it /in ~/Downloads”"],
     ["/context window [size]", "view/set the auto-compact ceiling (default 250k tokens)"],
   ];
   for (const [k, v] of picks) lines.push(`  ${c.cyan(k)}\n      ${c.dim(v)}`);

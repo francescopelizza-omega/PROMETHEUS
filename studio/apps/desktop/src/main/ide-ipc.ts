@@ -311,13 +311,29 @@ function guardSqliteConn(conn: string): string | null {
 
 /**
  * The minimal `{ send }` surface to push an IdeEvent back to a window. Extracted
- * WITHOUT importing the electron event type (mirrors the sibling IPC modules).
+ * WITHOUT importing the electron event type (mirrors the sibling IPC modules) — and, like
+ * model-ipc's, wrapped so a send to a CLOSED window is a no-op: ide:gate forwards nemesis
+ * stderr from inside a stream 'data' listener, so closing the window mid-scan made every
+ * later line throw 'Object has been destroyed' out of that listener.
  */
 function senderOf(evt: unknown): { send(channel: string, payload: IdeEvent): void } | undefined {
   if (!evt || typeof evt !== "object") return undefined;
   const sender = (evt as { sender?: unknown }).sender;
   if (sender && typeof (sender as { send?: unknown }).send === "function") {
-    return sender as { send(channel: string, payload: IdeEvent): void };
+    const wc = sender as {
+      send(channel: string, payload: IdeEvent): void;
+      isDestroyed?(): boolean;
+    };
+    return {
+      send(channel, payload) {
+        if (wc.isDestroyed?.()) return;
+        try {
+          wc.send(channel, payload);
+        } catch {
+          /* the window went away between the check and the send */
+        }
+      },
+    };
   }
   return undefined;
 }
@@ -857,16 +873,20 @@ export function registerIdeIpcHandlers(wiring: IdeIpcWiring): () => void {
    * watched and every change under it streamed back over `onFsChange`. A recursive watcher
    * is an enumeration channel with a subscription attached.
    *
-   * Both handlers MUST guard identically: `FsWatchHost` keys its map by the exact string it
-   * is given, so normalising the root on watch but not on unwatch would strand live
-   * watchers under their canonical key with no way to remove them. `assertNotSensitivePath`
-   * already calls `uriToFsPath` internally and returns the canonical absolute path.
+   * The guard is a CHECK only; the renderer's own string stays the key. `FsWatchHost` keys
+   * its map by the exact string it is given, emits that string back as `root`, and joins the
+   * changed paths onto it — and FileTree filters events with `ev.root === root`, the raw root
+   * it asked for. Watching the canonical path instead (the first version of this guard) meant
+   * a root under /tmp or /var (realpath /private/…), a symlinked folder or a trailing slash
+   * never matched again, and the explorer silently stopped auto-refreshing. Watch and unwatch
+   * use the same raw key, so no watcher can be stranded.
    */
   ipcMain.handle(IPC.ideFsWatch, async (_e, arg: unknown): Promise<IdeOkResult> => {
     const v = validateFsWatch(arg);
     if (!v.ok) return { ok: false, error: v.error.message };
     try {
-      fsWatch.watch(assertNotSensitivePath(v.value.root));
+      assertNotSensitivePath(v.value.root);
+      fsWatch.watch(v.value.root);
       return { ok: true };
     } catch (e) {
       return { ok: false, error: errString(e) };
@@ -876,7 +896,8 @@ export function registerIdeIpcHandlers(wiring: IdeIpcWiring): () => void {
     const v = validateFsWatch(arg);
     if (!v.ok) return { ok: false, error: v.error.message };
     try {
-      fsWatch.unwatch(assertNotSensitivePath(v.value.root));
+      assertNotSensitivePath(v.value.root);
+      fsWatch.unwatch(v.value.root);
       return { ok: true };
     } catch (e) {
       return { ok: false, error: errString(e) };

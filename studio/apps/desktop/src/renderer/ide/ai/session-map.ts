@@ -49,6 +49,9 @@ export function liveToSession(
     return turn;
   };
   for (const t of turns) {
+    // A LOCAL turn (`/ls` output) is not part of the conversation: archiving it as assistant
+    // text would hand it to the model as history the next time the session is resumed.
+    if (t.local) continue;
     if (t.role === "user") {
       open(t.content, t.checkpointId);
     } else {

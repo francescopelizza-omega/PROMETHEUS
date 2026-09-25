@@ -35,6 +35,7 @@ import {
   type EditRecord,
   type FetchImpl,
   type SessionCtx,
+  accountingSink,
   applyEditIntentsLocal,
   autoCompactPolicy,
   checkBudgetGate,
@@ -915,6 +916,101 @@ test("makeToolRunner: write_file outside the working set needs a recorded approv
   const okRes = await approved(tool, { path: escaped, content: "explicitly approved\n" });
   assert.equal(okRes.ok, true);
   assert.equal(readFileSync(escaped, "utf8"), "explicitly approved\n");
+});
+
+test("makeToolRunner: write_file over a BINARY file keeps no lossy pre-image", async () => {
+  // The raw utf8 read turned the old PNG into U+FFFD text and /revert wrote that text back.
+  // Now: a text file is recorded exactly and reverts byte-identical; a binary one is recorded
+  // as not revertible at all.
+  const { mkdtempSync, readFileSync, writeFileSync, realpathSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const root = realpathSync.native(mkdtempSync(join(tmpdir(), "prom-wf-bin-")));
+  const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0xff, 0xfe, 0x00]);
+  writeFileSync(join(root, "logo.png"), png);
+  writeFileSync(join(root, "notes.txt"), "old\n");
+
+  const { client } = fakeEngine(() => ({ ok: true }));
+  const tool = fakeTool("write_file", () => []);
+  const editHistory: EditRecord[] = [];
+  const run = makeToolRunner(client, { roots: [root], cwd: root, editHistory });
+
+  const bin = await run(tool, { path: "logo.png", content: "now text\n" });
+  assert.equal(bin.ok, true);
+  assert.match(bin.summary, /not revertible/);
+  assert.equal(editHistory.length, 0, "no record whose revert would write U+FFFD mush");
+
+  const txt = await run(tool, { path: "notes.txt", content: "new\n" });
+  assert.equal(txt.ok, true);
+  assert.equal(editHistory.length, 1);
+  assert.equal(revertEdit(editHistory[0] as EditRecord), true);
+  assert.equal(readFileSync(join(root, "notes.txt"), "utf8"), "old\n");
+});
+
+test("makeToolRunner: apply_patch refuses a non-UTF-8 file instead of rewriting it as U+FFFD", async () => {
+  // The lossy utf8 read turned every 0xE9 of a Latin-1 file into EF BF BD while applying one
+  // hunk to its ASCII part, and reported ok.
+  const { mkdtempSync, readFileSync, writeFileSync, realpathSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const root = realpathSync.native(mkdtempSync(join(tmpdir(), "prom-ap-latin1-")));
+  const latin1 = Buffer.from("greeting=hello\nname=caf\xe9\n", "latin1");
+  writeFileSync(join(root, "app.properties"), latin1);
+
+  const { client } = fakeEngine(() => ({ ok: true }));
+  const tool = fakeTool("apply_patch", () => []);
+  const editHistory: EditRecord[] = [];
+  const run = makeToolRunner(client, { roots: [root], cwd: root, editHistory });
+  const out = await run(tool, {
+    edits: [{ path: "app.properties", hunks: [{ old: "hello", new: "hi" }] }],
+  });
+  assert.equal(out.ok, false);
+  assert.match(out.summary, /not a UTF-8 text file/);
+  assert.deepEqual(readFileSync(join(root, "app.properties")), latin1, "byte-identical");
+  assert.equal(editHistory.length, 0);
+});
+
+test("a write_file that cannot be captured still CLAIMS its turn, so /revert never undoes the turn before", async () => {
+  // A turn whose only change was overwriting a binary file had no checkpoint at all; /revert
+  // took the PREVIOUS turn's checkpoint and silently undid that accepted work.
+  const { mkdtempSync, readFileSync, writeFileSync, realpathSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const root = realpathSync.native(mkdtempSync(join(tmpdir(), "prom-wf-claim-")));
+  writeFileSync(join(root, "logo.png"), Buffer.from([0x89, 0x50, 0x4e, 0x47, 0xff, 0xfe, 0x00]));
+  const store = new agent.CheckpointStore(10);
+  const hook = (turnNumber: number): CheckpointHook => ({
+    store,
+    turnId: `t${turnNumber}`,
+    sessionId: "s1",
+    turnNumber,
+    now: () => new Date(0).toISOString(),
+  });
+  const { client } = fakeEngine(() => ({ ok: true }));
+  const tool = fakeTool("write_file", () => []);
+
+  // turn 1: an ordinary text edit (its own checkpoint)
+  writeFileSync(join(root, "a.ts"), "v1\n");
+  await makeToolRunner(client, { roots: [root], cwd: root, checkpoint: hook(1) })(tool, {
+    path: "a.ts",
+    content: "v2\n",
+  });
+  // turn 2: the ONLY change is a binary overwrite, then a second write to the same path
+  const t2 = makeToolRunner(client, { roots: [root], cwd: root, checkpoint: hook(2) });
+  await t2(tool, { path: "logo.png", content: "text now\n" });
+  await t2(tool, { path: "logo.png", content: "text again\n" });
+
+  const last = store.list("s1").at(-1);
+  assert.equal(last?.id, "t2", "turn 2 has its own checkpoint");
+  assert.deepEqual(last?.unrevertable, [join(root, "logo.png")]);
+  assert.deepEqual(
+    Object.keys(last?.files ?? {}),
+    [],
+    "no intermediate state captured as pre-turn",
+  );
+  const res = restoreCheckpoint(last as never, { roots: [root] });
+  assert.deepEqual(res.unrevertable, [join(root, "logo.png")]);
+  assert.equal(readFileSync(join(root, "a.ts"), "utf8"), "v2\n", "turn 1 is left alone");
 });
 
 test("runMessageTurn: only a confirm-seam approval authorizes a write outside the set", async () => {
@@ -1846,6 +1942,92 @@ test("makeLlmClient: no /effort set at all leaves the body untouched", async () 
   assert.equal("reasoning_effort" in f.body(), false);
 });
 
+test("a turn CUT OFF at the context limit says so instead of ending in silence", async () => {
+  /**
+   * The 2026-09-24 incident, reproduced: a local thinking model streamed only `reasoning`
+   * deltas and was cut at the context end (`finish_reason: "length"`, ollama's
+   * `n_tokens = 8191, truncated = 1`). Nothing reached the pane, the transcript recorded only
+   * `{"kind":"done"}`, and the user read it as "Prometheus stopped working".
+   */
+  const sse =
+    'data: {"choices":[{"delta":{"reasoning":"Let me think about the file…"}}]}\n' +
+    'data: {"choices":[{"delta":{"reasoning":"I will call write_file"}}]}\n' +
+    'data: {"choices":[{"finish_reason":"length","delta":{}}]}\n' +
+    "data: [DONE]\n";
+  const f = capturingFetch(sse);
+  const llm = makeLlmClient(
+    { ...OLLAMA_ENDPOINT, supportsTools: true },
+    { fetch: f.fetch as never },
+  );
+  const out = await collect(
+    llm.turn(thread("write vafammok.py"), fakeTuning(), [fakeTool("write_file", () => ["w"])]),
+  );
+
+  const reasoning = out.filter((t) => t.kind === "reasoning").map((t) => t.text ?? "");
+  assert.ok(reasoning.join("").includes("write_file"), "the thinking still streams live");
+  const text = out
+    .filter((t) => t.kind === "text")
+    .map((t) => t.text ?? "")
+    .join("");
+  assert.match(text, /ran out of room/, "the turn explains itself");
+  assert.match(text, /context limit/);
+  assert.match(text, /while still thinking/, "…including that it never got past reasoning");
+  assert.match(text, /8,192/, "and names the window it hit");
+  assert.ok(
+    out.some((t) => t.kind === "final"),
+    "the turn still completes",
+  );
+});
+
+test("a turn that answers but is cut short is flagged as incomplete", async () => {
+  const sse =
+    'data: {"choices":[{"delta":{"content":"here is half an ans"}}]}\n' +
+    'data: {"choices":[{"finish_reason":"length","delta":{}}]}\n' +
+    "data: [DONE]\n";
+  const f = capturingFetch(sse);
+  const llm = makeLlmClient(
+    { ...OLLAMA_ENDPOINT, supportsTools: true },
+    { fetch: f.fetch as never },
+  );
+  const text = (
+    await collect(llm.turn(thread("hi"), fakeTuning(), [fakeTool("write_file", () => ["w"])]))
+  )
+    .filter((t) => t.kind === "text")
+    .map((t) => t.text ?? "")
+    .join("");
+  assert.match(text, /here is half an ans/, "the partial answer is kept");
+  assert.match(text, /cut off at the model's context limit/);
+});
+
+test("an ordinary finished turn gains NO notice", async () => {
+  const sse =
+    'data: {"choices":[{"delta":{"content":"all done"}}]}\n' +
+    'data: {"choices":[{"finish_reason":"stop","delta":{}}]}\n' +
+    "data: [DONE]\n";
+  const f = capturingFetch(sse);
+  const llm = makeLlmClient(
+    { ...OLLAMA_ENDPOINT, supportsTools: true },
+    { fetch: f.fetch as never },
+  );
+  const text = (
+    await collect(llm.turn(thread("hi"), fakeTuning(), [fakeTool("write_file", () => ["w"])]))
+  )
+    .filter((t) => t.kind === "text")
+    .map((t) => t.text ?? "")
+    .join("");
+  assert.equal(text, "all done");
+});
+
+test("the prompt estimate counts the TOOL SCHEMAS, not just the messages", async () => {
+  // The accounting row said 755 tokens where the server counted 7,254: on the native transport
+  // the tool catalog travels in the body's `tools:[]`, which the estimate never saw.
+  const tools = Array.from({ length: 20 }, (_, i) => fakeTool(`tool_${i}`, () => []));
+  const core = await import("@prometheus/core");
+  const small = core.ai.estimateRequestTokens(["hello"]);
+  const big = core.ai.estimateRequestTokens(["hello"], tools);
+  assert.ok(big > small * 5, `tools must dominate the estimate (small=${small} big=${big})`);
+});
+
 test("toolTurn (the tool-capable transport) also carries the effort tier", async () => {
   // toolTurn used to take no tuning parameter AT ALL, so even a correctly wired text path
   // would have silently dropped the tier for every agentic turn — i.e. almost all of them.
@@ -2379,9 +2561,10 @@ test("a missing key resolver is an honest message, not a silent 401", async () =
   assert.match(text, /needs an API key/);
 });
 
-test("a tool turn asks for usage on CLOUD and stays silent on LOCAL", async () => {
-  // Gated exactly like the GUI's: a strict local server 400s on the unknown field, and local
-  // tokens are free so the estimate costs nothing there.
+test("a tool turn asks for a usage frame on BOTH cloud and local endpoints", async () => {
+  // It used to ask only on cloud, because "local tokens are free". The estimate that replaced
+  // the frame is also what the context budget and the truncation notice read, and it
+  // under-counted a real 7,254-token prompt as 755 — the tool schemas are not in `messages`.
   const cloud = headerFetch(DONE_SSE);
   await collect(
     makeLlmClient(CLOUD_ENDPOINT, {
@@ -2400,7 +2583,7 @@ test("a tool turn asks for usage on CLOUD and stays silent on LOCAL", async () =
       },
     ).turn(thread("hi"), fakeTuning(), [fakeTool("read_file", () => ["read"])]),
   );
-  assert.equal("stream_options" in local.body(), false);
+  assert.deepEqual(local.body().stream_options, { include_usage: true });
 });
 
 test("an agentic turn is ACCOUNTED — it was the only kind that cost nothing", async () => {
@@ -4055,6 +4238,129 @@ test("restoreCheckpoint REPORTS a path the scope guard refused, instead of swall
   const res2 = restoreCheckpoint(cp, { roots: [inside, outside] });
   assert.deepEqual(res2.skipped, []);
   assert.equal(readFileSync(outFile, "utf8"), "original out\n");
+});
+
+test("restoreCheckpoint undoes a move as a PAIR: never deletes the destination while the source is not back", async () => {
+  // A text move records { source: existed, destination: absent }. /revert ran every delete
+  // even after the source write-back failed — e.g. its folder was deleted later in the turn —
+  // and the moved file vanished from BOTH paths.
+  const { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } =
+    await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const dir = realpathSync.native(mkdtempSync(join(tmpdir(), "prom-revert-pair-")));
+  const cp = (files: Record<string, string>, absent: string[]) =>
+    ({
+      id: "cp",
+      sessionId: "s1",
+      turnNumber: 1,
+      createdAt: new Date(0).toISOString(),
+      files,
+      absent,
+    }) as never;
+
+  // 1. the source's folder is gone: it is recreated and the pair completes
+  const src = join(dir, "lib", "a.ts");
+  const dest = join(dir, "src", "a.ts");
+  mkdirSync(join(dir, "src"));
+  writeFileSync(dest, "A");
+  const one = restoreCheckpoint(cp({ [src]: "A", [dest]: "" }, [dest]), { roots: [dir] });
+  assert.equal(readFileSync(src, "utf8"), "A");
+  assert.equal(existsSync(dest), false);
+  assert.deepEqual(one.failed, []);
+
+  // 2. the source cannot be written back (its parent is a FILE): the delete is WITHHELD
+  writeFileSync(join(dir, "blocker"), "a file, not a folder");
+  const src2 = join(dir, "blocker", "b.ts");
+  const dest2 = join(dir, "b.ts");
+  writeFileSync(dest2, "B");
+  const two = restoreCheckpoint(cp({ [src2]: "B", [dest2]: "" }, [dest2]), { roots: [dir] });
+  assert.equal(readFileSync(dest2, "utf8"), "B", "the only copy survives");
+  assert.deepEqual(two.failed.sort(), [dest2, src2].sort(), "both reported, checkpoint kept");
+  assert.deepEqual(two.deleted, []);
+});
+
+test("accountingSink: a LOCAL turn stays out of the shared ledger; a cloud turn is in it", async () => {
+  // The desktop gate prices the shared ledger; a bare local id ("gemma3:4b") prices as unknown
+  // there, so one local CLI turn blocked every Studio cloud call for the rest of the day.
+  const { existsSync, mkdtempSync, readdirSync, readFileSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const rec = (model: string, endpointId: string): AccountingRecord => ({
+    model,
+    endpointId,
+    promptTokens: 10,
+    completionTokens: 5,
+    estimated: false,
+    atIso: new Date().toISOString(),
+  });
+  const shared = (home: string): string[] =>
+    existsSync(join(home, "accounting"))
+      ? readdirSync(join(home, "accounting")).flatMap((f) =>
+          readFileSync(join(home, "accounting", f), "utf8")
+            .split("\n")
+            .filter(Boolean),
+        )
+      : [];
+
+  const localHome = mkdtempSync(join(tmpdir(), "prom-sink-local-"));
+  const local = accountingSink({
+    accounting: { home: localHome, sessionId: "s1" },
+    endpoint: { id: "local:ollama:gemma3:4b", locality: "local" } as SessionCtx["endpoint"],
+  });
+  local?.(rec("gemma3:4b", "local:ollama:gemma3:4b"));
+  assert.deepEqual(shared(localHome), [], "nothing in the shared ledger");
+  assert.equal(
+    readFileSync(join(localHome, "sessions", "s1.acct.jsonl"), "utf8")
+      .trim()
+      .split("\n").length,
+    1,
+    "…but the session's own file still has the row",
+  );
+
+  const cloudHome = mkdtempSync(join(tmpdir(), "prom-sink-cloud-"));
+  const cloud = accountingSink({
+    accounting: { home: cloudHome, sessionId: "s1" },
+    endpoint: { id: "anthropic", locality: "cloud" } as SessionCtx["endpoint"],
+  });
+  cloud?.(rec("claude-x", "anthropic"));
+  assert.equal(shared(cloudHome).length, 1);
+
+  assert.equal(
+    accountingSink({ endpoint: undefined } as never),
+    undefined,
+    "no accounting, no sink",
+  );
+});
+
+test("checkBudgetGate: a local turn earlier today does not block a cloud turn as unpriced", () => {
+  // Local rows carry a bare model id no price table knows; with daily_usd set the whole day's
+  // cloud turns were refused as "unpriced" until midnight.
+  const localRow: AccountingRecord = {
+    model: "gemma3:4b",
+    endpointId: "local:ollama:gemma3:4b",
+    promptTokens: 1000,
+    completionTokens: 500,
+    estimated: false,
+    atIso: "2026-09-22T09:00:00.000Z",
+  };
+  const ctx = {
+    endpoint: { id: "anthropic", locality: "cloud" },
+    accounting: { home: "/nowhere", sessionId: "s2" },
+    budget: {
+      config: { dailyUsd: 5 },
+      priceFor: (m: string) =>
+        m.startsWith("local:") ? { pricePerMTokIn: null, pricePerMTokOut: null } : undefined,
+      warned: new Set<string>(),
+    },
+  } as unknown as SessionCtx;
+  const res = checkBudgetGate(
+    ctx,
+    "2026-09-22T15:00:00.000Z",
+    () => [],
+    () => [localRow],
+  );
+  assert.equal(res.action, "ok", JSON.stringify(res));
 });
 
 /* ── the native tool transport: what the wire actually hands over ───────────*/

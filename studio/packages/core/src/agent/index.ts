@@ -430,3 +430,18 @@ export {
   runTodoTool,
   todoSummary,
 } from "./todo.js";
+
+// The external-tool catalog + the ~100-token manifest the model is told about it. PURE (the
+// probe that fills it in is in agent/system/host/host-tool-probe.ts) — see host-tools.ts for
+// why this is a list of NAMES and not a set of tool schemas.
+export {
+  DEFAULT_EXTERNAL_TOOLS,
+  EXTERNAL_TOOL_CHOICES,
+  HOST_TOOLS,
+  type ExternalToolDefaults,
+  type HostTool,
+  type HostToolStatus,
+  installPackage,
+  renderHostToolManifest,
+  renderToolDefaults,
+} from "./host-tools.js";

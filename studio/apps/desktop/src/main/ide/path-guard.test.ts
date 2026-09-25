@@ -54,3 +54,25 @@ test("an ordinary out-of-scope write keeps the plain refusal", () => {
   assert.throws(() => assertInsideWorkingSet("/tmp/pg-a/../pg-c/x.txt"), /outside the working set/);
   clearGrantedRoots();
 });
+
+test("the sensitive-path denylist is case-insensitive where the filesystem is", async () => {
+  // realpath keeps the caller's letter case, and every check was an exact string match: on a
+  // case-insensitive Mac `~/.SSH/config` and `~/.AWS/credentials` ARE ~/.ssh and ~/.aws, and
+  // they walked past the guard into ide:fs.read and ide:fs.watch.
+  if (process.platform !== "darwin" && process.platform !== "win32") return;
+  const { assertNotSensitivePath: guard } = await import("./path-guard.js");
+  const { homedir } = await import("node:os");
+  const { join } = await import("node:path");
+  const home = homedir();
+  for (const p of [
+    join(home, ".SSH"),
+    join(home, ".SSH", "config"),
+    join(home, ".Aws", "credentials"),
+    join(home, ".NETRC"),
+    join(home, "project", "ID_RSA"),
+  ]) {
+    assert.throws(() => guard(p), /refusing access/, p);
+  }
+  // …while an ordinary project path with capitals is still fine.
+  assert.doesNotThrow(() => guard(join(home, "Projects", "App", "README.md")));
+});

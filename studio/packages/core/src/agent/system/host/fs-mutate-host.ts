@@ -226,22 +226,31 @@ export function moveFileTool(args: Record<string, unknown>, deps: FsMutateDeps):
   } catch (err) {
     return { ok: false, summary: `move_file: failed: ${errText(err)}` };
   }
-  // The SOURCE existed and now does not → revert by writing it back, but only if its bytes
-  // survived the round-trip.
+  // A move is revertible only as a PAIR: undoing the destination is safe only if the source
+  // can be written back. Claiming the destination alone ("did not exist → delete it") for a
+  // binary or directory source made /revert delete the ONLY copy of the moved file and restore
+  // nothing — data loss where the previous behaviour was a harmless no-op. So nothing at all is
+  // claimed unless the source's bytes survived the round-trip.
+  //
+  // ORDER matters: destination first, source LAST. The TUI's one-step undo pops a single
+  // record from the end of the history; with the source last, one undo writes the source back
+  // (a harmless duplicate at the destination until the next undo), never deletes the
+  // destination while the source is still missing.
   if (sourcePre !== null) {
+    if (!destExists) {
+      // The destination did not exist → revert by DELETING it.
+      deps.onPreImage?.({ path: to.abs, preImage: "", existed: false });
+    } else if (destPre !== null) {
+      // The destination was replaced → revert by writing its old bytes back.
+      deps.onPreImage?.({ path: to.abs, preImage: destPre, existed: true });
+    }
+    // else: an overwritten BINARY destination. Its old bytes are gone and cannot be restored
+    // from a lossy read, so only the source is claimed.
+    // The SOURCE existed and now does not → revert by writing it back.
     deps.onPreImage?.({ path: from.abs, preImage: sourcePre, existed: true });
   }
-  if (!destExists) {
-    // The destination did not exist → revert by DELETING it. No read involved, so this is
-    // always safe to claim, binary or not.
-    deps.onPreImage?.({ path: to.abs, preImage: "", existed: false });
-  } else if (destPre !== null) {
-    // The destination was replaced → revert by writing its old bytes back.
-    deps.onPreImage?.({ path: to.abs, preImage: destPre, existed: true });
-  }
-  // else: an overwritten BINARY destination. Nothing is claimed, because nothing can be
-  // restored from a lossy read — emitting a pre-image here is what destroyed the file.
-  return { ok: true, summary: `moved ${from.raw} → ${to.raw}` };
+  const note = sourcePre === null ? " (not revertible: binary or directory source)" : "";
+  return { ok: true, summary: `moved ${from.raw} → ${to.raw}${note}` };
 }
 
 /** `mkdir` — create a directory chain; already-exists is a success, not an error. */

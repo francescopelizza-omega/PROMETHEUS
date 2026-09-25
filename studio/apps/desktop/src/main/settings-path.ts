@@ -17,15 +17,18 @@
  * MIGRATION is one-way, additive and per-LEAF. A whole-file copy would be wrong: the shared
  * file is also the CLI's, so overwriting it would clobber keys the terminal set (`hooks` above
  * all). Only leaves the shared file does not already define are folded in, so a user who has
- * been running both surfaces keeps the shared file as the newer truth. The old file is left on
- * disk rather than deleted — it costs nothing and it is the only copy of the pre-migration
- * state.
+ * been running both surfaces keeps the shared file as the newer truth. The old file is then
+ * RENAMED to `settings.json.migrated`, not deleted: it is the only copy of the pre-migration
+ * state. It must leave the migration's path, though. While it stayed as `settings.json`, the
+ * fold ran on EVERY launch, so any global key later removed from the shared file (a Studio
+ * Reset, a CLI unset, a deleted file) came back from the stale copy on the next start —
+ * `hooks` and `gateStrict` included.
  *
  * Arrays and scalars are single leaves (matching core's `deepMerge`/`flattenLeaves`, where
  * arrays REPLACE wholesale and are never merged per-index), so a desktop-only `todoPatterns`
  * array is adopted whole or not at all — never spliced into the CLI's.
  */
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 
 import { prometheusHome } from "@prometheus/core/agent-system-host";
@@ -80,21 +83,27 @@ function foldMissingLeaves(
 }
 
 /**
- * One-time, idempotent adoption of the desktop's private global layer into the shared one.
- * Never throws — a failed migration must not stop the app from starting.
+ * One-time adoption of the desktop's private global layer into the shared one. Once the fold
+ * has been written (or there was nothing to fold), the legacy file is renamed out of the way,
+ * so it can never be adopted again. Never throws — a failed migration must not stop the app
+ * from starting; if the shared write fails, the legacy file stays put and is retried next launch.
  */
 export function migrateGlobalSettings(userData: string): number {
   try {
     const legacyPath = legacyGlobalSettingsPath(userData);
     if (!existsSync(legacyPath)) return 0;
     const legacy = readLayerSync(legacyPath);
-    if (Object.keys(legacy).length === 0) return 0;
-    const sharedPath = sharedGlobalSettingsPath();
-    const shared = readLayerSync(sharedPath);
-    const adopted = foldMissingLeaves(shared, legacy);
-    if (adopted === 0) return 0;
-    mkdirSync(dirname(sharedPath), { recursive: true });
-    writeFileSync(sharedPath, JSON.stringify(shared, null, 2), "utf8");
+    let adopted = 0;
+    if (Object.keys(legacy).length > 0) {
+      const sharedPath = sharedGlobalSettingsPath();
+      const shared = readLayerSync(sharedPath);
+      adopted = foldMissingLeaves(shared, legacy);
+      if (adopted > 0) {
+        mkdirSync(dirname(sharedPath), { recursive: true });
+        writeFileSync(sharedPath, JSON.stringify(shared, null, 2), "utf8");
+      }
+    }
+    renameSync(legacyPath, `${legacyPath}.migrated`);
     return adopted;
   } catch {
     return 0;
