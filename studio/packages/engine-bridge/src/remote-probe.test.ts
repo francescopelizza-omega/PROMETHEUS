@@ -18,12 +18,25 @@ import {
 
 const GIB = 1024 * 1024 * 1024;
 
-/** Verbatim stdout from running the script under `sh` on this Mac. */
+/**
+ * Verbatim stdout from running the script under `sh` on this Mac — with ONE substitution:
+ * `PROM_HOSTNAME` carries the placeholder below instead of the machine's real hostname.
+ *
+ * That line is the only field of a probe that identifies a MACHINE rather than describing
+ * one, and `scripts/check-personal-data.sh` greps tracked files for exactly this host's name.
+ * Pasting a real probe in here therefore armed the pre-push hook against the whole repo: the
+ * push was refused, the auto-committer had already committed, and every later run stacked
+ * another commit that could not land. A fixture never needed the real name — nothing here
+ * asserts on it beyond the fact that it parses — so it does not get one.
+ *
+ * Keep it synthetic. If you re-capture this block from a live run, scrub this field again.
+ */
+const PROBE_HOSTNAME = "prom-probe-host";
 const REAL_DARWIN = `PROM_OK=1
 PROM_UNAME=Darwin
 PROM_ARCH=arm64
 PROM_KERNEL=27.0.0
-PROM_HOSTNAME=prom-probe-host
+PROM_HOSTNAME=${PROBE_HOSTNAME}
 PROM_MEM_TOTAL=68719476736
 PROM_MEM_FREE_PCT=83
 PROM_MEM_PRESSURE=1
@@ -42,6 +55,9 @@ test("ANCHOR: the real darwin output parses into the real machine", () => {
   assert.equal(hw.arch, "arm64");
   assert.equal(hw.cpuModel, "Apple M3 Max");
   assert.equal(hw.cpuCores, 16);
+  // Pinned so the placeholder stays load-bearing: a later "restore the real capture" would
+  // have to break this line rather than quietly re-publish the machine's name.
+  assert.equal(hw.hostname, PROBE_HOSTNAME);
   assert.equal(hw.memTotalBytes, 64 * GIB);
   // macOS reports a PERCENTAGE free, from `kern.memorystatus_level` — the same metric the local
   // probe and both watchdogs use, so the two machines are judged by one number.
