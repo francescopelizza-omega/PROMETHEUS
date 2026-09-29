@@ -1390,12 +1390,36 @@ const toOpenAiTools = agent.protocol.toOpenAiTools;
  * just means the first prompt loads cold, exactly as before. Local endpoints only (never a
  * cloud request, never a non-standard field to a non-Ollama endpoint).
  */
+/**
+ * How long a warm-up may take before it is abandoned.
+ *
+ * Long enough that a genuine cold load of a large model completes (30–90 s is normal on this
+ * hardware); short enough that a dead endpoint is not held onto for the life of the session.
+ */
+export const WARMUP_TIMEOUT_MS = 120_000;
+
 export function warmupLocalModel(endpoint: AiEndpoint | undefined, home?: string): void {
   if (!endpoint || endpoint.locality !== "local") return;
   const base = endpoint.baseUrl.replace(/\/+$/, "");
   const url = /\/v1$/.test(base) ? `${base}/chat/completions` : `${base}/v1/chat/completions`;
   void fetch(url, {
     method: "POST",
+    /**
+     * BOUNDED. This fetch carried no signal at all, which was survivable while "local" could
+     * only mean loopback: a refused connection fails immediately and a listening runner always
+     * answers eventually.
+     *
+     * It is not survivable now. A host declared with `/remote add … --ssh` resolves to
+     * `locality: "local"` for the egress decision, so this fire-and-forget POST reaches a
+     * machine across a network — or an ssh tunnel whose far end has gone away without an RST,
+     * which never fails and never answers. An unbounded fetch there hangs for the life of the
+     * process, holding a socket, with nothing watching it.
+     *
+     * The budget is generous on purpose: warm-up blocks until the model is resident, and a
+     * large local model can legitimately take 30–90 s to load. This is not a latency target —
+     * it is the difference between giving up and never giving up.
+     */
+    signal: AbortSignal.timeout(WARMUP_TIMEOUT_MS),
     headers: { "Content-Type": "application/json", Authorization: "Bearer local" },
     body: JSON.stringify({
       model: endpoint.model ?? endpoint.id,
@@ -1813,9 +1837,30 @@ async function* toolTurn(
      * deliberately does not match it, so it did not even demote the transport — it just read
      * as a bug in Prometheus.
      */
+    /**
+     * A REFUSAL needs a MEASURED window. An unmeasured one is a budgeting hint.
+     *
+     * Every local endpoint starts at `DEFAULT_CONTEXT_WINDOW` (8192) as an admitted placeholder
+     * — `onboarding.ts` labels it "A FLOOR, not a measurement" — and a failed probe leaves it
+     * there. Passing that floor here turned "we could not ask the runner" into
+     * "model error: this request is about N tokens but the model's context window is 8192", and
+     * the turn ended without the model being called at all. On a 262,144-window local model,
+     * with this repo's own ~7.2k-token prompt, that leaves the user about 800 tokens before
+     * every turn is refused over a number nobody measured.
+     *
+     * `preflightContext` already handles the unknown case correctly and says why — an unknown
+     * window disables the check, because "no information" must not mean "refuse".
+     *
+     * ONE flag covers both localities. A cloud endpoint is never probed by design, so
+     * `cloud-endpoints.ts` sets the flag from whether the provider registry DECLARED a window —
+     * 16 of its 18 rows do, and the two that do not (`nexos`, `abacus`, both routed gateways
+     * onto frontier models) were being refused at roughly 4% of their real window. Keying on
+     * locality instead would have re-trusted exactly those two.
+     */
+    const windowIsTrustworthy = endpoint.contextWindowMeasured === true;
     const pre = ai.preflightContext({
       estimatedPromptTokens,
-      contextWindow: endpoint.contextWindow,
+      contextWindow: windowIsTrustworthy ? endpoint.contextWindow : 0,
       maxTokens: replyReserve,
     });
     if (!pre.ok) {

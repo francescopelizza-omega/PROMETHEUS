@@ -151,11 +151,27 @@ export function activate(context: vscode.ExtensionContext): PrometheusApi {
     // Resolved once: it feeds the tuning, the permission mode AND the session's own ladder.
     const authLevel = resolveAuthLevel(cfg);
 
+    /**
+     * ONE endpoint object, shared by the LLM client and the session's own budget.
+     *
+     * It used to be built inline here and the `contextWindow` read a SECOND time below, so the
+     * two could disagree — and both defaulted to a literal 8192, which is the number CLAUDE.md
+     * §2.8 records as "the bug, not the guard": this repo's own prompt (system text plus ~46
+     * tool schemas) measures ~7.2k tokens, leaving a thinking model ~900 to work in. It spends
+     * them reasoning and is cut off mid-thought, producing a turn with no answer at all.
+     *
+     * Sharing the object also means the probe below refines BOTH.
+     */
+    const endpoint = endpointFromConfig(cfg, model);
+    // Fire-and-forget, exactly as `ai/context-window.ts` documents for session start: awaiting
+    // here would leave `api.session()` undefined when `activate()` returns (see above).
+    void refineContextWindow(endpoint);
+
     session = new ChatSession({
       llm:
         llmOverride ??
         createEndpointLlmClient({
-          endpoint: endpointFromConfig(cfg, model),
+          endpoint,
           // read lazily: `session` is assigned just below, and this is only ever called
           // mid-turn, long after that.
           getSignal: () => session?.currentSignal,
@@ -179,12 +195,7 @@ export function activate(context: vscode.ExtensionContext): PrometheusApi {
       // are two views of one posture, and leaving the mode unset let them disagree (the loop
       // honours the mode matrix's `deny` verdict, so an unset mode simply forfeits that check).
       // It cannot WIDEN anything — the matrix only ever denies.
-      tuning: vscodeTuning(
-        model,
-        authLevel,
-        authLevelToMode(authLevel),
-        resolveEffortTier(cfg),
-      ),
+      tuning: vscodeTuning(model, authLevel, authLevelToMode(authLevel), resolveEffortTier(cfg)),
       // The level as a NUMBER too, so the session can apply the whole ladder rather than the
       // single bit `tuning.yes` collapses it to — see `SessionDeps.authLevel`.
       authLevel,
@@ -199,7 +210,9 @@ export function activate(context: vscode.ExtensionContext): PrometheusApi {
        */
       insideWorkingSet: (p) => normalizeWorkspaceRelPath(p) !== null,
       // so the session can warn before the window it will be rejected at — see `SessionDeps`.
-      contextWindow: cfg.get<number>("contextWindow") ?? 8192,
+      // Read off the SHARED endpoint, not the setting a second time: two independent reads of
+      // the same config could disagree, and only this one is refined by the probe.
+      contextWindow: endpoint.contextWindow,
     });
 
     const key = `${folder.uri.fsPath}|${cfg.get<string>("baseUrl") ?? ""}|${model}|${llmEpoch}`;
@@ -273,9 +286,55 @@ function endpointFromConfig(cfg: vscode.WorkspaceConfiguration, model: string): 
     id: `vscode:${model}`,
     baseUrl,
     locality: local ? "local" : "cloud",
-    contextWindow: cfg.get<number>("contextWindow") ?? 8192,
+    // A POSITIVE setting is an explicit override and is honoured. Anything else (0, absent,
+    // nonsense) means "ask the server", and `refineContextWindow` does that — so the floor here
+    // is only what the first turn budgets against while the probe is in flight.
+    contextWindow: configuredContextWindow(cfg) ?? ai.DEFAULT_CONTEXT_WINDOW,
     supportsTools: true,
     model,
     ...(cfg.get<string>("apiKeyRef") ? { apiKeyRef: cfg.get<string>("apiKeyRef") as string } : {}),
   };
+}
+
+/** The user's explicit window, or undefined when they have left it on auto. */
+export function configuredContextWindow(cfg: vscode.WorkspaceConfiguration): number | undefined {
+  const raw = cfg.get<number>("contextWindow");
+  return typeof raw === "number" && Number.isFinite(raw) && raw > 0 ? Math.floor(raw) : undefined;
+}
+
+/**
+ * Replace the placeholder window with the one the server actually serves.
+ *
+ * This surface was the last one still ASSERTING a context window instead of measuring it. The
+ * CLI and the desktop both probe (`ai/context-window.ts`); the extension shipped a hardcoded
+ * 8192, which on a 262,144-window model under-states it by 32x — and under-stating is not the
+ * harmless direction. Every budget that scales with the window shrinks with it: the tool
+ * preamble drops tool descriptions, compaction fires on a conversation that had ample room, and
+ * the reply reserve leaves a thinking model no space to answer in.
+ *
+ * Never throws and never blocks: an unreachable runner, an unrecognised shape or an implausible
+ * number all leave the endpoint exactly as it was. An explicit user setting is not overridden —
+ * asking the server is the DEFAULT, not a correction of something they chose.
+ */
+export async function refineContextWindow(
+  endpoint: AiEndpoint,
+  probe: typeof ai.probeContextWindow = ai.probeContextWindow,
+  doFetch: typeof fetch = fetch,
+): Promise<void> {
+  try {
+    const res = await probe(
+      endpoint.baseUrl,
+      endpoint.model ?? endpoint.id,
+      doFetch as Parameters<typeof ai.probeContextWindow>[2],
+      ai.PROBE_TIMEOUT_MS,
+    );
+    // `source === "default"` means nothing answered — the probe is fail-soft and returns the
+    // floor rather than throwing, so it must not be mistaken for a measurement. And only ever
+    // GROW the window: a user who typed a deliberate smaller value keeps it.
+    if (res.source !== "default" && res.contextWindow > endpoint.contextWindow) {
+      endpoint.contextWindow = res.contextWindow;
+    }
+  } catch {
+    /* the configured floor stands; a probe failure must never cost a session */
+  }
 }

@@ -23,8 +23,11 @@ import {
   type MemorySnapshot,
   type RunnerStatus,
   localMemorySnapshot,
+  remoteMemorySnapshot,
   runnerCensus,
 } from "@prometheus/engine-bridge";
+
+import { loadLedger, remember } from "./footprint-store.js";
 
 /**
  * Memory held back on a REMOTE host.
@@ -34,6 +37,24 @@ import {
  * because an OS needs room whatever else it is doing.
  */
 export const REMOTE_HEADROOM_BYTES = 2 * 1024 * 1024 * 1024;
+
+/**
+ * How long a residency/inventory probe may take — and why it depends on WHERE.
+ *
+ * The repo's probe budgets were all calibrated against loopback, where a round trip is
+ * sub-millisecond: 900 ms in `ollama-autostart`, 1500 in `model-server`, 2000 in
+ * `runner-census`. Those numbers are fine for a socket on this machine and wrong for one on a
+ * LAN, and badly wrong through an ssh tunnel, where a handshake plus a WAN round trip can eat
+ * the whole budget before the runner has said anything.
+ *
+ * A timed-out census does not fail loudly. It returns "nothing is loaded there" — a confident,
+ * wrong answer that then feeds the admission decision. So the remote budget is several times
+ * the local one: a slow probe costs a pause, a false one costs a bad verdict.
+ */
+export const LOCAL_PROBE_TIMEOUT_MS = 1_500;
+export const REMOTE_PROBE_TIMEOUT_MS = 8_000;
+export const LOCAL_INVENTORY_TIMEOUT_MS = 2_500;
+export const REMOTE_INVENTORY_TIMEOUT_MS = 12_000;
 
 /**
  * Look up a declared remote host. Injected by the host so this module stays free of the
@@ -128,6 +149,19 @@ export async function admitEndpoint(
       deps.memory ??
       (async (): Promise<MemorySnapshot> => {
         if (!host) return localMemorySnapshot();
+        /**
+         * ASK THE MACHINE, when we can reach it.
+         *
+         * A declared `--ram` is believed forever: it cannot notice RAM being added, a GPU
+         * filling with someone else's job, or the box being rebooted into something smaller.
+         * An SSH probe reads that kernel's own numbers — the same metric `localMemorySnapshot`
+         * reads here — and on a discrete-GPU box it reads free VRAM, which is the constraint
+         * that actually decides whether a model loads.
+         */
+        if (declared?.ssh) {
+          const probed = await remoteMemorySnapshot(declared.ssh, { timeoutMs: 12_000 });
+          if (probed.ok) return probed.snapshot;
+        }
         if (!declared?.totalMemoryBytes) throw new Error("remote host size unknown");
         return {
           totalBytes: declared.totalMemoryBytes,
@@ -135,7 +169,7 @@ export async function admitEndpoint(
           availableBytes: declared.totalMemoryBytes,
           headroomBytes: REMOTE_HEADROOM_BYTES,
           host,
-          source: "os-freemem",
+          source: "declared",
         };
       });
     const cen =
@@ -154,20 +188,40 @@ export async function admitEndpoint(
                   },
                 ]),
           ],
-          { host: h, timeoutMs: 1500 },
+          // A remote host gets a budget that fits a network round trip; see the constants.
+          { host: h, timeoutMs: h ? REMOTE_PROBE_TIMEOUT_MS : LOCAL_PROBE_TIMEOUT_MS },
         ));
     [snapshot, census] = await Promise.all([mem(host), cen(baseUrl, host)]);
     const resident = census.flatMap((s) => s.models);
-    if (host && deps.memory === undefined) {
-      // The remote box's free memory is its declared total minus what the census says is
-      // resident. That is the best obtainable figure: no runner API reports free RAM.
+    if (host && deps.memory === undefined && snapshot.source === "declared") {
+      // Only the DECLARED figure needs this correction: it describes the whole machine and knows
+      // nothing about what is on it. A measured snapshot already reports what is free, and
+      // subtracting the resident models from it again would count them twice.
       const held = resident.reduce((n, m) => n + m.sizeBytes, 0);
       snapshot = { ...snapshot, availableBytes: Math.max(0, snapshot.totalBytes - held) };
     }
+
+    /**
+     * Learn from what is loaded right now, before deciding anything.
+     *
+     * `/api/ps` is the only source that reports a model's TOTAL resident bytes — weights, cache
+     * and the runner's own buffers together — which is precisely the term arithmetic cannot
+     * reach. Writing it down here means the next admission for this model, at any context, is
+     * anchored to a measurement instead of an allowance.
+     */
+    const ledger = rememberResident(resident, contextTokens, host);
+
     const inv =
       deps.inventory ??
       ((url: string, ctx: number) =>
-        ai.inventoryCandidates(url, ctx, { runner, resident, timeoutMs: 2500 }));
+        ai.inventoryCandidates(url, ctx, {
+          runner,
+          resident,
+          timeoutMs: host ? REMOTE_INVENTORY_TIMEOUT_MS : LOCAL_INVENTORY_TIMEOUT_MS,
+          observations: ledger,
+          ...(host ? { host } : {}),
+          ...(kvTypeFrom(ledger) ? { kvCacheType: kvTypeFrom(ledger) as ai.KvCacheType } : {}),
+        }));
     candidates = await inv(baseUrl, contextTokens);
   } catch {
     // Could not measure ⇒ do not stand in the way. See the doc comment.
@@ -199,14 +253,69 @@ export async function admitEndpoint(
   });
 
   if (decision.ok) {
-    // Silent on the happy path, except when a switch will evict something — that is a fact the
-    // user should not have to infer from a pause.
-    return {
-      allow: true,
-      lines: decision.evicting?.length
-        ? [`unloading ${decision.evicting.join(", ")} to make room for ${modelId}`]
-        : [],
-    };
+    // Silent on the happy path, except when a switch will evict something, or when the figure
+    // behind the decision was a range rather than a number — both are facts the user should not
+    // have to infer from a pause.
+    const lines: string[] = [];
+    if (decision.evicting?.length) {
+      lines.push(`unloading ${decision.evicting.join(", ")} to make room for ${modelId}`);
+    }
+    if (decision.uncertain) lines.push(decision.uncertain);
+    return { allow: true, lines };
   }
-  return { allow: false, lines: ai.renderRefusal(decision) };
+  // The renderer clamps this itself; passing the real terminal width just lets a wide window
+  // use more of itself than the 76-column default, and a narrow one stop short of its edge.
+  return { allow: false, lines: ai.renderRefusal(decision, { width: terminalWidth() }) };
+}
+
+/** Columns available for a refusal block, leaving a small gutter. `undefined` when not a TTY. */
+function terminalWidth(): number | undefined {
+  const cols = process.stdout.columns;
+  return typeof cols === "number" && cols > 0 ? cols - 4 : undefined;
+}
+
+/**
+ * Fold what is resident right now into the ledger, and return it.
+ *
+ * Never throws: a ledger is an optimisation, and failing to write one must not stop a model from
+ * loading. Returns the in-memory list either way so the caller's decision uses the fresh reading
+ * even if the disk write failed.
+ */
+export function rememberResident(
+  resident: readonly { id: string; sizeBytes: number; contextTokens?: number }[],
+  contextTokens: number,
+  host: string | undefined,
+): ai.FootprintObservation[] {
+  let ledger = loadLedger();
+  for (const m of resident) {
+    if (!(m.sizeBytes > 0)) continue;
+    try {
+      ledger = remember({
+        model: m.id,
+        // `/api/ps` reports the context the model was ACTUALLY loaded with, which may differ
+        // from the one being asked about. Recording the request's number against the
+        // measurement would file a true reading under the wrong context.
+        contextTokens: m.contextTokens ?? contextTokens,
+        totalBytes: m.sizeBytes,
+        observedAt: new Date().toISOString(),
+        via: "api-ps",
+        ...(host ? { host } : {}),
+      });
+    } catch {
+      /* a read-only home should never stop a model from loading */
+    }
+  }
+  return ledger;
+}
+
+/**
+ * The KV element type the runner is actually configured with.
+ *
+ * Not available from any HTTP API — but ollama's log records it with every cache it allocates
+ * (`K (q8_0)`), and the harvester keeps it. Reading it from the most recent observation is
+ * therefore free and beats assuming q8_0, which would mis-price an f16 cache by 2×.
+ */
+export function kvTypeFrom(ledger: readonly ai.FootprintObservation[]): ai.KvCacheType | undefined {
+  for (const o of ledger) if (o.kvType) return o.kvType;
+  return undefined;
 }

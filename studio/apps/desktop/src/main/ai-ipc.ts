@@ -1096,6 +1096,58 @@ export async function runAiStream(
         }
         if (!done) pendingRead = reader.read();
       }
+
+      /**
+       * Drain whatever the last read left behind.
+       *
+       * `parseSseChunk` only emits a frame once it has seen the `\n` that ends it, so a server
+       * that closes its body without a final newline leaves the last frame sitting in `buf`,
+       * unparsed and silently discarded. What is lost is the tail of the answer, or the tail of
+       * a tool call's arguments — and nothing reports it, because the stream ended cleanly.
+       *
+       * `ai/client.ts` and `session/agent-runtime.ts` have both done this for a while; this
+       * process was the one transport that did not. Loopback rarely produces that shape, which
+       * is why it survived — a REMOTE endpoint, over a LAN or an ssh tunnel, fragments
+       * differently and can end the body exactly on a frame boundary.
+       *
+       * Appending the newline rather than special-casing the parser keeps one code path: the
+       * frame drains through exactly the same `wire.parse` the loop above uses.
+       */
+      if (!streamError && buf.trim() !== "") {
+        const { payloads } = parseSseChunk(`${buf}\n`);
+        buf = "";
+        for (const payload of payloads) {
+          const ev = wire.parse(payload);
+          if (ev.error) {
+            streamError = ev.error;
+            break;
+          }
+          if (ev.done) break;
+          if (ev.stopReason) stopReason = ev.stopReason;
+          if (ev.usage) usage = ai.mergeWireUsage(usage, ev.usage);
+          const thinking = reasoningFrom(payload);
+          if (thinking) {
+            sawReasoning = true;
+            emit(sender, { runId: req.runId, kind: "reasoning", text: thinking });
+          }
+          if (ev.delta) {
+            firstTokenAt ??= Date.now();
+            const split = reasoningSplitter.push(ev.delta);
+            if (split.reasoning) {
+              sawReasoning = true;
+              emit(sender, { runId: req.runId, kind: "reasoning", text: split.reasoning });
+            }
+            if (split.text) {
+              text += split.text;
+              emit(sender, { runId: req.runId, kind: "text", text: split.text });
+            }
+          }
+          for (const tc of ev.toolCalls ?? (ev.toolCall ? [ev.toolCall] : [])) {
+            accumulateCall(calls, tc);
+          }
+        }
+      }
+
       // An unterminated `<think>` flushes as REASONING, never into `text`: a model cut off
       // mid-thought was still thinking.
       const tail = reasoningSplitter.end();

@@ -33,7 +33,18 @@
  * the host it describes, and `session/model-admission-host.ts` derives that host from the
  * endpoint's own URL. So a model served from a declared remote host is weighed against THAT
  * machine's memory and THAT machine's resident servers, with no local RAM involved.
+ *
+ * ── AND MEASURED, NOT DECLARED, WHEN SSH IS AVAILABLE ───────────────────────────────────────
+ *
+ * `totalMemoryBytes` was the first answer to "how big is that box?", and it is a weak one: the
+ * user types a number once and it is thereafter believed forever, including after they add RAM,
+ * after someone else fills the GPU, and after the box is rebooted into a different machine
+ * entirely. `ssh` replaces it with a measurement — `ai/remote-probe.ts` reads the remote
+ * kernel's own figures, the same ones the local probe reads, plus the VRAM that is the real
+ * constraint on a discrete-GPU machine. The declaration stays as the fallback for a host that
+ * has no SSH access.
  */
+import type { RemoteHardware, SshTarget } from "@prometheus/engine-bridge";
 
 /** A model server the user has declared to be their own. */
 export interface RemoteHost {
@@ -49,8 +60,33 @@ export interface RemoteHost {
    * A model runner's HTTP API reports what is RESIDENT, never how much the box has — so without
    * this the admission check knows what is loaded but not what is left. Declaring it turns a
    * remote fit check from "cannot say" into the same arithmetic the local one uses.
+   *
+   * Superseded by `hardware` once an SSH probe has run: a measurement beats a declaration, and
+   * unlike a declaration it notices when someone adds a stick of RAM or fills the GPU.
    */
   totalMemoryBytes?: number;
+  /**
+   * How to reach the machine itself, as opposed to its model server.
+   *
+   * This is what turns a remote host from an opaque HTTP endpoint into a machine Prometheus can
+   * actually reason about: RAM, free RAM, GPUs, VRAM, disk, whether a runner is even installed.
+   * Without it the fit check runs on a number the user typed once; with it, on the same kernel
+   * metrics the local check uses.
+   */
+  ssh?: SshTarget;
+  /**
+   * Reach the runner through an SSH tunnel rather than over the network.
+   *
+   * When set, the runner's port on the REMOTE machine is forwarded to loopback here, so the
+   * remote runner never has to listen on anything but its own 127.0.0.1. Prompts and replies
+   * travel inside SSH. `remotePort` is the port the runner listens on over there — the local
+   * port is chosen at connect time and never needs configuring.
+   */
+  tunnel?: { remotePort: number };
+  /** the last hardware probe, cached so a picker can show a machine without waiting on SSH. */
+  hardware?: RemoteHardware;
+  /** when that probe ran, ISO. Shown, because a stale reading should look stale. */
+  hardwareAt?: string;
 }
 
 /**
@@ -158,20 +194,32 @@ export function warnings(entry: RemoteHost): string[] {
     out.push(`${entry.baseUrl} is not a valid URL`);
     return out;
   }
-  if (url.protocol === "http:") {
+  /**
+   * A tunnelled host is not exposed and not in the clear, so neither warning applies to it.
+   *
+   * This is the case worth steering people towards: the traffic is inside SSH, and the remote
+   * runner can stay bound to its own loopback instead of listening on the network with no
+   * authentication at all — which is what `http://gpu-box.lan:11434` requires.
+   */
+  const tunnelled = entry.tunnel !== undefined && entry.ssh !== undefined;
+  if (url.protocol === "http:" && !tunnelled) {
     out.push(
       "prompts and replies will cross the network in plain text — anyone on the path can read them",
     );
+    if (entry.ssh) {
+      out.push("  (--tunnel would carry them inside ssh instead, and needs no open port there)");
+    }
   }
-  if (!isPrivateAddress(entry.host) && url.protocol === "http:") {
+  if (!isPrivateAddress(entry.host) && url.protocol === "http:" && !tunnelled) {
     out.push(
       `${entry.host} is not a private address, so this traffic may leave your network entirely`,
     );
   }
-  if (entry.totalMemoryBytes === undefined) {
+  if (entry.totalMemoryBytes === undefined && !entry.ssh) {
     out.push(
-      "no memory size declared for this host — Prometheus can see what is loaded there but not how much room is left, so it cannot refuse a model that will not fit",
+      "no memory size declared and no ssh access — Prometheus can see what is loaded there but not how much room is left, so it cannot refuse a model that will not fit",
     );
+    out.push("  (--ssh <user@host> measures it instead of taking your word for it)");
   }
   return out;
 }

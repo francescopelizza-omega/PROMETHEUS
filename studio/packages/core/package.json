@@ -11,6 +11,10 @@
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
     },
+    "./updates-live": {
+      "types": "./dist/updates-live/index.d.ts",
+      "import": "./dist/updates-live/index.js"
+    },
     "./token-economy": {
       "types": "./dist/token-economy/index.d.ts",
       "import": "./dist/token-economy/index.js"

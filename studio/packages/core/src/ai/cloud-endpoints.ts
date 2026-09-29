@@ -86,6 +86,22 @@ export function endpointForProvider(p: ApiProvider, ref: string, model?: string)
      * times smaller than the model's real one.
      */
     contextWindow: p.contextWindow ?? DEFAULT_CONTEXT_WINDOW,
+    /**
+     * And the fix above was only two-thirds done: 16 of the 18 registry rows declare a window,
+     * but `nexos` and `abacus` do not, so both still landed on the 8192 floor and both are
+     * routed gateways onto frontier models. `preflightContext` then refused an ordinary prompt
+     * at roughly 4% of the real window.
+     *
+     * The answer is NOT to invent numbers for them — both are `confidence: "verify"`, their
+     * figures are unconfirmed by design, and a guess here would be indistinguishable from a
+     * measurement later. It is to stop the floor MASQUERADING as a documented window: a row
+     * with no declared window is unknown, and `preflightContext` already refuses to refuse on
+     * unknown. The 8192 above stays as the budgeting hint it always was.
+     *
+     * This also closes the class rather than the instance — the next row added without a
+     * `contextWindow` degrades to "unknown" instead of silently to 8192.
+     */
+    contextWindowMeasured: p.contextWindow !== undefined,
     // All three wire formats carry `tools` natively now — see `ai/wire.ts`.
     supportsTools: true,
     ...(chosen ? { model: chosen } : {}),

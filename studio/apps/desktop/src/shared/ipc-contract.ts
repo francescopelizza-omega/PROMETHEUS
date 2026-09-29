@@ -409,6 +409,22 @@ export const IPC = {
   // ── the ONE saved thinking-effort tier, shared with the CLI (same store, same file) ──
   effortGet: "effort:get",
   effortSet: "effort:set",
+  /**
+   * The third-party update report: vendor CLIs, package managers, local models, Prometheus
+   * itself, and the install CONFLICTS between them.
+   *
+   * Studio had no update surface at all beyond Electron's own auto-updater, so a Studio-only
+   * user could never learn that their `claude`, `codex`, `ollama` or models were out of date —
+   * and never saw the conflicts that make an obvious `brew upgrade` a no-op.
+   */
+  updatesCheck: "updates:check",
+  /**
+   * The model catalogue — HuggingFace-backed, filtered to what this machine can run.
+   *
+   * Separate from `updates:check` because it is a SEARCH: the renderer supplies a query string,
+   * and the result depends on it. `updates:check` takes one boolean and describes the machine.
+   */
+  catalogSearch: "model-catalog:search",
   // ── model health (shared with the CLI's @prometheus/core ai/model-health) ──
   modelHealthList: "modelHealth:list",
   modelHealthRecord: "modelHealth:record",
@@ -1783,6 +1799,28 @@ export interface PrometheusApi {
 
   /** The ONE saved thinking-effort tier, likewise shared with the CLI. */
   effort: EffortPrefApi;
+  /**
+   * The THIRD-PARTY update report — vendor CLIs, package managers, local models, Prometheus
+   * itself, and the install conflicts between them.
+   *
+   * Deliberately NOT called `updates`: that name is already taken by `UpdatesApi`, which drives
+   * electron-updater and updates Studio's own binary. The two are unrelated, and collapsing them
+   * would put "quit and install Studio" next to "brew upgrade ripgrep".
+   *
+   * `force: true` skips the 6-hour throttle — what a "Check now" button means. That boolean is
+   * the ONLY thing the renderer supplies; every command, URL and argv in the result is built in
+   * the main process from core's own frozen tables.
+   */
+  toolUpdates: { check(force?: boolean): Promise<UpdatesReportResult> };
+  /**
+   * Browse installable MODELS. The query is the ONLY thing the renderer supplies; the source,
+   * the URL and the fit budget are all decided in main.
+   *
+   * Not `catalog`: that name already belongs to `CatalogApi`, the /invoke TOOL catalogue. Two
+   * unrelated catalogues under one name is the same trap `updates` vs `toolUpdates` already
+   * avoided once in this file.
+   */
+  modelCatalog: { search(query: string): Promise<CatalogSearchResult> };
 
   /** The "@"-path fuzzy completion feature (shared logic with the CLI). */
   pathCompletion: PathCompletionApi;
@@ -2760,6 +2798,120 @@ export interface AuthLevelResult {
  * default rather than being handed one. The tier here is always the REQUESTED one — what a
  * given model does with it is resolved per request and never stored.
  */
+/**
+ * One tool, as the renderer needs it.
+ *
+ * A FLATTENED projection of core's `ToolUpdateStatus`, not the type itself: the contextBridge
+ * carries structured-clone data, and shipping core's shape across would couple the sandboxed
+ * renderer to a module it must never import.
+ */
+export interface UpdateToolView {
+  id: string;
+  label: string;
+  role: string;
+  installed: boolean;
+  /** single | duplicate | shadowed | ambiguous | absent. */
+  state: string;
+  current: string | null;
+  latest: string | null;
+  /** `null` = could not check. Distinct from `false` = nothing newer. */
+  updateAvailable: boolean | null;
+  source?: string;
+  /** copyable commands that target the copy on PATH. */
+  offer: { command: string; note?: string }[];
+  /** commands that exist but act on a DIFFERENT copy, with the reason. */
+  withheld: { command: string; reason: string }[];
+  /** every install found, PATH order; `copies[0]` is what runs. */
+  copies: { path: string; realPath: string; owner: string; version?: string }[];
+  note?: string;
+}
+
+/** A package one of the machine's managers reports as upgradable. */
+export interface UpdatePackageView {
+  manager: string;
+  managerLabel: string;
+  name: string;
+  installed?: string;
+  available?: string;
+  pinned?: boolean;
+  /** the exact command for THIS package, with the manager's own flags. */
+  command: string | null;
+}
+
+/** Where a manager's offer and the machine's reality disagree. */
+export interface UpdateConflictView {
+  kind: string;
+  subject: string;
+  summary: string;
+  consequence: string;
+  remedy?: string;
+  /** a command that looks right and is not — named so the user does not find it elsewhere. */
+  avoid?: string;
+  severity: "high" | "medium" | "low";
+}
+
+/** One catalogue row, flattened for the sandboxed renderer. */
+export interface CatalogRowView {
+  id: string;
+  name: string;
+  source: string;
+  summary: string;
+  /** the download size, or null when the source publishes none — NEVER 0 for unknown. */
+  sizeBytes: number | null;
+  parameters?: string;
+  contextTokens?: number;
+  license?: string;
+  downloads?: number;
+  installed: boolean;
+  /** fits | tight | too-big | unknown — computed in MAIN against the real memory probe. */
+  fit: string;
+  /** why it cannot run here. Set only when `fit` is "too-big". */
+  blocked?: string;
+  /** the exact `ollama pull` line, or null when there is no automatic route. */
+  command: string | null;
+  /** the tag to hand `/updates pull`. */
+  tag: string;
+  /** pre-formatted detail lines for the row's expanded view. */
+  body: string[];
+}
+
+export interface CatalogSearchResult {
+  ok: boolean;
+  /** "" on success. NEVER an empty list passed off as "nothing matched". */
+  error: string;
+  rows: CatalogRowView[];
+  /** what the machine can actually offer a model, after headroom. */
+  usableBytes: number;
+  /** HuggingFace's remaining request budget, when it said. */
+  rateRemaining?: number;
+}
+
+export interface UpdatesReportResult {
+  ok: boolean;
+  error?: string;
+  /** ISO timestamp of the check that produced this. */
+  checkedAt?: string;
+  /** true when this came from the ≤6h cache rather than a fresh sweep. */
+  fromCache?: boolean;
+  conflicts: UpdateConflictView[];
+  tools: UpdateToolView[];
+  packages: UpdatePackageView[];
+  /** managers that could not be asked, or that failed — never folded into "up to date". */
+  unavailableManagers: { manager: string; label: string; reason: string }[];
+  models: { name: string; changed: boolean; newer: boolean; command: string; blockedBy?: string }[];
+  self: {
+    version: string;
+    engine?: string;
+    latest?: string;
+    /** `null` = the lookup failed. */
+    updateAvailable: boolean | null;
+    command: string;
+    steps: string[];
+  };
+  /** the one-line summary, identical to the terminal's startup nudge. */
+  summary: string;
+}
+
 export interface EffortPrefResult {
   ok: boolean;
   tier: string | null;

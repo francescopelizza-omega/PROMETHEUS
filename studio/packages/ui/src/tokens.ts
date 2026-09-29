@@ -18,11 +18,11 @@
  * No raw hex is allowed anywhere in app code (08 §6) — it lives here only.
  */
 
+import { FILL_ROLES, onFill } from "./tokens/contrast.js";
 // The 20 famous community schemes + the operator's "Pelly" scheme (pure data; the
 // module type-imports our shapes, so this adds no runtime cycle / no React dep).
 import { FAMOUS_SCHEMES } from "./tokens/famous-schemes.js";
-import { FILL_ROLES, onFill } from "./tokens/contrast.js";
-import { derivePalette } from "./tokens/scheme-derive.js";
+import { autonomyFrom, derivePalette } from "./tokens/scheme-derive.js";
 
 /* ────────────────────────────────────────────────────────────────────────────
  * Verdict / severity model mirror (structural copy of C3; do not drift).
@@ -221,6 +221,26 @@ export interface SemanticColors {
   /** danger TEXT on dark — a lighter tint than `danger` so copy stays legible. */
   "danger-fg": string;
   info: string;
+  /**
+   * FULL AUTONOMY — the top of the A0–A7 authorisation ladder (A6 trusted, A7 runall).
+   *
+   * Its own token because the ladder used to end in `danger`, which made an escalating
+   * SETTING read as an escalating FAULT. The scale is literally spelled in the severity
+   * roles — muted → accent → warn → danger — and the top rung is the mode an operator
+   * deliberately selects to get work finished unprompted. Painting it red both alarms them
+   * for no reason and spends the colour that `gate:off` genuinely needs.
+   *
+   * The rule, not the hex: **the accent, pushed further from the ground.** Same family, so
+   * it still reads as "Prometheus"; further out, so it reads as turned up. That direction
+   * FLIPS between themes and it must — on dark the accent is lifted toward white (ice), on
+   * light it is deepened toward black, because "away from the background" is the invariant
+   * and "lighter" is only what that means on a dark ground. A single hex here would be
+   * invisible in one of the two.
+   *
+   * Never the sole signal: every surface that paints it also spells the level in words
+   * (`A7 run all`, `auth:7·runall`, `☢ YOLO`).
+   */
+  autonomy: string;
   selection: string;
   /* ── the LABEL colour for each role used as a SOLID FILL (`on-<role>`) ──────────
    *
@@ -299,7 +319,11 @@ export const darkSemantic: SemanticColors = {
   danger: "#ff5566",
   "danger-fg": "#ff8093",
   info: "#35c7ee",
-  selection: "#16325a",  /* label colours for the solid role fills — see `onFill`; pinned by tokens.test.ts. */
+  // ice — 12.4:1 on the worst dark ground, 1.53x the accent's luminance. The same colour
+  // the TUI paints its composer frame at A6/A7 (`palette.ts` role `autonomy`).
+  autonomy: cyan[200],
+  selection:
+    "#16325a" /* label colours for the solid role fills — see `onFill`; pinned by tokens.test.ts. */,
   "on-brand": "#070d18", // on #a855f7 = 4.92:1
   "on-accent": "#070d18", // on #35c7ee = 9.78:1
   "on-ok": "#070d18", // on #8be04a = 11.91:1
@@ -351,7 +375,12 @@ export const lightSemantic: SemanticColors = {
   danger: red[600],
   "danger-fg": red[700],
   info: cyan[600],
-  selection: cyan[100],  /* label colours for the solid role fills — see `onFill`; pinned by tokens.test.ts. */
+  // DEEPER than the accent, not lighter: on a near-white ground cyan[200] measures 1.14:1
+  // and would vanish. cyan[800] is 7.44:1 and 0.29x the accent's luminance — the same
+  // "further from the ground" step, pointing the other way because the ground moved.
+  autonomy: cyan[800],
+  selection:
+    cyan[100] /* label colours for the solid role fills — see `onFill`; pinned by tokens.test.ts. */,
   "on-brand": "#f7f8fa", // on #8b3ad6 = 5.38:1
   "on-accent": "#000000", // on #0894ad = 5.85:1
   "on-ok": "#000000", // on #179c4a = 5.89:1
@@ -394,7 +423,10 @@ export const highContrastSemantic: SemanticColors = {
   danger: red[300],
   "danger-fg": red[200],
   info: cyan[300],
-  selection: cyan[800],  /* label colours for the solid role fills — see `onFill`; pinned by tokens.test.ts. */
+  // the HC accent is already cyan[300]; autonomy takes the next step out at 16.9:1.
+  autonomy: cyan[100],
+  selection:
+    cyan[800] /* label colours for the solid role fills — see `onFill`; pinned by tokens.test.ts. */,
   "on-brand": "#000000", // on #c08cff = 8.44:1
   "on-accent": "#000000", // on #5cdff5 = 13.33:1
   "on-ok": "#000000", // on #5fd98c = 11.79:1
@@ -628,6 +660,25 @@ export function resolveScheme(scheme: ColorScheme): SemanticColors {
     if (scheme.tokens[key] !== undefined) continue;
     if (scheme.tokens[role] === undefined && scheme.tokens["bg-app"] === undefined) continue;
     merged[key] = onFill(merged[role], merged["bg-app"]);
+  }
+  /**
+   * `autonomy` is a FUNCTION of `accent`, exactly as `on-<role>` is a function of its fill — so
+   * it needs the same protection against a partial palette.
+   *
+   * A scheme that moves `accent` and says nothing about `autonomy` would otherwise inherit the
+   * BASE theme's ice, measured against a different accent. Four built-ins do precisely that:
+   * dracula (#8be9fd), synthwave-84 (#36f9f6), shades-of-purple (#9effff) and pelly (#3cf5ee)
+   * all pick a bright cyan, and all landed within 1.05:1 of the inherited ice — an A7 pill
+   * indistinguishable from an A2 one, in four shipped themes.
+   *
+   * An EXPLICIT `autonomy` is left alone, on the same principle as the `on-*` pass above.
+   */
+  if (scheme.tokens.autonomy === undefined && scheme.tokens.accent !== undefined) {
+    merged.autonomy = autonomyFrom(
+      merged.accent,
+      [merged["bg-app"], merged["bg-surface"], merged["bg-surface-2"], merged["bg-inset"]],
+      scheme.base,
+    );
   }
   return merged;
 }

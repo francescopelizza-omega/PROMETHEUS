@@ -127,7 +127,11 @@ test("cli backend → a saturated machine refuses the launch, never spawns", asy
     // with `[backend error]`. The old "refused — …" wording matched nothing.
     /opencode: temporarily unavailable — RAM at 96%/,
   );
-  assert.equal(spawned, false, "must never spawn a fresh agent-CLI process under critical pressure");
+  assert.equal(
+    spawned,
+    false,
+    "must never spawn a fresh agent-CLI process under critical pressure",
+  );
   assert.equal(samples, 4, "the ceiling is re-sampled (1 + 3 waits) before the launch is refused");
 });
 
@@ -150,7 +154,9 @@ test("cli backend → a ceiling that CLEARS lets the launch through instead of l
       return capture("ok", "agent ran");
     },
   });
-  const out = await invoke(req({ name: "a", role: "r", backend: { kind: "cli", service: "opencode" } }));
+  const out = await invoke(
+    req({ name: "a", role: "r", backend: { kind: "cli", service: "opencode" } }),
+  );
   assert.equal(spawned, true, "the second sample was clear — the agent must run");
   assert.equal(samples, 2);
   assert.match(out.text, /agent ran/);

@@ -168,3 +168,58 @@ test("paintDuration: ansi256 downsamples rather than emitting a truecolor triple
   const out = paintDuration("x", 6 * HR, "ansi256");
   assert.match(out, /^\x1b\[1;38;5;\d+m/);
 });
+
+/* ── the autonomy colour ────────────────────────────────────────────────────────────────────
+ *
+ * A6/A7 used to paint `danger`. The replacement sits only 8° of hue from the operator accent —
+ * `accent` is PINNED to #16b3f5 by `ACCENT_ROLES` and does NOT use its ramp entry, which is the
+ * fact that decides whether this colour works. It cannot separate by hue, so it has to separate
+ * by lightness and by weight, and both of those are one-line changes away from being lost.
+ */
+
+/** The channels of a role's truecolor paint. */
+const rgbOf = (role: Parameters<typeof paint>[1]): number[] => {
+  const m = /38;2;(\d+);(\d+);(\d+)/.exec(paint("x", role, "truecolor"));
+  assert.ok(m, `${role} did not emit a truecolor triple`);
+  return [Number(m[1]), Number(m[2]), Number(m[3])];
+};
+/** WCAG relative luminance, so "lighter" is measured rather than eyeballed. */
+const relLum = (c: number[]): number => {
+  const f = (v: number): number => {
+    const s = v / 255;
+    return s <= 0.03928 ? s / 12.92 : ((s + 0.055) / 1.055) ** 2.4;
+  };
+  return 0.2126 * f(c[0] ?? 0) + 0.7152 * f(c[1] ?? 0) + 0.0722 * f(c[2] ?? 0);
+};
+
+test("autonomy is ICE (cyan.200), and is NOT the danger red it replaced", () => {
+  assert.deepEqual(rgbOf("autonomy"), [143, 236, 255], "cyan.200 #8fecff");
+  assert.deepEqual(rgbOf("danger"), [242, 67, 67], "danger stays red — gate:off still needs it");
+  assert.notDeepEqual(rgbOf("autonomy"), rgbOf("danger"));
+});
+
+test("autonomy is clearly LIGHTER than the accent beside it — the only axis it has", () => {
+  // Same family, 8° apart in hue: if the lightness gap ever closes, A6/A7 becomes
+  // indistinguishable from the default border and from every other light-blue chip.
+  const ice = relLum(rgbOf("autonomy"));
+  const acc = relLum(rgbOf("accent"));
+  assert.ok(
+    ice > acc * 1.8,
+    `ice (${ice.toFixed(3)}) must clearly outshine accent (${acc.toFixed(3)})`,
+  );
+});
+
+test("autonomy is NOT pinned to the operator accent, and is NOT bold", () => {
+  // `ACCENT_ROLES` rewrites accent/info/question/fleetOurs to #16b3f5 BOLD. If `autonomy` were
+  // ever added to that set it would silently collapse onto the accent — same hex, same weight —
+  // and the whole distinction would vanish with no test failing anywhere else.
+  assert.notDeepEqual(rgbOf("autonomy"), rgbOf("accent"), "it must keep its own ramp hex");
+  assert.match(paint("x", "accent", "truecolor"), /^\x1b\[1;/, "accent is always bold");
+  assert.doesNotMatch(paint("x", "autonomy", "truecolor"), /^\x1b\[1;/, "autonomy is not bold");
+});
+
+test("on a 16-colour terminal the two cyans still differ", () => {
+  // The ramp hex is gone at this depth, so the lightness separation has to survive as
+  // brightCyan (96) vs cyan (36). Collapsing both onto "cyan" would erase the mode.
+  assert.notEqual(paint("x", "autonomy", "ansi16"), paint("x", "accent", "ansi16"));
+});

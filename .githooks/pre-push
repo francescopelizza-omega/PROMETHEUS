@@ -1,0 +1,60 @@
+#!/bin/sh
+# .githooks/pre-push — the last gate before the irreversible act.
+#
+# Enable in a fresh clone with:   git config core.hooksPath .githooks
+#
+# WHY PRE-PUSH AND NOT PRE-COMMIT. `pre-commit` states its own constraint and it is a good
+# one: "this reads files and spawns nothing. Do not add a test or typecheck step here",
+# because this machine has been driven to ~60 MB free RAM by fan-out (CLAUDE.md §2). A full
+# gitleaks pass over ~22 MB of history at every commit would break that rule for no benefit —
+# a commit is local and revocable.
+#
+# A PUSH is neither. Once history reaches a public remote the secret is disclosed, and no
+# amount of rewriting un-discloses it. So the heavy scans run exactly once, here, against the
+# act that actually publishes.
+#
+# WHAT THIS CATCHES, and why it is two scanners rather than one:
+#
+#   secret-scan.sh         credentials — things that GRANT ACCESS. Whole history, all refs.
+#   check-personal-data.sh identity — home paths, hostname, personal email. Things that
+#                          identify a PERSON rather than grant access, which no secret
+#                          scanner flags. Its own header says "which is why this runs in CI",
+#                          and until 2026-09-26 it ran nowhere at all. It had one live
+#                          finding at the time: a tracked working note carrying
+#                          /Users/<name>/... on line 4.
+#
+# FAIL CLOSED. `secret-scan.sh` exits 127 with an install hint when gitleaks is missing, and
+# that is treated as a failure, not a pass — this repo's own pre-commit header explains why:
+# "A hook that can silently pass is worse than no hook, because it is believed."
+#
+# The deliberate escape is git's own, and it is loud in the reflog:  git push --no-verify
+
+set -e
+
+ROOT=$(git rev-parse --show-toplevel)
+cd "$ROOT"
+
+echo "pre-push: scanning for credentials and personal data before publishing…" >&2
+
+if ! sh scripts/secret-scan.sh; then
+  echo >&2
+  echo "pre-push: REFUSING to push — the secret scan did not pass (see above)." >&2
+  echo "  A finding that is genuinely a test fixture belongs in .gitleaks.toml, allowlisted" >&2
+  echo "  BY VALUE — never by path. That file explains why: an allowlisted path is a blind" >&2
+  echo "  spot, and a blind spot in the repo of a security tool is the one place it cannot" >&2
+  echo "  afford one." >&2
+  echo "  Deliberate override:  git push --no-verify" >&2
+  exit 1
+fi
+
+if ! bash scripts/check-personal-data.sh; then
+  echo >&2
+  echo "pre-push: REFUSING to push — personal data is present in tracked files (see above)." >&2
+  echo "  A public repo is not revocable. If the hit is an internal working note, it should" >&2
+  echo "  not be tracked at all: name it to match the patterns in .gitignore (-PLAN/-REPORT/" >&2
+  echo "  -AUDIT/-NOTES, or FIXES-*), then 'git rm --cached' it." >&2
+  echo "  Deliberate override:  git push --no-verify" >&2
+  exit 1
+fi
+
+echo "pre-push: clean." >&2

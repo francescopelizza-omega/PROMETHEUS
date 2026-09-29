@@ -23,6 +23,9 @@
 import { readFileSync } from "node:fs";
 import { freemem, totalmem } from "node:os";
 
+import { type RemoteHardware, usableMemoryBytes } from "./remote-probe.js";
+import type { SshTarget } from "./ssh-target.js";
+import { probeRemoteHardware } from "./ssh.js";
 import { probeSystemCommand } from "./system-probe.js";
 
 /** Reserved for the OS, the compositor, the editor and Prometheus itself. */
@@ -37,7 +40,7 @@ export interface MemorySnapshot {
   /** which machine this describes. */
   host?: string;
   /** how `availableBytes` was obtained — callers SHOW this. */
-  source: "kernel" | "meminfo" | "os-freemem";
+  source: "kernel" | "meminfo" | "os-freemem" | "remote-ssh" | "declared";
 }
 
 /** Parse `sysctl -n a b` output into numbers, in order. */
@@ -109,3 +112,79 @@ export function underMemoryPressure(snap: MemorySnapshot): boolean {
   if (snap.pressureLevel !== undefined && snap.pressureLevel >= 2) return true;
   return snap.availableBytes / Math.max(1, snap.totalBytes) <= 0.15;
 }
+
+/**
+ * The SAME question, asked of a machine across the network.
+ *
+ * This is the point of the SSH work. Before it, a remote host's budget was a number the user
+ * typed into `/remote add … --ram 128` and Prometheus believed forever — so it could not notice
+ * RAM being added, a GPU filling up, another user's job running, or the box being rebooted into
+ * something else entirely. `probeRemoteHardware` reads the remote KERNEL, which is the same
+ * metric `localMemorySnapshot` reads here, so the two machines are finally judged alike.
+ *
+ * On a discrete-GPU box the budget is free VRAM, not system RAM — a 24 GB card cannot hold a
+ * 30 GB model however much DDR the host has, and calling that "it fits" would be a lie told in
+ * the user's favour. `usableMemoryBytes` decides which pool applies; `basis` says which it chose
+ * so a surface can show the reason rather than an unexplained number.
+ */
+export async function remoteMemorySnapshot(
+  target: SshTarget,
+  opts: { headroomBytes?: number; timeoutMs?: number } = {},
+): Promise<
+  | { ok: true; snapshot: MemorySnapshot; hardware: RemoteHardware; basis: "vram" | "system" }
+  | { ok: false; error: string }
+> {
+  const probed = await probeRemoteHardware(target, {
+    ...(opts.timeoutMs !== undefined ? { timeoutMs: opts.timeoutMs } : {}),
+  });
+  if (!probed.ok) return { ok: false, error: probed.error };
+  const hw = probed.hardware;
+  const { bytes, basis } = usableMemoryBytes(hw);
+  if (basis === "unknown" || bytes <= 0) {
+    return { ok: false, error: `${target.host} answered, but reported no usable memory figure` };
+  }
+  /**
+   * A GPU box needs less headroom than a laptop.
+   *
+   * The local reserve (6 GiB) exists because this machine is also running a compositor, an
+   * editor and a browser, and on Apple Silicon the compositor starves before jetsam intervenes.
+   * A headless box running a model server and sshd has no compositor to starve. And when the
+   * budget is VRAM the reserve is smaller again: nothing else on that card is competing except
+   * the display, if there even is one.
+   */
+  const headroomBytes =
+    opts.headroomBytes ?? (basis === "vram" ? VRAM_HEADROOM_BYTES : REMOTE_HEADROOM_BYTES);
+  return {
+    ok: true,
+    hardware: hw,
+    basis,
+    snapshot: {
+      totalBytes:
+        basis === "vram"
+          ? hw.gpus.reduce((n, g) => n + (g.totalBytes ?? 0), 0) || bytes
+          : (hw.memTotalBytes ?? bytes),
+      availableBytes: bytes,
+      headroomBytes,
+      ...(hw.memPressureLevel !== undefined ? { pressureLevel: hw.memPressureLevel } : {}),
+      host: target.host,
+      source: "remote-ssh",
+    },
+  };
+}
+
+/**
+ * Memory held back on a remote machine that is NOT this one.
+ *
+ * Smaller than the local reserve: a box serving models is not also drawing the user's screen.
+ * Still non-zero, because an OS, sshd and the page cache need room whatever else is running.
+ */
+export const REMOTE_HEADROOM_BYTES = 2 * 1024 * 1024 * 1024;
+
+/**
+ * Held back on a GPU.
+ *
+ * Smaller still — a card's memory has no OS living in it. It is not zero because the driver,
+ * the display (if the card drives one) and the runner's own workspace all take a slice, and a
+ * VRAM allocation that just misses does not degrade: it fails the load outright.
+ */
+export const VRAM_HEADROOM_BYTES = 1024 * 1024 * 1024;

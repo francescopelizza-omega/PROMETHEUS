@@ -56,6 +56,9 @@ const MAP = {
     "host",
     "index.ts",
   ),
+  // The update checker's IO half — moved out of apps/cli so the desktop main process could
+  // reach it too. Main-process/CLI only: it spawns package managers and walks the filesystem.
+  "@prometheus/core/updates-live": resolvePath(PKG_ROOT, "core", "src", "updates-live", "index.ts"),
   "@prometheus/core/agent-system": resolvePath(
     PKG_ROOT,
     "core",

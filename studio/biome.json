@@ -16,6 +16,7 @@
       "pnpm-lock.yaml",
       "examples/**",
       "**/contract/golden/**",
+      "**/__fixtures__/**",
       "apps/cli/src/repl/**"
     ]
   },

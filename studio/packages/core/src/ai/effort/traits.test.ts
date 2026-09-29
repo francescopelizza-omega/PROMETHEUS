@@ -183,7 +183,10 @@ test("an unavailable dial reads `n/a` and refuses ↑/↓ rather than moving a k
     effort: { tier: "high", available: false },
   });
   const dial = rail.find((c) => c.id === "effort");
-  assert.equal(dial?.label, "⚙ n/a");
+  // U+FE0E after the gear — "paint that as TEXT, one cell". The rail is padded to an exact
+  // terminal column budget, and U+2699 is two cells wherever the terminal font has no text
+  // glyph for it, which put the composer's last row on the terminal's last column.
+  assert.equal(dial?.label, "⚙︎ n/a");
   assert.equal(dial?.actionable, false);
 });
 

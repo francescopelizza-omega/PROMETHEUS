@@ -894,11 +894,34 @@ test("/think stores the tier even when the model cannot use it as a parameter", 
 });
 
 test("renderCommands lists the count + groups; renderHelp mentions /faq", () => {
-  const cmds = renderCommands();
+  // EXPLICIT locale. These renderers translate now, and without a locale they read the
+  // machine's own setting or $LANG — which made this assertion depend on the developer's
+  // system language rather than on the code. "en" is the assertion's subject, so "en" is what
+  // it asks for.
+  const cmds = renderCommands("en");
   assert.match(cmds, new RegExp(`${SLASH_REGISTRY.length} commands`));
   assert.match(cmds, /Session/);
   assert.match(cmds, /Security/);
-  assert.match(renderHelp(), /\/faq/);
+  assert.match(renderHelp("en"), /\/faq/);
+});
+
+test("the help renderers translate the PROSE and never the command names", () => {
+  // The rule, asserted on real rendered output rather than on the catalogs alone.
+  const it = renderCommands("it");
+  const en = renderCommands("en");
+  assert.notEqual(it, en, "Italian must actually differ from English");
+  assert.match(it, /Sessione/, "group headings are translated");
+  assert.match(it, /Avvia una conversazione nuova/, "descriptions are translated");
+  // …and every command the user types is byte-identical in both.
+  for (const name of ["/reset", "/help", "/doctor", "/cat", "/ram"]) {
+    assert.ok(it.includes(name), `${name} must survive translation verbatim`);
+    assert.ok(en.includes(name));
+  }
+  // A command with no translation yet falls back to its English summary, not to a blank.
+  const untranslated = SLASH_REGISTRY.find(
+    (x) => !["reset", "quit", "help", "cat", "doctor"].includes(x.name) && x.summary.length > 20,
+  );
+  assert.ok(untranslated, "there must be an untranslated command to check");
 });
 
 test("/add-dir: validates, lists, and removes a real working-set dir (CLI-004)", async () => {

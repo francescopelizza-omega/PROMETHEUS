@@ -15,9 +15,14 @@
  * / tune / control / ask / askPath / agents / …) and do their work; the host just
  * dispatches. Pure data + thin closures — fully unit-testable with a fake SlashCtx.
  */
-import { COMMAND_SPECS, agent, ai, tokenEconomy } from "@prometheus/core";
+import { COMMAND_SPECS, agent, ai, i18n, onboarding, tokenEconomy } from "@prometheus/core";
 import { lookPath, probeHostTools } from "@prometheus/core/agent-system-host";
-import { type SecurityVerdict, localMemorySnapshot, runnerCensus } from "@prometheus/engine-bridge";
+import {
+  type SecurityVerdict,
+  formatSshTarget,
+  localMemorySnapshot,
+  runnerCensus,
+} from "@prometheus/engine-bridge";
 
 import type { CwdMove } from "../cwd-guard.js";
 import {
@@ -40,7 +45,9 @@ import {
 } from "./agent-runtime.js";
 import { formatCat, parseCatArgs, readTextFile } from "./cat.js";
 import { CONTEXT_WINDOW_PRESETS, parseContextWindowInput } from "./context-window-setting.js";
+import { gatherFacts } from "./doctor-host.js";
 import { renderFaq } from "./faq.js";
+import { harvestOllamaLog } from "./footprint-store.js";
 import {
   type DiffRole,
   type GitSpawn,
@@ -66,8 +73,15 @@ import {
   findHostTool,
   installHostTool,
 } from "./install-tools.js";
+import {
+  activeTranslator,
+  languageChoices,
+  parseLanguageAnswer,
+  renderLanguageConfirmed,
+  saveLocale,
+} from "./language-host.js";
 import { formatListing, listDirectory, parseLsArgs } from "./ls.js";
-import { servingHost } from "./model-admission-host.js";
+import { kvTypeFrom, rememberResident, servingHost } from "./model-admission-host.js";
 import {
   type ModelCandidate,
   renderModelCandidates,
@@ -76,6 +90,16 @@ import {
 import { runModelHealthCommand } from "./model-health-command.js";
 import { MAX_SUBAGENTS } from "./orchestrator.js";
 import {
+  confirmHostKey,
+  connectHost,
+  describeHost,
+  disconnectHost,
+  probeHost,
+  remoteFit,
+  tunnelStatus,
+} from "./remote-cmd.js";
+import {
+  REMOTE_ADD_USAGE,
   loadRemoteHosts,
   parseRemoteArgs,
   removeRemoteHost,
@@ -1656,8 +1680,8 @@ export const SLASH_REGISTRY: readonly SlashCmd[] = Object.freeze([
   {
     name: "remote",
     group: "model",
-    summary: "Model servers on other machines you own (a GPU box on the LAN).",
-    args: "[add <url> [--ram GB] | remove <host> | test <host>]",
+    summary: "Machines you own that can run models — over the LAN, or over ssh.",
+    args: "[add <url> [--ssh host] [--tunnel] | probe | connect | disconnect | fit | test | remove | status]",
     // DEFAULT DENY: a host is reachable only once declared here. Nothing is inferred from a
     // private IP range — "it is on 192.168/16 so it must be mine" is exactly the assumption
     // that makes a coffee-shop network dangerous.
@@ -1666,18 +1690,30 @@ export const SLASH_REGISTRY: readonly SlashCmd[] = Object.freeze([
       const verb = toks[0] ?? "";
       const hosts = loadRemoteHosts();
 
+      // The one place a host name is turned into a record. Every subcommand below that takes a
+      // host resolves it through this, so an unknown name fails the same way everywhere.
+      const pick = (name: string | undefined): ai.RemoteHost | undefined =>
+        name
+          ? hosts.find((h) => ai.normalizeHost(h.host) === ai.normalizeHost(name))
+          : hosts.length === 1
+            ? hosts[0]
+            : undefined;
+      const remoteCtx = { write: ctx.write, confirm: ctx.confirm };
+
       if (!verb) {
         if (hosts.length === 0) {
-          ctx.write(c.dim("no remote model servers declared"));
-          ctx.write(c.dim("  /remote add gpu-box.lan --ram 128     (a machine you own)"));
+          ctx.write(c.dim("no remote machines declared"));
+          ctx.write(c.dim("  /remote add gpu-box.lan --ssh --tunnel   (a machine you own)"));
+          ctx.write(
+            c.dim("  --ssh lets Prometheus measure its RAM, GPU and VRAM rather than guess"),
+          );
+          ctx.write(c.dim("  --tunnel carries the traffic inside ssh, so no port need be exposed"));
           ctx.write(c.dim("  until a host is declared it is treated as a third party and refused"));
           return;
         }
-        ctx.write(`${c.bold("Remote model servers")}  ${c.dim(`${hosts.length} declared`)}`);
-        for (const h of hosts) {
-          const ram = h.totalMemoryBytes ? ai.humanBytes(h.totalMemoryBytes) : "size unknown";
-          ctx.write(`  ${c.cyan(h.host)}  ${c.dim(`${h.baseUrl} · ${ram}`)}`);
-        }
+        ctx.write(`${c.bold("Remote machines")}  ${c.dim(`${hosts.length} declared`)}`);
+        for (const h of hosts) for (const line of describeHost(h)) ctx.write(line);
+        tunnelStatus(remoteCtx);
         return;
       }
 
@@ -1687,15 +1723,97 @@ export const SLASH_REGISTRY: readonly SlashCmd[] = Object.freeze([
           ctx.write(c.red(parsed.error));
           return;
         }
-        const { entry: e } = parsed;
+        let e = parsed.entry;
         ctx.write(`${c.bold(e.host)}  ${c.dim(e.baseUrl)}`);
+        if (e.ssh) ctx.write(c.dim(`  ssh ${formatSshTarget(e.ssh)}`));
         for (const w of ai.remoteHostWarnings(e)) ctx.write(c.yellow(`  ! ${w}`));
-        if (!(await ctx.confirm(`Trust ${e.host} as your own model server?`))) {
+        if (!(await ctx.confirm(`Trust ${e.host} as your own machine?`))) {
           ctx.write(c.dim("cancelled"));
           return;
         }
+        /**
+         * Probe at declaration time, when ssh was given.
+         *
+         * The point of `--ssh` is that the fit check stops running on a number the user typed.
+         * Measuring immediately means the first model switch is already accurate, and it also
+         * surfaces a broken login NOW rather than at the moment the user wanted to run something.
+         */
+        if (e.ssh) {
+          if (await confirmHostKey(e.ssh, remoteCtx)) {
+            const hw = await probeHost(e, remoteCtx);
+            if (hw) e = { ...e, hardware: hw, hardwareAt: new Date().toISOString() };
+          } else {
+            ctx.write(c.yellow("  host key not accepted — saving the host without ssh access"));
+            const { ssh: _dropped, tunnel: _t, ...rest } = e;
+            e = rest;
+          }
+        }
         saveRemoteHosts(upsertRemoteHost(e, hosts));
         ctx.write(c.green(`✓ ${e.host} declared — its models are now selectable`));
+        return;
+      }
+
+      if (verb === "probe") {
+        const entry = pick(toks[1]);
+        if (!entry) {
+          ctx.write(c.red(toks[1] ? `${toks[1]} is not declared` : "usage: /remote probe <host>"));
+          return;
+        }
+        if (entry.ssh && !(await confirmHostKey(entry.ssh, remoteCtx))) {
+          ctx.write(c.dim("cancelled"));
+          return;
+        }
+        const hw = await probeHost(entry, remoteCtx);
+        if (hw) {
+          saveRemoteHosts(
+            upsertRemoteHost(
+              { ...entry, hardware: hw, hardwareAt: new Date().toISOString() },
+              hosts,
+            ),
+          );
+        }
+        return;
+      }
+
+      if (verb === "connect") {
+        const entry = pick(toks[1]);
+        if (!entry) {
+          ctx.write(
+            c.red(toks[1] ? `${toks[1]} is not declared` : "usage: /remote connect <host>"),
+          );
+          return;
+        }
+        await connectHost(entry, remoteCtx);
+        return;
+      }
+
+      if (verb === "disconnect") {
+        const entry = pick(toks[1]);
+        if (!entry) {
+          ctx.write(
+            c.red(toks[1] ? `${toks[1]} is not declared` : "usage: /remote disconnect <host>"),
+          );
+          return;
+        }
+        await disconnectHost(entry, remoteCtx);
+        return;
+      }
+
+      if (verb === "status") {
+        tunnelStatus(remoteCtx);
+        return;
+      }
+
+      if (verb === "fit") {
+        const entry = pick(toks[1]);
+        if (!entry) {
+          ctx.write(c.red(toks[1] ? `${toks[1]} is not declared` : "usage: /remote fit <host>"));
+          return;
+        }
+        const ctxTokens =
+          ctx.modelPicker?.candidates().find((m) => m.endpoint.locality === "local")?.endpoint
+            .contextWindow ?? 262144;
+        await remoteFit(entry, ctxTokens, remoteCtx);
         return;
       }
 
@@ -1705,11 +1823,15 @@ export const SLASH_REGISTRY: readonly SlashCmd[] = Object.freeze([
           ctx.write(c.dim("usage: /remote remove <host>"));
           return;
         }
+        const entry = pick(target);
         const { hosts: next, removed } = removeRemoteHost(target, hosts);
         if (!removed) {
           ctx.write(c.red(`${target} is not declared`));
           return;
         }
+        // A ControlMaster lives on for two minutes after the last command, so without this the
+        // machine stays logged in after the user removed it. "Removed" has to mean removed.
+        if (entry) await disconnectHost(entry, remoteCtx);
         saveRemoteHosts(next);
         ctx.write(c.green(`✓ ${target} removed — it is a third party again`));
         return;
@@ -1754,7 +1876,10 @@ export const SLASH_REGISTRY: readonly SlashCmd[] = Object.freeze([
         return;
       }
 
-      ctx.write(c.dim("usage: /remote [add <url> [--ram GB]] | remove <host> | test <host>"));
+      ctx.write(c.dim(REMOTE_ADD_USAGE));
+      ctx.write(
+        c.dim("       /remote probe|connect|disconnect|fit|test|remove <host> · /remote status"),
+      );
     },
   },
   {
@@ -1828,9 +1953,33 @@ export const SLASH_REGISTRY: readonly SlashCmd[] = Object.freeze([
         ctx.write(c.dim("  no model is loaded right now"));
       }
 
+      /**
+       * Fold in everything already known before pricing anything.
+       *
+       * `harvestOllamaLog` reads sizes ollama recorded for loads it has already done — free,
+       * with nothing resident and no memory spent — and `rememberResident` writes down whatever
+       * is loaded right now, which is the only source that reports a model's TOTAL. Between
+       * them, `/ram` on a cold machine is usually reporting measurements rather than arithmetic.
+       */
+      const harvested = harvestOllamaLog();
+      const ledger = rememberResident(resident, ctxTokens, host);
       const candidates = await ai
-        .inventoryCandidates(root, ctxTokens, { runner: "ollama", resident, timeoutMs: 4000 })
+        .inventoryCandidates(root, ctxTokens, {
+          runner: "ollama",
+          resident,
+          timeoutMs: 4000,
+          observations: ledger,
+          ...(host ? { host } : {}),
+          ...(kvTypeFrom(ledger) ? { kvCacheType: kvTypeFrom(ledger) as ai.KvCacheType } : {}),
+        })
         .catch(() => [] as ai.ModelCandidate[]);
+      if (harvested.added > 0) {
+        ctx.write(
+          c.dim(
+            `  (learned ${harvested.added} past load${harvested.added === 1 ? "" : "s"} from ollama's log)`,
+          ),
+        );
+      }
       if (candidates.length === 0) {
         ctx.write(c.dim("  (no local models installed, or the runner did not answer)"));
         return;
@@ -1846,18 +1995,23 @@ export const SLASH_REGISTRY: readonly SlashCmd[] = Object.freeze([
         `${c.bold("Models")}  ${c.dim(`at a ${ctxTokens.toLocaleString("en-US")}-token context`)}`,
       );
       for (const row of rows) {
-        const mark = row.fits ? c.green("✓") : c.red("✗");
-        const note =
-          row.footprint.source === "estimated"
-            ? c.dim(" est.")
-            : row.footprint.source === "measured"
-              ? c.dim(" measured")
-              : "";
+        // A row that "fits" only because the optimistic FLOOR fits is marked, never shown as a
+        // plain yes: the headline figure for a geometry-less model is an admitted ceiling, and
+        // "fits" must not read as a promise the number cannot keep.
+        const mark = row.uncertain ? c.yellow("?") : row.fits ? c.green("✓") : c.red("✗");
+        const size = row.uncertain
+          ? `${gb(row.footprint.lowerBoundBytes ?? row.footprint.totalBytes)}–${gb(row.footprint.totalBytes)}`
+          : gb(row.footprint.totalBytes);
+        const note = ai.footprintNote(row.footprint.source);
+        const served = row.footprint.contextTokens;
+        // Say so when the model's own trained maximum is what sized the cache, rather than
+        // letting the user wonder why a 262k setting produced a small number.
+        const cap = served < ctxTokens ? ` at its own ${served.toLocaleString("en-US")} limit` : "";
         const detail = c.dim(
-          `${gb(row.footprint.weightsBytes)} weights + ${gb(row.footprint.kvBytes)} cache`,
+          `${gb(row.footprint.weightsBytes)} weights + ${gb(row.footprint.kvBytes)} cache${cap}`,
         );
         ctx.write(
-          `  ${mark} ${row.candidate.id.padEnd(26)} ${gb(row.footprint.totalBytes).padStart(8)}${note}  ${detail}`,
+          `  ${mark} ${row.candidate.id.padEnd(26)} ${size.padStart(10)}${note ? c.dim(` ${note}`) : ""}  ${detail}`,
         );
       }
       const short = rows.filter((r) => !r.fits);
@@ -1865,6 +2019,13 @@ export const SLASH_REGISTRY: readonly SlashCmd[] = Object.freeze([
         ctx.write(
           c.dim(
             `  ${short.length} model${short.length === 1 ? "" : "s"} too large — a smaller /context window shrinks the cache`,
+          ),
+        );
+      }
+      if (rows.some((r) => r.uncertain)) {
+        ctx.write(
+          c.dim(
+            "  ? = the runner reported no architecture for it, so that is a range, not a figure — it will be measured on first load",
           ),
         );
       }
@@ -2195,6 +2356,98 @@ export const SLASH_REGISTRY: readonly SlashCmd[] = Object.freeze([
     run: (_r, ctx) => ctx.runSetup(),
   },
   {
+    name: "doctor",
+    aliases: ["check", "diagnose", "setupcheck"],
+    group: "config",
+    summary: "What is missing to run a model, why it matters, and the command to install it.",
+    // The screen a beginner needs and never had. Same probes the rest of the app uses, so what
+    // this reports is what the app will actually do — a doctor that disagrees with the program
+    // it diagnoses is worse than none.
+    run: async (_rest, ctx) => {
+      const { t } = activeTranslator();
+      ctx.write(c.dim(t.t("doctor.checking")));
+      const facts = await gatherFacts();
+      const report = onboarding.diagnose(facts);
+      for (const line of onboarding.renderDoctor(report, t, facts)) {
+        // Colour only the verdict marks; the prose is the translator's, and re-wrapping or
+        // re-styling it per language is how layout bugs get imported from the catalog.
+        if (line.startsWith("✓")) ctx.write(c.green(line));
+        else if (line.startsWith("✗")) ctx.write(c.red(line));
+        else if (line.startsWith("•") || line.startsWith("?")) ctx.write(c.yellow(line));
+        else if (line.startsWith("    ")) ctx.write(c.dim(line));
+        else ctx.write(line);
+      }
+      // The engine's own audit is a different, deeper question (OS, agents, git, paths). It
+      // used to answer to `doctor`; say where it went rather than letting it become unfindable.
+      ctx.write(c.dim("/checkup — the engine's deeper health audit (OS, agents, git, paths)"));
+    },
+  },
+  {
+    name: "guide",
+    aliases: ["tour", "start"],
+    group: "config",
+    summary: "A five-step walkthrough for a first-time user.",
+    run: (_rest, ctx) => {
+      const { t } = activeTranslator();
+      for (const line of onboarding.renderGuide(t)) ctx.write(line);
+    },
+  },
+  {
+    name: "language",
+    aliases: ["lang"],
+    group: "config",
+    summary: "Show or change the language PROMETHEUS speaks.",
+    args: "[code]",
+    run: async (rest, ctx) => {
+      const arg = rest.trim().toLowerCase();
+      const { t, locale, source } = activeTranslator();
+
+      if (!arg) {
+        ctx.write(
+          t.t("language.current", {
+            language: i18n.LOCALE_NAMES[locale].endonym,
+            source: t.t(`language.source.${source}` as "language.source.setting"),
+          }),
+        );
+        ctx.write("");
+        ctx.write(t.t("language.available"));
+        // Two DIFFERENT figures, and conflating them would mislead: the prose catalog is
+        // complete in every shipped language, while the help menu is translated for the
+        // commands a newcomer meets and falls back to English for the long tail.
+        const names = SLASH_REGISTRY.map((x) => x.name);
+        for (const row of languageChoices()) {
+          const prose = i18n.completeness(row.locale, i18n.CATALOGS);
+          const help = i18n.helpCoverage(names, row.locale, i18n.HELP_CATALOGS);
+          const mark = row.locale === locale ? c.green(" ←") : "";
+          const bits: string[] = [];
+          if (prose < 100) bits.push(`${prose}%`);
+          if (row.locale !== "en") bits.push(`help ${help.percent}%`);
+          const note = bits.length > 0 ? c.dim(`  ${bits.join(" · ")}`) : "";
+          ctx.write(`  ${row.locale.padEnd(3)} ${row.endonym.padEnd(11)}${note}${mark}`);
+        }
+        ctx.write("");
+        ctx.write(
+          c.dim(
+            "Command names stay English on purpose — /setup is an identifier you type, not a word.",
+          ),
+        );
+        ctx.write("");
+        ctx.write(c.dim(t.t("language.usage")));
+        return;
+      }
+
+      const picked = parseLanguageAnswer(arg);
+      if (!picked) {
+        ctx.write(c.red(t.t("language.unknown", { code: arg })));
+        ctx.write(c.dim(t.t("language.usage")));
+        return;
+      }
+      saveLocale(picked);
+      // Confirm IN THE NEW LANGUAGE — the first proof to the user that it took effect.
+      for (const line of renderLanguageConfirmed(picked)) ctx.write(c.green(line));
+    },
+  },
+  {
     name: "deps",
     aliases: ["externals", "hosttools"],
     group: "config",
@@ -2279,6 +2532,12 @@ export const SLASH_REGISTRY: readonly SlashCmd[] = Object.freeze([
     group: "config",
     summary:
       "Check for updates: vendor CLIs (claude/codex/gemini/…), local models, + Prometheus itself.",
+    /**
+     * The two ACTION subcommands live here rather than on a `/models` command because `models`
+     * is an engine verb and `/model` already means "switch the active one" — see the note on
+     * `/ram` above for why one word must not answer to two commands.
+     */
+    args: "[catalog | pull <tag> | rm <tag> | convert <ref>]",
     run: (rest, ctx) => ctx.runUpdates(rest),
   },
   verb("accounts", "config", "List installed agent CLIs (claude/codex/gemini/…).", {
@@ -2871,7 +3130,13 @@ export const SLASH_REGISTRY: readonly SlashCmd[] = Object.freeze([
       "Copy the last assistant reply to the system clipboard (OSC 52 — works over SSH/tmux).",
     run: (_r, ctx) => ctx.write(c.dim(ctx.copyToClipboard())),
   },
-  verb("checkup", "info", "Health: OS/agents/git/paths.", { verb: "doctor", aliases: ["doctor"] }),
+  // The `doctor` ALIAS moved to the setup check (below). This is still the engine's own
+  // `doctor` VERB — OS, agents, git, paths — and keeps its primary name. The two answer
+  // different questions, and the one a newcomer means by "doctor" is "why can I not run a
+  // model", not a path audit; `/doctor` points here for the deeper check.
+  verb("checkup", "info", "Health: OS/agents/git/paths (the engine's own audit).", {
+    verb: "doctor",
+  }),
   verb("version", "info", "Print the engine/CLI version."),
   {
     name: "status",
@@ -2982,22 +3247,48 @@ const GROUP_TITLE: Record<SlashGroup, string> = {
 };
 
 /** Render the full grouped `/commands` listing. */
-export function renderCommands(): string {
+export function renderCommands(locale?: i18n.Locale): string {
+  const help = i18n.translator(locale ?? helpLocale());
   const lines: string[] = [
-    `${c.bold("Commands")} ${c.dim(`(${SLASH_REGISTRY.length} commands — type a /name)`)}`,
+    `${c.bold(help.t("commands.title"))} ${c.dim(`(${help.t("commands.hint", { count: SLASH_REGISTRY.length })})`)}`,
   ];
+  /*
+   * THE NAME STAYS ENGLISH, THE DESCRIPTION DOES NOT.
+   *
+   * `/setup` is an identifier the user types; translating it would produce a command that does
+   * not exist and cannot be searched for or pasted from a forum. The one-line description
+   * beside it is prose, and that is where a newcomer actually loses confidence in English.
+   * `helpFor` falls back to `cmd.summary` — the registry is the single English source, so
+   * there is no English catalog to drift from it.
+   */
+  const active = locale ?? helpLocale();
   for (const g of GROUP_ORDER) {
     const cmds = SLASH_REGISTRY.filter((cmd) => cmd.group === g);
     if (cmds.length === 0) continue;
     lines.push("");
-    lines.push(c.bold(GROUP_TITLE[g]));
+    lines.push(c.bold(i18n.helpGroup(g, GROUP_TITLE[g], active)));
     for (const cmd of cmds) {
       const name = `/${cmd.name}${cmd.args ? ` ${c.dim(cmd.args)}` : ""}`;
       lines.push(`  ${c.cyan(name)}`);
-      lines.push(`      ${c.dim(cmd.summary)}`);
+      lines.push(`      ${c.dim(i18n.helpFor(cmd.name, cmd.summary, active))}`);
     }
   }
   return lines.join("\n");
+}
+
+/**
+ * The locale for help rendering.
+ *
+ * Read fresh on every call rather than captured once: `/language` changes it mid-session, and a
+ * cached locale would leave `/commands` in the old language until restart. Fail-soft — a
+ * settings file that cannot be read renders English, which is always correct.
+ */
+function helpLocale(): i18n.Locale {
+  try {
+    return activeTranslator().locale;
+  } catch {
+    return i18n.FALLBACK_LOCALE;
+  }
 }
 
 /** Full engine command reference (the canonical COMMAND_SPECS registry: id · group ·
@@ -3038,11 +3329,19 @@ export function renderDocs(filter = ""): string {
 }
 
 /** A compact help block (top commands per group). */
-export function renderHelp(): string {
-  const lines = [`${c.bold("Prometheus session — help")}`, ""];
-  lines.push(
-    c.dim("Type a message to chat · a /command runs an action · a bare verb (scan) runs it."),
-  );
+export function renderHelp(locale?: i18n.Locale): string {
+  /*
+   * The FRAMING is translated; the `/command` names inside the picks below are not, and must
+   * not be — they are what the user types. `i18n.slashCommandsIn` is asserted over every
+   * catalog string for exactly this reason.
+   */
+  // INJECTABLE, defaulting to the ambient locale. A renderer that could only read the
+  // machine's own settings was not testable: this developer's $LANG is Italian, so the
+  // existing assertion on English output began failing for a reason that had nothing to do
+  // with the code under test.
+  const t = i18n.translator(locale ?? helpLocale());
+  const lines = [`${c.bold(t.t("help.title"))}`, ""];
+  lines.push(c.dim(t.t("help.intro")));
   lines.push("");
   const picks: Array<[string, string]> = [
     ["/help · /commands", "this help · the full command list"],
@@ -3062,7 +3361,7 @@ export function renderHelp(): string {
   ];
   for (const [k, v] of picks) lines.push(`  ${c.cyan(k)}\n      ${c.dim(v)}`);
   lines.push("");
-  lines.push(c.dim(`${SLASH_REGISTRY.length} commands total — /commands for all.`));
+  lines.push(c.dim(t.t("help.total", { count: SLASH_REGISTRY.length })));
   return lines.join("\n");
 }
 

@@ -17,6 +17,7 @@ import { test } from "node:test";
 import {
   ANTHROPIC_DEFAULT_MAX_TOKENS,
   ANTHROPIC_FALLBACK_MAX_TOKENS,
+  ANTHROPIC_MAX_OUTPUT,
   ANTHROPIC_WIRE,
   GEMINI_WIRE,
   OPENAI_WIRE,
@@ -619,13 +620,80 @@ test("Anthropic's required max_tokens is the MODEL's ceiling, never a flat 4096"
   // The shipped default was 4096 on models that serve sixteen times that.
   assert.equal(of("claude-sonnet-4-5"), 64_000);
   assert.equal(of("claude-haiku-4-5"), 64_000);
-  assert.equal(of("claude-opus-5"), 64_000);
   assert.equal(of("claude-opus-4-1"), 32_000);
   // Older models keep their real, smaller ceilings — sending more is a 400, not a favour.
   assert.equal(of("claude-3-5-sonnet-20241022"), 8_192);
   assert.equal(of("claude-3-opus-20240229"), 4_096);
   for (const id of ["claude-sonnet-4-5", "claude-3-5-sonnet-20241022"]) {
     assert.ok(of(id) > 0 && Number.isInteger(of(id)), id);
+  }
+});
+
+test("the 128K generation gets 128K — the first fix was family-wide, the ceilings are per-generation", () => {
+  const convo: WireMessage[] = [{ role: "user", content: "hi" }];
+  const of = (model: string): number =>
+    (ANTHROPIC_WIRE.body(convo, { model }) as { max_tokens: number }).max_tokens;
+  // Every one of these was under-capped by the 2026-09-25 table: the rows were written per
+  // FAMILY and the published ceilings move per GENERATION. `claude-opus-4-8` is the default
+  // Opus in this repo's own catalog and was being cut off at a quarter of its budget.
+  assert.equal(of("claude-opus-4-8"), 128_000);
+  assert.equal(of("claude-opus-4-7"), 128_000);
+  assert.equal(of("claude-opus-4-6"), 128_000);
+  assert.equal(of("claude-opus-5"), 128_000);
+  assert.equal(of("claude-sonnet-5"), 128_000);
+  assert.equal(of("claude-sonnet-4-6"), 128_000);
+  assert.equal(of("claude-fable-5"), 128_000);
+  assert.equal(of("claude-fable-5-1"), 128_000);
+  assert.equal(of("claude-mythos-5"), 128_000);
+
+  // ORDER IS LOAD-BEARING: `.find()` takes the first match, so the specific generations must
+  // precede the family catch-alls. These two prove the catch-alls still work — 32,000 really is
+  // correct for legacy Opus 4, and removing that row to "fix" 4-8 would have broken them.
+  assert.equal(of("claude-opus-4"), 32_000);
+  assert.equal(of("claude-opus-4-1"), 32_000);
+
+  // haiku-5 is undocumented; the row exists only so splitting opus/sonnet out to 128K does not
+  // drop it through to the 8,192 fallback. Preserving behaviour, not asserting a published fact.
+  assert.equal(of("claude-haiku-5"), 64_000);
+});
+
+test("INVARIANT: every Claude model this repo SHIPS has its own row, never the fallback", async () => {
+  /*
+   * The rule that stops this table rotting again.
+   *
+   * `claude-fable-5` matched no row and silently took `ANTHROPIC_FALLBACK_MAX_TOKENS` (8,192)
+   * against a real 128,000 — a 15.6x under-cap on a model listed in this repo's own catalog.
+   * The fallback's reasoning ("an unknown model is most likely a NEW one or an OLD one, so
+   * refusing to guess high keeps it working") is sound for an id arriving from a user's config
+   * and wrong for one we ship: there, a missing row is a bug, not caution.
+   *
+   * Reading the real config rather than a fixture is the point — a model added to the catalog
+   * without a row here must fail THIS test.
+   */
+  const cfg = (await import("./providers/providers.config.json", { with: { type: "json" } })) as {
+    default: unknown;
+  };
+  const raw = cfg.default as Record<string, unknown>;
+  const providers = (Array.isArray(raw) ? raw : (raw.providers ?? [])) as {
+    id?: string;
+    models?: { id?: string }[];
+  }[];
+  const shipped = providers
+    .flatMap((p) => p.models ?? [])
+    .map((m) => m.id)
+    .filter((id): id is string => typeof id === "string" && id.startsWith("claude-"));
+
+  assert.ok(
+    shipped.length > 0,
+    "the catalog must list some Claude models for this to mean anything",
+  );
+  for (const id of shipped) {
+    const matched = ANTHROPIC_MAX_OUTPUT.some((r) => r.re.test(id.toLowerCase()));
+    assert.ok(
+      matched,
+      `${id} is in providers.config.json but matches no ANTHROPIC_MAX_OUTPUT row, so it would ` +
+        `silently take the ${ANTHROPIC_FALLBACK_MAX_TOKENS}-token fallback. Add its row.`,
+    );
   }
 });
 

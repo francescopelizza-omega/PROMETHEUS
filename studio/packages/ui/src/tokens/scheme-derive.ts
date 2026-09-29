@@ -136,6 +136,34 @@ function away(from: string, ground: string, ok: (c: string) => boolean): string 
 }
 
 /**
+ * FULL AUTONOMY (A6/A7) from a scheme's accent — the accent, pushed further from the ground.
+ *
+ * Exported because it is needed in two places and must not be written twice: `derivePalette`
+ * below computes it for a derived scheme, and `resolveScheme` recomputes it for a hand-authored
+ * PARTIAL scheme that overrides `accent` without stating an `autonomy`. That second case is not
+ * hypothetical — four built-ins (dracula, synthwave-84, shades-of-purple, pelly) set a bright
+ * cyan accent and inherited the base theme's ice, landing within 1.05:1 of their own accent.
+ * Same fall-through the `on-<role>` pass exists to stop.
+ *
+ * `pole`, never the scheme's text colour: 14 of the 41 built-ins ship an accent BRIGHTER than
+ * their own text (synthwave-84's #36f9f6, shades-of-purple's #9effff), so mixing toward the text
+ * pulled those back TOWARD the background — the opposite of the intent, and undetectable without
+ * measuring, since the result stayed perfectly legible. An extreme guarantees the direction.
+ *
+ * 0.6 keeps the accent's hue in charge. On a scheme whose accent is already near-white the step
+ * it buys is small, and that is a real limit rather than a bug to tune away: there is no room
+ * left in that direction. `ramp-contrast.test.ts` asserts the direction and legibility for all
+ * 41, and a substantial gap for the themes this product actually ships. Colour is never the sole
+ * signal for this level — every surface that paints it also writes the level out.
+ */
+export function autonomyFrom(accent: string, grounds: readonly string[], base: SchemeBase): string {
+  const pole = base === "light" ? "#000000" : "#ffffff";
+  const ok = (c: string): boolean =>
+    Math.min(...grounds.map((g) => contrastRatio(c, g))) >= AA_TEXT;
+  return toward(mix(accent, pole, 0.6), pole, ok);
+}
+
+/**
  * The full §2 token map for a palette, with the legibility floors applied.
  *
  * `base` only selects the last-resort pole (white on a dark scheme, black on a light one);
@@ -231,6 +259,9 @@ export function derivePalette(p: Palette, base: SchemeBase): SemanticColors {
     // danger reads as TEXT here (error copy), so it carries the 4.5 bar, not the 3:1 one.
     "danger-fg": toward(mix(danger, strong, 0.6), strong, textOk),
     info,
+    // FULL AUTONOMY (A6/A7) — see `autonomyFrom` above for the whole argument. Derived from the
+    // ROLE-floored `accent`, not `p.accent`, so it starts from the colour that will be painted.
+    autonomy: autonomyFrom(accent, grounds, base),
     // a selection band must not swallow the text drawn on it: push it toward the ground
     // (never toward the text) until primary text clears AA on top of it.
     selection: toward(p.selection, p.bg, (c) => contrastRatio(strong, c) >= AA_TEXT),

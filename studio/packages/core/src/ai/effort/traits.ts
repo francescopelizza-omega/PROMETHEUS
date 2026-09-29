@@ -215,7 +215,23 @@ export function traitRail(input: TraitRailInput): TraitCell[] {
     const { tier, available } = input.effort;
     cells.push({
       id: "effort",
-      label: `⚙ ${available ? tier : "n/a"}`,
+      /**
+       * The gear carries U+FE0E (VARIATION SELECTOR-15) — "paint the previous code point as
+       * TEXT, one cell" — and it is load-bearing, not decoration.
+       *
+       * `⚙` U+2699 is `Emoji=Yes, Emoji_Presentation=No`, so its width is a property of the
+       * terminal font rather than of Unicode: measured on macOS, Menlo carries a text glyph and
+       * paints it in one cell, Monaco does not and CoreText falls back to Apple Color Emoji,
+       * which takes two. This label is the last cell of the composer's trait rail, a line padded
+       * to EXACTLY the terminal's `cols-1` budget, so one unexpected column puts the row on the
+       * last terminal cell — the one the width rule exists to keep empty — and the block becomes
+       * a physical row taller than the renderer counted. VS15 asks for the one-cell glyph
+       * explicitly, which is what every width table here already assumes; it measures zero, so
+       * no column budget moves, and it is a no-op where the text glyph was being used anyway.
+       *
+       * The Electron pane reads the same label, where VS15 means the same thing.
+       */
+      label: `⚙︎ ${available ? tier : "n/a"}`,
       state: !available ? "unsupported" : tier === "off" ? "off" : "on",
       actionable: available,
       ...(available ? {} : { reason: "this model has no reasoning control" }),

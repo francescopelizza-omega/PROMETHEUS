@@ -43,6 +43,7 @@ import {
   type CatalogRawRequest,
   type CatalogRawResult,
   type CatalogScaffoldRequest,
+  type CatalogSearchResult,
   type CatalogToggleRequest,
   type CatalogUninstallRequest,
   type CodebaseOverviewApi,
@@ -197,12 +198,12 @@ import {
   type ModelInstallConverterResult,
   type ModelInstallHfCliResult,
   type ModelInstallRunnerRequest,
-  type ModelLmstudioStartResult,
-  type ModelOllamaStartResult,
   type ModelInstallRunnerResult,
   type ModelInstallTargetRequest,
   type ModelInstallTargetResult,
+  type ModelLmstudioStartResult,
   type ModelMutationResult,
+  type ModelOllamaStartResult,
   type ModelProgressEvent,
   type ModelPullRequest,
   type ModelPullResult,
@@ -281,6 +282,7 @@ import {
   type UpdateInstallResult,
   type UpdateProgressInfo,
   type UpdatesApi,
+  type UpdatesReportResult,
   type VersionResult,
 } from "../shared/ipc-contract.js";
 import type {
@@ -1291,6 +1293,24 @@ export function createPrometheusApi(): PrometheusApi {
     effort: {
       get: (): Promise<EffortPrefResult> => ipcRenderer.invoke(IPC.effortGet),
       set: (tier: string): Promise<EffortPrefResult> => ipcRenderer.invoke(IPC.effortSet, { tier }),
+    },
+    /**
+     * The THIRD-PARTY update report — not `updates`, which is electron-updater and updates
+     * Studio itself. One boolean crosses the bridge; nothing else. The renderer cannot name a
+     * tool, a manager, a URL or a command — those all come from core's tables in the main
+     * process, which is what keeps a sandboxed view from being able to steer a spawn.
+     */
+    toolUpdates: {
+      check: (force?: boolean): Promise<UpdatesReportResult> =>
+        ipcRenderer.invoke(IPC.updatesCheck, { force: force === true }),
+    },
+    /**
+     * The MODEL catalogue. A query string is the only thing that crosses; the source, the URL
+     * and the fit budget are decided in main, so a sandboxed view cannot steer a fetch.
+     */
+    modelCatalog: {
+      search: (query: string): Promise<CatalogSearchResult> =>
+        ipcRenderer.invoke(IPC.catalogSearch, { query: String(query ?? "") }),
     },
     pathCompletion: createPathCompletionApi(),
     modelHealth: createModelHealthApi(),

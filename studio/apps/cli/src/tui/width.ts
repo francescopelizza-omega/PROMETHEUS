@@ -49,8 +49,78 @@ export function charWidth(cp: number): number {
   ) {
     return 2;
   }
+  /**
+   * The BMP emoji that are WIDE WITHOUT a variation selector (`Emoji_Presentation=Yes`).
+   *
+   * The ranges above jump from U+FFE6 straight to U+1F000, so every code point between U+2000
+   * and U+2FFF was measured as one column — including this set, which every emulator on every
+   * platform advances TWO cells for. No font or `TERM_PROGRAM` check belongs here: unlike the
+   * text-default emoji (`⚙`, `⚠`, `ℹ`, whose width depends on whether the terminal font carries
+   * a text glyph), these have emoji presentation by default and are unconditionally two cells.
+   *
+   * They do not appear in the chrome's own source — they arrive in model replies, which are
+   * word-wrapped with `wrapLine(line, cols-1)` and written into scrollback verbatim. A reply
+   * line holding a `✅` or a `❌` that packs to exactly the measured budget is really one column
+   * over, so it wraps, the printed block is a row taller than the renderer counted, and the
+   * chrome below it drifts — the same failure as a mismeasured composer row, reached through
+   * ordinary agent output instead.
+   */
+  if (
+    cp === 0x231a ||
+    cp === 0x231b ||
+    (cp >= 0x23e9 && cp <= 0x23ec) ||
+    cp === 0x23f0 ||
+    cp === 0x23f3 ||
+    (cp >= 0x25fd && cp <= 0x25fe) ||
+    (cp >= 0x2614 && cp <= 0x2615) ||
+    (cp >= 0x2648 && cp <= 0x2653) ||
+    cp === 0x267f ||
+    cp === 0x2693 ||
+    cp === 0x26a1 ||
+    (cp >= 0x26aa && cp <= 0x26ab) ||
+    (cp >= 0x26bd && cp <= 0x26be) ||
+    (cp >= 0x26c4 && cp <= 0x26c5) ||
+    cp === 0x26ce ||
+    cp === 0x26d4 ||
+    cp === 0x26ea ||
+    (cp >= 0x26f2 && cp <= 0x26f3) ||
+    cp === 0x26f5 ||
+    cp === 0x26fa ||
+    cp === 0x26fd ||
+    cp === 0x2705 ||
+    (cp >= 0x270a && cp <= 0x270b) ||
+    cp === 0x2728 ||
+    cp === 0x274c ||
+    cp === 0x274e ||
+    (cp >= 0x2753 && cp <= 0x2755) ||
+    cp === 0x2757 ||
+    (cp >= 0x2795 && cp <= 0x2797) ||
+    cp === 0x27b0 ||
+    cp === 0x27bf ||
+    (cp >= 0x2b1b && cp <= 0x2b1c) ||
+    cp === 0x2b50 ||
+    cp === 0x2b55
+  ) {
+    return 2;
+  }
   return 1;
 }
+
+/**
+ * U+FE0E VARIATION SELECTOR-15 — "render the PREVIOUS code point as text, one cell".
+ *
+ * For the other half of the emoji problem: code points with `Emoji=Yes` but
+ * `Emoji_Presentation=No` (`⚙` U+2699, `⚠` U+26A0, `ℹ` U+2139, …). Their width is a property of
+ * the TERMINAL FONT, not of Unicode — measured on this machine, Menlo carries a text glyph for
+ * `⚙` and paints it in one cell, while Monaco does not and CoreText falls back to Apple Color
+ * Emoji, which takes two. A width table cannot be right for both, so fixed-width chrome must
+ * not gamble: appending VS15 asks for the one-cell text glyph explicitly, which is what
+ * `charWidth` already assumes. VS15 itself measures 0, so no caller's column budget moves.
+ *
+ * Use it on any such glyph that lands in a line built to an exact column budget. It is a no-op
+ * on a terminal that was already picking the text glyph.
+ */
+export const TEXT_PRESENTATION = "︎";
 
 /** Display width of a string (ANSI-stripped, wide/zero-width aware). */
 export function stringWidth(s: string): number {

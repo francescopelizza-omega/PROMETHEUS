@@ -317,15 +317,60 @@ export const PROGRAMS: Readonly<Record<string, ProgramSpec>> = Object.freeze({
     needsSubcommand: true,
     subcommands: { ls: "read", list: "read", outdated: "read" },
   },
-  rsync: { tier: "install", denyFlags: [{ re: /^-e$|^--rsh=/, why: RUNS_CODE("rsync -e") }] },
+  /*
+   * ── ssh / scp / rsync: the 2026-09-25 re-anchoring ──────────────────────
+   *
+   * These three carried the SAME anchoring bug the 2026-08-08 review found in `sed -i`:
+   * `/^-e$/` and `/^-o$/` require the option to be its own token, so the joined form walked
+   * past them. Twelve live bypasses, each classifying `install` — a tier A5 and above
+   * auto-approve — and each one a local shell:
+   *
+   *   ssh -oProxyCommand='sh -c id' host        (joined; the spaced form WAS caught)
+   *   ssh -oPermitLocalCommand=yes -oLocalCommand=id host
+   *   ssh -F /tmp/evil_config host              (a config file sets the same options)
+   *   ssh -J attacker@evil host                 (a jump host the user never named)
+   *   rsync -e'sh -c id' a b
+   *   scp -oProxyCommand=… / scp -F …           (scp had no deny-flags at all)
+   *
+   * The rules below match on the PREFIX rather than the whole token, and match the dangerous
+   * option NAMES unanchored so they are caught wherever they appear — as `-oProxyCommand=x`,
+   * as `-o ProxyCommand=x`, or inside a `-o` bundle. Prometheus's own SSH feature does not go
+   * through here at all: it builds its argv in `engine-bridge/src/ssh-target.ts`, from a
+   * validated host, with these options fixed by the code rather than chosen by a caller.
+   */
+  rsync: {
+    tier: "install",
+    denyFlags: [
+      // `-e` prefix, not `-e` exactly: `-e'sh -c id'` is one token.
+      { re: /^-e/, why: RUNS_CODE("rsync -e") },
+      { re: /^--rsh(=|$)/, why: RUNS_CODE("rsync --rsh") },
+    ],
+  },
   ssh: {
     tier: "install",
     denyFlags: [
-      { re: /^-o$/, why: RUNS_CODE("ssh -o ProxyCommand") },
-      { re: /^ProxyCommand=|^LocalCommand=/i, why: RUNS_CODE("ssh ProxyCommand") },
+      { re: /^-o/, why: RUNS_CODE("ssh -o ProxyCommand") },
+      { re: /^-F/, why: "`ssh -F` reads a config file that can set ProxyCommand" },
+      { re: /^-J/, why: "`ssh -J` routes the connection through a host you did not name" },
+      {
+        re: /ProxyCommand|LocalCommand|ProxyJump|PermitLocalCommand/i,
+        why: RUNS_CODE("ssh ProxyCommand"),
+      },
     ],
   },
-  scp: { tier: "install" },
+  scp: {
+    tier: "install",
+    // scp IS ssh: it takes the same options, through the same client, with the same escapes.
+    denyFlags: [
+      { re: /^-o/, why: RUNS_CODE("scp -o ProxyCommand") },
+      { re: /^-F/, why: "`scp -F` reads a config file that can set ProxyCommand" },
+      { re: /^-J/, why: "`scp -J` routes the connection through a host you did not name" },
+      {
+        re: /ProxyCommand|LocalCommand|ProxyJump|PermitLocalCommand/i,
+        why: RUNS_CODE("scp ProxyCommand"),
+      },
+    ],
+  },
 
   /* ── media, documents and OCR ────────────────────────────────────────────
    *

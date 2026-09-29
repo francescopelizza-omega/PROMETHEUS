@@ -20,7 +20,7 @@
  * The cache is process-lifetime with an explicit invalidation (`clearHostToolCache`), called by
  * `/install` and `/deps --refresh`. A tool does not appear or vanish on its own.
  */
-import { constants, accessSync, existsSync } from "node:fs";
+import { constants, accessSync, existsSync, statSync } from "node:fs";
 import { homedir, platform } from "node:os";
 import { delimiter, join } from "node:path";
 
@@ -68,28 +68,88 @@ export function searchPath(
   return dirs;
 }
 
-/** Where `bin` resolves on PATH, or null. Pure fs — never spawns, never runs the program. */
+/**
+ * Is `p` an executable FILE (not a directory)?
+ *
+ * `access(X_OK)` alone is not that test. The execute bit on a directory means "may be traversed",
+ * so `accessSync("/opt/homebrew/bin/node", X_OK)` and `accessSync("/some/dir", X_OK)` both
+ * succeed — and a PATH entry that happens to contain a *directory* named like the tool would
+ * have been reported as the tool itself, then handed to spawn, which fails with EACCES at the
+ * moment it is least expected. `statSync` follows symlinks, which is what we want: the question
+ * is what the name finally resolves to, and a dangling symlink throws and is skipped.
+ */
+function isExecutableFile(p: string): boolean {
+  try {
+    accessSync(p, constants.X_OK);
+    return statSync(p).isFile();
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * EVERY place `bin` resolves on PATH, in resolution order. Pure fs — never spawns.
+ *
+ * `lookPath` answers "where does this run from"; this answers "what else is lying underneath",
+ * and the difference is the whole of a class of bug this repo has now measured three times on one
+ * machine: `claude` is installed twice (a native 2.1.284 in ~/.local/bin, a Homebrew cask 2.1.274
+ * behind it), `codex` twice, `ollama` twice — and in each case an update command aimed at the
+ * copy that is NOT first on PATH succeeds, reports success, and changes nothing the user runs.
+ *
+ * Answering that needed no new machinery: the walk already visits every directory and simply
+ * returned at the first hit. It now collects. Duplicates are removed by literal path, not by
+ * realpath — two PATH entries pointing at the same file is a shadow that does not matter, but the
+ * CALLER must still decide that, because `/usr/local/bin/x -> /Applications/X.app/…/x` and
+ * `/opt/homebrew/bin/x -> ../Cellar/x/1.2/bin/x` are genuinely different programs.
+ */
+export function lookPathAll(
+  bin: string,
+  env: NodeJS.ProcessEnv = process.env,
+  opts: { home?: string; exists?: (p: string) => boolean } = {},
+): string[] {
+  return walkPath(bin, env, opts, false);
+}
+
+/**
+ * Where `bin` resolves on PATH, or null. Pure fs — never spawns, never runs the program.
+ *
+ * Stops at the first hit rather than delegating to `lookPathAll().[0]`: this is the probe the
+ * host-tool inventory runs for every catalog entry, and finishing the walk to discard the rest
+ * would turn a first-directory hit into a full scan of a dozen directories per tool.
+ */
 export function lookPath(
   bin: string,
   env: NodeJS.ProcessEnv = process.env,
   opts: { home?: string; exists?: (p: string) => boolean } = {},
 ): string | null {
+  return walkPath(bin, env, opts, true)[0] ?? null;
+}
+
+function walkPath(
+  bin: string,
+  env: NodeJS.ProcessEnv,
+  opts: { home?: string; exists?: (p: string) => boolean },
+  stopAtFirst: boolean,
+): string[] {
   const exts =
     platform() === "win32"
       ? ["", ...(env.PATHEXT ?? ".EXE;.CMD;.BAT;.COM").split(";").filter(Boolean)]
       : [""];
+  const out: string[] = [];
+  const seen = new Set<string>();
   for (const dir of searchPath(env, opts)) {
     for (const ext of exts) {
       const candidate = join(dir, bin + ext);
-      try {
-        accessSync(candidate, constants.X_OK);
-        return candidate;
-      } catch {
-        /* keep scanning — a missing or non-executable candidate is the normal case */
-      }
+      // A PATH listing the same directory twice is common (a shell rc sourced twice); reporting
+      // the same literal path as its own shadow would be noise, not a finding.
+      if (seen.has(candidate)) continue;
+      seen.add(candidate);
+      if (!isExecutableFile(candidate)) continue;
+      out.push(candidate);
+      if (stopAtFirst) return out;
     }
   }
-  return null;
+  return out;
 }
 
 let cache: HostToolStatus[] | null = null;

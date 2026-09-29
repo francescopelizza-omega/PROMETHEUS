@@ -85,8 +85,8 @@
         },
         "prometheus.contextWindow": {
           "type": "number",
-          "default": 8192,
-          "description": "The model's context window, in tokens. Sizes the tool-preamble budget — too small a value drops tool descriptions from the listing."
+          "default": 0,
+          "description": "The model's context window, in tokens. Leave at 0 to ask the server (recommended) — Ollama reports the real value, which is often 32x the old 8192 default. Sizes the tool-preamble, compaction and reply budgets; too small a value drops tool descriptions and can leave a thinking model no room to answer."
         },
         "prometheus.apiKeyRef": {
           "type": "string",

@@ -678,11 +678,53 @@ export { createMcpGateRunner } from "./security/mcp-gate.js";
 export type { MemorySnapshot } from "./memory-probe.js";
 export {
   DEFAULT_HEADROOM_BYTES,
+  REMOTE_HEADROOM_BYTES,
+  VRAM_HEADROOM_BYTES,
   localMemorySnapshot,
   parseMemAvailable,
   parseSysctlNumbers,
+  remoteMemorySnapshot,
   underMemoryPressure,
 } from "./memory-probe.js";
+// --- remote machines over SSH (2026-09-25) ---------------------------------
+// Driving a model server on another box and knowing nothing about that box was the gap: a
+// runner's API reports what it HOLDS, never how much RAM or VRAM is left. `ssh-target.ts`
+// builds an argv a hostile hostname cannot turn into a local shell; `remote-probe.ts` is one
+// fixed, read-only script answering RAM / free RAM / GPU / VRAM / disk / runner in one round
+// trip; `ssh.ts` runs it, shows host-key fingerprints, and holds the `-L` tunnels.
+export type { SshTarget, SshValidation } from "./ssh-target.js";
+export {
+  fixedSshOptions,
+  formatSshTarget,
+  parseSshDestination,
+  sshArgs,
+  sshKeyscanArgs,
+  validateSshTarget,
+} from "./ssh-target.js";
+export type { RemoteGpu, RemoteHardware } from "./remote-probe.js";
+export {
+  REMOTE_PROBE_SCRIPT,
+  parseNvidiaRow,
+  parseRemoteProbe,
+  usableMemoryBytes,
+} from "./remote-probe.js";
+export type { SshResult, Tunnel, TunnelProcess } from "./ssh.js";
+export {
+  closeAllTunnels,
+  closeControlMaster,
+  controlPathFor,
+  explainSshFailure,
+  freeLocalPort,
+  hookTunnelCleanup,
+  isKnownHost,
+  listTunnels,
+  openTunnel,
+  probeRemoteHardware,
+  sshExec,
+  sshFingerprint,
+  waitForPort,
+} from "./ssh.js";
+
 export type { ResidentModelInfo, RunnerProbe, RunnerStatus } from "./runner-census.js";
 export {
   DEFAULT_RUNNERS,

@@ -11,6 +11,7 @@ import { type FrameInput, renderFrame } from "./frame.js";
 import { openInvokeOverlay } from "./invoke-overlay.js";
 import { initialTuiState } from "./reducer.js";
 import type { StatusModel } from "./status.js";
+import { stringWidth } from "./width.js";
 
 const STATUS: StatusModel = {
   permMode: "default",
@@ -51,9 +52,39 @@ test("default frame: box + status, caret inside the box", () => {
   assert.equal(f.cursorCol, 4 + 2); // text col 4 + caret 2
 });
 
-test("every line stays within cols-1 (magic-margin guard)", () => {
-  const f = renderFrame(base({ cols: 40, state: initialTuiState({ input: "x".repeat(100) }) }));
-  for (const l of f.lines) assert.ok([...strip(l)].length <= 40 - 1, `line ≤ cols-1: ${strip(l)}`);
+/**
+ * The guard measured CODE POINTS (`[...strip(l)].length`), which is not what a terminal counts.
+ *
+ * That is why the trait rail shipped one column over budget on every width: the row holds
+ * `⚙ medium`, and the gear is one code point of two display columns wherever the terminal font
+ * has no text glyph for it, so a row that measured 119 and was accepted actually landed on the
+ * 120th cell — the one the width rule exists to keep empty. One row touching the last column
+ * makes the block a physical row taller than `frame.lines.length`, and the redraw strands the
+ * top border. `stringWidth` is the measure every layout helper here already uses; the test has
+ * to use it too or it agrees with the bug.
+ *
+ * Run across widths AND with a status model that actually populates the rail — the old fixture
+ * had no capabilities and no effort, so the offending row was never rendered at all.
+ */
+test("every line stays within cols-1 DISPLAY columns (magic-margin guard)", () => {
+  const RAIL: StatusModel = {
+    ...STATUS,
+    capabilities: ["completion", "vision", "audio", "tools", "thinking"],
+    effort: { tier: "medium", available: true },
+  };
+  for (const cols of [40, 60, 80, 106, 120, 134]) {
+    for (const status of [STATUS, RAIL]) {
+      for (const input of ["", "x".repeat(100), "hello"]) {
+        const f = renderFrame(base({ cols, status, state: initialTuiState({ input }) }));
+        for (const l of f.lines) {
+          assert.ok(
+            stringWidth(l) <= cols - 1,
+            `cols=${cols} rail=${status === RAIL} line is ${stringWidth(l)} columns: ${strip(l)}`,
+          );
+        }
+      }
+    }
+  }
 });
 
 test("open dropdown renders ABOVE the box and pushes the caret down", () => {
@@ -66,14 +97,56 @@ test("open dropdown renders ABOVE the box and pushes the caret down", () => {
   assert.equal(f.cursorRow, boxTop + 1);
 });
 
-test("bypass mode tints the box border danger (red)", () => {
+/**
+ * Full autonomy tints the frame ICE, and specifically NOT red.
+ *
+ * The old assertion here only checked that SOME truecolor sequence reached the top border, which
+ * every border has — so it would have passed just as happily on the red it was named after, on
+ * ice, or on anything else. The colour is the whole subject of this test, so it names the exact
+ * channels: `cyan.200` #8fecff = rgb(143,236,255), and `red.400` #f24343 = rgb(242,67,67) must be
+ * absent. A6/A7 are modes the operator chose, not faults.
+ */
+const ICE_SGR = "38;2;143;236;255";
+const RED_SGR = "38;2;242;67;67";
+
+test("bypass mode tints the box border ICE, not danger red", () => {
   const f = renderFrame(
     base({ caps: "truecolor", state: initialTuiState({ permMode: "bypassPermissions" }) }),
   );
-  // the danger role (red.400 #f85149-ish) appears on the top border line
-  assert.match(f.lines[0] ?? "", /38;2;/);
+  assert.ok(f.lines[0]?.includes(ICE_SGR), "the top border is painted cyan.200");
+  assert.ok(!f.lines[0]?.includes(RED_SGR), "and carries no red");
   // and the bypass indicator shows in the status block
   assert.ok(f.lines.some((l) => strip(l).includes("⏵⏵ bypass permissions on")));
+});
+
+test("yolo tints the frame the SAME ice — the two high rungs match", () => {
+  // A7 → yolo, A6 → bypassPermissions (`authLevelToMode`). The frame cannot see the level, so
+  // the two must agree or A6 and A7 would disagree about a colour that means the same thing.
+  const f = renderFrame(base({ caps: "truecolor", state: initialTuiState({ permMode: "yolo" }) }));
+  assert.ok(f.lines[0]?.includes(ICE_SGR));
+  assert.ok(!f.lines[0]?.includes(RED_SGR));
+});
+
+test("the ordinary modes keep the accent border — ice is reserved for full autonomy", () => {
+  for (const permMode of ["default", "acceptEdits", "plan"] as const) {
+    const f = renderFrame(base({ caps: "truecolor", state: initialTuiState({ permMode }) }));
+    assert.ok(!f.lines[0]?.includes(ICE_SGR), `${permMode} must not use the autonomy colour`);
+  }
+});
+
+test("NO red is painted anywhere in the frame at full autonomy", () => {
+  // The whole point: the border, the [PROMETHEUS:YOLO] chip, the auth chip and the ☢ indicator
+  // all moved off `danger` together. One of them left behind would undo the change.
+  const f = renderFrame(
+    base({
+      caps: "truecolor",
+      state: initialTuiState({ permMode: "yolo" }),
+      status: { ...STATUS, authLevel: 7 },
+    }),
+  );
+  const whole = f.lines.join("\n");
+  assert.ok(!whole.includes(RED_SGR), "something in the frame is still red at A7");
+  assert.ok(whole.includes(ICE_SGR), "and the autonomy colour is actually present");
 });
 
 test("narrow terminal collapses to a single prompt line", () => {
@@ -108,7 +181,7 @@ test("the trait rail is ONE row, in fixed slot order, with the dial last", () =>
   const lines = f.lines.map(strip);
   const rule = lines.findIndex((l) => l.startsWith("\u251c"));
   assert.ok(rule > 0, "no rail rule was rendered");
-  assert.match(lines[rule + 1] ?? "", /txt\s+vis\s+aud\s+tool\s+think\s+\u2699 max/);
+  assert.match(lines[rule + 1] ?? "", /txt\s+vis\s+aud\s+tool\s+think\s+\u2699\ufe0e max/);
   assert.ok(
     (lines[rule + 2] ?? "").startsWith("\u2570"),
     "the bottom border must follow the rail directly — the rail is a SINGLE row",
@@ -133,7 +206,7 @@ test("a capability the model LACKS keeps its slot instead of vanishing", () => {
   assert.ok(rule > 0);
   assert.match(
     lines[rule + 1] ?? "",
-    /txt\s+vis\s+aud\s+tool\s+think\s+\u2699 high/,
+    /txt\s+vis\s+aud\s+tool\s+think\s+\u2699\ufe0e high/,
     "vis/aud/think must still occupy their slots (dimmed) on a text-only model",
   );
 });
@@ -186,8 +259,11 @@ test("the panel never breaks the width rule at any terminal size", () => {
     for (const rows of [10, 16, 24, 50]) {
       const f = renderFrame(base({ status: GEMMA4_STATUS, cols, rows }));
       for (const line of f.lines) {
+        // `stringWidth`, not `.length`: a terminal counts COLUMNS. Measuring UTF-16 units calls
+        // a zero-width variation selector a column and a two-column glyph one, so the check both
+        // fails on lines that fit and passes lines that overflow — see the guard above.
         assert.ok(
-          strip(line).length <= cols - 1,
+          stringWidth(line) <= cols - 1,
           `cols=${cols} rows=${rows}: a line touched the last column`,
         );
       }

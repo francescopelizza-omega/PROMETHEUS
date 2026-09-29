@@ -61,6 +61,25 @@ export interface AiEndpoint {
    * instead of falling through to `UNKNOWN_CAPABILITY` for every model, always.
    */
   probedCapabilities?: readonly string[];
+  /**
+   * Did anything actually MEASURE `contextWindow`, or is it the floor?
+   *
+   * `contextWindow` cannot answer this on its own, and the difference decides whether a turn
+   * runs. Every local endpoint is constructed at `DEFAULT_CONTEXT_WINDOW` (8192) as an admitted
+   * placeholder — `onboarding.ts` even labels it "A FLOOR, not a measurement" — and a failed
+   * probe leaves it there (`endpoint-probe.ts` returns the input endpoint unchanged on
+   * `failed: true`). That floor is then handed to `preflightContext`, which REFUSES the turn
+   * locally before anything is sent. Since this repo's own prompt (system text plus ~46 tool
+   * schemas) already measures ~7.2k tokens, a failed probe on a 262,144-window model leaves the
+   * user roughly 800 tokens before every turn is refused with
+   * "the model's context window is 8192" — a number nobody measured.
+   *
+   * `preflightContext` already has the right rule for this case and says so: an unknown window
+   * disables the check, because "no information" must not mean "refuse". This flag is how a
+   * caller can tell it the truth. Absent/false means "treat the window as a budgeting hint, not
+   * as grounds for refusal".
+   */
+  contextWindowMeasured?: boolean;
 }
 
 /** Per-workspace privacy policy (file 07 §7.5). */

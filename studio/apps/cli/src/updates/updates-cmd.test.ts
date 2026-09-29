@@ -10,28 +10,85 @@ import { test } from "node:test";
 
 import { updates as u } from "@prometheus/core";
 
-import { type CheckDeps, checkUpdates } from "./check.js";
+import { type CheckDeps, checkUpdates } from "@prometheus/core/updates-live";
 import { runUpdates, updatesStartupNotice } from "./updates-cmd.js";
 
 function tmpHome(): string {
   return mkdtempSync(join(tmpdir(), "prom-updates-"));
 }
 
-/** A fully-faked check setup: claude installed + outdated, ollama has one model, git checkout. */
+/**
+ * A fully-faked check setup: claude installed + outdated, ollama has one model, git checkout.
+ *
+ * EVERY seam is named here, including the ones the tool and package sweeps use. When those
+ * sweeps were added this object silently stopped covering them and these tests began making
+ * real HTTPS requests and spawning `brew` — each one took over a second and would have failed
+ * on an offline machine. `CheckDeps extends ToolSweepDeps` is what makes the set complete by
+ * construction; this is the set.
+ */
 function fakeDeps(home: string, over: Partial<CheckDeps> = {}): CheckDeps {
   return {
     home,
     promVersion: "0.0.0",
     ramGb: 32,
+    platform: "darwin",
     scriptPath: "/x/y/z.js",
     now: () => new Date("2026-06-25T00:00:00Z"),
     which: (bin) => bin === "claude" || bin === "cursor-agent",
     cliVersion: (bin) => (bin === "claude" ? "2.1.190" : "2026.02.13"),
     fetchNpmLatest: async (pkg) => (pkg.includes("claude") ? "2.1.191" : null),
-    fetchGithubLatest: async () => null, // no self/ollama latest in the test
+    fetchGithubLatest: async () => null,
+    fetchSelfLatest: async () => null, // GitLab lookup: "could not check", not "up to date"
     ollamaTags: async () => [{ name: "qwen2.5-coder:7b", digest: "sha:aaa" }],
     engineVersionFn: async () => "0.15.0",
     detectMethod: () => ({ method: "git", repoDir: "/repo" }),
+    // --- the sweeps ---
+    checkUpstream: false, // no registry probe per model
+    skipPackages: true, // no spawning of brew/apt/npm
+    npmBinDir: null, // no `npm prefix -g`
+    /**
+     * `which` no longer decides what is installed — `clis` is DERIVED from this resolution, so
+     * one report cannot contain two disagreeing answers about the same tool. The fake therefore
+     * has to say where each copy lives, not merely that it exists.
+     */
+    resolve: (t) =>
+      t.id === "claude"
+        ? u.resolveTool("claude", [
+            {
+              pathEntry: "/opt/homebrew/bin/claude",
+              realPath: "/opt/homebrew/Caskroom/claude-code/2.1.190/claude",
+              owner: "brew-cask",
+              name: "claude-code",
+              version: "2.1.190",
+              versionSource: "path",
+            },
+          ])
+        : t.id === "cursor"
+          ? u.resolveTool("cursor", [
+              {
+                pathEntry: "/usr/local/bin/cursor-agent",
+                realPath: "/usr/local/bin/cursor-agent",
+                owner: "unknown",
+                version: "2026.02.13",
+                versionSource: "probe",
+              },
+            ])
+          : u.resolveTool(t.id, []),
+    fetchImpl: (async (url: string) => {
+      const npm = /registry\.npmjs\.org\/(.+)\/latest/.exec(String(url));
+      const cask = /api\/cask\/(.+)\.json/.exec(String(url));
+      const body = npm?.[1]?.includes("claude")
+        ? JSON.stringify({ version: "2.1.191" })
+        : cask?.[1] === "claude-code"
+          ? JSON.stringify({ version: "2.1.191" })
+          : "";
+      return {
+        status: body ? 200 : 404,
+        ok: Boolean(body),
+        text: async () => body,
+        json: async () => JSON.parse(body || "null"),
+      } as unknown as Response;
+    }) as unknown as typeof fetch,
     ...over,
   };
 }
@@ -45,10 +102,18 @@ test("checkUpdates assembles all three sections from the seams", async () => {
     assert.equal(claude?.updateAvailable, true);
     assert.equal(claude?.current, "2.1.190");
     assert.equal(claude?.latest, "2.1.191");
-    // cursor is selfcheck-only → installed, no latest, not flagged.
+    // cursor has no published version endpoint → installed, no latest, and NOT flagged.
     const cursor = report.clis.find((c) => c.service === "cursor");
     assert.equal(cursor?.installed, true);
     assert.equal(cursor?.updateAvailable, false);
+    /**
+     * …and in the section that can express it, "no endpoint" reads as UNKNOWN rather than as
+     * up-to-date. The legacy `clis` row is a boolean and cannot carry that, which is exactly why
+     * `tools` exists alongside it.
+     */
+    const cursorTool = report.tools?.find((t) => t.id === "cursor");
+    assert.equal(cursorTool?.updateAvailable, null);
+    assert.match(cursorTool?.source ?? "", /no public version endpoint|none/);
     // self: git method → git pull command; engine version captured.
     assert.equal(report.self.engine, "0.15.0");
     assert.match(report.self.plan.command, /git -C \/repo pull/);
@@ -140,6 +205,7 @@ test("updatesStartupNotice returns a one-liner when updates exist, else empty", 
           ...fakeDeps(home2),
           ramGb: 1, // nothing in the catalog fits → no "new model" suggestions
           which: () => false, // no CLIs installed
+          resolve: (t) => u.resolveTool(t.id, []), // …and none resolve on PATH either
           ollamaTags: async () => [], // no models → no digest changes
           fetchNpmLatest: async () => null,
           ...d,
@@ -182,4 +248,147 @@ test("runUpdates returns the report for --json; a check failure → null (CLI-04
   } finally {
     rmSync(home, { recursive: true, force: true });
   }
+});
+
+test("REGRESSION: the blocking package sweep runs AFTER every async check", () => {
+  /**
+   * `sweepPackages` is built on `spawnSync`, which holds the event loop for as long as the child
+   * runs — and `brew outdated` takes about two seconds. Run inside the same `Promise.all` as the
+   * network checks, it stalled their AbortController timers past the 4-second per-request
+   * deadline, and the registry probe for every installed model silently produced NOTHING. Not an
+   * error: an empty result, rendered as "not checked against the registry this run".
+   *
+   * Measured: identical inputs found `qwen3.6:latest` had moved to a newer build when the sweep
+   * ran afterwards, and found nothing at all when it ran alongside.
+   */
+  return (async () => {
+    const home = tmpHome();
+    try {
+      const order: string[] = [];
+      await checkUpdates(
+        fakeDeps(home, {
+          skipPackages: false,
+          ollamaTags: async () => {
+            // A real async boundary, so a blocking sweep scheduled concurrently would interleave.
+            await new Promise((r) => setTimeout(r, 5));
+            order.push("async");
+            return [];
+          },
+          sweepPackagesFn: () => {
+            order.push("sweep");
+            return [];
+          },
+        }),
+      );
+      assert.deepEqual(
+        order,
+        ["async", "sweep"],
+        "the sweep must not run while async work is in flight",
+      );
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  })();
+});
+
+test("a tool whose copy no command fits says so, instead of printing nothing", () => {
+  /**
+   * `opencode` is installed by its own script into ~/.opencode/bin; the table's only command was
+   * an npm one, correctly withheld — leaving the row with a version gap and no way to close it,
+   * silently. A blank is indistinguishable from "nothing to do".
+   */
+  const line = u.formatUpdateReport({
+    clis: [],
+    models: { diff: { changed: [], added: [], removed: [] }, suggestions: [] },
+    self: {
+      prometheus: "0.0.0",
+      updateAvailable: false,
+      plan: u.buildSelfUpdatePlan({ method: "unknown" }),
+    },
+    checkedAt: "2026-09-29T00:00:00.000Z",
+    tools: [
+      {
+        id: "x",
+        label: "X",
+        role: "agent",
+        installed: true,
+        state: "single",
+        copies: [],
+        current: "1.0.0",
+        latest: "2.0.0",
+        updateAvailable: true,
+        offer: [],
+        withheld: [
+          { command: "npm install -g x", reason: "no npm install of this tool was found" },
+        ],
+      },
+    ],
+  });
+  assert.match(line, /no update command applies to how this copy was installed/);
+});
+
+test("an empty withheld command renders as the vendor's own updater, not as a blank", () => {
+  // ollama's `{ via: "app", command: "" }` row printed as `not:  ` with nothing after it, which
+  // reads as a rendering fault rather than as information.
+  const line = u.formatUpdateReport({
+    clis: [],
+    models: { diff: { changed: [], added: [], removed: [] }, suggestions: [] },
+    self: {
+      prometheus: "0.0.0",
+      updateAvailable: false,
+      plan: u.buildSelfUpdatePlan({ method: "unknown" }),
+    },
+    checkedAt: "2026-09-29T00:00:00.000Z",
+    tools: [
+      {
+        id: "ollama",
+        label: "Ollama",
+        role: "engine",
+        installed: true,
+        state: "single",
+        copies: [],
+        current: "0.34.4",
+        latest: "0.34.4",
+        updateAvailable: false,
+        offer: [],
+        withheld: [{ command: "", reason: "updates the app bundle copy, which is not on PATH" }],
+      },
+    ],
+  });
+  assert.match(line, /not:\s+\(its own built-in updater\)/);
+  assert.doesNotMatch(line, /not:\s*$/m);
+});
+
+test("a readable latest with an unreadable installed version says WHICH is unknown", () => {
+  /**
+   * Measured on LM Studio: `lms --version` prints "CLI commit: 71bd99c" — no version — while the
+   * cask channel answers fine. A flat "could not check" implies the lookup failed, when in fact
+   * the opposite is true.
+   */
+  const line = u.formatUpdateReport({
+    clis: [],
+    models: { diff: { changed: [], added: [], removed: [] }, suggestions: [] },
+    self: {
+      prometheus: "0.0.0",
+      updateAvailable: false,
+      plan: u.buildSelfUpdatePlan({ method: "unknown" }),
+    },
+    checkedAt: "2026-09-29T00:00:00.000Z",
+    tools: [
+      {
+        id: "lmstudio",
+        label: "LM Studio",
+        role: "engine",
+        installed: true,
+        state: "single",
+        copies: [],
+        current: null,
+        latest: "0.4.25",
+        updateAvailable: null,
+        offer: [],
+        withheld: [],
+      },
+    ],
+  });
+  assert.match(line, /installed version unreadable — latest is 0\.4\.25/);
 });

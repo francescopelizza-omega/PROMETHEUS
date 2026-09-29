@@ -64,7 +64,21 @@ export const CLI_UPDATE_SOURCES: Readonly<Record<string, UpdateSource>> = Object
     channel: "github",
     id: "ollama/ollama",
     versionArgs: ["--version"],
-    selfUpdate: "curl -fsSL https://ollama.com/install.sh | sh   # or: brew upgrade ollama",
+    /**
+     * The "or: brew upgrade ollama" that used to be here was wrong, and wrong in a way this
+     * repo has already paid for.
+     *
+     * `ollama` (the brew FORMULA) and `ollama-app` (the brew CASK) are different installs. On a
+     * machine running Ollama.app — which is what owns `:11434`, per CLAUDE.md §2.8 — that
+     * command installs a SECOND ollama CLI beside it. The last time two ollamas contended for
+     * that port the brew service crash-looped 36,135 times.
+     *
+     * `install.sh` is the one instruction that is right regardless of platform, and on macOS
+     * the app updates itself anyway. `tool-registry.ts` carries the per-install-method commands
+     * and is the place to look them up; `updates.test.ts` asserts these two rows agree.
+     */
+    selfUpdate: "curl -fsSL https://ollama.com/install.sh | sh",
+    note: "On macOS, Ollama.app updates itself — see tool-registry.ts for the per-install-method command.",
   },
 });
 
@@ -81,7 +95,15 @@ export function updateSourceFor(service: string): UpdateSource | undefined {
 /** Extract the installed version from a CLI `--version` stdout blob (fail-soft → null). */
 export function parseCliVersion(raw: unknown): string | null {
   const p = parseVersion(raw);
-  return p ? `${p.major}.${p.minor}.${p.patch}${p.prerelease ? `-${p.prerelease}` : ""}` : null;
+  if (!p) return null;
+  // Rebuilt from the parsed parts rather than returned verbatim, so a `--version` line with
+  // surrounding text yields a bare version — but every component must survive the round trip.
+  // Dropping `.build` here would re-introduce the bug where 1.2.3.4 and 1.2.3.5 are the same.
+  const epoch = p.epoch ? `${p.epoch}:` : "";
+  const build = p.build !== null ? `.${p.build}` : "";
+  const pre = p.prerelease ? `-${p.prerelease}` : "";
+  const rev = p.revision ? `_${p.revision}` : "";
+  return `${epoch}${p.major}.${p.minor}.${p.patch}${build}${pre}${rev}`;
 }
 
 /** Pull `.version` from an npm registry `/<pkg>/latest` document (fail-soft → null). */

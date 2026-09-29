@@ -48,6 +48,26 @@ export type Role =
   | "accent"
   | "muted"
   | "heading"
+  // the composer frame + chips at FULL AUTONOMY (A6 trusted, A7 runall).
+  //
+  // Its own role rather than `danger`, because those two are not a fault — they are the mode the
+  // operator deliberately selected to get work finished without being asked. `danger` is the
+  // vocabulary of `gate:off` and a failed turn, and spending it on a chosen setting both alarms
+  // the user for no reason and devalues the colour for the cases that ARE faults. Red is also,
+  // measurably, the DIMMEST colour in this palette on a dark ground (#f24343 = 5.2:1, against
+  // 8.6–10.8 for everything else on that bar), so it was the worst of both worlds: loud in
+  // meaning, weak in legibility.
+  //
+  // `cyan.200` — ice. It stays inside the light-blue family the operator already reads as
+  // "Prometheus", and separates from it by LIGHTNESS (0.78 vs the accent's 0.52) rather than by
+  // hue, which is the point: at full autonomy the frame should read as turned up, not as broken.
+  // Deliberately NOT in `ACCENT_ROLES`, so it keeps this ramp hex instead of collapsing onto the
+  // pinned operator accent — and stays non-bold, giving it a second axis of separation from the
+  // always-bold accent beside it.
+  //
+  // Colour is not the sole signal and must not become it: the `☢ YOLO` indicator line, the
+  // `[PROMETHEUS:YOLO]` chip and `auth:7·runall` all still say it in words.
+  | "autonomy"
   // the model's trait rail: a capability that is LIVE this turn vs one the user switched off.
   // Green/amber and not the generic info/warn pair, because these two are read as a matched
   // set — "is this on or off" — and a shared vocabulary for a binary is what makes the rail
@@ -123,6 +143,8 @@ const ROLE_RAMP: Record<Role, [RampName, keyof Ramp]> = {
   accent: ["cyan", 400],
   muted: ["neutral", 500],
   heading: ["violet", 200],
+  autonomy: ["cyan", 200], // ice #8fecff — 14.5:1 on neutral-950; see the Role's comment
+
   traitOn: ["green", 400],
   traitOff: ["amber", 400],
   fleetOurs: ["cyan", 400], //  light blue — pinned to the operator accent by ACCENT_ROLES
@@ -186,6 +208,9 @@ const ROLE_ANSI16: Record<Role, AnsiColorName> = {
   accent: "cyan",
   muted: "brightBlack",
   heading: "brightMagenta",
+  // brightCyan (96) against accent's cyan (36): on a 16-colour terminal the ramp hex is gone, so
+  // the lightness separation has to come from the two cyans the palette actually has.
+  autonomy: "brightCyan",
   traitOn: "green",
   traitOff: "yellow",
   fleetOurs: "brightCyan",

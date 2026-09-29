@@ -268,19 +268,37 @@ function gateRole(gate: string): Role {
   return gate === "off" ? "danger" : gate === "warn" ? "warn" : "info";
 }
 
-/** The authorisation chip's role: higher autonomy = louder (0–1 muted → 6–7 danger). */
+/**
+ * The authorisation chip's role: higher autonomy = brighter (0–1 muted → 6–7 ice).
+ *
+ * The top of this ladder used to be `danger`, which made the whole scale read as an escalating
+ * FAULT — it is literally spelled in the severity roles, `muted → accent → warn → danger`. A6
+ * and A7 are settings the operator selected, so they now get `autonomy` (see `palette.ts`).
+ * `warn` stays at 4–5 for the moment; that rung has the same problem one notch down and is
+ * worth revisiting as a whole-ladder change rather than piecemeal.
+ *
+ * Red is not gone from this bar — `gateRole` keeps it for `gate:off`, which genuinely is a
+ * fault state, and it is more legible now that nothing else competes for it.
+ */
 function authRole(level: number): Role {
-  if (level >= 6) return "danger";
+  if (level >= 6) return "autonomy";
   if (level >= 4) return "warn";
   if (level >= 2) return "accent";
   return "muted";
 }
 
-/** The permission-mode chip role, from its tone. */
+/**
+ * The permission-mode chip role, from its tone.
+ *
+ * `danger` is the tone of exactly two modes — bypassPermissions and yolo — which are the same
+ * two the composer frame recolours. Mapping that tone to `autonomy` keeps the chip, the
+ * indicator line and the box border moving as one set; leaving it red would have left the
+ * `☢ YOLO` line shouting under a calm frame.
+ */
 function modeRole(mode: PermissionModeId): Role {
   const tone = permissionModeMeta(mode).tone;
   return tone === "danger"
-    ? "danger"
+    ? "autonomy"
     : tone === "warn"
       ? "warn"
       : tone === "accent"

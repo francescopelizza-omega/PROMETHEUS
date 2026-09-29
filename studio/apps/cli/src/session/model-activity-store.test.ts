@@ -3,10 +3,17 @@ import { dirname } from "node:path";
 import test from "node:test";
 
 import type { ModelActivityFs } from "./model-activity-store.js";
-import { modelActivityPath, readModelActivity, touchModelActivity } from "./model-activity-store.js";
+import {
+  modelActivityPath,
+  readModelActivity,
+  touchModelActivity,
+} from "./model-activity-store.js";
 
 /** An in-memory fake fs: a map of path → file content, and a set of dirs (existsSync). */
-function fakeFs(files: Record<string, string> = {}, dirs: Set<string> = new Set()): ModelActivityFs {
+function fakeFs(
+  files: Record<string, string> = {},
+  dirs: Set<string> = new Set(),
+): ModelActivityFs {
   return {
     existsSync: (p) => dirs.has(p) || p in files,
     readFileSync: (p) => {
@@ -43,7 +50,9 @@ test("readModelActivity: a corrupt/malformed JSON file also degrades to lastActi
 
 test("readModelActivity: a non-numeric lastActiveAt also degrades to 0 rather than NaN/undefined leaking out", () => {
   const home = "/home/.prometheus";
-  const fs = fakeFs({ [`${home}/state/model-activity.json`]: JSON.stringify({ lastActiveAt: "soon" }) });
+  const fs = fakeFs({
+    [`${home}/state/model-activity.json`]: JSON.stringify({ lastActiveAt: "soon" }),
+  });
   assert.deepEqual(readModelActivity(home, fs), { lastActiveAt: 0 });
 });
 

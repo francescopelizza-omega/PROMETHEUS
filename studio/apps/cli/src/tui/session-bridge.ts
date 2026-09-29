@@ -46,6 +46,9 @@ import { createKeyResolver, keychainProviders } from "../session/key-resolver.js
 import { mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { isAbsolute, join, resolve } from "node:path";
 
+import { updates as u } from "@prometheus/core";
+import { fetchOllamaTags, searchHuggingFace } from "@prometheus/core/updates-live";
+import { localMemorySnapshot } from "@prometheus/engine-bridge";
 import { PROM_VERSION } from "../commands/help.js";
 import {
   type InvokeDeps,
@@ -171,7 +174,8 @@ import { execVarsFromEnv } from "../session/system-tools.js";
 import { turnSummaryOf } from "../session/turn-summary.js";
 import { createWorkingSet, isPathAllowed } from "../session/working-set.js";
 import { insideTmux } from "../tmux/tmux.js";
-import { runUpdates } from "../updates/updates-cmd.js";
+import { type BrowseRow, browseRows, installTag } from "../updates/model-actions-cmd.js";
+import { runUpdates, updatesStartupNotice } from "../updates/updates-cmd.js";
 import { copyReplyStatus, lastAssistantReply, osc52Sequence } from "./clipboard.js";
 import { fleetLegendLines } from "./fleet-bar.js";
 import { CODE_STATE, detectLanguage, highlightLine, isHighlightable } from "./highlight.js";
@@ -418,6 +422,20 @@ export interface SessionBridge {
   setPosture: (mode: PermissionModeId, level: number) => void;
   /** the startup banner + onboarding hint block. */
   banner: () => string;
+  /**
+   * The throttled update nudge, as PLAIN text (or "" when there is nothing to say).
+   *
+   * Exposed rather than fired inside `createSessionBridge` because of ordering: the bridge is
+   * awaited at app.ts:349 but the banner is not printed until app.ts:1211, so a notice resolved
+   * from a warm ≤6h cache — which is the normal case — would land ABOVE the banner, or before
+   * raw mode is even entered. The readline host deliberately prints it UNDER the banner, and the
+   * two surfaces are supposed to be at parity.
+   *
+   * Plain, because the caller owns the palette: the readline host tints it with `c.yellow`
+   * directly, while the TUI must go through `paint(…, caps)` so it degrades correctly at
+   * `--color=none` and on a 16-colour terminal.
+   */
+  updatesNotice: () => Promise<string>;
   /** undo the last applied propose_edit; returns the reverted path (or undefined). CLI-010. */
   revertLastEdit: () => string | undefined;
   /** quick-toggle all agent tools (Ctrl+T); returns the new global enabled state. CLI-018. */
@@ -437,6 +455,14 @@ export interface SessionBridge {
   resumeThinking: () => ai.EffortTier;
   /** the `/invoke` overlay's catalog rows (name · summary · install presence), CLI-059. [] on error. */
   invokeCatalog: () => Promise<InvokeItem[]>;
+  /**
+   * The MODEL browser's rows, for the `/updates catalog` overlay. [] on error.
+   *
+   * Awaited BEFORE the overlay opens, exactly as `invokeCatalog` is: `list-overlay.ts` has no
+   * async state, and giving it one would mean a half-painted list that reflows under the
+   * cursor. The caller prints a line first so a slow network is visible rather than a freeze.
+   */
+  catalogRows: (query: string) => Promise<BrowseRow[]>;
   /** dispatch the overlay's pick+args through the SAME nemesis-gated install path (CLI-059). */
   invokeInstall: (name: string, args: string) => Promise<void>;
   /**
@@ -2200,6 +2226,37 @@ export async function createSessionBridge(deps: BridgeDeps): Promise<SessionBrid
         env: process.env,
         ...(process.argv[1] ? { scriptPath: process.argv[1] } : {}),
         cwd: state.cwd,
+        /**
+         * The seams `/updates pull` and `/updates rm` need. Passing them is what ENABLES the
+         * action subcommands on this surface — without them the dispatcher refuses rather than
+         * assuming a confirmation, because one of the two is irreversible.
+         *
+         * Read off `slashCtx` lazily: this arrow runs long after the literal is constructed, and
+         * routing through the same object the rest of the TUI uses means the overlay-backed
+         * confirm is the one the user actually sees.
+         */
+        actions: {
+          confirm: (prompt) => slashCtx.confirm(prompt),
+          ask: (prompt) => slashCtx.ask(prompt),
+          getAuthLevel: () => slashCtx.getAuthLevel(),
+        },
+        /**
+         * The catalogue seam. READ-ONLY, so it is supplied even where the action seams are not:
+         * browsing shows a list and a command, and installs nothing.
+         *
+         * The budget is this machine's REAL memory, read the same way the admission gate reads
+         * it, so a model the browser says fits is one the gate will also admit. A browser using
+         * `totalmem()` would promise models that cannot load once the OS and the compositor are
+         * accounted for.
+         */
+        browse: {
+          search: async (q: string) => {
+            const r = await searchHuggingFace({ query: q, limit: 40 });
+            return { entries: r.entries, error: r.error };
+          },
+          budget: await catalogBudget(),
+          installed: await installedTags(),
+        },
       });
     },
     usage: () => {
@@ -2875,12 +2932,49 @@ export async function createSessionBridge(deps: BridgeDeps): Promise<SessionBrid
       if (origin === "user") saveAuthLevel(authLevel, deps.configHome);
     },
     banner,
+    /**
+     * Plain text, throttled, fail-soft. The APP decides when to print it (after the banner) and
+     * how to paint it — see the field's doc comment on `SessionBridge`.
+     */
+    updatesNotice: () =>
+      updatesStartupNotice({
+        home,
+        promVersion: PROM_VERSION,
+        client,
+        write: deps.write,
+        env: process.env,
+        ...(process.argv[1] ? { scriptPath: process.argv[1] } : {}),
+        cwd: state.cwd,
+        tint: (line) => line,
+      }),
     revertLastEdit,
     toggleTools: () => setToolsEnabled(!state.tuning.tools.enabled),
     setToolsEnabled,
     stepEffort,
     setEffort,
     resumeThinking,
+    /**
+     * The model browser's rows. Read-only: it produces a list and a command, and installs
+     * nothing — the command it hands back is `/updates pull`, which has its own confirmation
+     * and its own authorisation gate.
+     */
+    catalogRows: async (query: string): Promise<BrowseRow[]> => {
+      try {
+        const r = await searchHuggingFace({ query, limit: 40 });
+        if (r.error) {
+          write(`  ! catalogue unavailable: ${r.error}`);
+          return [];
+        }
+        const budget = await catalogBudget();
+        return browseRows(
+          u.sortCatalog(r.entries, "relevance", budget),
+          budget,
+          await installedTags(),
+        );
+      } catch {
+        return [];
+      }
+    },
     // the /invoke overlay (CLI-059): catalog rows for the picker + the gated dispatch.
     invokeCatalog: async (): Promise<InvokeItem[]> => {
       const res = await fetchCatalogRows(client, "");
@@ -2906,4 +3000,36 @@ export async function createSessionBridge(deps: BridgeDeps): Promise<SessionBrid
       await mcp?.close().catch(() => {});
     },
   };
+}
+
+/**
+ * What the model browser may promise this machine.
+ *
+ * Read through the same probe the admission gate uses, minus the headroom it keeps back — so a
+ * model the browser calls a fit is one the gate will also admit. `os.totalmem()` would be the
+ * easy answer and the wrong one: it ignores what is already resident and the reserve that keeps
+ * the compositor alive (CLAUDE.md §2), and would offer models that cannot actually load.
+ *
+ * Fail-soft: an unreadable probe yields a zero budget, which makes every verdict `too-big` —
+ * conservative, visible, and not a silent promise.
+ */
+async function catalogBudget(): Promise<u.FitBudget> {
+  try {
+    const snap = await localMemorySnapshot();
+    return {
+      usableBytes: Math.max(0, snap.availableBytes - snap.headroomBytes),
+      contextTokens: DEFAULT_CONTEXT_WINDOW,
+    };
+  } catch {
+    return { usableBytes: 0, contextTokens: DEFAULT_CONTEXT_WINDOW };
+  }
+}
+
+/** Tags already on this machine, so the browser can mark them rather than offer them again. */
+async function installedTags(): Promise<string[]> {
+  try {
+    return (await fetchOllamaTags()).map((m) => m.name);
+  } catch {
+    return [];
+  }
 }

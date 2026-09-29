@@ -35,12 +35,16 @@
  * machine; it cannot accidentally judge a remote model by local RAM.
  */
 
+import { type FootprintObservation, ledgerFootprint } from "./footprint-ledger.js";
 import {
+  FALLBACK_KV_BYTES_PER_TOKEN,
+  type KvCacheType,
   type MemoryBudget,
   type ModelFootprint,
   admitModel,
   humanBytes,
-  modelFootprint,
+  type modelFootprint,
+  servedContext,
 } from "./model-footprint.js";
 
 /** A model the caller might load. */
@@ -57,6 +61,18 @@ export interface ModelCandidate {
   measuredTotalBytes?: number;
   /** which runner would serve it ("ollama", "lmstudio", …). */
   runner?: string;
+  /**
+   * What this model has actually been measured at before, on this host.
+   *
+   * The reason the footprint is not a guess. One past observation solves the runner-overhead
+   * term outright and a log-derived one prices the cache without needing the architecture at
+   * all — see `ai/footprint-ledger.ts`. Empty or absent simply falls back to arithmetic.
+   */
+  observations?: readonly FootprintObservation[];
+  /** the host these observations belong to, so a remote model is not judged by local readings. */
+  host?: string;
+  /** the KV element type the runner is configured with, when it could be read. */
+  kvCacheType?: KvCacheType;
 }
 
 /** A model server that is up right now. */
@@ -89,28 +105,81 @@ export interface AffordableModel {
   fits: boolean;
   /** how much would be left over (negative = shortfall). */
   spareBytes: number;
+  /**
+   * `fits` is true only because the optimistic floor fits — the headline figure does not, and
+   * the headline figure is an admitted ceiling. Surfaces mark these rows so "fits" never reads
+   * as a promise it cannot keep.
+   */
+  uncertain?: boolean;
 }
 
 export type AdmissionDecision =
-  | { ok: true; footprint: ModelFootprint; spareBytes: number; evicting?: readonly string[] }
+  | {
+      ok: true;
+      footprint: ModelFootprint;
+      spareBytes: number;
+      evicting?: readonly string[];
+      /**
+       * Present when the load was allowed DESPITE the headline figure not fitting, because that
+       * figure is an admitted ceiling rather than a measurement. Callers print it; they do not
+       * stop. See `admitModelLoad`.
+       */
+      uncertain?: string;
+    }
   | {
       ok: false;
       code: "too-big" | "second-server";
-      /** one sentence, already phrased for a human. */
+      /**
+       * The whole refusal as prose — `headline` and `detail` joined.
+       *
+       * Kept as the contract because not every surface can lay out a block: a log line, a tool
+       * result and an IPC payload all want one string. The two fields below are the SAME words,
+       * pre-split, for the surfaces that can.
+       */
       reason: string;
+      /**
+       * The fact, in one sentence: what happened and to which model.
+       *
+       * Its own field because the first sentence is the only part a user reads before deciding
+       * whether to care, and burying it at the head of a four-line paragraph makes them read all
+       * four to find it. Splitting on `.` at render time would be worse — `gpu-box.lan` and
+       * `qwen3.6:latest` both carry dots.
+       */
+      headline: string;
+      /** the explanation and the way out, one sentence per entry. */
+      detail: readonly string[];
       footprint: ModelFootprint;
       shortfallBytes: number;
+      /**
+       * Memory the decision was actually made against — available minus headroom — so a
+       * renderer can show "needed vs free" without recomputing the budget it was not given.
+       * Omitted when the refusal was not about size.
+       */
+      usableBytes?: number;
       /** what WOULD fit, biggest first. Empty means nothing installed fits. */
       affordable: readonly AffordableModel[];
     };
 
-/** Footprint a candidate against a context. */
+/**
+ * Footprint a candidate against a context.
+ *
+ * Routed through the ledger, so everything ever measured about this model is used before any
+ * arithmetic is. The context is CLAMPED to what the model was actually trained for: a runner
+ * serves `min(requested, trained)`, so pricing a cache at a 262,144-token setting for a model
+ * trained at 8,192 over-counts by 32× and refuses a model over memory it would never ask for.
+ */
 export function footprintOf(c: ModelCandidate): ModelFootprint {
-  return modelFootprint({
+  const contextTokens = servedContext(c.contextTokens, c.geometry);
+  return ledgerFootprint({
+    model: c.id,
     weightsBytes: c.weightsBytes,
-    contextTokens: c.contextTokens,
+    contextTokens,
     geometry: c.geometry ?? null,
-    ...(c.measuredTotalBytes !== undefined ? { measuredTotalBytes: c.measuredTotalBytes } : {}),
+    fallbackKvBytesPerToken: FALLBACK_KV_BYTES_PER_TOKEN,
+    ...(c.host !== undefined ? { host: c.host } : {}),
+    ...(c.kvCacheType !== undefined ? { kvCacheType: c.kvCacheType } : {}),
+    ...(c.measuredTotalBytes !== undefined ? { residentTotalBytes: c.measuredTotalBytes } : {}),
+    ...(c.observations !== undefined ? { ledger: c.observations } : {}),
   });
 }
 
@@ -127,15 +196,18 @@ export function affordableModels(
   budget: MemoryBudget,
 ): AffordableModel[] {
   return candidates
-    .map((candidate) => {
+    .map((candidate): AffordableModel => {
       const footprint = footprintOf(candidate);
       const a = admitModel(footprint, budget);
-      return {
-        candidate,
-        footprint,
-        fits: a.ok,
-        spareBytes: a.ok ? a.spareBytes : -a.shortfallBytes,
-      };
+      if (a.ok) return { candidate, footprint, fits: true, spareBytes: a.spareBytes };
+      // Same rule as `admitModelLoad`: a ceiling that does not fit is not the same as a model
+      // that does not fit. If the floor fits, the honest answer is "probably", not "no".
+      const floor = footprint.lowerBoundBytes;
+      const usable = Math.max(0, budget.availableBytes - budget.headroomBytes);
+      if (footprint.source === "estimated" && floor !== undefined && floor <= usable) {
+        return { candidate, footprint, fits: true, spareBytes: usable - floor, uncertain: true };
+      }
+      return { candidate, footprint, fits: false, spareBytes: -a.shortfallBytes };
     })
     .sort((x, y) => {
       if (x.fits !== y.fits) return x.fits ? -1 : 1;
@@ -171,10 +243,17 @@ export function admitModelLoad(req: AdmissionRequest): AdmissionDecision {
   const others = resident.filter((s) => s.runner !== candidate.runner && s.models.length > 0);
   if (others.length > 0 && !req.allowSecondServer) {
     const names = others.map((s) => s.runner).join(", ");
+    const headline = `${names} is already serving a model on ${budget.host ?? "this machine"}.`;
+    const detail = [
+      "Prometheus keeps one model server running at a time so two of them cannot each hold a full set of weights.",
+      "Stop it first, or allow a second server explicitly.",
+    ];
     return {
       ok: false,
       code: "second-server",
-      reason: `${names} is already serving a model on ${budget.host ?? "this machine"}. Prometheus keeps one model server running at a time so two of them cannot each hold a full set of weights. Stop it first, or allow a second server explicitly.`,
+      reason: [headline, ...detail].join(" "),
+      headline,
+      detail,
       footprint,
       shortfallBytes: 0,
       affordable: affordableModels(req.alternatives ?? [], budget),
@@ -204,50 +283,259 @@ export function admitModelLoad(req: AdmissionRequest): AdmissionDecision {
     };
   }
 
+  /**
+   * ── THE ESTIMATE IS NOT ALLOWED TO REFUSE INSIDE ITS OWN ERROR BAR ────────────────────────
+   *
+   * An `estimated` footprint has no geometry behind it: its KV term is a blanket per-token
+   * allowance chosen to be a CEILING. Refusing a model because a deliberate ceiling did not fit
+   * is refusing it on a number we do not have — the precise failure the user named, where a
+   * model that would have run fine is discarded as too big.
+   *
+   * So when the optimistic floor DOES fit, this is not a refusal. It is a warning and a load:
+   * the arithmetic that is actually trustworthy (weights, which are known) fits, and the part
+   * that is guessed is the part being deferred to reality. The costs are asymmetric in both
+   * directions and this is where they balance — a wrong refusal is certain and permanent, a
+   * wrong admission is probabilistic and recoverable (the runner's own allocation fails, and
+   * `ram-guard.sh` is watching regardless).
+   *
+   * A `computed`, `calibrated` or `measured` footprint gets no such benefit. Those numbers have
+   * been verified to the megabyte against ollama's own allocation; if one says no, it means no.
+   */
+  const floor = footprint.lowerBoundBytes;
+  if (footprint.source === "estimated" && floor !== undefined) {
+    const usable = Math.max(0, effective.availableBytes - effective.headroomBytes);
+    if (floor <= usable) {
+      return {
+        ok: true,
+        footprint,
+        spareBytes: usable - floor,
+        uncertain: `${candidate.id}'s size could not be computed — no architecture data from the runner — so this is a range, not a figure: between ${humanBytes(floor)} and ${humanBytes(footprint.totalBytes)}, against ${humanBytes(usable)} free. Loading it anyway, because refusing on a guess would be worse than finding out.`,
+      };
+    }
+  }
+
   const where = budget.host ? ` on ${budget.host}` : "";
+  const headline =
+    `${candidate.id} needs about ${humanBytes(footprint.totalBytes)}${where}, ` +
+    `which is ${humanBytes(verdict.shortfallBytes)} more than is free.`;
+  /**
+   * The same breakdown `renderRefusal` draws as a column, written out as a sentence.
+   *
+   * Both exist on purpose. A terminal can align three figures and read them at a glance; a log
+   * line, a notification or a pane that wraps at an unknown width cannot, and a column that
+   * wraps is worse than no column. Neither is the "real" one — they are one fact, twice.
+   */
+  const detail = [
+    `That is ${humanBytes(footprint.weightsBytes)} of weights plus ` +
+      `${humanBytes(footprint.kvBytes)} of context cache at ` +
+      `${footprint.contextTokens.toLocaleString("en-US")} tokens.`,
+  ];
   return {
     ok: false,
     code: "too-big",
-    reason:
-      `${candidate.id} needs about ${humanBytes(footprint.totalBytes)}${where} ` +
-      `(${humanBytes(footprint.weightsBytes)} of weights plus ` +
-      `${humanBytes(footprint.kvBytes)} of context cache at ` +
-      `${footprint.contextTokens.toLocaleString("en-US")} tokens), ` +
-      `which is ${humanBytes(verdict.shortfallBytes)} more than is free.`,
+    reason: [headline, ...detail].join(" "),
+    headline,
+    detail,
     footprint,
     shortfallBytes: verdict.shortfallBytes,
+    usableBytes: Math.max(0, footprint.totalBytes - verdict.shortfallBytes),
     affordable: affordableModels(req.alternatives ?? [], effective),
   };
 }
 
 /**
+ * How a size figure should be qualified, in the user's terms rather than the code's.
+ *
+ * The words matter: "measured" and "estimated" are already English, and a user reading a list of
+ * models does not need to learn a vocabulary to know which numbers to trust.
+ */
+export function footprintNote(source: ModelFootprint["source"]): string {
+  if (source === "measured") return "(measured)";
+  if (source === "calibrated") return "(from a past load)";
+  if (source === "estimated") return "(rough — no architecture data)";
+  return "";
+}
+
+/**
+ * Word-wrap plain prose to `width` columns, with a fixed indent.
+ *
+ * Deliberately naive — no ANSI, no East-Asian width table — because everything this module
+ * produces is plain ASCII prose plus model ids, and the surfaces that add colour do it per line
+ * AFTER wrapping. `apps/cli/src/tui/width.ts` has the ANSI- and wide-char-aware version; core
+ * cannot import it (it lives in an app) and does not need it.
+ *
+ * A word longer than the line is left long rather than hard-broken: the only words that get
+ * near the limit here are model ids and env-var names, and both are worth more unbroken than
+ * they cost in overflow.
+ */
+function wrapPlain(text: string, width: number, indent = ""): string[] {
+  const max = Math.max(24, width - indent.length);
+  const out: string[] = [];
+  let line = "";
+  for (const word of text.split(/\s+/).filter(Boolean)) {
+    if (line === "") line = word;
+    else if (line.length + 1 + word.length <= max) line += ` ${word}`;
+    else {
+      out.push(indent + line);
+      line = word;
+    }
+  }
+  if (line !== "") out.push(indent + line);
+  return out;
+}
+
+/** Byte units, smallest first, for the figures column. */
+const COLUMN_UNITS: readonly (readonly [string, number])[] = Object.freeze([
+  ["B", 1],
+  ["KB", 1024],
+  ["MB", 1024 ** 2],
+  ["GB", 1024 ** 3],
+  ["TB", 1024 ** 4],
+] as const);
+
+/**
+ * Format several byte figures for ONE column: same unit throughout, one decimal each.
+ *
+ * `humanBytes` is right for prose and wrong here, for two reasons that only show up in a
+ * column. It picks a unit per value, so a row of 900 MB sits under a row of 22 GB with nothing
+ * to compare; and it drops the decimal above 10, so `22 GB + 2.7 GB + 1.6 GB` prints under a
+ * rule against a total of `27 GB` — three figures that do not reach the number they are ruled
+ * into. The gap is pure display rounding, but a reader cannot know that, and a table whose
+ * visible arithmetic is wrong discredits the figures in it that are right.
+ *
+ * One decimal leaves at most 0.05 of slack per row, so the column ties as printed.
+ */
+function columnBytes(values: readonly number[]): string[] {
+  const max = Math.max(...values.map((v) => Math.abs(v)), 1);
+  let i = 0;
+  while (i < COLUMN_UNITS.length - 1 && max >= (COLUMN_UNITS[i + 1] as [string, number])[1]) i++;
+  const [suffix, div] = COLUMN_UNITS[i] as [string, number];
+  return values.map(
+    (v) =>
+      `${(v / div).toLocaleString("en-US", {
+        minimumFractionDigits: 1,
+        maximumFractionDigits: 1,
+      })} ${suffix}`,
+  );
+}
+
+/**
  * The refusal, rendered for a terminal or a pane.
+ *
+ * ── WHY THIS IS LAID OUT RATHER THAN PRINTED ────────────────────────────────────────────────
+ *
+ * A refusal arrives unasked-for, in the middle of a session the user was doing something else
+ * in. It gets about one second of attention before they decide whether to read it — so the
+ * shape has to do the work that reading would otherwise have to:
+ *
+ *   - the FACT is its own line, at the left margin, so it is the first thing the eye lands on;
+ *   - the EXPLANATION is indented and wrapped, so it reads as subordinate and never runs to the
+ *     terminal's right edge (an 80-column terminal wrapped the old single-string paragraph at
+ *     an arbitrary column, mid-word, with no indent to show the lines belonged together);
+ *   - the FIGURES are a column, because three numbers that must be compared to each other are a
+ *     table, not a sentence;
+ *   - the MODELS are aligned on name and right-aligned on size, so "which is biggest" is
+ *     answered by looking down a column rather than by reading every row. The old
+ *     `id  —  size  (note)` put the sizes at a different x for every row, which is exactly the
+ *     comparison the list exists to support.
  *
  * Deliberately ends with what the user CAN do. A refusal is only useful if the next step is on
  * the same screen.
  */
 export function renderRefusal(
   d: Extract<AdmissionDecision, { ok: false }>,
-  opts: { contextHint?: boolean } = {},
+  opts: { contextHint?: boolean; width?: number } = {},
 ): string[] {
-  const lines = [d.reason];
+  // Clamped, not trusted: a 400-column terminal would produce prose no one can track a line of,
+  // and a 20-column one would produce a word per line. 76 is the default because it is the
+  // widest a wrapped paragraph stays comfortable at, and leaves room for a prompt's own gutter.
+  const width = Math.max(52, Math.min(96, opts.width ?? 76));
+  const lines = wrapPlain(d.headline, width);
   const fits = d.affordable.filter((a) => a.fits);
   const tooBig = d.affordable.filter((a) => !a.fits);
+
+  if (d.code === "too-big") {
+    /**
+     * The breakdown as a column. `detail` says the same thing in prose for surfaces that cannot
+     * align — printing both here would be saying it twice.
+     *
+     * All THREE addends are shown, including the runner's own overhead, and a rule separates
+     * them from the total. Listing only weights and cache under a total they do not add up to
+     * reads as an arithmetic mistake, and the missing term is the one a user is least likely to
+     * guess at: a 1–2 GB process is not obvious from a model's name.
+     */
+    const f = d.footprint;
+    /**
+     * The third addend is the RESIDUAL, not `overheadBytes`.
+     *
+     * They are the same number on a computed footprint, and different on a measured one: there,
+     * `totalBytes` is a real reading and `overheadBytes` is set to 0 because nothing separated
+     * the runner's own memory out of it. Printing that 0 under a rule would show three figures
+     * that visibly do not add up to the total above them — and a table whose arithmetic is
+     * wrong discredits the numbers that are right. `total − weights − cache` IS the buffers and
+     * the process, whichever tier produced the figure.
+     */
+    const other = f.totalBytes - f.weightsBytes - f.kvBytes;
+    const note = footprintNote(f.source);
+    const labels = [
+      "weights",
+      `context cache at ${f.contextTokens.toLocaleString("en-US")} tokens`,
+      ...(other > 0 ? ["compute buffers and the runner itself"] : []),
+      `needed in total${note ? ` ${note}` : ""}`,
+      ...(d.usableBytes !== undefined ? ["free right now"] : []),
+    ];
+    const values = [
+      f.weightsBytes,
+      f.kvBytes,
+      ...(other > 0 ? [other] : []),
+      f.totalBytes,
+      ...(d.usableBytes !== undefined ? [d.usableBytes] : []),
+    ];
+    // Everything above the total is an addend; the rule goes between them.
+    const ruleAt = other > 0 ? 3 : 2;
+    const cells = columnBytes(values);
+    const numW = Math.max(...cells.map((c) => c.length));
+    lines.push("");
+    cells.forEach((cell, i) => {
+      // The rule claims "these add up". Only drawn when they do — a measured total below the
+      // weights alone (a runner reporting something odd) gets the figures without the claim.
+      if (i === ruleAt && other >= 0) lines.push(`    ${"─".repeat(numW)}`);
+      lines.push(`    ${cell.padStart(numW)}   ${labels[i]}`);
+    });
+  } else {
+    lines.push("");
+    for (const sentence of d.detail) lines.push(...wrapPlain(sentence, width, "  "));
+  }
+
   if (fits.length > 0) {
+    const sizes = fits.map((a) =>
+      a.uncertain
+        ? `${humanBytes(a.footprint.lowerBoundBytes ?? a.footprint.totalBytes)}–${humanBytes(a.footprint.totalBytes)}`
+        : humanBytes(a.footprint.totalBytes),
+    );
+    const nameW = Math.max(...fits.map((a) => a.candidate.id.length));
+    const sizeW = Math.max(...sizes.map((s) => s.length));
     lines.push("", "Models that fit right now:");
-    for (const a of fits) {
+    fits.forEach((a, i) => {
+      const note = footprintNote(a.footprint.source);
       lines.push(
-        `  ${a.candidate.id}  —  ${humanBytes(a.footprint.totalBytes)}` +
-          `${a.footprint.source === "estimated" ? " (estimated)" : ""}`,
+        `    ${a.candidate.id.padEnd(nameW)}   ${(sizes[i] as string).padStart(sizeW)}   ${note}`.trimEnd(),
       );
-    }
+    });
   } else if (d.affordable.length > 0) {
-    lines.push("", "Nothing installed fits in the memory that is free right now.");
+    lines.push(
+      "",
+      ...wrapPlain("Nothing installed fits in the memory that is free right now.", width),
+    );
   }
   if (tooBig.length > 0 && fits.length > 0) {
     lines.push(
-      `  (${tooBig.length} other${tooBig.length === 1 ? "" : "s"} too large: ` +
-        `${tooBig.map((a) => a.candidate.id).join(", ")})`,
+      ...wrapPlain(
+        `${tooBig.length} other${tooBig.length === 1 ? "" : "s"} too large: ` +
+          `${tooBig.map((a) => a.candidate.id).join(", ")}`,
+        width,
+        "    ",
+      ),
     );
   }
   if (d.code === "too-big" && opts.contextHint !== false) {
@@ -255,7 +543,10 @@ export function renderRefusal(
     // without changing model.
     lines.push(
       "",
-      "A smaller context would also reduce the cache: /context window, or PROMETHEUS_OLLAMA_CTX.",
+      ...wrapPlain(
+        "A smaller context would also reduce the cache: /context window, or PROMETHEUS_OLLAMA_CTX.",
+        width,
+      ),
     );
   }
   return lines;

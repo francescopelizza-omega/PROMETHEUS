@@ -401,7 +401,9 @@ export interface AccountingRecord {
  */
 export function withLocalRowsFree(records: AccountingRecord[]): AccountingRecord[] {
   return records.map((r) =>
-    r.endpointId.startsWith("local:") && r.model !== r.endpointId ? { ...r, model: r.endpointId } : r,
+    r.endpointId.startsWith("local:") && r.model !== r.endpointId
+      ? { ...r, model: r.endpointId }
+      : r,
   );
 }
 
@@ -486,7 +488,10 @@ export function readAccountingSince(home: string, sinceMs: number): AccountingRe
   // midnight, where the two coincide, but the contract is the narrower one and a caller
   // passing a shorter window must get it.
   const shared = (
-    ai.readSharedDay(join(home, "accounting"), new Date(sinceMs).toISOString()) as AccountingRecord[]
+    ai.readSharedDay(
+      join(home, "accounting"),
+      new Date(sinceMs).toISOString(),
+    ) as AccountingRecord[]
   ).filter((r) => {
     const t = Date.parse(r.atIso);
     return Number.isFinite(t) && t >= sinceMs;

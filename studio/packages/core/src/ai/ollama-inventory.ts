@@ -14,8 +14,9 @@
  * cannot be read still gets a candidate — with `geometry: null`, which makes the footprint
  * estimate deliberately pessimistic rather than absent.
  */
+import type { FootprintObservation } from "./footprint-ledger.js";
 import type { ModelCandidate } from "./model-admission.js";
-import { type KvGeometry, parseKvGeometry } from "./model-footprint.js";
+import { type KvCacheType, type KvGeometry, parseKvGeometry } from "./model-footprint.js";
 
 type FetchFn = typeof fetch;
 
@@ -115,6 +116,17 @@ export async function inventoryCandidates(
     timeoutMs?: number;
     runner?: string;
     resident?: readonly { id: string; sizeBytes: number }[];
+    /**
+     * Everything ever measured about these models on this host.
+     *
+     * Passed in rather than read here because this module is pure and testable without a
+     * filesystem; the CLI and the desktop each load their own ledger and hand it over.
+     */
+    observations?: readonly FootprintObservation[];
+    /** the host these numbers describe — undefined means the local machine. */
+    host?: string;
+    /** the KV element type the runner is configured with. */
+    kvCacheType?: KvCacheType;
   } = {},
 ): Promise<ModelCandidate[]> {
   const models = await listInstalledModels(baseUrl, opts);
@@ -132,6 +144,9 @@ export async function inventoryCandidates(
         geometry,
         runner,
         ...(measured && measured > 0 ? { measuredTotalBytes: measured } : {}),
+        ...(opts.observations ? { observations: opts.observations } : {}),
+        ...(opts.host !== undefined ? { host: opts.host } : {}),
+        ...(opts.kvCacheType !== undefined ? { kvCacheType: opts.kvCacheType } : {}),
       };
     }),
   );

@@ -88,7 +88,9 @@ export async function checkOrchestrationResourcePressure(
   const trackedChildrenFn = deps.trackedChildrenFn ?? trackedChildren;
   const children = trackedChildrenFn()
     .map((c) => ({ ...c, bin: guardedBin(c.label) }))
-    .filter((c): c is { pid: number; group: boolean; label: string; bin: string } => c.bin !== undefined);
+    .filter(
+      (c): c is { pid: number; group: boolean; label: string; bin: string } => c.bin !== undefined,
+    );
   if (children.length === 0) {
     streakRef.value = 0; // nothing to protect right now — an old streak must not carry over
     return;

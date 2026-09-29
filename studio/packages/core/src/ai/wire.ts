@@ -520,10 +520,50 @@ export const ANTHROPIC_VERSION = "2023-06-01";
  * "just send a million" breaks every request instead of none. Entries are the published output
  * ceilings; `ANTHROPIC_FALLBACK_MAX_TOKENS` covers an unrecognised model conservatively enough
  * to be accepted by any of them.
+ *
+ * ── 2026-09-25: THE FIRST VERSION OF THIS TABLE WAS STILL WRONG ─────────────────────────────
+ *
+ * Replacing the flat 4096 fixed the worst of it and then left four under-caps behind, because
+ * the rows were written for model FAMILIES while the ceilings move per GENERATION. Measured
+ * against the published table for every id this repo actually ships
+ * (`ai/providers/providers.config.json`):
+ *
+ *   claude-opus-4-8   sent 32,000   real 128,000   ← and this is the DEFAULT Opus in the catalog
+ *   claude-fable-5    sent  8,192   real 128,000   ← matched NO row at all, fell to the fallback
+ *   claude-sonnet-4-6 sent 64,000   real 128,000
+ *   claude-haiku-4-5  sent 64,000   real  64,000   ← the only shipped model that was right
+ *
+ * `claude-fable-5` is the instructive one: the fallback's comment reasons about "a model this
+ * table has never heard of", which is sound for an id arriving from a user's config and wrong
+ * for one the repo ships in its own catalog. A 15.6× under-cap on a listed model is not a
+ * conservative default, it is a missing row.
+ *
+ * THE RULE THAT KEEPS THIS TRUE: a model id in `providers.config.json` must have its own row
+ * here. The fallback is for ids this repo does not ship. `wire.test.ts` asserts that.
+ *
+ * ORDER IS LOAD-BEARING — `anthropicMaxTokensFor` takes the FIRST match, so the specific
+ * generations must precede the family catch-alls. The catch-alls are kept, not replaced: 32,000
+ * is genuinely correct for the legacy `claude-opus-4` and `claude-opus-4-1`.
+ *
+ * 128,000 is safe to send from here only because `ANTHROPIC_WIRE.body` sets `stream: true`
+ * unconditionally (see below) — the vendor requires streaming at that ceiling.
  */
 export const ANTHROPIC_MAX_OUTPUT: readonly { re: RegExp; maxTokens: number }[] = Object.freeze([
+  // ── the 128K generation, most specific first ──────────────────────────────
+  { re: /^claude-(fable|mythos)-5/, maxTokens: 128_000 },
+  { re: /^claude-opus-4-[678]/, maxTokens: 128_000 },
+  { re: /^claude-(opus|sonnet)-5/, maxTokens: 128_000 },
+  { re: /^claude-sonnet-4-6/, maxTokens: 128_000 },
+  // ── 64K ───────────────────────────────────────────────────────────────────
   { re: /^claude-(sonnet|haiku)-4-5/, maxTokens: 64_000 },
-  { re: /^claude-(sonnet|haiku|opus)-5/, maxTokens: 64_000 },
+  // `haiku-5` is NOT a guess and NOT in the published table — it is here to preserve behaviour.
+  // The old row was `^claude-(sonnet|haiku|opus)-5`, so splitting opus/sonnet out to 128K would
+  // have dropped haiku-5 through to the 8,192 fallback. Keeping its previous 64,000 changes
+  // nothing about a model nobody has documented, and matches haiku-4-5's real ceiling.
+  { re: /^claude-haiku-5/, maxTokens: 64_000 },
+  // ── family catch-alls. `opus-4` / `opus-4-1` really are 32K; `opus-4-5` has
+  //    no published output ceiling in the reference, so it lands here rather
+  //    than being given a number nobody has verified.
   { re: /^claude-opus-4/, maxTokens: 32_000 },
   { re: /^claude-(sonnet|haiku)-4/, maxTokens: 64_000 },
   { re: /^claude-3-7/, maxTokens: 64_000 },

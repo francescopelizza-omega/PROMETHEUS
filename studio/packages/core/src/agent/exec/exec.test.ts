@@ -406,6 +406,30 @@ const REDTEAM: [label: string, line: string][] = [
   ["sqlite3 .load loads native code", `sqlite3 db.sqlite ".load /tmp/evil.dylib"`],
   ["sqlite3 .once pipes into a command", `sqlite3 db.sqlite ".once |sh"`],
   ["sqlite3 -cmd", `sqlite3 -cmd ".shell id" db.sqlite`],
+
+  /* ── found 2026-09-25, while building the SSH remote-compute feature ─────
+   * The `ssh` and `rsync` rows had the same anchoring bug the 2026-08-08 review found in
+   * `sed -i`: `/^-o$/` requires the option to be its own token, so the JOINED form walked
+   * straight past it. `ssh -oProxyCommand=sh host` was classified `install` — which A5 and
+   * above auto-approve — and is a local shell. `-F` (a config file that can set the same
+   * option) and `-J` (a jump host the user never named) had no rule at all.
+   */
+  ["ssh -o joined with its value", "ssh -oProxyCommand='sh -c id' host"],
+  ["ssh -o ProxyCommand spaced", "ssh -o ProxyCommand='sh -c id' host"],
+  ["ssh -o=ProxyCommand", "ssh -o=ProxyCommand=id host"],
+  [
+    "ssh PermitLocalCommand re-enables LocalCommand",
+    "ssh -oPermitLocalCommand=yes -oLocalCommand=id host",
+  ],
+  ["ssh -F points at a config that can set ProxyCommand", "ssh -F /tmp/evil_config host"],
+  ["ssh -F joined", "ssh -F/tmp/evil_config host"],
+  ["ssh -J is a jump host the user never named", "ssh -J attacker@evil host"],
+  ["ssh -J joined", "ssh -Jattacker@evil host"],
+  ["ssh ProxyJump as an option value", "ssh -oProxyJump=attacker@evil host"],
+  ["rsync -e joined with its value", "rsync -e'sh -c id' a b"],
+  ["rsync --rsh spaced", "rsync --rsh 'sh -c id' a b"],
+  ["scp -o is the same escape as ssh's", "scp -oProxyCommand='sh -c id' a host:b"],
+  ["scp -F", "scp -F /tmp/evil_config a host:b"],
 ];
 
 /*

@@ -6,7 +6,7 @@
  * concern) with a hard timeout, and NEVER throws — an offline/blocked/slow check returns null
  * so the report still renders (the update command is always shown regardless).
  */
-import { updates as u } from "@prometheus/core";
+import * as u from "../updates/index.js";
 
 const DEFAULT_TIMEOUT_MS = 4000;
 

@@ -153,9 +153,21 @@ export function renderFrame(input: FrameInput): Frame {
     );
   }
 
-  // ── composer box (red border in bypass / yolo mode) ──────────────────────── //
+  /**
+   * ── composer box (ICE border at full autonomy) ────────────────────────────
+   *
+   * Was `danger` (red). Full autonomy is a mode the operator CHOSE to finish work unprompted,
+   * not a fault, and a red rectangle held for a whole session stops being information and
+   * becomes pressure — the reported effect being that people leave the mode that was working.
+   * `autonomy` keeps it in the light-blue family and turns the lightness up instead. See the
+   * role's comment in `palette.ts` for the full argument and the contrast figures.
+   *
+   * Both bypass AND yolo, because the level is not visible here: this keys on `permMode`, and
+   * `authLevelToMode` maps A7 → yolo and A6 → bypassPermissions. Recolouring A7 alone would
+   * mean threading `authLevel` into `TuiState`, which carries no level today.
+   */
   const borderRole =
-    state.permMode === "bypassPermissions" || state.permMode === "yolo" ? "danger" : "accent";
+    state.permMode === "bypassPermissions" || state.permMode === "yolo" ? "autonomy" : "accent";
   /**
    * The model's traits ride in the composer's own chrome rather than the status bar: they
    * change when the MODEL changes, and the box you are typing into is the one piece of chrome

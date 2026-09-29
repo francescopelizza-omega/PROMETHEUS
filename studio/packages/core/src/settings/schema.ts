@@ -11,7 +11,7 @@ import { type EffortTier, isEffortTier } from "../ai/effort/types.js";
 
 export type { HookSpec };
 
-export interface Settings extends ExternalToolSettings, RemoteHostSettings {
+export interface Settings extends ExternalToolSettings, RemoteHostSettings, LanguageSettings {
   /** active profile id (§7.1). */
   profileId?: string;
   /** scheme id, or "system" to follow the OS (file 08 §6). */
@@ -137,6 +137,22 @@ export interface ExternalToolSettings {
 export interface RemoteHostSettings {
   /** JSON array of `RemoteHost`. Empty/absent means no remote host is trusted. */
   "models.remoteHosts"?: string;
+}
+
+/**
+ * The language PROMETHEUS speaks (`i18n/`).
+ *
+ * ABSENT IS MEANINGFUL and is not the same as `"en"`. Absent means "never asked", which is what
+ * triggers the first-run language question; `"en"` means the user was asked and chose English.
+ * Collapsing the two would re-ask an English speaker on every launch, or — worse — silently
+ * adopt `$LANG` for someone who had deliberately chosen otherwise.
+ *
+ * `resolveLocale` consults the environment only when this is absent, and a value it does not
+ * recognise is ignored rather than trusted: the settings file is hand-editable.
+ */
+export interface LanguageSettings {
+  /** An i18n `Locale` code — "en", "it", "fr", "es", "de", "pt", "nl", "pl". */
+  "ui.language"?: string;
 }
 
 export const DEFAULT_SETTINGS: Settings = {

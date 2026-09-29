@@ -688,3 +688,15 @@ export {
   AUTO_DOWNLOAD,
   AUTO_INSTALL,
 } from "./update-policy.js";
+
+// --- i18n (2026-09-26) ------------------------------------------------------
+// The language layer. Scoped to the first ten minutes — the language question, the setup
+// doctor and the beginner guide — because that is the slice where the wrong language costs
+// someone the product rather than merely inconveniencing them. English is the FALLBACK, per
+// KEY: a half-finished catalog ships what it has and shows English for the rest.
+export * as i18n from "./i18n/index.js";
+
+// --- onboarding (2026-09-26) ------------------------------------------------
+// "What is missing, why it matters, and exactly what to type." Pure: the caller probes and
+// hands the facts in. Prose is translated through i18n; the install COMMANDS never are.
+export * as onboarding from "./onboarding/index.js";

@@ -127,3 +127,84 @@ test("a long list (e.g. the full command registry) scrolls without crashing or o
   for (const line of lines) assert.ok(stringWidth(strip(line)) <= 80);
   assert.ok(lines.length <= 20);
 });
+
+/* ───────── the model-browser additions: detail pane, status, blocked rows ───────── */
+
+test("a highlighted row's BODY is shown below the list; other rows' bodies are not", () => {
+  /**
+   * One line cannot carry what a person needs to choose a model: the size, the quantisation,
+   * the licence, whether it fits this machine. The pane is per-row and follows the highlight.
+   */
+  const items = [
+    { label: "a", submitText: "/x a", body: ["size 4.1 GB", "Apache-2.0"] },
+    { label: "b", submitText: "/x b", body: ["size 22.6 GB", "MIT"] },
+  ];
+  const first = strip(
+    renderListOverlay(openListOverlay("Models", items), 60, 15, "none").join("\n"),
+  );
+  assert.match(first, /size 4\.1 GB/);
+  assert.doesNotMatch(first, /22\.6 GB/, "only the highlighted row's body is drawn");
+
+  const moved = onListKey(openListOverlay("Models", items), k("down")).state;
+  assert.match(strip(renderListOverlay(moved, 60, 15, "none").join("\n")), /size 22\.6 GB/);
+});
+
+test("a DISABLED row cannot be picked, and says why instead of its body", () => {
+  /**
+   * A model too large for this machine stays visible — hiding it invites "why isn't X listed?" —
+   * but Enter does nothing. Submitting it would fail only after a 20 GB download.
+   */
+  const items = [
+    {
+      label: "huge",
+      submitText: "/x huge",
+      body: ["ignored"],
+      disabled: "needs 64 GB RAM; this machine has 36 GB",
+    },
+  ];
+  const state = openListOverlay("Models", items);
+  const r = onListKey(state, k("enter"));
+  assert.deepEqual(r.action, { type: "none" }, "Enter on a blocked row does nothing");
+  const out = strip(renderListOverlay(state, 70, 15, "none").join("\n"));
+  assert.match(out, /needs 64 GB RAM/);
+  assert.doesNotMatch(out, /ignored/, "the reason replaces the body");
+});
+
+test("a STATUS line distinguishes `no matches` from `the source was unreachable`", () => {
+  // In an empty list those two look identical, and only one of them is the filter's fault.
+  const out = strip(
+    renderListOverlay(
+      openListOverlay("Models", [], "HuggingFace unreachable — showing nothing"),
+      60,
+      12,
+      "none",
+    ).join("\n"),
+  );
+  assert.match(out, /HuggingFace unreachable/);
+  assert.match(out, /\(no matches\)/);
+});
+
+test("the detail pane never squeezes the list below three rows", () => {
+  /**
+   * The pane and the list compete for the same budget. An item with a long body must not make
+   * the overlay unnavigable — the list keeps at least three rows, whatever the body asks for.
+   */
+  const body = Array.from({ length: 20 }, (_, i) => `line ${i}`);
+  const items = Array.from({ length: 8 }, (_, i) => ({
+    label: `m${i}`,
+    submitText: `/x ${i}`,
+    body,
+  }));
+  const lines = renderListOverlay(openListOverlay("Models", items), 60, 10, "none").map(strip);
+  const rowLines = lines.filter((l) => /\bm\d\b/.test(l));
+  assert.ok(rowLines.length >= 3, `list kept ${rowLines.length} rows`);
+  assert.ok(lines.length <= 10, `stayed within the ${10}-row budget, used ${lines.length}`);
+});
+
+test("the pane costs nothing when no item has a body — every existing picker is unchanged", () => {
+  const plain = [{ label: "a", submitText: "/x a" }];
+  const before = renderListOverlay(openListOverlay("t", plain), 40, 12, "none");
+  assert.ok(before.every((l) => !l.includes("undefined")));
+  // Same shape as it has always produced: title, filter, one row, hint.
+  assert.equal(before.length, 4);
+});

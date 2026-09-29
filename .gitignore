@@ -42,6 +42,17 @@ coverage/
 /*-REPORT.md
 /*-AUDIT.md
 /*-NOTES.md
+# `FIXES-<dates>.md` matched NONE of the suffix patterns above, so it was committed by
+# default — and it carried `/Users/<name>/ALPHA/PROMETHEUS` on line 4, the only personal-path
+# leak in the whole tree (found 2026-09-26 by scripts/check-personal-data.sh). A note is a note
+# whichever end of the name says so, so the PREFIX forms are ignored too.
+/FIXES-*.md
+/FIXES/
+/HANDOFF*.md
+/*-HANDOFF.md
+/*-FIXES.md
+/*-SUMMARY.md
+/*-STATUS.md
 /DEPLOYMENT-PLAN.md
 /SLASH-COMMANDS-REPORT.md
 /notes/

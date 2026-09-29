@@ -226,6 +226,25 @@ test("a frame split across reads is reassembled", async () => {
   assert.equal(r.text, "ok");
 });
 
+test("the LAST frame is not lost when the server closes without a final newline", async () => {
+  // Found by a scout on 2026-09-25. Core (`ai/client.ts`) and the CLI (`session/agent-runtime.ts`)
+  // both drain `buf` after the read loop ends; this file did not — `if (streamDone) break;` left
+  // whatever had not yet been terminated by a `\n` sitting in the buffer, unparsed.
+  //
+  // Loopback rarely produces that shape, which is why it survived. A REMOTE endpoint — over a
+  // LAN, a proxy or an ssh tunnel — fragments differently and can end the body exactly on a
+  // frame boundary, so the remote-compute work makes this far more likely to bite. What is lost
+  // is the tail of the answer, or the tail of a tool call's arguments.
+  const r = await runAiStream(req(), undefined, async () =>
+    sseResponse([
+      'data: {"choices":[{"delta":{"content":"first "}}]}\n',
+      // no trailing newline, and no [DONE] — the server just closes.
+      'data: {"choices":[{"delta":{"content":"LAST"}}]}',
+    ]),
+  );
+  assert.equal(r.text, "first LAST", "the unterminated final frame must still be delivered");
+});
+
 test("a malformed / keepalive frame is skipped, not fatal", async () => {
   const r = await runAiStream(req(), undefined, async () =>
     sseResponse([
@@ -378,7 +397,10 @@ test("ollama autostart fires for an ollama-port local endpoint when injected, wi
 test("ollama autostart does NOT fire for a local endpoint on a different port (e.g. LM Studio)", async () => {
   let calls = 0;
   await runAiStream(
-    req({ runId: "autostart-wrong-port", endpoint: { ...LOCAL, baseUrl: "http://127.0.0.1:1234/v1" } }),
+    req({
+      runId: "autostart-wrong-port",
+      endpoint: { ...LOCAL, baseUrl: "http://127.0.0.1:1234/v1" },
+    }),
     undefined,
     async () => sseResponse(["data: [DONE]\n"]),
     undefined,
@@ -401,7 +423,12 @@ test("lmstudio autostart fires for a port-1234 local endpoint when injected, exa
   await runAiStream(
     req({
       runId: "lmstudio-autostart-fires",
-      endpoint: { ...LOCAL, baseUrl: "http://127.0.0.1:1234/v1", id: "lmstudio", model: "qwen2.5-coder" },
+      endpoint: {
+        ...LOCAL,
+        baseUrl: "http://127.0.0.1:1234/v1",
+        id: "lmstudio",
+        model: "qwen2.5-coder",
+      },
     }),
     undefined,
     async () => sseResponse(["data: [DONE]\n"]),
@@ -420,16 +447,22 @@ test("lmstudio autostart fires for a port-1234 local endpoint when injected, exa
 test("lmstudio autostart does NOT fire for an ollama-port endpoint, and vice versa — never the wrong runner", async () => {
   let ollamaCalls = 0;
   let lmstudioCalls = 0;
-  await runAiStream(req({ runId: "cross-runner-guard" }), undefined, async () => sseResponse(["data: [DONE]\n"]), undefined, {
-    ensureOllamaRunningFn: async () => {
-      ollamaCalls += 1;
-      return { started: false };
+  await runAiStream(
+    req({ runId: "cross-runner-guard" }),
+    undefined,
+    async () => sseResponse(["data: [DONE]\n"]),
+    undefined,
+    {
+      ensureOllamaRunningFn: async () => {
+        ollamaCalls += 1;
+        return { started: false };
+      },
+      ensureLmStudioRunningFn: async () => {
+        lmstudioCalls += 1;
+        return { started: false };
+      },
     },
-    ensureLmStudioRunningFn: async () => {
-      lmstudioCalls += 1;
-      return { started: false };
-    },
-  });
+  );
   assert.equal(ollamaCalls, 1, "the ollama endpoint must still bring up ollama");
   assert.equal(lmstudioCalls, 0, "never LM Studio, for an ollama-port endpoint");
 });
@@ -484,7 +517,11 @@ test("ACTIVE EVICTION: a resource-ceiling refusal PAUSES the turn without ever a
       }),
     },
   );
-  assert.equal(fetchCalled, false, "a runner just refused a restart must never be asked to serve anyway");
+  assert.equal(
+    fetchCalled,
+    false,
+    "a runner just refused a restart must never be asked to serve anyway",
+  );
   assert.equal(r.ok, true);
   assert.equal(r.paused, true);
   assert.equal(r.pausedReason, "resources-critical");
@@ -519,11 +556,17 @@ test("ACTIVE EVICTION: a connection failure with NO matching recent eviction sti
   const fail = (async () => {
     throw new Error("ECONNREFUSED");
   }) as unknown as typeof fetch;
-  const r = await runAiStream(req({ runId: "mid-stream-not-evicted" }), undefined, fail, undefined, {
-    sleep: async () => {},
-    retries: 0,
-    readEvictionEventsFn: () => [],
-  });
+  const r = await runAiStream(
+    req({ runId: "mid-stream-not-evicted" }),
+    undefined,
+    fail,
+    undefined,
+    {
+      sleep: async () => {},
+      retries: 0,
+      readEvictionEventsFn: () => [],
+    },
+  );
   assert.equal(r.ok, false);
   assert.equal(r.paused, undefined);
   assert.match(r.error ?? "", /ECONNREFUSED/);
@@ -542,12 +585,22 @@ test("ACTIVE EVICTION: a STALE eviction (outside the recency window) does not ma
     at: new Date(Date.now() - 10 * 60_000).toISOString(), // 10 minutes ago — long stale
     reason: "old news",
   };
-  const r = await runAiStream(req({ runId: "mid-stream-stale-eviction" }), undefined, fail, undefined, {
-    sleep: async () => {},
-    retries: 0,
-    readEvictionEventsFn: () => [staleEvent],
-  });
-  assert.equal(r.ok, false, "a stale eviction from long ago must not paper over today's real failure");
+  const r = await runAiStream(
+    req({ runId: "mid-stream-stale-eviction" }),
+    undefined,
+    fail,
+    undefined,
+    {
+      sleep: async () => {},
+      retries: 0,
+      readEvictionEventsFn: () => [staleEvent],
+    },
+  );
+  assert.equal(
+    r.ok,
+    false,
+    "a stale eviction from long ago must not paper over today's real failure",
+  );
   assert.equal(r.paused, undefined);
 });
 

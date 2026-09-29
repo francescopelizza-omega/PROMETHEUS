@@ -83,12 +83,23 @@ function inline(text: string, p: ReturnType<typeof painter>): string {
   return out;
 }
 
-export function createMarkdownRenderer(caps: ColorCaps, width: number): MarkdownRenderer {
+/**
+ * `width` may be a GETTER, read at each line rather than captured once.
+ *
+ * The app builds one renderer per session and kept its width from startup, so after a window
+ * resize every fenced code box was still ruled to the OLD terminal width. Narrower, and the rule
+ * runs past the edge — one more line whose real height is not the height anything counted.
+ * A plain number still works, which is what the tests pass.
+ */
+export function createMarkdownRenderer(
+  caps: ColorCaps,
+  width: number | (() => number),
+): MarkdownRenderer {
   const p = painter(caps);
-  const boxW = Math.max(8, width);
+  const boxW = (): number => Math.max(8, typeof width === "function" ? width() : width);
   let fence: FenceState | null = null;
 
-  const closeRule = (): string => p.muted(`╰${"─".repeat(Math.min(boxW - 1, 40))}`);
+  const closeRule = (): string => p.muted(`╰${"─".repeat(Math.min(boxW() - 1, 40))}`);
 
   const feedLine = (line: string): string[] => {
     if (fence) {
@@ -119,7 +130,7 @@ export function createMarkdownRenderer(caps: ColorCaps, width: number): Markdown
         hl: CODE_STATE,
       };
       const label = fence.lang ? ` ${fence.lang} ` : "─";
-      const dash = "─".repeat(Math.max(1, Math.min(boxW - 4 - stringWidth(label), 36)));
+      const dash = "─".repeat(Math.max(1, Math.min(boxW() - 4 - stringWidth(label), 36)));
       // Painted in three pieces rather than nesting `p.accent(...)` inside `p.muted(...)`:
       // the inner painter emits its own reset, which ends the OUTER muted run, so everything
       // after the label — the whole trailing dash rule — rendered un-tinted.

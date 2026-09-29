@@ -32,6 +32,7 @@
 #     accident.
 
 stages:
+  - security
   - verify
   - e2e
 
@@ -67,6 +68,47 @@ cache:
     - studio/node_modules
     - studio/.turbo
 
+# ── disclosure gate ───────────────────────────────────────────────────────────
+#
+# FIRST STAGE on purpose. Everything below it costs minutes; this costs seconds, and it is the
+# only failure here that cannot be undone by a follow-up commit. `check-personal-data.sh`'s own
+# header has always said "which is why this runs in CI" — until 2026-09-26 it ran nowhere, and
+# it had a live finding at the time (a tracked working note carrying a developer home path).
+#
+# Two scanners because they look for different things: one for credentials, which GRANT ACCESS,
+# and one for identity — home paths, hostname, personal email — which no secret scanner flags.
+#
+# It does NOT share the `default:` before_script: this job needs neither Node 22 nor a pnpm
+# install, and making a disclosure gate depend on a dependency tree resolving is backwards.
+security:
+  stage: security
+  image: alpine:3.20
+  variables:
+    # LOAD-BEARING. GitLab shallow-clones by default, and `gitleaks git --log-opts=--all` can
+    # only scan the commits it was given. On a shallow clone the scan passes by seeing nothing —
+    # a hollow gate, which is worse than no gate because it is believed.
+    GIT_DEPTH: 0
+    GITLEAKS_VERSION: "8.30.1"
+  before_script:
+    - apk add --no-cache git bash curl tar
+    # PINNED. An unpinned scanner changes its rules under you, and a gate whose behaviour moves
+    # on its own is not a gate — a new rule turns a green pipeline red for no code change, and
+    # a dropped rule turns it green for no fix. Bump deliberately, and re-run
+    # `scripts/secret-scan.sh` locally against the new version before committing the bump.
+    # 8.30.1 is the version this repo's findings were triaged against.
+    #
+    # If the URL or the asset name is ever wrong, `gitleaks version` fails and the JOB fails —
+    # the gate refuses rather than passing hollow, which is the direction it must fail in.
+    - curl -sSfL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" | tar -xz -C /usr/local/bin gitleaks
+    - gitleaks version
+  script:
+    # Credentials, whole history, all refs. Exits non-zero on any finding; fixtures are
+    # allowlisted BY VALUE in .gitleaks.toml, never by path.
+    - bash scripts/secret-scan.sh
+    # Identity. Tracked files only — built artifacts are covered by --artifacts, which needs a
+    # build and therefore belongs after `verify`, not here.
+    - bash scripts/check-personal-data.sh
+
 # ── the blocking gate ─────────────────────────────────────────────────────────
 # One job, not five: these steps share an install and a build cache, and splitting them would
 # pay that cost repeatedly to gain parallelism the repo is too small to need.
@@ -78,8 +120,26 @@ verify:
     - pnpm run typecheck
     # biome, plus the two custom guards: no raw hex outside tokens/, and the §9 layout rules.
     - pnpm run lint
-    # ~4500 node:test suites across core, cli and desktop.
-    - node scripts/run-tests.mjs
+    # ── the suites, SCOPED per package ────────────────────────────────────────
+    #
+    # This was one bare `node scripts/run-tests.mjs`, and it could not pass. The runner's
+    # resource guard (added 2026-09-05, after this file) REFUSES an unscoped selection:
+    # 601 suites against a MAX_UNSCOPED of 120 exits 2 before a single test runs. The guard
+    # exists because node:test forks one process per file — ~1,350 processes in two seconds,
+    # measured — which has taken the dev machine's display down.
+    #
+    # Scoped rather than overridden. `PROMETHEUS_ALLOW_FULL_SUITE=1` would silence the guard
+    # here and leave nothing checking the shape of the run; these seven paths select exactly
+    # the same 601 suites (verified: 214+160+152+47+17+10+1), each well under the runner's
+    # 260-file ceiling, and a failure now names the package it came from. `apps/jetbrains-…`
+    # is omitted deliberately — it is a scaffold with no suites.
+    - node scripts/run-tests.mjs packages/core
+    - node scripts/run-tests.mjs packages/engine-bridge
+    - node scripts/run-tests.mjs packages/ui
+    - node scripts/run-tests.mjs apps/cli
+    - node scripts/run-tests.mjs apps/desktop
+    - node scripts/run-tests.mjs apps/vscode-extension
+    - node scripts/run-tests.mjs apps/mcp-server
     # The vite build is its own gate: the CORE_SUBPATHS alias map lives only here, so a new
     # core subpath can pass tsc and every test and still fail the bundle.
     - pnpm --filter @prometheus/desktop exec electron-vite build

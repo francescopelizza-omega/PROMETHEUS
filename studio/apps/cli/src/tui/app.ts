@@ -33,6 +33,7 @@ import {
   recordPathUse,
 } from "../session/path-frecency-store.js";
 import { SLASH_REGISTRY } from "../session/slash-registry.js";
+import { installTag } from "../updates/model-actions-cmd.js";
 import type { AcItem } from "./autocomplete.js";
 import {
   type ModalView,
@@ -49,7 +50,7 @@ import { type ListOverlayItem, openListOverlay } from "./list-overlay.js";
 import { createMarkdownRenderer } from "./markdown.js";
 import { type ColorCaps, detectColorCaps, paint, paintDuration } from "./palette.js";
 import { workingLine } from "./quantum-verbs.js";
-import { BG_BLACK, BG_RESET, ENTER_TUI, RESTORE_TUI, Renderer } from "./redraw.js";
+import { BG_BLACK, BG_RESET, ENTER_TUI, RESTORE_TUI, Renderer, reflowSlack } from "./redraw.js";
 import {
   type ReduceCtx,
   type TuiEffect,
@@ -61,7 +62,7 @@ import {
 import { createSessionBridge } from "./session-bridge.js";
 import { traitCells, traitRailFits } from "./status.js";
 import { SUDO_ACK_PROMPT, detectElevation, resolveSudoDecision, sudoWarningLines } from "./sudo.js";
-import { graphemeCount } from "./width.js";
+import { graphemeCount, stringWidth } from "./width.js";
 
 /** Injection seams (tests / non-default streams). */
 /**
@@ -269,7 +270,8 @@ export async function launchTui(parsed: ParsedArgs, deps: TuiDeps = {}): Promise
   let handler: KeyHandler = mainHandler;
 
   let lastFrame: ReturnType<typeof renderFrame> | null = null;
-  function render(): void {
+  /** `slack` = extra rows to climb before erasing; only `onResize` passes it (see `reflowSlack`). */
+  function render(slack = 0): void {
     if (modal || !entered) return;
     lastFrame = renderFrame({
       state,
@@ -278,7 +280,7 @@ export async function launchTui(parsed: ParsedArgs, deps: TuiDeps = {}): Promise
       cols: size.cols,
       rows: size.rows,
     });
-    renderer.paint(lastFrame);
+    renderer.paint(lastFrame, slack);
   }
 
   /**
@@ -336,7 +338,9 @@ export async function launchTui(parsed: ParsedArgs, deps: TuiDeps = {}): Promise
   // back to the readline host (the terminal hasn't been touched yet) instead of crashing.
   // one markdown renderer per assistant turn (reset in handleSubmit); tool-framing
   // lines (●/⎿/notices) bypass it and keep the heuristic tint (CLI-020).
-  const md = createMarkdownRenderer(caps, Math.max(20, size.cols - 4));
+  // width as a GETTER, not a snapshot: this renderer lives for the whole session and `size`
+  // changes under it on every SIGWINCH (see `onResize`).
+  const md = createMarkdownRenderer(caps, () => Math.max(20, size.cols - 4));
   const renderPaneText = (text: string): string => {
     const out: string[] = [];
     for (const line of text.split("\n")) {
@@ -618,9 +622,32 @@ export async function launchTui(parsed: ParsedArgs, deps: TuiDeps = {}): Promise
       paintModal();
       return;
     }
-    // the paint moves up by the parked caret row + erases, so the old (autowrap-off,
-    // non-reflowed) block is wiped cleanly at the new width — no reset(), no debris.
-    render();
+    /**
+     * A NARROWING resize rewraps the block before we are told about it.
+     *
+     * This used to be a bare `render()`, on the reasoning that "the paint moves up by the parked
+     * caret row + erases, so the old (autowrap-off, non-reflowed) block is wiped cleanly at the
+     * new width — no reset(), no debris". The premise is false on the emulators this actually
+     * runs on: Terminal.app and iTerm2 both rewrap the buffer when the window narrows, whatever
+     * DECAWM said when the text was written. Lines built at the OLD `cols-1` no longer fit, each
+     * becomes two physical rows, the rows above the caret shift down, and the cursor-up lands
+     * short of the block top — so `ESC[0J` erases from BELOW the top border and strands it.
+     *
+     * One orphan per resize, and they accumulate: the reported screenshot was a single 359-column
+     * line holding four `╭` runs — 133, 105, 2 and 119 columns — the last one live and the others
+     * left behind at widths that window had passed through. `reflowSlack` climbs the surplus rows
+     * the rewrap added, so the erase starts at the real top again. It is 0 whenever nothing above
+     * the caret was too wide for the new width, which is every widening and most shrinks.
+     */
+    const parked = lastFrame
+      ? Math.max(0, Math.min(lastFrame.cursorRow, lastFrame.lines.length - 1))
+      : 0;
+    const above = lastFrame ? lastFrame.lines.slice(0, parked).map(stringWidth) : [];
+    // …plus the caret's OWN line, when the window narrowed past the column the caret was parked
+    // at: the cursor cell then rides down onto that line's continuation row, putting the block
+    // top one further up again.
+    const caretOverflow = lastFrame ? Math.floor(lastFrame.cursorCol / Math.max(1, size.cols)) : 0;
+    render(reflowSlack(above, size.cols) + caretOverflow);
   }
 
   /**
@@ -865,6 +892,53 @@ export async function launchTui(parsed: ParsedArgs, deps: TuiDeps = {}): Promise
     // fallback (CLI-1xx) — `/agents 4`, `/think high`, `/model <id>` and every non-TTY host keep
     // their existing typed-argument behavior unchanged; only the ARGUMENT-LESS form is special-
     // cased here, exactly like `/invoke` below.
+    /**
+     * `/updates catalog [query]` — the model browser, as an arrow-nav overlay.
+     *
+     * The rows are fetched BEFORE the overlay opens (the same order `/invoke` uses), because
+     * `list-overlay.ts` has no async state and giving it one would mean a list that reflows
+     * under the cursor. A line is printed first so a slow network reads as "working", not as a
+     * freeze — and every row already carries the `/updates pull …` line that picking it submits,
+     * so the overlay never re-implements what installing a model does.
+     */
+    if (
+      trimmed === "/updates catalog" ||
+      trimmed === "/updates browse" ||
+      trimmed.startsWith("/updates catalog ") ||
+      trimmed.startsWith("/updates browse ")
+    ) {
+      const query = trimmed.replace(/^\/updates (catalog|browse)\s*/, "").trim();
+      renderer.printAbove(paint("Searching HuggingFace for installable models…", "muted", caps));
+      const rows = await session.catalogRows(query);
+      if (rows.length === 0) {
+        renderer.printAbove(paint("  (no models to show)", "muted", caps));
+        /**
+         * `printAbove` ERASES the chrome — that is how it gets the text into scrollback above it
+         * — and it does not put it back. The turn path repaints at the end of `handleSubmit`,
+         * but these early `return`s never reach it, so the composer box simply vanished until
+         * the next keystroke happened to schedule a render. Same omission at the three other
+         * `printAbove`-then-return sites below.
+         */
+        scheduleRender();
+        return;
+      }
+      openPicker(
+        `Models — ${rows.length} found · sorted by what this machine can run`,
+        rows.map((r) => ({
+          label: r.entry.name,
+          detail: r.line
+            .trim()
+            .split(/\s{2,}/)
+            .slice(0, 2)
+            .join(" · "),
+          submitText: r.command ? `/updates pull ${installTag(r.entry)}` : "",
+          body: r.body,
+          ...(r.blocked ? { disabled: r.blocked } : {}),
+          ...(r.entry.installed ? { current: true } : {}),
+        })),
+      );
+      return;
+    }
     if (trimmed === "/agents" || trimmed === "/subagents" || trimmed === "/team") {
       const current = session.slashCtx.agents.count();
       openPicker(
@@ -947,6 +1021,7 @@ export async function launchTui(parsed: ParsedArgs, deps: TuiDeps = {}): Promise
             caps,
           ),
         );
+        scheduleRender(); // printAbove erased the chrome; nothing downstream repaints it
         return;
       }
       openPicker(
@@ -966,6 +1041,7 @@ export async function launchTui(parsed: ParsedArgs, deps: TuiDeps = {}): Promise
       const items = await session.invokeCatalog();
       if (items.length === 0) {
         renderer.printAbove(paint("/invoke: catalog empty or unavailable", "warn", caps));
+        scheduleRender(); // printAbove erased the chrome; nothing downstream repaints it
         return;
       }
       state = { ...state, invokeOverlay: openInvokeOverlay(items) };
@@ -1210,6 +1286,36 @@ export async function launchTui(parsed: ParsedArgs, deps: TuiDeps = {}): Promise
     try {
       renderer.printAbove(session.banner());
       render();
+      /**
+       * The update nudge, UNDER the banner and never blocking it.
+       *
+       * The readline host has printed this since it was written; the TUI never did, so a user in
+       * the full-screen UI — the surface CLAUDE.md lists as having full Studio parity — got no
+       * indication that their agent CLIs, their models or Prometheus itself had updates waiting.
+       * Same drift class as the two hosts diverging over todos and grants.
+       *
+       * Fired here rather than inside `createSessionBridge` because of ordering: the bridge is
+       * awaited long before this point, and a notice resolved from the warm ≤6h cache would land
+       * above the banner or before raw mode is entered. Painted here rather than in the notice
+       * because only this layer knows `caps`.
+       */
+      void session
+        .updatesNotice()
+        .then((line) => {
+          if (!line) return;
+          renderer.printAbove(paint(line, "warn", caps));
+          /**
+           * …and put the chrome back. This lands ASYNCHRONOUSLY, after the first `render()`
+           * above has already painted the composer, and `printAbove` erases the block it prints
+           * over. Without this the box disappeared a moment after every launch that had an
+           * update to report, and stayed gone until the user pressed a key. `scheduleRender`
+           * rather than `render` so a notice that resolves mid-turn stays out of the way.
+           */
+          scheduleRender();
+        })
+        .catch(() => {
+          /* a courtesy nudge must never be able to break a session start */
+        });
     } catch {
       finish(1);
     }
@@ -1224,7 +1330,9 @@ export async function launchTui(parsed: ParsedArgs, deps: TuiDeps = {}): Promise
 /** Tool-framing / notice lines bypass markdown (keep the heuristic tint), CLI-020. */
 function isFramingLine(line: string): boolean {
   const t = line.trimStart();
-  return /^[●⎿ℹ▸🛸↩⚒↻✎]/u.test(t) || t.startsWith("$ ") || t.startsWith("› ");
+  // `↑` is the update nudge's marker. Without it the line goes through the markdown path, where
+  // a version like `**2.1.0**` or a bare `_` in a package name would be re-rendered as emphasis.
+  return /^[●⎿ℹ▸🛸↩⚒↻✎↑]/u.test(t) || t.startsWith("$ ") || t.startsWith("› ");
 }
 
 function paintByHeuristic(text: string, caps: ColorCaps): string {

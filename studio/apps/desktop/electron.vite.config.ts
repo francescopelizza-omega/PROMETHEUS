@@ -62,6 +62,12 @@ const require = createRequire(import.meta.url);
  * main or the renderer imports it.
  */
 const CORE_SUBPATHS: Record<string, string> = {
+  /**
+   * The update checker's IO half. MAIN-PROCESS ONLY: it spawns package managers and reads the
+   * filesystem, which is why it is a subpath rather than part of the `updates` barrel that the
+   * sandboxed renderer can reach.
+   */
+  "@prometheus/core/updates-live": "packages/core/src/updates-live/index.ts",
   "@prometheus/core/mcp-node": "packages/core/src/mcp/host/node.ts",
   "@prometheus/core/ai-usage": "packages/core/src/ai/usage.ts",
   "@prometheus/core/metadata": "packages/core/src/metadata/index.ts",

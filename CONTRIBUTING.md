@@ -7,6 +7,23 @@ you don't need to understand all three to contribute to one.
 
 ## Before you start
 
+- **Turn the git hooks on, once per clone:**
+
+  ```sh
+  git config core.hooksPath .githooks
+  ```
+
+  They are not optional and they are not style checks. `pre-commit` refuses a `process.kill`
+  that could broadcast a signal (a unit test once SIGKILLed a whole logged-in session — see
+  CLAUDE.md §2). `pre-push` runs the two disclosure scanners before the one act that cannot be
+  undone: `scripts/secret-scan.sh` for credentials across the whole history, and
+  `scripts/check-personal-data.sh` for the other half — home paths, hostname, personal email —
+  which no secret scanner flags. Both also run in CI's `security` stage, so a clone without the
+  hooks is caught later rather than never; the hooks just tell you before you have published.
+
+  A finding that is genuinely a test fixture is allowlisted in `.gitleaks.toml` **by value,
+  never by path** — that file explains why an allowlisted path is a blind spot.
+
 - **Security issues do not go through a PR or a public issue.** See [SECURITY.md](./SECURITY.md).
 - For anything non-trivial (a new feature, a behavior change, a new tool the agent can call),
   open an issue first describing what you want to do and why. Small, well-scoped fixes

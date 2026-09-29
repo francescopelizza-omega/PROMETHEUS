@@ -54,17 +54,43 @@ export function clampAuthLevel(value: unknown): number {
 }
 
 /**
- * The §5 color ladder as SEMANTIC TOKEN names (never hex): 0–1 ok-green · 2–3 accent-cyan ·
- * 4–5 warn-amber · 6 danger-fg (the lighter red — "system-wide" is grave, not fatal) ·
- * 7 danger-red. Returns a CSS var NAME so callers write `var(${authLevelVar(n)})`.
+ * The §5 colour ladder as SEMANTIC TOKEN names (never hex). Returns a CSS var NAME so callers
+ * write `var(${authLevelVar(n)})`.
+ *
+ *   0–1 text-muted · 2–3 accent · 4–5 warn · 6–7 autonomy
+ *
+ * ── WHY THE TOP IS NO LONGER RED ────────────────────────────────────────────────────────────
+ *
+ * It was `--danger-fg` at 6 and `--danger` at 7, which made the ladder a severity scale:
+ * green, blue, amber, red is the vocabulary of fine/info/warning/error. A6 and A7 are not
+ * errors — they are the setting an operator chose so work finishes without being asked — and a
+ * red pill held for a whole session stops carrying information and starts carrying pressure.
+ * `--autonomy` is the accent pushed further from the ground (ice on dark, deepened on light;
+ * see the token's own comment in `packages/ui/src/tokens.ts`), so full autonomy reads as a dial
+ * turned up rather than a fault raised.
+ *
+ * Red is still on this bar and is now unambiguous: `StatusBar` keeps `--danger` for a failed
+ * scan, which genuinely is one.
+ *
+ * ── AND WHY 0–1 IS NO LONGER GREEN ──────────────────────────────────────────────────────────
+ *
+ * The CLI's own ladder (`apps/cli/src/tui/status.ts`, `authRole`) starts at `muted`, and the
+ * two had silently drifted: the same A0 was grey in the terminal and green in Studio. Green is
+ * this product's "ok / enabled / clean" colour everywhere else, and spending it on "asks before
+ * everything" claims a verdict the level is not making — A0 is the most CAUTIOUS rung, not the
+ * healthiest one. Muted matches the CLI and says the honest thing: nothing notable is on.
+ *
+ * The two ladders are now the same shape. They are still two functions in two packages, which
+ * is a real duplication — but `core` cannot reach a CSS variable and the renderer cannot reach
+ * a terminal Role, so the shared thing would have to be an abstract rung enum. Worth doing if a
+ * third surface ever grows one; not worth it for two.
  */
 export function authLevelVar(level: number): string {
   const l = clampAuthLevel(level);
-  if (l <= 1) return "--ok";
+  if (l <= 1) return "--text-muted";
   if (l <= 3) return "--accent";
   if (l <= 5) return "--warn";
-  if (l === 6) return "--danger-fg";
-  return "--danger";
+  return "--autonomy";
 }
 
 /** The GUI wording for a level ("accept edits"), from core's `uiLabel`. */

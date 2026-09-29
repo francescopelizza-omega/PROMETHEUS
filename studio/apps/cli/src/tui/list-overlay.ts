@@ -24,6 +24,25 @@ export interface ListOverlayItem {
   current?: boolean;
   /** the full composer line to resubmit when this item is picked. */
   submitText: string;
+  /**
+   * Extra lines shown BELOW the list, for the highlighted row only.
+   *
+   * Added for the model browser, where one line cannot carry what a person needs to choose: the
+   * size, the quantisation, the licence, whether it fits this machine's RAM. Optional, so every
+   * existing picker (`/agents`, `/think`, `/commands`, `/model`) renders exactly as before.
+   *
+   * Pre-formatted by the caller — the overlay clips each line to width but never reflows, in
+   * keeping with the rest of this renderer.
+   */
+  body?: readonly string[];
+  /**
+   * Blocks selection, with the reason shown in place of the body.
+   *
+   * A model too large for this machine stays VISIBLE — hiding it invites "why isn't X listed?"
+   * — but Enter on it does nothing and says why. Offering a choice that cannot work, and failing
+   * only after a 20 GB download, is the outcome this exists to prevent.
+   */
+  disabled?: string;
 }
 
 export type ListOverlayAction =
@@ -37,6 +56,13 @@ export interface ListOverlayState {
   filtered: readonly ListOverlayItem[];
   index: number;
   query: string;
+  /**
+   * A line under the title: where the rows came from, or why there are none.
+   *
+   * The model browser needs it because "no matches" and "HuggingFace was unreachable" look
+   * identical in an empty list, and only one of them is the user's filter being too narrow.
+   */
+  status?: string;
 }
 
 /**
@@ -67,10 +93,18 @@ function rank(query: string, items: readonly ListOverlayItem[]): ListOverlayItem
 export function openListOverlay(
   title: string,
   items: readonly ListOverlayItem[],
+  status?: string,
 ): ListOverlayState {
   const filtered = rank("", items);
   const currentIdx = filtered.findIndex((it) => it.current);
-  return { title, all: items, filtered, index: currentIdx >= 0 ? currentIdx : 0, query: "" };
+  return {
+    title,
+    all: items,
+    filtered,
+    index: currentIdx >= 0 ? currentIdx : 0,
+    query: "",
+    ...(status ? { status } : {}),
+  };
 }
 
 function move(state: ListOverlayState, delta: number): ListOverlayState {
@@ -104,7 +138,10 @@ export function onListKey(
       return none(move(state, 1));
     case "enter": {
       const sel = state.filtered[state.index];
-      return sel ? { state, action: { type: "pick", text: sel.submitText } } : none(state);
+      // A disabled row stays selectable so its reason can be read, but picking it does nothing.
+      // Silently submitting a model that cannot run here would fail only after the download.
+      if (!sel || sel.disabled) return none(state);
+      return { state, action: { type: "pick", text: sel.submitText } };
     }
     case "backspace":
       return none(reQuery(state, state.query.slice(0, -1)));
@@ -131,7 +168,18 @@ export function renderListOverlay(
   const lines: string[] = [];
   lines.push(p.accent(clipToWidth(state.title, w)));
   lines.push(p.muted(clipToWidth(`  filter: ${state.query || "(type to filter)"}`, w)));
-  const bodyRows = Math.max(1, rows - 3); // title + filter + hint reserved
+  if (state.status) lines.push(p.muted(clipToWidth(`  ${state.status}`, w)));
+
+  /**
+   * The detail pane competes with the LIST for the same rows, so it is budgeted before either is
+   * drawn — and capped, because an item with fifteen body lines must not squeeze the list to one
+   * row and make the overlay unnavigable. The list keeps at least three rows whatever happens.
+   */
+  const selected = state.filtered[state.index];
+  const detail = selected?.disabled ? [selected.disabled] : (selected?.body ?? []);
+  const reserved = 3 + (state.status ? 1 : 0); // title + filter + hint (+ status)
+  const detailRows = Math.min(detail.length, Math.max(0, rows - reserved - 3), 6);
+  const bodyRows = Math.max(1, rows - reserved - detailRows);
   const n = state.filtered.length;
   let top = 0;
   if (n > bodyRows) top = Math.min(Math.max(0, state.index - (bodyRows >> 1)), n - bodyRows);
@@ -154,6 +202,12 @@ export function renderListOverlay(
     }
   });
   if (n === 0) lines.push(p.muted(clipToWidth("  (no matches)", w)));
+  for (const line of detail.slice(0, detailRows)) {
+    // A blocked row's reason is painted as a warning, not as ordinary detail — it is the reason
+    // Enter will do nothing, and it has to look different from the description above it.
+    const paint = selected?.disabled ? p.warn : p.muted;
+    lines.push(paint(clipToWidth(`  ${line}`, w)));
+  }
   lines.push(p.muted(clipToWidth("  ↑↓ move · Enter select · Esc cancel", w)));
   return lines;
 }

@@ -131,6 +131,18 @@ export {
   selectWire,
 } from "./wire.js";
 
+// --- the served context window, MEASURED (exported to the ai barrel 2026-09-25) ------------
+// The VS Code extension was the last surface still ASSERTING a window (a hardcoded 8192, which
+// is the number CLAUDE.md §2.8 records as the cause of empty turns). It could not probe because
+// the probe was never on this barrel — only `DEFAULT_CONTEXT_WINDOW` reached the root index.
+export type { ContextWindowResult, ContextWindowSource } from "./context-window.js";
+export {
+  CONTEXT_PROBE_AWAIT_MS,
+  DEFAULT_CONTEXT_WINDOW,
+  PROBE_TIMEOUT_MS,
+  probeContextWindow,
+} from "./context-window.js";
+
 // --- memory admission (2026-09-25) -----------------------------------------
 // Whether a model fits, computed from geometry verified against ollama's own allocation, and
 // the two rules that follow from it: one model server at a time, and nothing starts that does
@@ -144,14 +156,49 @@ export type {
 } from "./model-footprint.js";
 export {
   FALLBACK_KV_BYTES_PER_TOKEN,
+  FLOOR_KV_BYTES_PER_TOKEN,
+  MIN_RUNNER_OVERHEAD_BYTES,
   RUNNER_OVERHEAD_BYTES,
   admitModel,
   bytesPerElement,
+  estimatedLowerBound,
+  expandWindowPattern,
   humanBytes,
   kvBytesForContext,
   modelFootprint,
   parseKvGeometry,
+  servedContext,
 } from "./model-footprint.js";
+
+// --- learning what a model really costs (2026-09-25) ------------------------
+// Architecture arithmetic prices the KV cache exactly; the weights and the runner overhead it
+// can only allow for. One real observation solves the overhead term outright, so a model that
+// has loaded once is never estimated again — which is what stops a cautious allowance from
+// refusing a model that would have run.
+export type { FootprintObservation } from "./footprint-ledger.js";
+export {
+  MAX_OBSERVATIONS,
+  MAX_OBSERVATIONS_PER_MODEL,
+  OBSERVATION_TTL_MS,
+  calibratedOverhead,
+  kvSlope,
+  ledgerFootprint,
+  measuredKvPerToken,
+  ledgerKey,
+  observationsFor,
+  parseObservations,
+  recordObservation,
+  solveOverhead,
+} from "./footprint-ledger.js";
+export type { OllamaLoadRecord } from "./ollama-log-parse.js";
+export {
+  latestPerModel,
+  modelNameFrom,
+  nearestModel,
+  normalizeModelName,
+  parseOllamaLog,
+  parseSizeToBytes,
+} from "./ollama-log-parse.js";
 export type {
   AdmissionDecision,
   AdmissionRequest,
@@ -162,6 +209,7 @@ export type {
 export {
   admitModelLoad,
   affordableModels,
+  footprintNote,
   footprintOf,
   reclaimableBytes,
   renderRefusal,
@@ -187,3 +235,10 @@ export {
   normalizeHost,
   warnings as remoteHostWarnings,
 } from "./remote-hosts.js";
+
+// --- real remote machines, over SSH (2026-09-25) ----------------------------
+// The SSH argv builder and the hardware probe live in `@prometheus/engine-bridge`, not here:
+// core DEPENDS ON engine-bridge (never the reverse), and a module whose whole purpose is to
+// construct a child-process argv safely belongs beside the code that spawns it (C5 / SPINE).
+// The types are re-exported here so a caller reasoning about remote hosts has one import.
+export type { RemoteGpu, RemoteHardware, SshTarget } from "@prometheus/engine-bridge";

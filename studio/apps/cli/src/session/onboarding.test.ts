@@ -323,7 +323,9 @@ test("renderOnboarding: a resource-refused runner names the reason and tells the
     localEndpoint: undefined,
     paidClis: [],
     startedRunners: new Set<string>(),
-    unavailableRunners: [{ id: "ollama", name: "ollama", wedged: false, reason: "RAM at 94% ≥ 90% ceiling" }],
+    unavailableRunners: [
+      { id: "ollama", name: "ollama", wedged: false, reason: "RAM at 94% ≥ 90% ceiling" },
+    ],
   };
   const rendered = renderOnboarding(backends);
   // Matched against the box's TEXT, with the chrome and the line breaks taken out.
@@ -372,7 +374,13 @@ test("detectBackends: a successful CLI autostart arms the idle-shutdown watchdog
   });
   assert.equal(b.startedRunners.has("ollama"), true);
   assert.deepEqual(watchdogCalls, [
-    { port: 11434, processMatch: "ollama", runnerId: "ollama", displayName: "Ollama", stopCmd: undefined },
+    {
+      port: 11434,
+      processMatch: "ollama",
+      runnerId: "ollama",
+      displayName: "Ollama",
+      stopCmd: undefined,
+    },
   ]);
 });
 

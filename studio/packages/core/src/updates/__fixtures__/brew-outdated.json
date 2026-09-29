@@ -1,0 +1,62 @@
+{
+  "formulae": [
+    {
+      "name": "gumbo-parser",
+      "installed_versions": ["0.14.0"],
+      "current_version": "0.14.1",
+      "pinned": false,
+      "pinned_version": null
+    },
+    {
+      "name": "imagemagick",
+      "installed_versions": ["7.1.2-31"],
+      "current_version": "7.1.2-32",
+      "pinned": false,
+      "pinned_version": null
+    },
+    {
+      "name": "openexr",
+      "installed_versions": ["3.5.0"],
+      "current_version": "3.5.1",
+      "pinned": false,
+      "pinned_version": null
+    },
+    {
+      "name": "openssl@3",
+      "installed_versions": ["3.6.4"],
+      "current_version": "3.6.4_1",
+      "pinned": false,
+      "pinned_version": null
+    },
+    {
+      "name": "openssl@4",
+      "installed_versions": ["4.0.2"],
+      "current_version": "4.0.2_1",
+      "pinned": false,
+      "pinned_version": null
+    },
+    {
+      "name": "tcl-tk",
+      "installed_versions": ["9.0.4"],
+      "current_version": "9.0.4_1",
+      "pinned": false,
+      "pinned_version": null
+    }
+  ],
+  "casks": [
+    {
+      "name": "claude-code",
+      "installed_versions": ["2.1.274"],
+      "current_version": "2.1.277",
+      "pinned": false,
+      "pinned_version": null
+    },
+    {
+      "name": "codex",
+      "installed_versions": ["0.157.1"],
+      "current_version": "0.158.0",
+      "pinned": false,
+      "pinned_version": null
+    }
+  ]
+}

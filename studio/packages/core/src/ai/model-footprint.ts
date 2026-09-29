@@ -67,31 +67,130 @@ export interface KvGeometry {
   slidingWindow?: number;
   /** which layers are windowed; `true` = windowed. Same length as headCountKv. */
   slidingWindowPattern?: readonly boolean[];
+  /**
+   * The head dimension used by the WINDOWED layers, when it differs (`key_length_swa`).
+   *
+   * gemma4 reports `key_length = 512` and `key_length_swa = 256`: its sliding-window layers
+   * store half-width keys. Charging them the full width over-states that model's cache by
+   * ~170 MiB — small next to the weights, and exactly the kind of quiet surcharge that adds up
+   * into refusing a model that would have fit.
+   */
+  keyLengthSwa?: number;
+  /** likewise for values (`value_length_swa`). */
+  valueLengthSwa?: number;
+  /** `block_count` — the layer count, kept because a scalar head count needs it to expand. */
+  blockCount?: number;
+  /**
+   * The context this model was TRAINED for (`*.context_length`).
+   *
+   * Load-bearing, not decoration: a runner serves `min(requested, this)`, so pricing a KV cache
+   * at a 262,144-token setting for a model trained at 8,192 over-counts by 32×. That is the
+   * single largest over-estimate this module can make, and `servedContext()` is what stops it.
+   */
+  contextLength?: number;
 }
 
-/** Pull the geometry out of `/api/show`'s `model_info`, whatever the architecture prefix is. */
+/**
+ * Pull the geometry out of `/api/show`'s `model_info`, whatever the architecture prefix is.
+ *
+ * `attention.head_count_kv` comes in BOTH shapes. qwen3.6 reports a per-layer array; most
+ * models report a single scalar meaning "every layer, this many". Rejecting the scalar — which
+ * this function used to do — sent those models down the geometry-less fallback path, where a
+ * blanket 24 KiB/token allowance priced a 262k context at 6 GiB of cache the model would never
+ * have allocated. The scalar is expanded against `block_count` instead, which is the same fact
+ * written more briefly.
+ */
 export function parseKvGeometry(modelInfo: Record<string, unknown>): KvGeometry | null {
   const pick = (suffix: string): unknown => {
     const key = Object.keys(modelInfo).find((k) => k.endsWith(suffix));
     return key ? modelInfo[key] : undefined;
   };
-  const headCountKv = pick(".attention.head_count_kv");
-  const keyLength = pick(".attention.key_length");
+  const rawHeads = pick(".attention.head_count_kv");
+  const keyLengthRaw = pick(".attention.key_length");
   const valueLength = pick(".attention.value_length");
-  if (!Array.isArray(headCountKv) || headCountKv.length === 0) return null;
-  if (typeof keyLength !== "number" || keyLength <= 0) return null;
-  const heads = headCountKv.filter((h): h is number => typeof h === "number");
-  if (heads.length !== headCountKv.length) return null;
+  const blockCountRaw = pick(".block_count");
+  const blockCount =
+    typeof blockCountRaw === "number" && blockCountRaw > 0 ? Math.round(blockCountRaw) : undefined;
+  const embedding = pick(".embedding_length");
+  const headCount = pick(".attention.head_count");
+
+  let heads: number[] | null = null;
+  if (Array.isArray(rawHeads) && rawHeads.length > 0) {
+    const nums = rawHeads.filter((h): h is number => typeof h === "number");
+    if (nums.length === rawHeads.length) heads = nums;
+  } else if (typeof rawHeads === "number" && rawHeads > 0 && blockCount) {
+    // One number for every layer — the common case, and the one that used to be discarded.
+    heads = new Array<number>(blockCount).fill(rawHeads);
+  }
+  if (!heads || heads.length === 0) return null;
+
+  /**
+   * The head dimension.
+   *
+   * `attention.key_length` is authoritative and is what qwen3.6 needs (256, where
+   * embedding/heads would say 128). When a model omits it, `embedding_length / head_count` is
+   * the definition it omitted, so deriving it is not a guess — and it is far better than
+   * discarding the whole geometry over one absent field.
+   */
+  let keyLength = typeof keyLengthRaw === "number" && keyLengthRaw > 0 ? keyLengthRaw : 0;
+  if (
+    !keyLength &&
+    typeof embedding === "number" &&
+    typeof headCount === "number" &&
+    headCount > 0
+  ) {
+    keyLength = Math.round(embedding / headCount);
+  }
+  if (!keyLength || keyLength <= 0) return null;
 
   const slidingWindow = pick(".attention.sliding_window");
   const pattern = pick(".attention.sliding_window_pattern");
+  const contextLength = pick(".context_length");
+  const keyLengthSwa = pick(".attention.key_length_swa");
+  const valueLengthSwa = pick(".attention.value_length_swa");
   return {
     headCountKv: heads,
     keyLength,
     valueLength: typeof valueLength === "number" && valueLength > 0 ? valueLength : keyLength,
+    ...(typeof keyLengthSwa === "number" && keyLengthSwa > 0 ? { keyLengthSwa } : {}),
+    ...(typeof valueLengthSwa === "number" && valueLengthSwa > 0 ? { valueLengthSwa } : {}),
     ...(typeof slidingWindow === "number" && slidingWindow > 0 ? { slidingWindow } : {}),
-    ...(Array.isArray(pattern) ? { slidingWindowPattern: pattern.map((p) => p === true) } : {}),
+    ...(Array.isArray(pattern)
+      ? { slidingWindowPattern: expandWindowPattern(pattern, heads.length) }
+      : {}),
+    ...(blockCount ? { blockCount } : {}),
+    ...(typeof contextLength === "number" && contextLength > 0 ? { contextLength } : {}),
   };
+}
+
+/**
+ * Normalise `sliding_window_pattern` to one boolean per layer.
+ *
+ * Two dialects exist. gemma reports a full per-layer boolean array. Others report a short
+ * repeating unit — `[true,true,true,true,true,false]` meaning "5 windowed, then 1 full, and
+ * repeat". Reading the short form as a full-length array marks every layer past its end as
+ * FULL-window, which over-counts the cache by the same order of magnitude the per-layer fix
+ * was introduced to remove, so the short form is tiled instead.
+ */
+export function expandWindowPattern(pattern: readonly unknown[], layers: number): boolean[] {
+  const bools = pattern.map((p) => p === true);
+  if (bools.length === 0) return new Array<boolean>(layers).fill(false);
+  if (bools.length >= layers) return bools.slice(0, layers);
+  const out: boolean[] = [];
+  for (let i = 0; i < layers; i++) out.push(bools[i % bools.length] as boolean);
+  return out;
+}
+
+/**
+ * The context a runner will ACTUALLY serve: the request, capped by what the model was trained for.
+ *
+ * ollama clamps silently. Prometheus must clamp too, or it prices a cache that will never be
+ * allocated and refuses a model over memory it was never going to ask for.
+ */
+export function servedContext(requestedTokens: number, geo?: KvGeometry | null): number {
+  const req = Math.max(1, Math.round(requestedTokens));
+  const max = geo?.contextLength;
+  return max && max > 0 ? Math.min(req, max) : req;
 }
 
 /**
@@ -106,13 +205,18 @@ export function kvBytesForContext(
   type: KvCacheType = "q8_0",
 ): number {
   const perElement = bytesPerElement(type);
+  // A windowed layer may store narrower keys and values than a full-attention one — gemma4 does
+  // (512 vs 256). Fall back to the full width when the model does not distinguish them.
+  const swaKey = geo.keyLengthSwa ?? geo.keyLength;
+  const swaValue = geo.valueLengthSwa ?? geo.valueLength;
   let total = 0;
   for (let i = 0; i < geo.headCountKv.length; i++) {
     const kvHeads = geo.headCountKv[i] ?? 0;
     if (kvHeads <= 0) continue; // this layer keeps no cache
     const windowed = geo.slidingWindowPattern?.[i] === true && geo.slidingWindow;
     const cells = windowed ? Math.min(contextTokens, geo.slidingWindow as number) : contextTokens;
-    total += cells * kvHeads * (geo.keyLength + geo.valueLength) * perElement;
+    const width = windowed ? swaKey + swaValue : geo.keyLength + geo.valueLength;
+    total += cells * kvHeads * width * perElement;
   }
   return Math.round(total);
 }
@@ -138,10 +242,23 @@ export interface ModelFootprint {
   /**
    * Where the number came from — the caller SHOWS this, because "we measured this model at
    * 26 GB last time" and "we think it is about 26 GB" deserve different confidence.
+   *
+   * `calibrated` sits between the two: the KV arithmetic at this context, with the runner
+   * overhead SOLVED from a real observation of this model at some other context rather than
+   * taken from the flat allowance. See `ai/footprint-ledger.ts`.
    */
-  source: "measured" | "computed" | "estimated";
+  source: "measured" | "calibrated" | "computed" | "estimated";
   /** the context the KV figure assumes. */
   contextTokens: number;
+  /**
+   * An OPTIMISTIC floor: the least this could plausibly need.
+   *
+   * Only meaningful on the `estimated` tier, where `totalBytes` is a deliberate ceiling built
+   * from a blanket per-token allowance. The gap between the two is the honest width of our
+   * ignorance, and a refusal that lands inside that gap is a refusal we have not earned — see
+   * `admitModelLoad`, which downgrades it to a warning rather than a no.
+   */
+  lowerBoundBytes?: number;
 }
 
 /**
@@ -195,18 +312,63 @@ export function modelFootprint(opts: {
     totalBytes: weightsBytes + kvBytes + RUNNER_OVERHEAD_BYTES,
     source: "estimated",
     contextTokens,
+    lowerBoundBytes: estimatedLowerBound(weightsBytes, contextTokens),
   };
 }
 
 /**
- * KV bytes per token when the geometry is unknown.
+ * The least an unknown model could plausibly need at this context.
  *
- * qwen3.6 — a 36B MoE that caches on a quarter of its layers — measures 10.6 KiB/token. A dense
- * model of similar size caching on every layer would be several times that, so this is set
- * above the measured figure rather than at it: the fallback's job is to be safe, and the
- * `estimated` source tells the caller to treat it as a ceiling.
+ * The ceiling assumes every layer caches at full width. The floor assumes the opposite end of
+ * what real architectures do: a sparse KV layout on a fraction of layers, and a modest runner
+ * overhead. Both are true of models shipping today, which is precisely why a single number
+ * cannot be both safe and fair — so the estimated tier carries both.
  */
-export const FALLBACK_KV_BYTES_PER_TOKEN = 24 * 1024;
+export function estimatedLowerBound(weightsBytes: number, contextTokens: number): number {
+  return Math.round(
+    weightsBytes + contextTokens * FLOOR_KV_BYTES_PER_TOKEN + MIN_RUNNER_OVERHEAD_BYTES,
+  );
+}
+
+/**
+ * The optimistic per-token KV allowance.
+ *
+ * qwen3.6 — a 36B model caching on a quarter of its layers at q8_0 — measures 10.6 KiB/token.
+ * A model with grouped-query attention on few layers, or sliding windows, costs a fraction of
+ * that. 2 KiB is the low end of what has actually been observed, not a number chosen to be
+ * convenient.
+ */
+export const FLOOR_KV_BYTES_PER_TOKEN = 2 * 1024;
+
+/** The smallest runner overhead observed on this hardware. See `RUNNER_OVERHEAD_BYTES`. */
+export const MIN_RUNNER_OVERHEAD_BYTES = 256 * 1024 * 1024;
+
+/**
+ * KV bytes per token when the geometry is unknown — a CEILING, and an honest one.
+ *
+ * This was 24 KiB, described in its own comment as safe. It was not. The arithmetic, once the
+ * scalar-geometry fix made it possible to check a dense model:
+ *
+ *   qwen3.6   10 of 40 layers, 2 kv heads, 256-wide   → 10.6 KiB/token   (measured, in the log)
+ *   llama-ish 32 of 32 layers, 8 kv heads, 128-wide   → 69.6 KiB/token   (computed)
+ *
+ * So 24 KiB over-charged the sparse model by 2× — refusing models that fit, the exact complaint
+ * this work exists to answer — while UNDER-charging the dense one by 3×, which is the failure
+ * that actually takes a machine down. A number in the middle of a 7× spread is wrong in both
+ * directions at once.
+ *
+ * The fix is not a better single number, because there isn't one. It is:
+ *
+ *   1. `parseKvGeometry` now succeeds far more often (scalar head counts, derived key lengths),
+ *      so this constant is reached only when the runner tells us nothing at all;
+ *   2. when it IS reached, the footprint carries `lowerBoundBytes` as well, and `admitModelLoad`
+ *      refuses only if the FLOOR does not fit — so a generous ceiling costs a warning, never a
+ *      wrongly-refused model.
+ *
+ * Which frees this to be what it claims to be: high enough to cover a dense model with
+ * grouped-query attention on every layer.
+ */
+export const FALLBACK_KV_BYTES_PER_TOKEN = 72 * 1024;
 
 /** What the machine can actually give a model right now. */
 export interface MemoryBudget {

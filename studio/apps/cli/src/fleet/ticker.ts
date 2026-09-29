@@ -1,4 +1,3 @@
-import type { FleetBarModel } from "../tui/fleet-bar.js";
 /**
  * fleet/ticker.ts — the clock behind the fleet bar.
  *
@@ -20,6 +19,7 @@ import type { FleetBarModel } from "../tui/fleet-bar.js";
  * over the rounded, rendered values, so the callback fires exactly when the pixels would differ.
  */
 import { type EvictionEvent, readEvictionEvents } from "@prometheus/engine-bridge";
+import type { FleetBarModel } from "../tui/fleet-bar.js";
 
 import {
   type FleetPeer,

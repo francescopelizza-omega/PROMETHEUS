@@ -33,6 +33,27 @@ export const BG_RESET = `${ESC}]111\x07`;
  *  a killed TUI never leaves the parent shell emitting click garbage. */
 export const RESTORE_TUI = `${ESC}[?1006l${ESC}[?1000l${ESC}[?2004l${ESC}[?7h${ESC}[?25h${ESC}[0m`;
 
+/**
+ * DECAWM (autowrap) OFF — set once in `ENTER_TUI`, and RE-ASSERTED on every repaint below.
+ *
+ * Once was not enough, and the whole redraw rests on it. The invariant is
+ * `lines.length === physical rows`: a repaint moves the cursor up by exactly the parked caret
+ * row to reach the block top. One chrome line that WRAPS makes the block a row taller than the
+ * renderer believes, the cursor-up lands a row short of the top, `ESC[0J` erases from there
+ * down, and the top border is stranded above — one orphan `╭────╮` per repaint, which is
+ * exactly what the reported screenshot shows.
+ *
+ * Anything can turn autowrap back on mid-session: a child process that emits its own reset, a
+ * pager or $EDITOR sharing the tty, a terminal restoring defaults, or model output streamed
+ * verbatim into scrollback that happens to contain `ESC[?7h` — the agent writes into the same
+ * terminal, and its text is not sanitised.
+ *
+ * Four bytes per paint buys the invariant back unconditionally. With autowrap off, a line that
+ * is one column too wide — a glyph the width table measures as 1 and the font paints as 2 — is
+ * one clipped cell, not an extra row, so the cursor math cannot drift.
+ */
+const WRAP_OFF = `${ESC}[?7l`;
+
 /** CUU — cursor up `n` rows (0 is a no-op; many terminals treat `[0A` as `[1A`). */
 export function cursorUp(n: number): string {
   return n > 0 ? `${ESC}[${n}A` : "";
@@ -47,7 +68,37 @@ export function cursorRight(n: number): string {
  * the block's top-left and erase to end of screen — the start of every repaint.
  */
 export function moveToTop(fromRow: number): string {
-  return `${cursorUp(Math.max(0, fromRow))}\r${ESC}[0J`;
+  return `${WRAP_OFF}${cursorUp(Math.max(0, fromRow))}\r${ESC}[0J`;
+}
+
+/**
+ * Extra rows to climb past when the terminal has just been made NARROWER.
+ *
+ * `onResize` used to repaint straight through `paint()`, on the stated assumption that the old
+ * block "is wiped cleanly at the new width — no reset(), no debris" because autowrap was off so
+ * nothing had reflowed. That assumption does not hold on the two emulators this is used from:
+ * Terminal.app and iTerm2 both REWRAP the buffer when the window narrows, whatever DECAWM said
+ * when the text was written. A chrome line built at the old `cols-1` no longer fits, so it
+ * becomes two physical rows, every row above the caret shifts, and the cursor-up lands short of
+ * the block top. `ESC[0J` then erases from below the top border and leaves it stranded — one
+ * orphan per resize. That is what the reported screenshot is: a single 359-column logical line
+ * holding FOUR `╭` runs of 133, 105, 2 and 119 columns, the last being the live border and the
+ * first two the `cols-1` budgets for widths the window had passed through (134 and 106).
+ *
+ * Takes the DISPLAY WIDTHS of the rows above the caret, not a count and a nominal width: a line
+ * of `w` columns occupies `ceil(w / cols)` rows after the rewrap, and rows that still fit are
+ * untouched. Measuring each one matters because the block is not uniform — the key-hint row and
+ * a short dropdown entry are well under the box's full width, and charging them for a rewrap
+ * they did not have would climb past the block and erase live transcript above it.
+ *
+ * Zero whenever nothing was too wide, which is every widening and every shrink small enough to
+ * leave the block intact.
+ */
+export function reflowSlack(rowWidths: readonly number[], cols: number): number {
+  if (cols <= 0) return 0;
+  let extra = 0;
+  for (const w of rowWidths) if (w > cols) extra += Math.ceil(w / cols) - 1;
+  return extra;
 }
 
 /**
@@ -81,9 +132,15 @@ export class Renderer {
     this.write = write;
   }
 
-  /** Repaint the chrome in place. */
-  paint(frame: Frame): void {
-    this.write(composePaint(this.parkedRow, frame));
+  /**
+   * Repaint the chrome in place.
+   *
+   * `slack` is extra rows to climb before erasing, for the one case where the parked row is a
+   * count the terminal no longer agrees with: a narrowing resize that rewrapped the block under
+   * us (see `reflowSlack`). It defaults to 0, so every ordinary repaint is unchanged.
+   */
+  paint(frame: Frame, slack = 0): void {
+    this.write(composePaint(this.parkedRow + Math.max(0, slack), frame));
     this.parkedRow = Math.max(0, Math.min(frame.cursorRow, frame.lines.length - 1));
   }
 

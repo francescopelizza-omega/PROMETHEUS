@@ -60,6 +60,9 @@ import {
 } from "@prometheus/engine-bridge";
 import { defaultOpenEditor, loadEffectiveStartupProfileWithNotes } from "../profile-store.js";
 
+import type { updates as u } from "@prometheus/core";
+import { fetchOllamaTags, searchHuggingFace } from "@prometheus/core/updates-live";
+import { localMemorySnapshot } from "@prometheus/engine-bridge";
 import { PROM_VERSION } from "../commands/help.js";
 import { runInvoke } from "../commands/invoke.js";
 import { readTokenToggles } from "../commands/token-toggles.js";
@@ -142,12 +145,22 @@ import { readSavedAuthLevel, saveAuthLevel } from "./authorisation-store.js";
 import { type SessionCtx as VerbCtx, execVerb } from "./command-exec.js";
 import { realGitSpawn } from "./git-helpers.js";
 
+import { onboarding as onboardingDoctor } from "@prometheus/core";
 import { loadAgentFiles } from "./agent-file-store.js";
 import { type LoadedCommand, expandCommand, loadCommandFiles } from "./command-files.js";
+import { gatherFacts } from "./doctor-host.js";
 import { loadEffortRules } from "./effort-rules.js";
 import { loadGrantsInto, saveGrants } from "./grants-store.js";
 import { type HooksSource, loadHooksDetailed } from "./hooks-config.js";
 import { applyInDirective, createOutputDir } from "./in.js";
+import {
+  activeTranslator,
+  languageChosen,
+  parseLanguageAnswer,
+  renderLanguageConfirmed,
+  renderLanguagePrompt,
+  saveLocale,
+} from "./language-host.js";
 import { type McpSession, openMcpSession, withMcpTools } from "./mcp-session.js";
 import { admitEndpoint, setRemoteHostLookup } from "./model-admission-host.js";
 import { modelCandidates, resolveModelCandidate } from "./model-candidates.js";
@@ -956,10 +969,55 @@ export async function launchSession(parsed: ParsedArgs, deps: SessionDeps = {}):
       writeLine(c.yellow(`! ${loadedGrants.refused} saved grant(s) refused as too broad`));
     }
   }
+  /**
+   * FIRST RUN: ask which language, once, in English.
+   *
+   * Before anything else a newcomer reads, because everything after it is affected. English
+   * because this is the one screen shown BEFORE we know what they read — each row carries its
+   * own endonym ("Italiano", "Deutsch") so the right one is recognisable regardless.
+   *
+   * `languageChosen` is false only when the setting is ABSENT or unrecognisable, never when it
+   * is "en": choosing English IS an answer, and re-asking someone who already answered is the
+   * failure this guards. Non-TTY skips it silently — a piped or scripted run must not block on
+   * a question nobody can see, and English is the right default there anyway.
+   */
+  if (isTty && !languageChosen(home)) {
+    writeLine("");
+    for (const line of renderLanguagePrompt()) writeLine(line);
+    const answer = await new Promise<string>((res) => rl.question("› ", (a) => res(a)));
+    const picked = parseLanguageAnswer(answer) ?? "en";
+    // An unparseable answer is NOT re-asked in a loop: a first impression that will not let you
+    // past is worse than English, and /language changes it at any time.
+    saveLocale(picked, home);
+    writeLine("");
+    for (const line of renderLanguageConfirmed(picked)) writeLine(c.green(line));
+    writeLine(c.dim(activeTranslator(home).t.t("firstrun.newhere")));
+  }
+
   // First-run onboarding: no usable local model → show the picker hint up front.
   if (!endpoint) {
     writeLine("");
     writeLine(renderOnboarding(backends));
+    /**
+     * …and say WHY, with the command, in their language.
+     *
+     * `renderOnboarding` lists the backends it probed; it never explains that PROMETHEUS does
+     * not CONTAIN a model, which is the one fact a beginner is missing. Fire-and-forget and
+     * fail-soft: the doctor is a courtesy and must never delay or break a session start.
+     */
+    void gatherFacts()
+      .then((facts) => {
+        const report = onboardingDoctor.diagnose(facts);
+        if (report.ready) return;
+        const { t } = activeTranslator(home);
+        writeLine("");
+        for (const line of onboardingDoctor.renderDoctor(report, t, facts)) {
+          writeLine(line.startsWith("    ") ? c.dim(line) : line);
+        }
+      })
+      .catch(() => {
+        /* never let a courtesy break a session start */
+      });
   }
   // Throttled, fail-soft update nudge (cached ≤6h; never blocks the prompt). A one-liner
   // pointing at /updates when a vendor CLI / local model / Prometheus itself has an update.
@@ -2405,6 +2463,33 @@ export async function launchSession(parsed: ParsedArgs, deps: SessionDeps = {}):
         env: process.env,
         ...(process.argv[1] ? { scriptPath: process.argv[1] } : {}),
         cwd: state.cwd,
+        /**
+         * The seams `/updates pull` and `/updates rm` need. Passing them is what ENABLES the
+         * action subcommands on this surface — without them the dispatcher refuses rather than
+         * assuming a confirmation, because one of the two is irreversible.
+         */
+        actions: {
+          confirm: (prompt) => slashCtx.confirm(prompt),
+          ask: (prompt) => slashCtx.ask(prompt),
+          getAuthLevel: () => slashCtx.getAuthLevel(),
+        },
+        /**
+         * The catalogue seam. READ-ONLY, so it is supplied even where the action seams are not:
+         * browsing shows a list and a command, and installs nothing.
+         *
+         * The budget is this machine's REAL memory, read the same way the admission gate reads
+         * it, so a model the browser says fits is one the gate will also admit. A browser using
+         * `totalmem()` would promise models that cannot load once the OS and the compositor are
+         * accounted for.
+         */
+        browse: {
+          search: async (q: string) => {
+            const r = await searchHuggingFace({ query: q, limit: 40 });
+            return { entries: r.entries, error: r.error };
+          },
+          budget: await catalogBudget(),
+          installed: await installedTags(),
+        },
       });
     },
     usage: () => {
@@ -2955,4 +3040,36 @@ export async function launchSession(parsed: ParsedArgs, deps: SessionDeps = {}):
   await mcp?.close().catch(() => {});
 
   return exitCode;
+}
+
+/**
+ * What the model browser may promise this machine.
+ *
+ * Read through the same probe the admission gate uses, minus the headroom it keeps back — so a
+ * model the browser calls a fit is one the gate will also admit. `os.totalmem()` would be the
+ * easy answer and the wrong one: it ignores what is already resident and the reserve that keeps
+ * the compositor alive (CLAUDE.md §2), and would offer models that cannot actually load.
+ *
+ * Fail-soft: an unreadable probe yields a zero budget, which makes every verdict `too-big` —
+ * conservative, visible, and not a silent promise.
+ */
+async function catalogBudget(): Promise<u.FitBudget> {
+  try {
+    const snap = await localMemorySnapshot();
+    return {
+      usableBytes: Math.max(0, snap.availableBytes - snap.headroomBytes),
+      contextTokens: DEFAULT_CONTEXT_WINDOW,
+    };
+  } catch {
+    return { usableBytes: 0, contextTokens: DEFAULT_CONTEXT_WINDOW };
+  }
+}
+
+/** Tags already on this machine, so the browser can mark them rather than offer them again. */
+async function installedTags(): Promise<string[]> {
+  try {
+    return (await fetchOllamaTags()).map((m) => m.name);
+  } catch {
+    return [];
+  }
 }

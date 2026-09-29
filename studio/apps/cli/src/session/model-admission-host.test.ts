@@ -10,7 +10,15 @@ import { test } from "node:test";
 
 import type { AiEndpoint } from "@prometheus/core";
 
-import { admitEndpoint, runnerIdFor, servingHost } from "./model-admission-host.js";
+import {
+  LOCAL_INVENTORY_TIMEOUT_MS,
+  LOCAL_PROBE_TIMEOUT_MS,
+  REMOTE_INVENTORY_TIMEOUT_MS,
+  REMOTE_PROBE_TIMEOUT_MS,
+  admitEndpoint,
+  runnerIdFor,
+  servingHost,
+} from "./model-admission-host.js";
 
 const GIB = 1024 ** 3;
 
@@ -186,4 +194,27 @@ test("the runner is identified from the port", () => {
   assert.equal(runnerIdFor("http://127.0.0.1:1234/v1"), "lmstudio");
   assert.equal(runnerIdFor("http://127.0.0.1:11434/v1"), "ollama");
   assert.equal(runnerIdFor("http://gpu-box.lan:11434"), "ollama");
+});
+
+test("a remote probe gets a far larger budget than a loopback one", () => {
+  /*
+   * Every probe budget in this repo was calibrated against loopback, where a round trip is
+   * sub-millisecond — 900 ms in `ollama-autostart`, 1500 in `model-server`, 2000 in
+   * `runner-census`. Those are fine for a socket on this machine and wrong for one across a
+   * LAN, and badly wrong through an ssh tunnel.
+   *
+   * The reason this needs a test rather than a comment: a timed-out census does NOT fail
+   * loudly. `runnerCensus` is fail-soft by design, so a probe that ran out of time reports
+   * "nothing is loaded there" — a confident, wrong answer that then feeds the admission
+   * decision and the one-server rule. Silent wrongness is the failure mode to guard.
+   */
+  assert.ok(
+    REMOTE_PROBE_TIMEOUT_MS >= 4 * LOCAL_PROBE_TIMEOUT_MS,
+    `remote census budget ${REMOTE_PROBE_TIMEOUT_MS}ms is not meaningfully above local ${LOCAL_PROBE_TIMEOUT_MS}ms`,
+  );
+  assert.ok(
+    REMOTE_INVENTORY_TIMEOUT_MS >= 4 * 1000,
+    "an inventory over a tunnel fetches /api/show per model and needs room for it",
+  );
+  assert.ok(REMOTE_INVENTORY_TIMEOUT_MS > LOCAL_INVENTORY_TIMEOUT_MS);
 });

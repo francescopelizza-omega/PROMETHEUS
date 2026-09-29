@@ -203,9 +203,12 @@ export { PREVIEW_MAX_BYTES, PREVIEW_MAX_ENTRIES, nodePreviewIo } from "./preview
 // spawn, cached for the process — an inventory consulted once per turn cannot afford fourteen
 // forks per turn on this machine (CLAUDE.md §2.3). It also repairs a GUI-launched PATH, which
 // is why it sees the Homebrew tools that `whichTool` reports as missing.
+// `lookPathAll` is the same walk without the early return: it answers "what ELSE is installed
+// under this name", which is what makes a shadowed second copy visible at all.
 export {
   clearHostToolCache,
   lookPath,
+  lookPathAll,
   probeHostTools,
   searchPath,
 } from "./host-tool-probe.js";

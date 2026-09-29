@@ -5,6 +5,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import {
+  TEXT_PRESENTATION,
   charWidth,
   clipToWidth,
   graphemeCount,
@@ -23,6 +24,30 @@ test("charWidth: ASCII=1, CJK/emoji=2, combining/ZW=0", () => {
   assert.equal(charWidth(0x0301), 0); // combining acute
   assert.equal(charWidth(0x200d), 0); // ZWJ
   assert.equal(charWidth(0xfe0f), 0); // variation selector
+});
+
+/**
+ * The wide ranges jumped from U+FFE6 to U+1F000, so the BMP emoji — which are two cells in every
+ * emulator on every platform — were measured as one. They are not in the chrome's own source;
+ * they arrive in model replies, which are word-wrapped to `cols-1` and written straight into
+ * scrollback, so a reply line holding a `✅` that packs to exactly the budget is one column over,
+ * wraps, and makes the printed block a row taller than anything counted.
+ */
+test("charWidth: BMP emoji with default emoji presentation are 2 cells", () => {
+  for (const ch of ["✅", "❌", "⭐", "⭕", "❗", "✨", "⌚", "⏰", "⏳", "➕", "⚡", "♈", "⬛"]) {
+    assert.equal(stringWidth(ch), 2, `${ch} must measure 2 columns`);
+  }
+  // …while the TEXT-default neighbours stay 1: their width is a font property, and the chrome
+  // pins them with VS15 (`TEXT_PRESENTATION`) rather than guessing in the table.
+  for (const ch of ["⚙", "⚠", "ℹ", "✓", "✗", "→", "·", "│", "╭"]) {
+    assert.equal(stringWidth(ch), 1, `${ch} must measure 1 column`);
+  }
+});
+
+test("TEXT_PRESENTATION pins a text-default emoji to one cell and costs no columns", () => {
+  assert.equal(stringWidth(TEXT_PRESENTATION), 0);
+  assert.equal(stringWidth(`⚙${TEXT_PRESENTATION} medium`), 8); // same as the bare gear
+  assert.equal(stringWidth("⚙ medium"), 8);
 });
 
 test("stringWidth sums cells + strips ANSI", () => {

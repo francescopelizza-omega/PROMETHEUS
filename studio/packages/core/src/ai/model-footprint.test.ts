@@ -14,10 +14,12 @@ import {
   type KvGeometry,
   admitModel,
   bytesPerElement,
+  expandWindowPattern,
   humanBytes,
   kvBytesForContext,
   modelFootprint,
   parseKvGeometry,
+  servedContext,
 } from "./model-footprint.js";
 
 const MIB = 1024 * 1024;
@@ -36,20 +38,33 @@ const QWEN_INFO: Record<string, unknown> = {
   "qwen35moe.embedding_length": 2048,
 };
 
-/** gemma4:12b, verbatim. 5 of every 6 layers are windowed at 1024. */
+/**
+ * gemma4:12b, verbatim from `/api/show` on 2026-09-25.
+ *
+ * The `key_length` here used to read 256. That was wrong: the model reports **512**, with a
+ * SEPARATE `key_length_swa` of 256 for its windowed layers. The fixture being wrong hid the
+ * distinction entirely, which is how the windowed layers came to be charged at full width.
+ *
+ * The two populations line up exactly, and that pairing is the whole shape of this model:
+ *   - 40 layers: windowed at 1024 cells, `head_count_kv = 8`, 256-wide  (the swa width)
+ *   -  8 layers: full attention,         `head_count_kv = 1`, 512-wide
+ */
 const GEMMA_INFO: Record<string, unknown> = {
   "gemma4.attention.head_count": 16,
   "gemma4.attention.head_count_kv": Array.from({ length: 48 }, (_, i) =>
     (i + 1) % 6 === 0 ? 1 : 8,
   ),
-  "gemma4.attention.key_length": 256,
-  "gemma4.attention.value_length": 256,
+  "gemma4.attention.key_length": 512,
+  "gemma4.attention.value_length": 512,
+  "gemma4.attention.key_length_swa": 256,
+  "gemma4.attention.value_length_swa": 256,
   "gemma4.attention.sliding_window": 1024,
   "gemma4.attention.sliding_window_pattern": Array.from(
     { length: 48 },
     (_, i) => (i + 1) % 6 !== 0,
   ),
   "gemma4.block_count": 48,
+  "gemma4.context_length": 262144,
   "gemma4.embedding_length": 3840,
 };
 
@@ -108,9 +123,22 @@ test("unparseable model_info yields null, and the caller falls back pessimistica
   assert.equal(
     parseKvGeometry({ "x.attention.head_count_kv": 8 }),
     null,
-    "a scalar is not the array",
+    "a scalar with no block_count cannot be expanded to per-layer, so it is still null",
   );
-  assert.equal(parseKvGeometry({ "x.attention.head_count_kv": [8] }), null, "key_length required");
+  // But a scalar WITH a block_count is expanded rather than discarded — see the scalar test
+  // below. That was the single largest source of over-estimation: most models report a scalar.
+  assert.ok(
+    parseKvGeometry({
+      "x.attention.head_count_kv": 8,
+      "x.attention.key_length": 128,
+      "x.block_count": 32,
+    }),
+  );
+  assert.equal(
+    parseKvGeometry({ "x.attention.head_count_kv": [8] }),
+    null,
+    "key_length required, and not derivable without embedding_length + head_count",
+  );
   const fp = modelFootprint({ weightsBytes: 8 * GIB, contextTokens: 100_000 });
   assert.equal(fp.source, "estimated");
   assert.equal(fp.kvBytes, 100_000 * FALLBACK_KV_BYTES_PER_TOKEN);
@@ -203,4 +231,144 @@ test("humanBytes is readable and locale-pinned", () => {
   assert.equal(humanBytes(23.94e9), "22 GB");
   assert.equal(humanBytes(7.56e9), "7 GB");
   assert.equal(humanBytes(2720 * 1024 * 1024), "2.7 GB");
+});
+
+/* ────────────────────────────────────────────────────────────────────────────
+ * 2026-09-25: the over-estimates.
+ *
+ * The brief was that Prometheus must not refuse a model that would in fact have run. Each
+ * test below pins one way the estimator used to be too big, with the real figure beside it.
+ * ──────────────────────────────────────────────────────────────────────────── */
+
+/** llama-style: ONE number for every layer, which is how most models report it. */
+const SCALAR_INFO: Record<string, unknown> = {
+  "llama.attention.head_count": 32,
+  "llama.attention.head_count_kv": 8,
+  "llama.attention.key_length": 128,
+  "llama.attention.value_length": 128,
+  "llama.block_count": 32,
+  "llama.context_length": 8192,
+  "llama.embedding_length": 4096,
+};
+
+test("a SCALAR head_count_kv is expanded, not discarded — most models report it that way", () => {
+  // This used to return null, which sent the model down the 24 KiB/token fallback: at a 262,144
+  // setting that prices the cache at 6 GiB it would never have allocated.
+  const geo = parseKvGeometry(SCALAR_INFO);
+  assert.ok(geo, "a scalar head count must still yield geometry");
+  assert.equal(geo.headCountKv.length, 32, "expanded against block_count");
+  assert.ok(geo.headCountKv.every((h) => h === 8));
+
+  const computed = modelFootprint({ weightsBytes: 4 * GIB, contextTokens: 8192, geometry: geo });
+  const fallback = modelFootprint({ weightsBytes: 4 * GIB, contextTokens: 8192, geometry: null });
+  assert.equal(computed.source, "computed");
+  assert.equal(fallback.source, "estimated");
+
+  // This model caches on EVERY layer: 32 × 8 heads × 256 bytes × 1.0625 = 69.6 KiB/token. That
+  // is the number that showed the old 24 KiB fallback was not a ceiling but a middle — too big
+  // for a sparse model and far too small for this one.
+  assert.equal(Math.round(computed.kvBytes / 8192 / 1024), 68);
+  assert.ok(
+    fallback.kvBytes >= computed.kvBytes,
+    "and the fallback, now set at 72 KiB, is finally above it",
+  );
+});
+
+test("the context is CLAMPED to what the model was trained for — the single biggest over-count", () => {
+  const geo = parseKvGeometry(SCALAR_INFO);
+  assert.ok(geo);
+  assert.equal(geo.contextLength, 8192, "the trained maximum is read from /api/show");
+  // A runner serves min(requested, trained). Pricing a 262,144-token cache for a model that
+  // tops out at 8,192 over-counts by 32× — and then refuses it over memory it never asked for.
+  assert.equal(servedContext(262144, geo), 8192);
+  assert.equal(servedContext(4096, geo), 4096, "a smaller request is still honoured");
+  const unclamped = kvBytesForContext(geo, 262144);
+  const clamped = kvBytesForContext(geo, servedContext(262144, geo));
+  assert.equal(Math.round(unclamped / clamped), 32);
+});
+
+test("a model with no declared maximum is not clamped", () => {
+  const geo = parseKvGeometry({ ...SCALAR_INFO, "llama.context_length": undefined });
+  assert.ok(geo);
+  assert.equal(geo.contextLength, undefined);
+  assert.equal(servedContext(262144, geo), 262144);
+});
+
+test("key_length is derived from embedding/heads when a model omits it", () => {
+  const {
+    "llama.attention.key_length": _k,
+    "llama.attention.value_length": _v,
+    ...noKeyLen
+  } = SCALAR_INFO;
+  const geo = parseKvGeometry(noKeyLen);
+  assert.ok(geo, "one absent field must not discard the whole geometry");
+  assert.equal(geo.keyLength, 128, "4096 embedding / 32 heads");
+});
+
+test("ANCHOR: gemma4 at 262144 is 2346 MiB — its two layer populations, priced separately", () => {
+  // Independently derived from `/api/show`, and it is the sum of two very different halves:
+  //    8 full layers  × 1 kv head  × (512+512) × 1.0625 × 262144 cells = 2176 MiB
+  //   40 swa  layers  × 8 kv heads × (256+256) × 1.0625 ×   1024 cells =  170 MiB
+  // Neither term is negligible and neither is obvious from the model's headline numbers.
+  const geo = parseKvGeometry(GEMMA_INFO);
+  assert.ok(geo);
+  assert.equal(Math.round(kvBytesForContext(geo, 262144) / MIB), 2346);
+});
+
+test("gemma4's windowed layers use the NARROWER swa head dimension", () => {
+  // Charging the windowed layers the full 512 over-states gemma's cache by ~170 MiB. Small
+  // next to the weights, and exactly the kind of quiet surcharge that adds up into refusing a
+  // model that would have fit.
+  const {
+    "gemma4.attention.key_length_swa": _k,
+    "gemma4.attention.value_length_swa": _v,
+    ...wideInfo
+  } = GEMMA_INFO;
+  const wide = parseKvGeometry(wideInfo);
+  const withSwa = parseKvGeometry(GEMMA_INFO);
+  assert.ok(wide && withSwa);
+  assert.equal(withSwa.keyLengthSwa, 256);
+  const a = kvBytesForContext(wide, 262144);
+  const b = kvBytesForContext(withSwa, 262144);
+  assert.ok(b < a, "the swa width must reduce the total");
+  assert.equal(Math.round((a - b) / MIB), 170);
+});
+
+test("a SHORT sliding_window_pattern is TILED, not read as full-attention past its end", () => {
+  // Some models report the repeating unit (5 windowed, 1 full) rather than all 48 booleans.
+  // Treating the absent tail as full-attention re-introduces the 10× this module was built to
+  // remove — every one of those layers would then be priced at the whole context.
+  const short = parseKvGeometry({
+    ...GEMMA_INFO,
+    "gemma4.attention.sliding_window_pattern": [true, true, true, true, true, false],
+  });
+  const full = parseKvGeometry(GEMMA_INFO);
+  assert.ok(short && full);
+  assert.equal(short.slidingWindowPattern?.length, 48);
+  assert.equal(kvBytesForContext(short, 262144), kvBytesForContext(full, 262144));
+});
+
+test("expandWindowPattern tiles, truncates, and survives an empty pattern", () => {
+  assert.deepEqual(expandWindowPattern([true, false], 5), [true, false, true, false, true]);
+  assert.deepEqual(expandWindowPattern([true, false, true], 2), [true, false]);
+  assert.deepEqual(expandWindowPattern([], 3), [false, false, false]);
+});
+
+test("an ESTIMATED footprint carries a floor as well as a ceiling", () => {
+  // The estimated tier has no geometry, so its total is a blanket allowance chosen to be a
+  // ceiling. Refusing on a ceiling alone is refusing on a number we do not have; the floor is
+  // what lets the admission layer say "probably" instead of "no".
+  const fp = modelFootprint({ weightsBytes: 4 * GIB, contextTokens: 262144, geometry: null });
+  assert.equal(fp.source, "estimated");
+  assert.ok(fp.lowerBoundBytes !== undefined, "an estimate must admit its own width");
+  assert.ok(fp.lowerBoundBytes < fp.totalBytes);
+  assert.ok(fp.lowerBoundBytes > 4 * GIB, "but the weights are known, so the floor is above them");
+});
+
+test("a COMPUTED footprint carries no floor — it does not need one", () => {
+  const geo = parseKvGeometry(QWEN_INFO);
+  assert.ok(geo);
+  const fp = modelFootprint({ weightsBytes: 4 * GIB, contextTokens: 262144, geometry: geo });
+  assert.equal(fp.source, "computed");
+  assert.equal(fp.lowerBoundBytes, undefined, "verified arithmetic is not a range");
 });

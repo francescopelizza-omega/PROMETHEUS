@@ -36,9 +36,9 @@ import {
 
 import { ServerSupervisor, ai, cliProfiles, type settings as coreSettings } from "@prometheus/core";
 import {
+  type EvictionEvent,
   createEngineClient,
   createModelHubClient,
-  type EvictionEvent,
   gateFull as engineGateFull,
   safeChildEnv,
   safeFetch,
@@ -115,15 +115,14 @@ import { type PtyBackend, PtyHost, nodePtyBackend } from "./ide/pty-host.js";
 import { RunHost } from "./ide/run-host.js";
 import type { TestRunSpawn } from "./ide/test-run-host.js";
 import { registerIpcHandlers } from "./ipc.js";
+import { registerLmstudioIpc } from "./lmstudio-ipc.js";
 import { registerMcpIpcHandlers } from "./mcp-ipc.js";
 import { migrateMcpStore, sharedMcpStorePath } from "./mcp-store-path.js";
-import { migrateGlobalSettings, sharedGlobalSettingsPath } from "./settings-path.js";
 import { registerMetadataIpcHandlers } from "./metadata-ipc.js";
 import { registerModelHealthIpcHandlers } from "./model-health-ipc.js";
-import { registerOllamaIpc } from "./ollama-ipc.js";
-import { registerLmstudioIpc } from "./lmstudio-ipc.js";
 import { migrateModelHealthStore, sharedModelHealthStorePath } from "./model-health-store-path.js";
 import { registerModelIpcHandlers } from "./model-ipc.js";
+import { registerOllamaIpc } from "./ollama-ipc.js";
 import { registerPathCompletionIpcHandlers } from "./path-completion-ipc.js";
 import { registerPersonaIpcHandlers } from "./persona-ipc.js";
 import { registerRepoIpcHandlers } from "./repo-ipc.js";
@@ -133,11 +132,13 @@ import { migrateScheduleStore, sharedScheduleStorePath } from "./schedule-store-
 import { registerSecurityIpcHandlers } from "./security-ipc.js";
 import { ServeSupervisor } from "./serve-supervisor.js";
 import { registerSettingsIpcHandlers } from "./settings-ipc.js";
+import { migrateGlobalSettings, sharedGlobalSettingsPath } from "./settings-path.js";
 import { registerSettingsSyncIpcHandlers } from "./settings-sync-ipc.js";
 import { SidecarSupervisor } from "./sidecar-supervisor.js";
 import { registerSpectacularIpcHandlers } from "./spectacular-ipc.js";
 import { registerTelemetryIpcHandlers } from "./telemetry-ipc.js";
 import { registerUpdater } from "./updater.js";
+import { registerModelCatalogIpcHandlers, registerUpdatesIpcHandlers } from "./updates-ipc.js";
 import { type WorkerHandle, WorkerHost } from "./worker-host.js";
 import { makeWorkerTaskSeam } from "./worker-task-seam.js";
 
@@ -357,6 +358,8 @@ let disposeSettingsIpc: (() => void) | null = null;
 let disposeAuthLevelIpc: (() => void) | null = null;
 /** `effort:*` — the ONE saved thinking-effort tier, likewise shared with the CLI. */
 let disposeEffortIpc: (() => void) | null = null;
+let disposeUpdatesIpc: (() => void) | null = null;
+let disposeModelCatalogIpc: (() => void) | null = null;
 /** Removes the registered `pathCompletion:*` ipcMain handlers (the "@"-path feature). */
 let disposePathCompletionIpc: (() => void) | null = null;
 /** Removes the registered `modelHealth:*` ipcMain handlers. */
@@ -839,7 +842,11 @@ async function runHeadlessSmoke(): Promise<void> {
   // The Package & Environment Manager surface (file 04 §1,§3) — its own handler set.
   disposeEnvIpc = registerEnvIpcHandlers();
   // The Model Hub surface (file 05 §1,§7,§8) — discover/fit/download/serve(C8).
-  disposeModelIpc = registerModelIpcHandlers({ serveSupervisor, broadcast: broadcastModel, notifyEviction });
+  disposeModelIpc = registerModelIpcHandlers({
+    serveSupervisor,
+    broadcast: broadcastModel,
+    notifyEviction,
+  });
   // The Catalog manager surface (file 06 §4) — plugins/skills/apps/worldsim/models.
   disposeCatalogIpc = registerCatalogIpcHandlers();
   // The GitHub Repo Manager surface (file 06 §3, FEATURE #5a) — staged + gated clones.
@@ -941,6 +948,15 @@ async function runHeadlessSmoke(): Promise<void> {
   // …and the thinking-effort tier, from the same shared config root.
   disposeEffortIpc?.();
   disposeEffortIpc = registerEffortIpcHandlers();
+  // The third-party update report — vendor CLIs, package managers, local models, Prometheus
+  // itself, and the install conflicts between them. Studio previously had no surface for any of
+  // it: `main/updater.ts` updates Electron and nothing else.
+  disposeUpdatesIpc?.();
+  disposeUpdatesIpc = registerUpdatesIpcHandlers({ promVersion: app.getVersion() });
+  // …and the model catalogue behind it: browse, with every row's fit judged against the same
+  // memory probe the admission gate uses.
+  disposeModelCatalogIpc?.();
+  disposeModelCatalogIpc = registerModelCatalogIpcHandlers();
   // Keyed/layered settings tree (file 13 §2.1) — the global layer is the SHARED
   // `$PROMETHEUS_HOME/config/settings.json`, the same file the CLI reads, so a hook or a
   // gate posture set in Studio is the one a terminal session opens with (and the reverse).
@@ -1014,6 +1030,10 @@ async function runHeadlessSmoke(): Promise<void> {
     disposeAuthLevelIpc = null;
     disposeEffortIpc?.();
     disposeEffortIpc = null;
+    disposeUpdatesIpc?.();
+    disposeUpdatesIpc = null;
+    disposeModelCatalogIpc?.();
+    disposeModelCatalogIpc = null;
     disposePathCompletionIpc?.();
     disposePathCompletionIpc = null;
     disposeModelHealthIpc?.();
@@ -1182,7 +1202,11 @@ async function bootstrap(): Promise<void> {
   disposeEnvIpc = registerEnvIpcHandlers();
   // The Model Hub surface (file 05 §1,§7,§8) — registered alongside the main ipc
   // so the Models tab finds a live handler from boot (discover/fit/download/serve).
-  disposeModelIpc = registerModelIpcHandlers({ serveSupervisor, broadcast: broadcastModel, notifyEviction });
+  disposeModelIpc = registerModelIpcHandlers({
+    serveSupervisor,
+    broadcast: broadcastModel,
+    notifyEviction,
+  });
   // The Catalog manager surface (file 06 §4) — registered alongside the main ipc
   // so the Catalog tab finds a live handler from boot (plugins/skills/apps/…).
   disposeCatalogIpc = registerCatalogIpcHandlers();
@@ -1300,6 +1324,15 @@ async function bootstrap(): Promise<void> {
   // …and the thinking-effort tier, from the same shared config root.
   disposeEffortIpc?.();
   disposeEffortIpc = registerEffortIpcHandlers();
+  // The third-party update report — vendor CLIs, package managers, local models, Prometheus
+  // itself, and the install conflicts between them. Studio previously had no surface for any of
+  // it: `main/updater.ts` updates Electron and nothing else.
+  disposeUpdatesIpc?.();
+  disposeUpdatesIpc = registerUpdatesIpcHandlers({ promVersion: app.getVersion() });
+  // …and the model catalogue behind it: browse, with every row's fit judged against the same
+  // memory probe the admission gate uses.
+  disposeModelCatalogIpc?.();
+  disposeModelCatalogIpc = registerModelCatalogIpcHandlers();
   // Keyed/layered settings tree (file 13 §2.1) — the global layer is the SHARED
   // `$PROMETHEUS_HOME/config/settings.json`, the same file the CLI reads, so a hook or a
   // gate posture set in Studio is the one a terminal session opens with (and the reverse).
@@ -1542,6 +1575,10 @@ app.on("before-quit", (event) => {
     disposeAuthLevelIpc = null;
     disposeEffortIpc?.();
     disposeEffortIpc = null;
+    disposeUpdatesIpc?.();
+    disposeUpdatesIpc = null;
+    disposeModelCatalogIpc?.();
+    disposeModelCatalogIpc = null;
     disposePathCompletionIpc?.();
     disposePathCompletionIpc = null;
     disposeModelHealthIpc?.();

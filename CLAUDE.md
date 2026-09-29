@@ -71,6 +71,16 @@ Decision rule, no exceptions:
   user and stop. (Only if `sysctl` cannot be read: fall back to free + speculative < 256 MB.)
 - **`llama-server` running, or `ollama ps` lists a model** → do not run it. Tell the user
   what is loaded and ask. Never unload it yourself; it may be in deliberate use.
+  **Since 2026-09-25 `scripts/run-tests.mjs` enforces this itself.** It used to enforce only the
+  memory half of this rule, so this half depended on whoever happened to be reading — and on
+  2026-09-25 a four-package sweep ran twice while qwen3.6 (26 GB) was resident. It now refuses
+  with exit 2 and names what is holding memory. Override, deliberately separate from the
+  full-suite switch so you do not have to give up the memory floor to get it:
+  `PROMETHEUS_ALLOW_MODEL_RESIDENT=1`.
+- **Run this pre-flight as its OWN command.** Putting it in the same shell invocation as the
+  build or test is how it stops being a check: the output arrives with the damage already done
+  and there is no point left at which anything can stop. That is exactly how the second
+  2026-09-25 violation happened, an hour after the first one was acknowledged.
 - **All clear** → proceed, one command at a time.
 
 Until 2026-09-22 the first rule was "free + speculative < 4 GB". On this Mac that is the
@@ -92,7 +102,8 @@ the word.
 | `PROMETHEUS_ALLOW_FULL_SUITE=1 …` | never set this yourself — it exists for the user |
 
 These are also blocked in `.claude/settings.local.json` under `permissions.deny`, and
-`scripts/run-tests.mjs` refuses unscoped runs and low-memory runs on its own. **Do not
+`scripts/run-tests.mjs` refuses unscoped runs, low-memory runs, and runs started while a model
+is resident, on its own. **Do not
 route around either guard** — not with `env`, not by inlining the node command, not by
 calling the runner through another script. If a guard fires, that is the correct outcome:
 report it and stop.

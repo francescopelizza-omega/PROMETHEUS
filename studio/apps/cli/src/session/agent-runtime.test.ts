@@ -16,7 +16,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { agent, type mcpServer } from "@prometheus/core";
+import { agent, ai, createEndpointProbe, type mcpServer } from "@prometheus/core";
 import { type EngineClient, recordEvictionEvent } from "@prometheus/engine-bridge";
 
 // the agent loop types live under the `agent` namespace; ToolDef under `mcpServer`.
@@ -4559,4 +4559,85 @@ test("propose_edit REFUSES a binary file instead of rewriting every byte of it",
   });
   assert.equal(ok.ok, true, `an ordinary edit was refused: ${ok.summary}`);
   assert.equal(readFileSync(txt, "utf8"), "hello JPG world\n");
+});
+
+/* ────────────────────────────────────────────────────────────────────────────
+ * 2026-09-25: an UNMEASURED context window must not refuse a turn.
+ *
+ * Found by the cap audit as one of four "blocks"-severity findings, all the same shape:
+ * failure to MEASURE resolved to the 8192 floor, and the floor then armed a local refusal.
+ * ──────────────────────────────────────────────────────────────────────────── */
+
+test("preflight refuses only on a MEASURED window — the 8192 floor is a hint, not grounds", () => {
+  /*
+   * The arithmetic that made this urgent: this repo's own prompt (system text plus ~46 tool
+   * schemas) measures ~7.2k tokens. Against an 8192 window, minus the reply reserve, the user
+   * gets roughly 800 tokens before every turn is refused with "the model's context window is
+   * 8192" — a number nobody measured, on a model that may serve 262,144.
+   *
+   * `preflightContext` already has the correct rule and states it: an unknown window disables
+   * the check, because "no information" must not mean "refuse". This asserts the gate actually
+   * reaches that branch, which is decided by the `contextWindowMeasured` flag.
+   */
+  const est = 9000;
+  const reserve = ai.replyReserveFor(8192);
+
+  // MEASURED 8192 — a genuinely small model. Refusing is correct and must still happen.
+  const measured = ai.preflightContext({
+    estimatedPromptTokens: est,
+    contextWindow: 8192,
+    maxTokens: reserve,
+  });
+  assert.equal(measured.ok, false, "a real 8192 window must still refuse an oversized prompt");
+
+  // UNMEASURED — the same number, but nothing measured it. The turn must proceed and let the
+  // server be the authority, exactly as it is for a window we never asked about.
+  const unmeasured = ai.preflightContext({
+    estimatedPromptTokens: est,
+    contextWindow: 0,
+    maxTokens: reserve,
+  });
+  assert.equal(unmeasured.ok, true, "an unmeasured window must not block the model");
+  assert.equal(unmeasured.overflowTokens, 0);
+});
+
+test("a successful probe marks the window measured; a failed one leaves it unmarked", async () => {
+  // `enrich` is only reached on success, so the flag cannot be set by a failure. That is the
+  // whole invariant: the flag means "something asked the runner and got an answer".
+  /** An `/api/show` answer, in the shape the probe actually parses. */
+  const showing = (ctx: number) =>
+    (async () =>
+      ({
+        ok: true,
+        status: 200,
+        json: async () => ({ model_info: { "qwen35moe.context_length": ctx } }),
+      }) as never) as never;
+  const probe = createEndpointProbe({ fetch: showing(262144) });
+  const local = {
+    id: "local:qwen",
+    model: "qwen3.6:latest",
+    baseUrl: "http://127.0.0.1:11434/v1",
+    locality: "local" as const,
+    contextWindow: 8192,
+    supportsTools: true,
+  };
+  const ok = await probe.attach(local);
+  assert.equal(ok.measured, true);
+  assert.equal(ok.endpoint.contextWindow, 262144);
+  assert.equal(ok.endpoint.contextWindowMeasured, true);
+
+  // Nothing answers — the probe is fail-soft and returns the floor with `source: "default"`.
+  const failing = createEndpointProbe({
+    fetch: (async () => {
+      throw new Error("runner is down");
+    }) as never,
+  });
+  const bad = await failing.attach(local);
+  assert.equal(bad.failed, true);
+  assert.equal(bad.endpoint.contextWindow, 8192, "the floor is left in place");
+  assert.equal(
+    bad.endpoint.contextWindowMeasured,
+    undefined,
+    "and it is NOT claimed as measured — that flag is what stops it refusing a turn",
+  );
 });

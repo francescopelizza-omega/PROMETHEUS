@@ -109,3 +109,80 @@ for (const scheme of BUILTIN_SCHEMES) {
     }
   });
 }
+
+/* ── the autonomy token, across all 41 schemes ──────────────────────────────────────────────
+ *
+ * `autonomy` is the top of the A0–A7 ladder and it is DERIVED, not authored: "the accent,
+ * pushed further from the ground". That is a construction guarantee with exactly the failure
+ * mode this file was written for — one refactor of `derivePalette` and it silently collapses
+ * onto `accent`, or lands the wrong side of the ground on the light schemes, with nothing to
+ * notice. Both are asserted here for every built-in at once.
+ */
+
+/** WCAG relative luminance — "further from the ground" has to be measured, not assumed. */
+function relLuminance(hex: string): number {
+  const n = Number.parseInt(hex.slice(1), 16);
+  const ch = [(n >> 16) & 255, (n >> 8) & 255, n & 255].map((v) => {
+    const s = v / 255;
+    return s <= 0.03928 ? s / 12.92 : ((s + 0.055) / 1.055) ** 2.4;
+  });
+  return 0.2126 * (ch[0] ?? 0) + 0.7152 * (ch[1] ?? 0) + 0.0722 * (ch[2] ?? 0);
+}
+
+test("every scheme's `autonomy` is legible on every ground it is painted on", () => {
+  for (const scheme of BUILTIN_SCHEMES) {
+    const t: SemanticColors = resolveScheme(scheme);
+    for (const g of GROUNDS) {
+      const r = contrastRatio(t.autonomy, t[g]);
+      assert.ok(
+        r >= AA_TEXT,
+        `${scheme.id}: autonomy on ${g} is ${r.toFixed(2)}:1 (need ${AA_TEXT})`,
+      );
+    }
+  }
+});
+
+test("every scheme's `autonomy` is further from the ground than its `accent`", () => {
+  // The DIRECTION flips between light and dark, which is the whole reason this is derived: on a
+  // dark ground "further out" means lighter, on a light ground it means deeper. Asserting
+  // "lighter" would pass the dark half and quietly invert the meaning on the light half.
+  for (const scheme of BUILTIN_SCHEMES) {
+    const t: SemanticColors = resolveScheme(scheme);
+    const ground = relLuminance(t["bg-app"]);
+    const gap = (c: string): number => Math.abs(relLuminance(c) - ground);
+    assert.ok(
+      gap(t.autonomy) > gap(t.accent),
+      `${scheme.id}: autonomy (${t.autonomy}) is not further from ${t["bg-app"]} than accent (${t.accent})`,
+    );
+  }
+});
+
+test("`autonomy` is tellable from `accent` — strongly in the themes we ship", () => {
+  // Two floors, because the headroom is not ours to choose in a community scheme.
+  //
+  // The three base themes are authored here and clear 1.25 comfortably (prometheus-dark 1.48,
+  // prometheus-light 2.45, high-contrast 1.34). The derived schemes start from an accent their
+  // own author picked, and three of them pick one so close to white that there is physically
+  // nowhere further to push: synthwave-84 (#36f9f6), pelly (#3cf5ee) and shades-of-purple
+  // (#9effff) land at 1.05-1.09. That is a real limit of those palettes, not a tuning bug, and
+  // it is why no surface uses this colour as the only signal: the level is always written out
+  // (`A7 run all`, `auth:7·runall`). The floor below is set from the measurement so a future
+  // change that makes ANY scheme worse than today's worst fails here.
+  const SHIPPED = new Set(["prometheus-dark", "prometheus-light", "high-contrast"]);
+  for (const scheme of BUILTIN_SCHEMES) {
+    const t: SemanticColors = resolveScheme(scheme);
+    const r = contrastRatio(t.autonomy, t.accent);
+    const floor = SHIPPED.has(scheme.id) ? 1.25 : 1.05;
+    assert.ok(r >= floor, `${scheme.id}: autonomy vs accent is ${r.toFixed(2)}:1 (need ${floor})`);
+  }
+});
+
+test("`autonomy` never collapses onto `accent`, `danger` or the ground", () => {
+  // Same family as the accent by design, so the guard is that it stays a DIFFERENT colour — and
+  // specifically that it never drifts back to the danger red the ladder used to end in.
+  for (const scheme of BUILTIN_SCHEMES) {
+    const t: SemanticColors = resolveScheme(scheme);
+    assert.notEqual(t.autonomy, t.accent, `${scheme.id}: autonomy === accent`);
+    assert.notEqual(t.autonomy, t.danger, `${scheme.id}: autonomy fell back to danger`);
+  }
+});

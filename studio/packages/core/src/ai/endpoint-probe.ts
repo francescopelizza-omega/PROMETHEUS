@@ -115,6 +115,11 @@ function enrich(
   return {
     ...rest,
     contextWindow: result.contextWindow,
+    // `enrich` is only ever reached on a SUCCESSFUL probe (`attach` returns the input endpoint
+    // untouched when `result.source === "default"`), so this is the one place that can honestly
+    // claim the window was measured. Callers use it to decide whether the number is solid
+    // enough to REFUSE a turn over — see `AiEndpoint.contextWindowMeasured`.
+    contextWindowMeasured: true,
     ...(capabilities ? { probedCapabilities: capabilities } : {}),
   };
 }

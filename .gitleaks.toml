@@ -45,3 +45,44 @@ regexes = [
 description = "tmux send-keys verb misread as a generic api key"
 regexTarget = "match"
 regexes = ['''send-keys,\s*''']
+
+# ── the redactor's own fixtures (added 2026-09-26) ───────────────────────────
+# studio/packages/core/src/agent/system/redact.test.ts is the test FOR the scrubber, so it
+# must contain credential SHAPES or it is testing nothing. Its own header states the rule it
+# follows: "a real credential SHAPE (with the secret bytes replaced by filler of the same
+# length and charset)". Each value below was read and confirmed to be filler.
+#
+# BY VALUE, per this file's standing rule — a real credential pasted into redact.test.ts is
+# still caught, because none of these patterns would match it.
+
+# The PEM body is all-`A` base64 padding after a fixed OpenSSH preamble. A real key's body is
+# high-entropy and would not match either line.
+[[allowlists]]
+description = "all-padding OpenSSH PEM fixture in the redact test"
+regexTarget = "match"
+regexes = [
+  '''b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtz''',
+  '''c2gtZWQyNTUxOQAAACA[A]{20,}==''',
+]
+
+# Header `{"alg":"HS256","typ":"JWT"}`, payload `{"sub":"1234567890"}`, and a signature that is
+# 20 literal `A`s. Anchored on that signature: a real JWT cannot have it.
+[[allowlists]]
+description = "JWT fixture with an all-A signature in the redact test"
+regexTarget = "match"
+regexes = ['''eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9\.eyJzdWIiOiIxMjM0NTY3ODkwIn0\.A{16,}''']
+
+# Sequential hex, sixteen characters. The same class as the `ghp_0123…` fixture above.
+[[allowlists]]
+description = "sequential-hex apiKey fixture in the redact test"
+regexTarget = "match"
+regexes = ['''abcdef0123456789''']
+
+# ── false positive: a localStorage KEY NAME, not a key ───────────────────────
+# studio/apps/desktop/src/renderer/ide/ai/effort-store.ts:27
+#   export const EFFORT_KEY = "prometheus.ai.effort.v1";
+# generic-api-key fires on the `KEY = "…"` shape. The value is a storage namespace.
+[[allowlists]]
+description = "EFFORT_KEY storage namespace misread as a generic api key"
+regexTarget = "match"
+regexes = ['''prometheus\.ai\.effort\.v\d+''']

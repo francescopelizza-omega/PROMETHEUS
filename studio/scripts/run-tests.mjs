@@ -138,6 +138,71 @@ function sysctlInt(name) {
   return Number.isFinite(n) ? n : null;
 }
 
+/**
+ * ── THE MODEL-RESIDENCY GUARD (added 2026-09-25) ─────────────────────────────────
+ *
+ * CLAUDE.md §2.1 has always had TWO decision rules, and this script only enforced one.
+ *
+ *   1. kernel pressure >= 2, or kernel-free <= 25%   -> refuse      [enforced above]
+ *   2. llama-server running, or `ollama ps` lists a model -> STOP AND ASK   [prose only]
+ *
+ * Rule 2 lived exclusively in prose, which means it was enforced by whoever happened to be
+ * reading — and on 2026-09-25 an assistant ran a four-package sweep while qwen3.6 (26 GB) was
+ * resident, twice, the second time by putting the pre-flight check and the test command in the
+ * SAME shell invocation so there was no point at which it could stop. A check that cannot
+ * interrupt the thing it is checking is decoration.
+ *
+ * The hazard is specific and measured: ~20 suites target a live ollama on :11434 (§2.3), and
+ * `llama-server` has been observed going 8.7 GB -> 17 GB in two seconds when one lands. Add the
+ * fork storm and a model already holding 26 GB, and this is the exact shape of the 2026-09-05
+ * episode that drove free memory to 58.9 MB.
+ *
+ * Refusing rather than warning is deliberate: the memory guard above cannot see this coming,
+ * because a resident model does NOT raise kernel pressure until the second allocation starts.
+ * A 26 GB model and a healthy-looking 77% free is precisely the state that reads as safe and
+ * is not.
+ *
+ * Its own override, NOT `PROMETHEUS_ALLOW_FULL_SUITE`: that switch disables every check in this
+ * block including the memory floor, and a user who deliberately wants a scoped run beside a
+ * loaded model should not have to give up the rest of the guard to get it.
+ */
+const ALLOW_RESIDENT = process.env.PROMETHEUS_ALLOW_MODEL_RESIDENT === "1";
+
+/** What is holding a model right now, or null. Never throws; an unreadable probe means "nothing". */
+function modelResidency() {
+  if (process.platform !== "darwin" && process.platform !== "linux") return null;
+  const held = [];
+
+  // `pgrep -x` matches the executable NAME exactly. `-f` would match any process whose ARGUMENTS
+  // merely contain the string — including this guard's own command line, and including the editor
+  // that has the word open in a buffer. CLAUDE.md §2.1 calls this out by name.
+  for (const name of ["llama-server", "ollama_llama_server"]) {
+    const r = spawnSync("/usr/bin/pgrep", ["-xl", name], { encoding: "utf8" });
+    if (r.status === 0 && typeof r.stdout === "string" && r.stdout.trim()) {
+      held.push(
+        ...r.stdout
+          .trim()
+          .split("\n")
+          .map((l) => `process ${l.trim()}`),
+      );
+    }
+  }
+
+  // `ollama ps` is the same question CLAUDE.md's own pre-flight asks. A daemon that is up but
+  // idle prints only a header, so the header row is dropped rather than counted.
+  const ps = spawnSync("ollama", ["ps"], { encoding: "utf8" });
+  if (ps.status === 0 && typeof ps.stdout === "string") {
+    const rows = ps.stdout
+      .split("\n")
+      .slice(1)
+      .map((l) => l.trim())
+      .filter(Boolean);
+    for (const row of rows) held.push(`ollama: ${row.replace(/\s{2,}/g, "  ")}`);
+  }
+
+  return held.length > 0 ? held : null;
+}
+
 /** Why memory is too tight to start a run, or null. All three figures go in the message. */
 function memoryRefusal() {
   if (process.platform !== "darwin") return null;
@@ -201,10 +266,7 @@ function testConcurrency() {
 const selectsWholeTree =
   filters.length === 0 ||
   filters.some(
-    (f) =>
-      f === ROOT ||
-      ROOT.startsWith(`${f}/`) ||
-      ROOTS.some((r) => f === join(ROOT, r)),
+    (f) => f === ROOT || ROOT.startsWith(`${f}/`) || ROOTS.some((r) => f === join(ROOT, r)),
   );
 
 // A second, unconditional ceiling. `MAX_UNSCOPED` cannot be lowered to catch a novel bypass
@@ -238,6 +300,30 @@ if (!OVERRIDE) {
     console.error(
       `run-tests: REFUSING — ${memWhy}.\n` +
         `  Check what is holding it:  ollama ps ; pgrep -xl llama-server ; memory_pressure -Q`,
+    );
+    process.exit(2);
+  }
+}
+
+// Checked even under PROMETHEUS_ALLOW_FULL_SUITE, because that switch is about the SIZE of the
+// run and this hazard is about what else is already in memory. Its own override turns it off.
+if (!ALLOW_RESIDENT) {
+  const held = modelResidency();
+  if (held) {
+    console.error(
+      [
+        "run-tests: REFUSING — a model is resident right now (CLAUDE.md §2.1).",
+        ...held.map((h) => `    ${h}`),
+        "  ~20 suites target a live ollama on :11434, and llama-server has been measured going",
+        "  8.7 GB -> 17 GB in two seconds when one of them lands. A model already holding memory",
+        "  plus this runner's fork-per-file is the combination that has taken the display down.",
+        "  Note that memory can look healthy here: a resident model does not raise kernel",
+        "  pressure until the SECOND allocation starts.",
+        "",
+        "  Wait for it to unload (ollama's keep-alive is 60s — see handoffs/ollama-safe-limits.sh),",
+        "  or stop it deliberately, then re-run.",
+        "  Override:   PROMETHEUS_ALLOW_MODEL_RESIDENT=1  (you are choosing to accept this)",
+      ].join("\n"),
     );
     process.exit(2);
   }

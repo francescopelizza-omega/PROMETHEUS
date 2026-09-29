@@ -1042,7 +1042,10 @@ test("readline host: --permission-mode plan SURVIVES the elevation clamp (and ne
   assert.match(both, /permission mode: plan/);
   assert.doesNotMatch(both, /permission mode: yolo/, "plan must never come out as run-all");
   // the modes that DO round-trip keep working, so the guard did not break the normal path
-  assert.match(await run({ flags: { "permission-mode": "acceptEdits" } }), /permission mode: acceptEdits/);
+  assert.match(
+    await run({ flags: { "permission-mode": "acceptEdits" } }),
+    /permission mode: acceptEdits/,
+  );
 });
 
 /**
