@@ -278,6 +278,7 @@ test("the sensitive-path list is canonicalised the same way the probed path is",
     writeFileSync(join(realHome, "ok.txt"), "hello", "utf8");
     assert.doesNotThrow(() => assertNotSensitivePath(join(linkHome, "ok.txt")));
   } finally {
+    // biome-ignore lint/performance/noDelete: restoring process.env — the rule's fix is `= undefined`, which Node coerces to the STRING "undefined" and leaves the var set. delete is the only way to make it absent again.
     if (prevHome === undefined) delete process.env.HOME;
     else process.env.HOME = prevHome;
   }

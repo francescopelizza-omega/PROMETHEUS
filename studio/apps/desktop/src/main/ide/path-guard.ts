@@ -443,8 +443,7 @@ export function assertInsideWorkingSet(uri: string): string {
   const abs = canonical(uriToFsPath(uri));
   if (refusedEveryDeclaredRoot) {
     throw new Error(
-      `refusing to write: this workspace was never approved (${abs}). ` +
-        "Open it with File ▸ Open Folder to approve it.",
+      `refusing to write: this workspace was never approved (${abs}). Open it with File ▸ Open Folder to approve it.`,
     );
   }
   if (workingSetRoots.length === 0) return abs;

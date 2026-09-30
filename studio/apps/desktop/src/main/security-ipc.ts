@@ -105,7 +105,9 @@ function errString(e: unknown): string {
  */
 function senderOf(
   evt: unknown,
-): { send(channel: string, payload: ProgressFeedEvent): void; isDestroyed?(): boolean } | undefined {
+):
+  | { send(channel: string, payload: ProgressFeedEvent): void; isDestroyed?(): boolean }
+  | undefined {
   if (!evt || typeof evt !== "object") return undefined;
   const sender = (evt as { sender?: unknown }).sender;
   if (sender && typeof (sender as { send?: unknown }).send === "function") {
@@ -132,7 +134,9 @@ export function registerSecurityIpcHandlers(wiring: SecurityIpcWiring = {}): () 
 
   /** Forward a security progress line to the initiating window (cosmetic, C5). */
   function emitSecurityProgress(
-    sender: { send(channel: string, payload: ProgressFeedEvent): void; isDestroyed?(): boolean } | undefined,
+    sender:
+      | { send(channel: string, payload: ProgressFeedEvent): void; isDestroyed?(): boolean }
+      | undefined,
     runId: string | undefined,
     line: string,
   ): void {

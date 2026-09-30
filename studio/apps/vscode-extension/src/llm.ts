@@ -65,8 +65,7 @@ async function resolveApiKeyRef(ref: string): Promise<string> {
   if (!parsed) throw new Error(`unrecognised api key reference "${ref}"`);
   if (parsed.kind !== "env") {
     throw new Error(
-      `\`prometheus.apiKeyRef\` supports \`env:NAME\` in VS Code; got "${ref}". ` +
-        "Export the key as an environment variable and reference it as env:NAME.",
+      `\`prometheus.apiKeyRef\` supports \`env:NAME\` in VS Code; got "${ref}". Export the key as an environment variable and reference it as env:NAME.`,
     );
   }
   const val = process.env[parsed.envVar];

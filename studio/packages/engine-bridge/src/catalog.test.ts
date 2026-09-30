@@ -143,8 +143,7 @@ test("appsList()/worldsimList()/modelsList()/inventory() LIVE return DISPLAY lin
     assert.ok(res.engine, "the engine path that ran is reported");
     assert.ok(
       res.lines.length > 1,
-      `${res.command}: a catalog read must produce many display rows, got ${res.lines.length} ` +
-        "— one row means the JSON envelope was rendered as a single line",
+      `${res.command}: a catalog read must produce many display rows, got ${res.lines.length} — one row means the JSON envelope was rendered as a single line`,
     );
     for (const line of res.lines) {
       assert.ok(

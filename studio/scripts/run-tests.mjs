@@ -278,28 +278,20 @@ const HARD_MAX_FILES = 260;
 if (!OVERRIDE) {
   if (selectsWholeTree && files.length > MAX_UNSCOPED) {
     console.error(
-      `run-tests: REFUSING an unscoped run of ${files.length} suites.\n` +
-        `  node:test forks one process per file; this has hard-locked this machine.\n` +
-        `  (Arguments that select the whole tree — ".", "", "..", "apps packages" — are\n` +
-        `   unscoped too, however many of them you pass.)\n` +
-        `  Scope it:   node scripts/run-tests.mjs packages/core\n` +
-        `  Override:   PROMETHEUS_ALLOW_FULL_SUITE=1  (only with ollama/LM Studio stopped)`,
+      `run-tests: REFUSING an unscoped run of ${files.length} suites.\n  node:test forks one process per file; this has hard-locked this machine.\n  (Arguments that select the whole tree — ".", "", "..", "apps packages" — are\n   unscoped too, however many of them you pass.)\n  Scope it:   node scripts/run-tests.mjs packages/core\n  Override:   PROMETHEUS_ALLOW_FULL_SUITE=1  (only with ollama/LM Studio stopped)`,
     );
     process.exit(2);
   }
   if (files.length > HARD_MAX_FILES) {
     console.error(
-      `run-tests: REFUSING ${files.length} suites in one run (ceiling ${HARD_MAX_FILES}).\n` +
-        `  That is broader than any single package; narrow the path.\n` +
-        `  Override:   PROMETHEUS_ALLOW_FULL_SUITE=1  (only with ollama/LM Studio stopped)`,
+      `run-tests: REFUSING ${files.length} suites in one run (ceiling ${HARD_MAX_FILES}).\n  That is broader than any single package; narrow the path.\n  Override:   PROMETHEUS_ALLOW_FULL_SUITE=1  (only with ollama/LM Studio stopped)`,
     );
     process.exit(2);
   }
   const memWhy = memoryRefusal();
   if (memWhy) {
     console.error(
-      `run-tests: REFUSING — ${memWhy}.\n` +
-        `  Check what is holding it:  ollama ps ; pgrep -xl llama-server ; memory_pressure -Q`,
+      `run-tests: REFUSING — ${memWhy}.\n  Check what is holding it:  ollama ps ; pgrep -xl llama-server ; memory_pressure -Q`,
     );
     process.exit(2);
   }

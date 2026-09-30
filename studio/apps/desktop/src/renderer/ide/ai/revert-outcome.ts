@@ -63,10 +63,7 @@ export function revertOutcome(results: readonly RevertStepResult[]): RevertOutco
   const why = failures.find((f) => f.error)?.error;
   return {
     truncate: false,
-    notice:
-      `⚠ revert incomplete — ${failed.length} file${failed.length === 1 ? "" : "s"} could not be ` +
-      `restored (${named}${more})${why ? `: ${why}` : ""}. ` +
-      "The conversation was left intact so you can still see what this turn changed.",
+    notice: `⚠ revert incomplete — ${failed.length} file${failed.length === 1 ? "" : "s"} could not be restored (${named}${more})${why ? `: ${why}` : ""}. The conversation was left intact so you can still see what this turn changed.`,
     failed,
   };
 }

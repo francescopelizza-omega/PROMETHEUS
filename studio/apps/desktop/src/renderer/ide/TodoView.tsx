@@ -398,7 +398,12 @@ function PatternEditor({
             value={p.regex}
             disabled={!editable}
             onChange={(e) => edit(i, { regex: e.target.value })}
-            style={{ ...fieldStyle, flex: 1, minWidth: 0, fontFamily: "var(--font-mono, monospace)" }}
+            style={{
+              ...fieldStyle,
+              flex: 1,
+              minWidth: 0,
+              fontFamily: "var(--font-mono, monospace)",
+            }}
           />
           <label
             style={{ display: "flex", alignItems: "center", gap: 2, fontSize: "0.64rem" }}

@@ -98,7 +98,10 @@ test("touchActivity then readLastActiveAt round-trips a real timestamp", () => {
   touchActivity(home);
   const after1 = Date.now();
   const at = readLastActiveAt(home);
-  assert.ok(at >= before && at <= after1, "the recorded timestamp must fall inside the call window");
+  assert.ok(
+    at >= before && at <= after1,
+    "the recorded timestamp must fall inside the call window",
+  );
 });
 
 test("touchActivity creates the state directory", () => {
@@ -171,7 +174,11 @@ test("parseStopCmd: a JSON value that isn't a non-empty array of strings is reje
   assert.equal(parseStopCmd("[]"), undefined, "an empty array is not a runnable command");
   assert.equal(parseStopCmd('{"bin":"lms"}'), undefined, "an object is not an argv");
   assert.equal(parseStopCmd("[1,2,3]"), undefined, "non-string elements are not a valid argv");
-  assert.equal(parseStopCmd('["lms", 3]'), undefined, "a MIXED array is still rejected, not truncated");
+  assert.equal(
+    parseStopCmd('["lms", 3]'),
+    undefined,
+    "a MIXED array is still rejected, not truncated",
+  );
 });
 
 /* ── stopViaCommand: the graceful, vendor-owned stop path ────────────────────────────────── */
@@ -196,7 +203,11 @@ test("stopRunner: with a stopCmd, uses the graceful command and NEVER signals a 
   listenersQueue = [{ processes: [{ pid: 555, command: "Bionic" }] }];
   await stopRunner("LM Studio", 1234, ["lms", "server", "stop"]);
   assert.deepEqual(execCalls, [{ command: "lms", args: ["server", "stop"] }]);
-  assert.deepEqual(signalCalls, [], "must never SIGTERM/SIGKILL a process that has its own stop command");
+  assert.deepEqual(
+    signalCalls,
+    [],
+    "must never SIGTERM/SIGKILL a process that has its own stop command",
+  );
 });
 
 test("stopRunner: with NO stopCmd, falls back to the signal-based escalation (Ollama's real path)", async () => {

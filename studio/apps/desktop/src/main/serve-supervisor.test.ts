@@ -330,7 +330,11 @@ test("checkCriticalPressure: SUSTAINED critical RAM force-kills a ready recipe a
   await Promise.resolve();
 
   assert.deepEqual(core.stopped, [RECIPE.id]);
-  assert.equal(core.stopGraceMs.at(-1), 0, "eviction force-kills, same as the manual kill() control");
+  assert.equal(
+    core.stopGraceMs.at(-1),
+    0,
+    "eviction force-kills, same as the manual kill() control",
+  );
   assert.equal(recorded.length, 1);
   assert.equal(recorded[0]?.runnerId, RECIPE.id);
   assert.equal(recorded[0]?.ramPct, 97);
@@ -404,7 +408,11 @@ test("checkCriticalPressure: a non-ready recipe (still starting) is left alone e
   timers.tickIntervals();
   await Promise.resolve();
 
-  assert.deepEqual(core.stopped, [], "a starting (not yet ready) recipe is never an eviction target");
+  assert.deepEqual(
+    core.stopped,
+    [],
+    "a starting (not yet ready) recipe is never an eviction target",
+  );
   assert.equal(sup.status(RECIPE.id)?.status, "starting");
 });
 

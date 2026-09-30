@@ -111,14 +111,30 @@ report it and stop.
 ### 2.3 Why the full suite is lethal here
 
 `scripts/run-tests.mjs` sweeps **575 `*.test.ts(x)` files** and node:test forks one
-process per file — observed: ~1,350 processes in two seconds. Separately, 20+ suites are
-wired to a live ollama on `127.0.0.1:11434`
-(`packages/core/src/modelhub/localai.test.ts`,
-`apps/cli/src/session/model-candidates.test.ts`,
-`apps/vscode-extension/src/model-discovery.test.ts`, and others). When one of them lands,
-`llama-server` has been measured going 8.7 GB → 17 GB in two seconds. Fork storm plus
-model load plus ~4.4 GB pinned as unpageable wired memory on the Neural Engine = display
-death.
+process per file — observed: ~1,350 processes in two seconds. Separately, suites that name
+`127.0.0.1:11434` can reach a live ollama. When one of them lands, `llama-server` has been
+measured going 8.7 GB → 17 GB in two seconds. Fork storm plus model load plus ~4.4 GB pinned
+as unpageable wired memory on the Neural Engine = display death.
+
+**Naming a URL is not the same as calling it, and this list used to conflate them** (checked
+file by file, 2026-09-30). `packages/core/src/modelhub/localai.test.ts` and
+`apps/cli/src/session/model-candidates.test.ts` were listed here for years and touch no
+network at all — the address appears only inside a static fixture fed to a pure function.
+`apps/vscode-extension/src/model-discovery.test.ts` does exercise a fetch path and guards it
+the way this repo actually guards them: it replaces `globalThis.fetch` with a canned stub.
+That is the convention — dependency-injected or stubbed `fetch`, never an env flag.
+
+The one that genuinely loaded weights was `apps/cli/src/tui/session-bridge.test.ts`, and it
+was on no list. It named the real base URL and `qwen3.6:latest`, and `adoptEndpoint` ends in
+`warmupLocalModel` → `POST /v1/chat/completions`, which makes ollama load the model before it
+can answer even a one-token ping. 23 GB resident per run, from a test whose only assertion is
+that a constructor does not throw. Because §2.1 and the runner both refuse while a model is
+resident, **it blocked its own next run** — in the directory anyone doing TUI work runs. Fixed
+2026-09-30: unreachable port plus a refusing `fetch` stub.
+
+The lesson generalises: grep for `fetch(`, not for `11434`. A suite is dangerous when it can
+reach the daemon, and `/v1/chat/completions`, `/api/generate` and `/api/embeddings` load
+weights while `/api/show`, `/api/tags` and `/api/ps` do not.
 
 The runner now caps parallelism via `--test-concurrency` (default 4, override with
 `PROMETHEUS_TEST_CONCURRENCY`). That helps; it does not make an unscoped run safe.
@@ -228,6 +244,33 @@ script pins `settings.context_length` in the app's `db.sqlite`. **Moving that sl
 the cap.** The brew `ollama` service is stopped on purpose: it fought the app for the port
 and crash-looped 36,135 times. Check the live values, not the script:
 `ps eww -p $(pgrep -f 'ollama serve') | tr ' ' '\n' | grep OLLAMA_`.
+
+**Do not read "the server on :11434 is Ollama.app's" as a standing fact — it is whatever bound
+the port last.** Measured 2026-09-29/30: `:11434` was held by a bare `/opt/homebrew/bin/ollama
+serve` with PPID 1 and **zero** `OLLAMA_*` variables, for 18 hours. Not the app, and not the
+brew service either — `brew services list` said `none`. Its environment carried
+`NODE_TEST_CONTEXT=child-v8` and a `CLAUDE_CODE_SESSION_ID`, i.e. **a test spawned a daemon and
+it outlived its parent.** `launchctl setenv` only reaches processes launchd starts, so an
+orphan like that inherits none of the caps and nothing notices; the caps were correctly set the
+whole time (`launchctl getenv OLLAMA_MAX_LOADED_MODELS` → 1). `ram-guard` would not have caught
+it either: it watches memory pressure, never whether the running server is capped.
+
+So resolve the ACTUAL listener rather than trusting which mechanism you think owns the port:
+
+```bash
+ps eww -p "$(lsof -nP -iTCP:11434 -sTCP:LISTEN -t)" | tr ' ' '\n' | grep OLLAMA_
+```
+
+Empty output means an uncapped daemon. Kill it and restart through a launchd path
+(`open -g -a Ollama`, or `brew services start ollama` — one or the other, never both), then
+re-run the command and confirm all seven variables are listed.
+
+One trap when you do: `ollama-safe-limits.sh` asks the DAEMON what context the models support,
+so running it while the daemon is down made it fall back to `131072` and write that to its
+cache — silently halving the window (found and fixed 2026-09-30; it now keeps the larger of the
+probe and the last known-good value). `OLLAMA_KEEP_ALIVE` is **5m**, raised from 60s on
+2026-09-30: it does not change peak memory, which `OLLAMA_MAX_LOADED_MODELS=1` already fixes at
+one model — it only decided how often you paid to reload 23 GB.
 
 **`ram-guard.sh`** — a watchdog. Polls every two seconds and kills `llama-server` /
 `ollama runner` (matched by process name, never by a substring of the command line) when

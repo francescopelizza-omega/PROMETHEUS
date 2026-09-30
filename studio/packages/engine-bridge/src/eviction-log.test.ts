@@ -5,14 +5,22 @@ import { dirname, join } from "node:path";
 import test from "node:test";
 
 import type { EvictionEvent } from "./eviction-log.js";
-import { evictionLogPath, findRecentEviction, readEvictionEvents, recordEvictionEvent } from "./eviction-log.js";
+import {
+  evictionLogPath,
+  findRecentEviction,
+  readEvictionEvents,
+  recordEvictionEvent,
+} from "./eviction-log.js";
 
 function tmpHome(): string {
   return mkdtempSync(join(tmpdir(), "prom-home-"));
 }
 
 test("evictionLogPath: lives at <home>/state/eviction-events.json", () => {
-  assert.equal(evictionLogPath("/home/.prometheus"), "/home/.prometheus/state/eviction-events.json");
+  assert.equal(
+    evictionLogPath("/home/.prometheus"),
+    "/home/.prometheus/state/eviction-events.json",
+  );
 });
 
 test("readEvictionEvents: a missing log yields an empty list, never throws", () => {
@@ -52,7 +60,18 @@ test("readEvictionEvents: malformed entries within an otherwise-valid array are 
     mkdirSync(dirname(evictionLogPath(home)), { recursive: true });
     writeFileSync(
       evictionLogPath(home),
-      JSON.stringify([{ garbage: true }, { id: "x", runnerId: "ollama", name: "Ollama", ramPct: 96, ceiling: 95, at: "now", reason: "r" }]),
+      JSON.stringify([
+        { garbage: true },
+        {
+          id: "x",
+          runnerId: "ollama",
+          name: "Ollama",
+          ramPct: 96,
+          ceiling: 95,
+          at: "now",
+          reason: "r",
+        },
+      ]),
     );
     const events = readEvictionEvents(home);
     assert.equal(events.length, 1);
@@ -66,7 +85,14 @@ test("recordEvictionEvent then readEvictionEvents round-trips, with a generated 
   const home = tmpHome();
   try {
     const recorded = recordEvictionEvent(
-      { runnerId: "ollama", name: "Ollama", pid: 4242, ramPct: 96, ceiling: 95, reason: "RAM at 96% ≥ 95%" },
+      {
+        runnerId: "ollama",
+        name: "Ollama",
+        pid: 4242,
+        ramPct: 96,
+        ceiling: 95,
+        reason: "RAM at 96% ≥ 95%",
+      },
       home,
       () => 1_700_000_000_000,
     );
@@ -93,7 +119,10 @@ test("recordEvictionEvent: successive calls append, each with a distinct id", ()
     const events = readEvictionEvents(home);
     assert.equal(events.length, 2);
     assert.notEqual(first.id, second.id);
-    assert.deepEqual(events.map((e) => e.reason), ["first", "second"]);
+    assert.deepEqual(
+      events.map((e) => e.reason),
+      ["first", "second"],
+    );
   } finally {
     rmSync(home, { recursive: true, force: true });
   }
@@ -103,7 +132,10 @@ test("recordEvictionEvent: caps at the most recent events, dropping the oldest f
   const home = tmpHome();
   try {
     for (let i = 0; i < 55; i++) {
-      recordEvictionEvent({ runnerId: "ollama", name: "Ollama", ramPct: 96, ceiling: 95, reason: `evt-${i}` }, home);
+      recordEvictionEvent(
+        { runnerId: "ollama", name: "Ollama", ramPct: 96, ceiling: 95, reason: `evt-${i}` },
+        home,
+      );
     }
     const events = readEvictionEvents(home);
     assert.equal(events.length, 50, "capped at MAX_EVENTS");
@@ -117,7 +149,10 @@ test("recordEvictionEvent: caps at the most recent events, dropping the oldest f
 test("recordEvictionEvent: releases its own write-lock after every call (no leftover contention)", () => {
   const home = tmpHome();
   try {
-    recordEvictionEvent({ runnerId: "ollama", name: "Ollama", ramPct: 96, ceiling: 95, reason: "r" }, home);
+    recordEvictionEvent(
+      { runnerId: "ollama", name: "Ollama", ramPct: 96, ceiling: 95, reason: "r" },
+      home,
+    );
     assert.throws(
       () => readFileSync(`${evictionLogPath(home)}.lock`, "utf8"),
       "a held lock left behind would wedge every future write's contention check",
@@ -149,38 +184,67 @@ test("findRecentEviction: undefined runnerId never matches anything (no accident
 
 test("findRecentEviction: a fresh, matching event is found", () => {
   const event = fakeEvent({ at: new Date(Date.now() - 5_000).toISOString() });
-  assert.deepEqual(findRecentEviction("ollama", () => [event]), event);
+  assert.deepEqual(
+    findRecentEviction("ollama", () => [event]),
+    event,
+  );
 });
 
 test("findRecentEviction: a DIFFERENT runnerId is never matched", () => {
   const event = fakeEvent({ runnerId: "some-recipe-id" });
-  assert.equal(findRecentEviction("ollama", () => [event]), undefined);
+  assert.equal(
+    findRecentEviction("ollama", () => [event]),
+    undefined,
+  );
 });
 
 test("findRecentEviction: an event outside the recency window is treated as stale, not a match", () => {
   const stale = fakeEvent({ at: new Date(Date.now() - 10 * 60_000).toISOString() });
-  assert.equal(findRecentEviction("ollama", () => [stale]), undefined);
+  assert.equal(
+    findRecentEviction("ollama", () => [stale]),
+    undefined,
+  );
 });
 
 test("findRecentEviction: with TWO matching events in the window, returns the MOST RECENT one, not the oldest", () => {
   // events are appended oldest-first (recordEvictionEvent pushes onto the end), so a naive
   // `.find()` over the array would return `older` here — the regression this guards against.
-  const older = fakeEvent({ id: "evt-older", pid: 111, at: new Date(Date.now() - 30_000).toISOString() });
-  const newer = fakeEvent({ id: "evt-newer", pid: 222, at: new Date(Date.now() - 1_000).toISOString() });
-  assert.deepEqual(findRecentEviction("ollama", () => [older, newer]), newer);
+  const older = fakeEvent({
+    id: "evt-older",
+    pid: 111,
+    at: new Date(Date.now() - 30_000).toISOString(),
+  });
+  const newer = fakeEvent({
+    id: "evt-newer",
+    pid: 222,
+    at: new Date(Date.now() - 1_000).toISOString(),
+  });
+  assert.deepEqual(
+    findRecentEviction("ollama", () => [older, newer]),
+    newer,
+  );
 });
 
 test("findRecentEviction: a custom recencyMs is honored", () => {
   const event = fakeEvent({ at: new Date(Date.now() - 5_000).toISOString() });
-  assert.deepEqual(findRecentEviction("ollama", () => [event], 10_000), event);
-  assert.equal(findRecentEviction("ollama", () => [event], 1_000), undefined);
+  assert.deepEqual(
+    findRecentEviction("ollama", () => [event], 10_000),
+    event,
+  );
+  assert.equal(
+    findRecentEviction("ollama", () => [event], 1_000),
+    undefined,
+  );
 });
 
 test("recordEvictionEvent creates the state directory on a completely fresh home", () => {
   const home = tmpHome();
   try {
     assert.doesNotThrow(() =>
-      recordEvictionEvent({ runnerId: "ollama", name: "Ollama", ramPct: 96, ceiling: 95, reason: "r" }, home),
+      recordEvictionEvent(
+        { runnerId: "ollama", name: "Ollama", ramPct: 96, ceiling: 95, reason: "r" },
+        home,
+      ),
     );
     assert.equal(readEvictionEvents(home).length, 1);
   } finally {

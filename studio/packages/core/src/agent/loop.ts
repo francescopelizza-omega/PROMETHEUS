@@ -1019,9 +1019,7 @@ export async function* runAgentTurn(
         // one that stops, because the user cannot tell what the agent thinks it is doing.
         yield {
           kind: "status",
-          text:
-            "the model described work without doing it — asking it to act (nudge " +
-            `${nudges}/${maxNudges})`,
+          text: `the model described work without doing it — asking it to act (nudge ${nudges}/${maxNudges})`,
         };
         continue;
       }

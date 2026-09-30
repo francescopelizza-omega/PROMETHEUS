@@ -105,13 +105,15 @@ function errString(e: unknown): string {
  * type `evt` as unknown). Returns a minimal `{ send }` surface used only to push
  * progress events back to the initiating window; undefined if absent.
  */
-  // `isDestroyed` is part of the surface because a progress feed OUTLIVES its window: an
-  // op started, the user closed that window, and every subsequent line threw
-  // "Object has been destroyed" out of a fire-and-forget emit — surfacing as the op
-  // appearing to die mid-run. Optional so a test double need not implement it.
+// `isDestroyed` is part of the surface because a progress feed OUTLIVES its window: an
+// op started, the user closed that window, and every subsequent line threw
+// "Object has been destroyed" out of a fire-and-forget emit — surfacing as the op
+// appearing to die mid-run. Optional so a test double need not implement it.
 function senderOf(
   evt: unknown,
-): { send(channel: string, payload: ProgressFeedEvent): void; isDestroyed?(): boolean } | undefined {
+):
+  | { send(channel: string, payload: ProgressFeedEvent): void; isDestroyed?(): boolean }
+  | undefined {
   if (!evt || typeof evt !== "object") return undefined;
   const sender = (evt as { sender?: unknown }).sender;
   if (sender && typeof (sender as { send?: unknown }).send === "function") {
@@ -202,7 +204,9 @@ export function registerIpcHandlers(wiring: IpcWiring): () => void {
    * Cosmetic only — NO security verdict crosses (C5).
    */
   function emitProgress(
-    sender: { send(channel: string, payload: ProgressFeedEvent): void; isDestroyed?(): boolean } | undefined,
+    sender:
+      | { send(channel: string, payload: ProgressFeedEvent): void; isDestroyed?(): boolean }
+      | undefined,
     runId: string | undefined,
     line: string,
   ): void {

@@ -358,4 +358,3 @@ test("a DESTRUCTIVE tool asks below the global opt-in, and only stops asking at 
     assert.equal(s2.asked(), 0, `level ${level} is an explicit global opt-in`);
   }
 });
-

@@ -18,7 +18,7 @@
  */
 import { join } from "node:path";
 
-import { acquireLock, type PidLockFs, releaseLock } from "./pid-lock.js";
+import { type PidLockFs, acquireLock, releaseLock } from "./pid-lock.js";
 import { prometheusHome } from "./prom-home.js";
 
 function startLockPath(runnerId: string): string {

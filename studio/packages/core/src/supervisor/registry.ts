@@ -245,6 +245,7 @@ export class ServerSupervisor extends EventEmitter {
       // ReferenceError INSIDE the promise executor, rejecting `stop()` for a server that had
       // simply already died. The one path meant to handle "already dead" was the one that
       // could not.
+      // biome-ignore lint/style/useConst: `const` is impossible here and the comment above says why — `onExit` closes over this at line 249, before the assignment below. Declaring it at the assignment recreates the temporal-dead-zone ReferenceError this code exists to fix.
       let killTimer: ReturnType<typeof setTimeout> | undefined;
       const onExit = () => {
         if (killTimer) clearTimeout(killTimer);

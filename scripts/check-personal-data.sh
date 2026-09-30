@@ -27,7 +27,19 @@ ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)
 cd "$ROOT"
 
 ARTIFACTS=0
-[ "${1:-}" = "--artifacts" ] && ARTIFACTS=1
+HISTORY=0
+# Which commits `--history` walks. Empty means "every ref in this repo" (--all), which is the
+# right default for a standalone run. The pre-push hook passes the exact tips it is about to
+# publish instead — see below for why that distinction is load-bearing.
+HISTORY_REVS=""
+for a in "$@"; do
+  case "$a" in
+    --artifacts) ARTIFACTS=1 ;;
+    --history)   HISTORY=1 ;;
+    --*)         ;;
+    *)           HISTORY_REVS="$HISTORY_REVS $a" ;;
+  esac
+done
 if [ "${1:-}" = "--list-manifests" ]; then
   git grep -lIE "@[A-Za-z0-9.-]+\.(com|org|net|eu|io)" -- '*/package.json' '*.yml' '*.json' 2>/dev/null || true
   exit 0
@@ -83,6 +95,65 @@ hits=$(git grep -nIE '[A-Za-z0-9._%+-]+@(gmail|outlook|hotmail|yahoo|icloud|prot
   -- . ':(exclude)*/package.json' ':(exclude)*/package-lock.json' ':(exclude)studio/pnpm-lock.yaml' \
   ':(exclude)*electron-builder.yml' ':(exclude)*.claude-plugin/*' 2>/dev/null || true)
 report "no personal email outside package manifests" "$hits"
+
+# ── 3b. THE SAME THREE CHECKS, OVER EVERY REACHABLE COMMIT ───────────────────
+# Everything above uses `git grep` with no tree argument, which searches the
+# WORKING TREE. That is the right default — it is what you can still fix — but on
+# its own it is a scanner that cannot see the thing it exists to prevent.
+#
+# Deleting a leaking file does not unpublish it. On 2026-09-30 this repo's tree
+# was clean by every check above while ten commits still carried
+# `/Users/<name>/ALPHA/PROMETHEUS` across eight files, and thirty blobs carried a
+# personal gmail address — including inside `studio/apps/cli/dist/bin.js`, a
+# BUNDLED ARTIFACT. The header of this very script describes that leak in the past
+# tense ("that is exactly what happened here — six source files, both artifacts"),
+# because the fix landed in the tree and nobody looked behind it. `gitleaks` does
+# read history, but it matches credential SHAPES; a home path is not one, so the
+# two scanners together still had a blind spot exactly the size of this problem.
+#
+# Off by default because it costs a grep per commit, and a local commit is
+# revocable. The pre-push hook turns it ON, because a push is not.
+#
+# SCAN WHAT IS BEING PUBLISHED, not every object that happens to be lying around.
+#
+# `--all` includes remote-tracking refs, and that is wrong at exactly the moment it matters
+# most. Rewriting history to REMOVE a leak produces clean local commits — and then `git fetch`
+# brings the old, dirty ones back under `refs/remotes/origin/main`, where `--all` finds them
+# and refuses the very push that would delete them from the server. Measured 2026-09-30: the
+# purge was blocked by the objects it was purging.
+#
+# So the hook passes the tips it is about to send and only those are walked. A standalone run
+# with no revs still gets `--all`, which is the conservative answer when nobody said otherwise.
+if [ "$HISTORY" -eq 1 ]; then
+  # shellcheck disable=SC2086
+  commits=$(git rev-list ${HISTORY_REVS:---all} 2>/dev/null || true)
+  ncommits=$(printf '%s\n' "$commits" | grep -c . || true)
+  if [ -z "$commits" ]; then
+    report "history: nothing to scan (no commits)" ""
+  else
+    # One `git grep` over many trees, not one per commit: git walks them together
+    # and it is the difference between seconds and minutes on a real history.
+    # shellcheck disable=SC2086
+    hits=$(
+      {
+        for who in $IDENTITIES; do
+          git grep -nIiE "(/Users/|/home/|\\\\Users\\\\|-Users-)$who" $commits -- \
+            ':(exclude)studio/pnpm-lock.yaml' 2>/dev/null || true
+        done
+        [ -n "$host" ] && [ "$host" != "localhost" ] && \
+          git grep -nIF "$host" $commits -- 2>/dev/null || true
+        git grep -nIE '[A-Za-z0-9._%+-]+@(gmail|outlook|hotmail|yahoo|icloud|proton(mail)?)\.[a-z]+' \
+          $commits -- ':(exclude)studio/pnpm-lock.yaml' 2>/dev/null || true
+      } | cut -d: -f1,2 | sort -u | head -40
+    )
+    # Manifest author fields are deliberate in the TREE, but a published history is
+    # forever, so history reports them too — as `<commit>:<path>` pairs, which is
+    # what `git filter-repo --replace-text` needs to remove them.
+    report "history: no personal data in any of $ncommits reachable commit(s)" "$hits"
+    [ -n "$hits" ] && printf '      %s\n' \
+      "to purge: git filter-repo --replace-text <rules>  (back up with 'git bundle create' first)"
+  fi
+fi
 
 # ── 4. built artifacts (the ones users actually download) ────────────────────
 if [ "$ARTIFACTS" -eq 1 ]; then

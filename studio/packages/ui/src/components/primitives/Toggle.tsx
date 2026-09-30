@@ -248,6 +248,7 @@ export function RadioGroupItem({ value, label, disabled, id }: RadioGroupItemPro
     // The span keeps role/id/aria-checked/tabIndex/onKeyDown because focus lands on it; only
     // the pointer path moves up here, so the click is handled exactly once.
     // biome-ignore lint/a11y/noLabelWithoutControl: the labelled control is the role="radio" span below, not a form element
+    // biome-ignore lint/a11y/useKeyWithClickEvents: keys are handled on the role="radio" span below
     <label
       onClick={() => !isDisabled && ctx?.onValueChange?.(value)}
       style={{

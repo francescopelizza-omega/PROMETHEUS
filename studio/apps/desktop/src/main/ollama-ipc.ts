@@ -8,7 +8,7 @@
 import { ai } from "@prometheus/core";
 import { ipcMain } from "electron";
 
-import { type ModelOllamaStartResult, IPC } from "../shared/ipc-contract.js";
+import { IPC, type ModelOllamaStartResult } from "../shared/ipc-contract.js";
 
 /** Register `model:ollamaStart`. Returns a disposer (mirrors sibling IPC modules). */
 export function registerOllamaIpc(): () => void {

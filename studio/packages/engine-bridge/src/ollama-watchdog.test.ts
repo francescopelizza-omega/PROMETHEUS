@@ -12,8 +12,8 @@
  */
 import assert from "node:assert/strict";
 import { existsSync } from "node:fs";
-import { fileURLToPath } from "node:url";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 
 import { watchdogEntryPath } from "./ollama-watchdog.js";
 

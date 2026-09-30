@@ -514,7 +514,12 @@ function BreakpointRow({
           }}
         >
           <span
-            style={{ overflow: "hidden", textOverflow: "ellipsis", minWidth: 0, whiteSpace: "nowrap" }}
+            style={{
+              overflow: "hidden",
+              textOverflow: "ellipsis",
+              minWidth: 0,
+              whiteSpace: "nowrap",
+            }}
           >
             {basename(bp.path)}
           </span>

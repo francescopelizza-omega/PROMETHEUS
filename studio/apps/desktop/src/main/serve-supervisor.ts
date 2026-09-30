@@ -288,7 +288,11 @@ export class ServeSupervisor extends EventEmitter {
 
   private checkCriticalPressureInner(): void {
     const ramPct = this.ramSampleFn();
-    this.criticalStreak = nextCriticalStreak(this.criticalStreak, ramPct, this.criticalRamCeilingPct);
+    this.criticalStreak = nextCriticalStreak(
+      this.criticalStreak,
+      ramPct,
+      this.criticalRamCeilingPct,
+    );
     if (this.criticalStreak < CRITICAL_POLLS_REQUIRED) return;
     this.criticalStreak = 0; // reset regardless of outcome — never re-fire every tick in a row
     const ready = [...this.entries.values()].filter((e) => e.row.status === "ready");

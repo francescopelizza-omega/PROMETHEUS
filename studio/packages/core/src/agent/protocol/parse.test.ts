@@ -579,8 +579,7 @@ test("a 4-backtick fence does not swallow the tool call that follows it", () => 
    * malformed events, so the agent silently did nothing and nothing was reported.
    */
   const body = (ticks: string) =>
-    `Here is the README:\n${ticks}markdown\n\`\`\`js\nconsole.log(1)\n\`\`\`\n${ticks}\n` +
-    `Now reading it.\n<tool_call>{"name":"read_file","arguments":{"path":"a.ts"}}</tool_call>`;
+    `Here is the README:\n${ticks}markdown\n\`\`\`js\nconsole.log(1)\n\`\`\`\n${ticks}\nNow reading it.\n<tool_call>{"name":"read_file","arguments":{"path":"a.ts"}}</tool_call>`;
   for (const ticks of ["```", "````", "`````"]) {
     const calls = scanToolCalls(body(ticks)).filter((e) => e.kind === "call");
     assert.equal(calls.length, 1, `a ${ticks.length}-backtick fence lost the tool call`);

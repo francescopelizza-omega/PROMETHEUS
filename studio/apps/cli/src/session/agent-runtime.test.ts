@@ -4101,6 +4101,7 @@ test("ACTIVE EVICTION: a failed request matching a JUST-evicted runner reports W
     assert.match(text, /RAM at 97%/);
     assert.doesNotMatch(text, /model error/, "the honest reason replaces the raw connection error");
   } finally {
+    // biome-ignore lint/performance/noDelete: restoring process.env — the rule's fix is `= undefined`, which Node coerces to the STRING "undefined" and leaves the var set. delete is the only way to make it absent again.
     if (prevHome === undefined) delete process.env.PROMETHEUS_HOME;
     else process.env.PROMETHEUS_HOME = prevHome;
     rmSync(home, { recursive: true, force: true });
@@ -4124,6 +4125,7 @@ test("ACTIVE EVICTION: a failed request with NO matching recent eviction still r
     assert.match(text, /model error/);
     assert.doesNotMatch(text, /machine-wide freeze/);
   } finally {
+    // biome-ignore lint/performance/noDelete: restoring process.env — the rule's fix is `= undefined`, which Node coerces to the STRING "undefined" and leaves the var set. delete is the only way to make it absent again.
     if (prevHome === undefined) delete process.env.PROMETHEUS_HOME;
     else process.env.PROMETHEUS_HOME = prevHome;
     rmSync(home, { recursive: true, force: true });

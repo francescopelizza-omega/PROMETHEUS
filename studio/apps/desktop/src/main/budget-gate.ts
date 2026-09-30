@@ -131,7 +131,10 @@ export function readDayRecords(
   const key = (r: DesktopSpendRecord): string =>
     `${r.atIso}|${r.model}|${r.promptTokens}|${r.completionTokens}`;
   const seen = new Set(shared.map(key));
-  return [...shared, ...readPrivateDayRecords(userDataPath, nowIso).filter((r) => !seen.has(key(r)))];
+  return [
+    ...shared,
+    ...readPrivateDayRecords(userDataPath, nowIso).filter((r) => !seen.has(key(r))),
+  ];
 }
 
 /**
@@ -281,7 +284,9 @@ export class DesktopBudgetGate {
     try {
       const sessionRecords = readSessionRecords(this.userDataPath, nowIso, this.startedMs);
       const dayRecords =
-        config.dailyUsd !== undefined ? readDayRecords(this.userDataPath, nowIso, this.sharedDir) : undefined;
+        config.dailyUsd !== undefined
+          ? readDayRecords(this.userDataPath, nowIso, this.sharedDir)
+          : undefined;
       return ai.decideBudget({
         sessionRecords,
         ...(dayRecords ? { dayRecords } : {}),

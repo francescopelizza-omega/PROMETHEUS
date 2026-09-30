@@ -48,7 +48,12 @@ function makeDeps(
 
 test("nothing tracked → RAM is never even sampled, streak resets, nothing signalled", async () => {
   let sampled = false;
-  const { deps, signals } = makeDeps([], { ramSampleFn: () => (sampled = true) && 99 });
+  const { deps, signals } = makeDeps([], {
+    ramSampleFn: () => {
+      sampled = true;
+      return 99;
+    },
+  });
   const streak = { value: 3 }; // a stale streak from before the last child exited
   await checkOrchestrationResourcePressure(streak, deps);
   assert.equal(sampled, false, "a session that never touches /demos must pay nothing for this");

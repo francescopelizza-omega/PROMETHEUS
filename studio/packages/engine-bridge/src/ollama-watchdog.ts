@@ -140,7 +140,9 @@ export function spawnWatchdogIfNeeded(opts: SpawnWatchdogOptions = {}): void {
     opts.runnerId ?? processMatch,
     "--display-name",
     opts.displayName ?? processMatch,
-    ...(opts.stopCmd && opts.stopCmd.length > 0 ? ["--stop-cmd", JSON.stringify(opts.stopCmd)] : []),
+    ...(opts.stopCmd && opts.stopCmd.length > 0
+      ? ["--stop-cmd", JSON.stringify(opts.stopCmd)]
+      : []),
   ];
   try {
     const child = spawn(process.execPath, args, {

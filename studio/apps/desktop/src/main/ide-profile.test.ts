@@ -102,6 +102,7 @@ test("ide:profile.start reports the TARGET's own crash instead of a flame graph 
     assert.equal(fine.ok, true);
     assert.equal(fine.runError, undefined);
   } finally {
+    // biome-ignore lint/performance/noDelete: restoring process.env — the rule's fix is `= undefined`, which Node coerces to the STRING "undefined" and leaves the var set. delete is the only way to make it absent again.
     if (priorSkip === undefined) delete process.env.PROMETHEUS_PROFILE_SKIP_GUARD;
     else process.env.PROMETHEUS_PROFILE_SKIP_GUARD = priorSkip;
     dispose();
@@ -135,6 +136,7 @@ test("ide:profile.start surfaces the sidecar's LOAD REFUSAL rather than an empty
     assert.equal(out.ok, false, "a load refusal must not be reported as a successful profile");
     assert.ok(out.error, "the refusal must carry a reason the panel can show");
   } finally {
+    // biome-ignore lint/performance/noDelete: restoring process.env — the rule's fix is `= undefined`, which Node coerces to the STRING "undefined" and leaves the var set. delete is the only way to make it absent again.
     if (priorForce === undefined) delete process.env.PROMETHEUS_PROFILE_FORCE_LOAD;
     else process.env.PROMETHEUS_PROFILE_FORCE_LOAD = priorForce;
     dispose();

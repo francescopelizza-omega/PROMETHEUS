@@ -17,8 +17,8 @@
 import type { CSSProperties, ReactElement, ReactNode } from "react";
 
 import { ResizeHandle, useResizable } from "./Resizable.js";
-import { safeInspectorJson } from "./rightrail-view.js";
 import { paneMaxWidth, readPaneWidth } from "./responsive.js";
+import { safeInspectorJson } from "./rightrail-view.js";
 
 /** §2.5: 330px open. */
 const RAIL_DEFAULT = 330;

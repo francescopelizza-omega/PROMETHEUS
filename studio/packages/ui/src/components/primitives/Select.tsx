@@ -11,8 +11,8 @@
 import { type KeyboardEvent, type ReactNode, useId, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { Z } from "../../tokens/layers.js";
-import { useAnchoredLayer } from "./anchor.js";
 import { Input } from "./Input.js";
+import { useAnchoredLayer } from "./anchor.js";
 import { filterItems } from "./filter.js";
 import { menuKeyHandler, useDismiss } from "./overlay.js";
 import { fs, FOCUS_RING, rad, sp, v } from "./styles.js";
@@ -229,22 +229,22 @@ export function Select({
               zIndex: Z.dropdown,
             }}
           >
-          {/* `active` indexes the ENABLED subset (keyboard movement skips disabled rows),
+            {/* `active` indexes the ENABLED subset (keyboard movement skips disabled rows),
               while OptionList renders the FULL list — so with any disabled option present the
               highlight landed on the wrong row. Map at this boundary only: Combobox shares
               OptionList and its indices are already in the full space. `enabled` holds the
               same object references as `options`, so indexOf is exact. */}
-          <OptionList
-            options={options}
-            active={active >= 0 ? options.indexOf(enabled[active] as SelectOption) : -1}
-            setActive={(i) => setActive(enabled.indexOf(options[i] as SelectOption))}
-            value={value}
-            listboxId={listboxId}
-            onChoose={(v2) => {
-              onValueChange(v2);
-              setOpen(false);
-            }}
-          />
+            <OptionList
+              options={options}
+              active={active >= 0 ? options.indexOf(enabled[active] as SelectOption) : -1}
+              setActive={(i) => setActive(enabled.indexOf(options[i] as SelectOption))}
+              value={value}
+              listboxId={listboxId}
+              onChoose={(v2) => {
+                onValueChange(v2);
+                setOpen(false);
+              }}
+            />
           </div>,
           document.body,
         )}
@@ -341,18 +341,18 @@ export function Combobox({
               zIndex: Z.dropdown,
             }}
           >
-          <OptionList
-            options={filtered}
-            active={active}
-            setActive={setActive}
-            value={value}
-            listboxId={listboxId}
-            onChoose={(v2) => {
-              onValueChange(v2);
-              setQuery("");
-              setOpen(false);
-            }}
-          />
+            <OptionList
+              options={filtered}
+              active={active}
+              setActive={setActive}
+              value={value}
+              listboxId={listboxId}
+              onChoose={(v2) => {
+                onValueChange(v2);
+                setQuery("");
+                setOpen(false);
+              }}
+            />
           </div>,
           document.body,
         )}

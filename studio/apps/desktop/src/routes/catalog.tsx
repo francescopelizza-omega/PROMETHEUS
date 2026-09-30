@@ -1369,7 +1369,6 @@ export function CatalogRoute(): ReactElement {
 
       {/* §9: the typed confirm that gates every deep-red override on this route. */}
       <ForceGate gate={force} />
-
     </div>
   );
 }

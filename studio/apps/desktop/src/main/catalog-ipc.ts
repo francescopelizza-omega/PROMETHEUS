@@ -83,7 +83,9 @@ function errString(e: unknown): string {
 /** Extract the renderer's WebContents `sender` WITHOUT importing the electron type. */
 function senderOf(
   evt: unknown,
-): { send(channel: string, payload: CatalogProgressEvent): void; isDestroyed?(): boolean } | undefined {
+):
+  | { send(channel: string, payload: CatalogProgressEvent): void; isDestroyed?(): boolean }
+  | undefined {
   if (!evt || typeof evt !== "object") return undefined;
   const sender = (evt as { sender?: unknown }).sender;
   if (sender && typeof (sender as { send?: unknown }).send === "function") {

@@ -8,7 +8,7 @@
 import { ai } from "@prometheus/core";
 import { ipcMain } from "electron";
 
-import { type ModelLmstudioStartResult, IPC } from "../shared/ipc-contract.js";
+import { IPC, type ModelLmstudioStartResult } from "../shared/ipc-contract.js";
 
 /** Register `model:lmstudioStart`. Returns a disposer (mirrors sibling IPC modules). */
 export function registerLmstudioIpc(): () => void {

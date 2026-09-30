@@ -12,7 +12,7 @@ import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join, relative } from "node:path";
-import test from "node:test";
+import test, { after, before } from "node:test";
 
 import { agent } from "@prometheus/core";
 
@@ -22,7 +22,84 @@ import { type BridgeDeps, createSessionBridge } from "./session-bridge.js";
 
 setColorEnabled(false);
 
+/**
+ * NO TEST IN THIS FILE MAY REACH THE NETWORK. This is a file-wide block, not a per-test one.
+ *
+ * `createSessionBridge` reaches a local daemon by more paths than one: `adoptEndpoint` runs
+ * fire-and-forget during setup when `backends.localEndpoint` is set, and `/model` adopts an
+ * endpoint too (`session-bridge.ts` lines ~1867 and ~2335). Every one of them ends at
+ * `warmupLocalModel` → `POST /v1/chat/completions`, which makes ollama LOAD THE WEIGHTS before
+ * it can answer even a one-token ping. On this machine that is qwen3.6 at 26 GB.
+ *
+ * Measured 2026-09-30: stubbing only the one obvious test still left the whole directory
+ * loading the model, because the other route was open. The daemon that had been squatting
+ * uncapped on :11434 for eighteen hours carried
+ * `PROMETHEUS_MODELS_DIR=…/prom-bridge-home-…/open_models` — the `TMP_HOME` below. This file
+ * did that.
+ *
+ * It matters beyond tidiness: `scripts/run-tests.mjs` and the CLAUDE.md §2.1 pre-flight both
+ * REFUSE to run while a model is resident, so this file blocked its own next run — and it sits
+ * in the directory anyone doing TUI work runs. See CLAUDE.md §2.3.
+ *
+ * A refusing `fetch` is the repo's existing convention for this (`model-discovery.test.ts` does
+ * the same). Nothing here asserts on a real HTTP response; these tests are about slash commands
+ * and bridge wiring. If a future test genuinely needs a response, give it a canned one here
+ * rather than opening the file back up to the daemon.
+ */
 const TMP_HOME = mkdtempSync(join(tmpdir(), "prom-bridge-home-"));
+
+/**
+ * A STUB ENGINE, because two tests in this file were running a real LLM turn.
+ *
+ * `/zzcustom …` and `/background write a haiku` both end in the bridge spawning the engine —
+ * measured, with the full argv:
+ *
+ *     prometheus.py --json --no-color chat --local qwen3.6:latest -- write a haiku
+ *
+ * That is a genuine chat against the local daemon, so ollama loaded qwen3.6 (26 GB, 100% GPU)
+ * on every run of this file. Because `scripts/run-tests.mjs` and the CLAUDE.md §2.1 pre-flight
+ * both REFUSE while a model is resident, the file blocked its own next run — in the directory
+ * anyone doing TUI work runs. See CLAUDE.md §2.3.
+ *
+ * A stubbed `globalThis.fetch` does NOT stop this and it is worth saying why: the request is not
+ * made by node at all. The engine is a PYTHON CHILD PROCESS, and `prometheus.py` hardcodes
+ * `http://localhost:11434/v1` with no env override, so the only seam is the engine binary
+ * itself — `PROMETHEUS_PY`, which is exactly how the rest of the repo redirects it.
+ *
+ * Neither test asserts anything about a model's reply: one checks the command was RESOLVED
+ * ("not unknown command"), the other that a background run was STARTED. Both are true of a
+ * stub, so nothing is weakened by not burning 26 GB to learn them.
+ */
+const STUB_ENGINE = join(TMP_HOME, "stub-prometheus.py");
+writeFileSync(
+  STUB_ENGINE,
+  [
+    "import sys, json",
+    "argv = [a for a in sys.argv[1:] if not a.startswith('-')]",
+    "print(json.dumps({'command': argv[0] if argv else 'chat', 'ok': True,",
+    "                  'text': '', 'reply': '', 'messages': []}))",
+  ].join("\n"),
+);
+
+/**
+ * The network is blocked as well — belt and braces. The engine stub covers the child process;
+ * this covers everything node does in-process (`adoptEndpoint` during setup, and `/model`,
+ * which adopts an endpoint too). `model-discovery.test.ts` uses the same technique.
+ */
+const realFetch: typeof globalThis.fetch = globalThis.fetch;
+const realEnginePath = process.env.PROMETHEUS_PY;
+before(() => {
+  process.env.PROMETHEUS_PY = STUB_ENGINE;
+  globalThis.fetch = (async () => {
+    throw new Error("session-bridge.test.ts: network disabled (see the note above)");
+  }) as typeof globalThis.fetch;
+});
+after(() => {
+  globalThis.fetch = realFetch;
+  // biome-ignore lint/performance/noDelete: `= undefined` sets the STRING "undefined" in process.env
+  if (realEnginePath === undefined) delete process.env.PROMETHEUS_PY;
+  else process.env.PROMETHEUS_PY = realEnginePath;
+});
 
 function args(over: Partial<ParsedArgs> = {}): ParsedArgs {
   return {
@@ -276,6 +353,25 @@ test("the bridge starts when an endpoint EXISTS — the setup path a real user t
    * Every other test in this file passes empty `backends`, so `endpoint` is undefined and the
    * branch is skipped — which is exactly why a crash on the DEFAULT surface went unnoticed here.
    */
+  /**
+   * THE ENDPOINT IS DELIBERATELY UNREACHABLE, and the global `fetch` is stubbed on top of that.
+   *
+   * What this test proves is that `adoptEndpoint` is CALLED without throwing — the bug was a
+   * temporal dead zone at the call site. It never needed a daemon to answer. But it used to
+   * name `http://127.0.0.1:11434/v1` and `qwen3.6:latest`, which on this machine is a real
+   * server and a real 23 GB model: `adoptEndpoint` ends in `warmupLocalModel`, and that is a
+   * `POST /v1/chat/completions`, which makes ollama load the weights before it can reply even
+   * to a one-token ping. Every run of this directory therefore pinned 23 GB — and since
+   * `scripts/run-tests.mjs` and the CLAUDE.md §2.1 pre-flight both REFUSE while a model is
+   * resident, this file blocked its own next run, in the directory anyone doing TUI work runs.
+   *
+   * Two independent stops, because the fire-and-forget `void adoptEndpoint(...)` outlives the
+   * assertion and could otherwise be reached on a later tick:
+   *   1. the file-wide refusing `fetch` installed at the top — no socket, ever.
+   *   2. port 9 (discard) and a model name that does not exist, so even if someone removes that
+   *      block this test alone still cannot load weights. Belt and braces, on purpose: the
+   *      one-stub version of this fix was measured still loading 26 GB.
+   */
   const bridge = await makeBridge({
     backends: {
       liveRunners: [],
@@ -283,14 +379,17 @@ test("the bridge starts when an endpoint EXISTS — the setup path a real user t
       localEndpoint: {
         id: "local-probe",
         provider: "ollama",
-        baseUrl: "http://127.0.0.1:11434/v1",
-        model: "qwen3.6:latest",
+        baseUrl: "http://127.0.0.1:9/v1",
+        model: "test-model-that-does-not-exist",
         locality: "local",
         contextWindow: 8192,
       },
     } as never,
   });
   assert.ok(bridge, "createSessionBridge threw during setup with a real endpoint");
+  // Every other test in this file disposes; this one did not, leaving the warm-up chain
+  // running detached with a 120s timeout after the assertion had already passed.
+  await bridge.dispose();
 });
 
 test("/cwd: re-discovers steering from the NEW directory too — it moves in place, not blindly", async () => {

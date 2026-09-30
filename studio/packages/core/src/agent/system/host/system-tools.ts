@@ -1097,8 +1097,7 @@ async function runCommandTool(
       if (hit) {
         auditRefusal(`recursive read would reach ${hit}`, cls.tier);
         return refuse(
-          `refused: \`${bin}\` would read ${hit} recursively — ${secretPathReason(hit)}. ` +
-            "Scope the command to a specific path, or exclude that file.",
+          `refused: \`${bin}\` would read ${hit} recursively — ${secretPathReason(hit)}. Scope the command to a specific path, or exclude that file.`,
         );
       }
     }

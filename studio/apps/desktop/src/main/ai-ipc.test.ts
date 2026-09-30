@@ -315,6 +315,7 @@ test("`keep_alive` goes to LOCAL endpoints only — a cloud provider never sees 
     assert.equal(bodies[0]?.keep_alive, "9m");
     assert.equal(bodies[1]?.keep_alive, undefined, "a cloud provider received keep_alive");
   } finally {
+    // biome-ignore lint/performance/noDelete: restoring process.env — the rule's fix is `= undefined`, which Node coerces to the STRING "undefined" and leaves the var set. delete is the only way to make it absent again.
     if (prev === undefined) delete process.env.PROMETHEUS_LOCAL_KEEP_ALIVE;
     else process.env.PROMETHEUS_LOCAL_KEEP_ALIVE = prev;
   }
@@ -338,6 +339,7 @@ test("the request is shaped by the URL, NOT by the renderer's `locality` label",
   const prevKA = process.env.PROMETHEUS_LOCAL_KEEP_ALIVE;
   process.env.PROMETHEUS_LOCAL_KEEP_ALIVE = "9m";
   t.after(() => {
+    // biome-ignore lint/performance/noDelete: restoring process.env — the rule's fix is `= undefined`, which Node coerces to the STRING "undefined" and leaves the var set. delete is the only way to make it absent again.
     if (prevKA === undefined) delete process.env.PROMETHEUS_LOCAL_KEEP_ALIVE;
     else process.env.PROMETHEUS_LOCAL_KEEP_ALIVE = prevKA;
   });

@@ -68,7 +68,9 @@ function errString(e: unknown): string {
 /** Extract the renderer's WebContents `sender` WITHOUT importing the electron type. */
 function senderOf(
   evt: unknown,
-): { send(channel: string, payload: ProgressFeedEvent): void; isDestroyed?(): boolean } | undefined {
+):
+  | { send(channel: string, payload: ProgressFeedEvent): void; isDestroyed?(): boolean }
+  | undefined {
   if (!evt || typeof evt !== "object") return undefined;
   const sender = (evt as { sender?: unknown }).sender;
   if (sender && typeof (sender as { send?: unknown }).send === "function") {
@@ -119,7 +121,9 @@ export function registerEnvIpcHandlers(wiring: EnvIpcWiring = {}): () => void {
 
   /** Forward an env progress line to the initiating window (cosmetic, C5). */
   function emitEnvProgress(
-    sender: { send(channel: string, payload: ProgressFeedEvent): void; isDestroyed?(): boolean } | undefined,
+    sender:
+      | { send(channel: string, payload: ProgressFeedEvent): void; isDestroyed?(): boolean }
+      | undefined,
     runId: string | undefined,
     line: string,
   ): void {

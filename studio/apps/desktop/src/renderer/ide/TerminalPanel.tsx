@@ -615,9 +615,7 @@ function PaneStrip({
     if (menuShown) menuRef.current?.querySelector<HTMLElement>('[role="menuitem"]')?.focus();
   }, [menuShown]);
   const onMenuKeyDown = (e: KeyboardEvent<HTMLDivElement>): void => {
-    const items = [
-      ...(menuRef.current?.querySelectorAll<HTMLElement>('[role="menuitem"]') ?? []),
-    ];
+    const items = [...(menuRef.current?.querySelectorAll<HTMLElement>('[role="menuitem"]') ?? [])];
     if (items.length === 0) return;
     const i = items.indexOf(document.activeElement as HTMLElement);
     if (e.key === "Escape") {
@@ -773,105 +771,109 @@ function PaneStrip({
           menuBox &&
           createPortal(
             <>
-            <button
-              type="button"
-              aria-label="close menu"
-              onClick={onCloseMenu}
-              style={{
-                position: "fixed",
-                inset: 0,
-                background: "transparent",
-                border: "none",
-                cursor: "default",
-                // Z.dropdown, not Z.raise: the menu it dismisses is a dropdown, and a
-                // backdrop one rung BELOW its own menu leaves everything between the two
-                // rungs clickable through it.
-                zIndex: Z.dropdown,
-              }}
-            />
-            <div
-              ref={menuRef}
-              role="menu"
-              aria-label="new terminal"
-              onKeyDown={onMenuKeyDown}
-              style={{
-                // fixed + measured, so no ancestor's overflow can clip it. `useAnchoredLayer`
-                // clamps into the viewport, which also replaces the old right:0 hack.
-                position: "fixed",
-                left: menuBox.left,
-                top: menuBox.top,
-                width: menuBox.width,
-                minWidth: 230,
-                background: "var(--bg-surface-2)",
-                border: "1px solid var(--border-strong)",
-                borderRadius: "var(--radius-md, 6px)",
-                boxShadow: "var(--elevation-e3)",
-                padding: 4,
-                zIndex: Z.dropdown,
-                maxHeight: 240,
-                overflowY: "auto",
-                fontSize: "0.78rem",
-              }}
-            >
-              {(["shell", "ai-preset", "env"] as const).map((group) => {
-                const groupItems = menu.filter((m) => m.kind === group);
-                if (!groupItems.length) return null;
-                const label =
-                  group === "shell" ? "Shells" : group === "ai-preset" ? "AI CLIs" : "Environments";
-                const glyph = group === "shell" ? "$" : group === "ai-preset" ? "◆" : "⬢";
-                return (
-                  <div key={group}>
-                    <div
-                      style={{
-                        height: 1,
-                        background: "var(--border-subtle)",
-                        margin: "4px 2px",
-                      }}
-                    />
-                    <div
-                      style={{
-                        padding: "2px 8px",
-                        color: "var(--text-secondary)",
-                        fontSize: "0.7rem",
-                      }}
-                    >
-                      {label}
+              <button
+                type="button"
+                aria-label="close menu"
+                onClick={onCloseMenu}
+                style={{
+                  position: "fixed",
+                  inset: 0,
+                  background: "transparent",
+                  border: "none",
+                  cursor: "default",
+                  // Z.dropdown, not Z.raise: the menu it dismisses is a dropdown, and a
+                  // backdrop one rung BELOW its own menu leaves everything between the two
+                  // rungs clickable through it.
+                  zIndex: Z.dropdown,
+                }}
+              />
+              <div
+                ref={menuRef}
+                role="menu"
+                aria-label="new terminal"
+                onKeyDown={onMenuKeyDown}
+                style={{
+                  // fixed + measured, so no ancestor's overflow can clip it. `useAnchoredLayer`
+                  // clamps into the viewport, which also replaces the old right:0 hack.
+                  position: "fixed",
+                  left: menuBox.left,
+                  top: menuBox.top,
+                  width: menuBox.width,
+                  minWidth: 230,
+                  background: "var(--bg-surface-2)",
+                  border: "1px solid var(--border-strong)",
+                  borderRadius: "var(--radius-md, 6px)",
+                  boxShadow: "var(--elevation-e3)",
+                  padding: 4,
+                  zIndex: Z.dropdown,
+                  maxHeight: 240,
+                  overflowY: "auto",
+                  fontSize: "0.78rem",
+                }}
+              >
+                {(["shell", "ai-preset", "env"] as const).map((group) => {
+                  const groupItems = menu.filter((m) => m.kind === group);
+                  if (!groupItems.length) return null;
+                  const label =
+                    group === "shell"
+                      ? "Shells"
+                      : group === "ai-preset"
+                        ? "AI CLIs"
+                        : "Environments";
+                  const glyph = group === "shell" ? "$" : group === "ai-preset" ? "◆" : "⬢";
+                  return (
+                    <div key={group}>
+                      <div
+                        style={{
+                          height: 1,
+                          background: "var(--border-subtle)",
+                          margin: "4px 2px",
+                        }}
+                      />
+                      <div
+                        style={{
+                          padding: "2px 8px",
+                          color: "var(--text-secondary)",
+                          fontSize: "0.7rem",
+                        }}
+                      >
+                        {label}
+                      </div>
+                      {groupItems.map((item) => {
+                        const ok = !item.detectBin || installed[item.detectBin];
+                        const canInstall = !!item.install;
+                        return (
+                          <button
+                            key={item.id}
+                            type="button"
+                            role="menuitem"
+                            title={
+                              ok || !canInstall
+                                ? item.title
+                                : `Not installed — opens a terminal primed with: ${item.install}`
+                            }
+                            onClick={() => onLaunch(item)}
+                            style={menuItem()}
+                          >
+                            <span aria-hidden="true">{glyph}</span> {item.title}
+                            {item.kind === "ai-preset" && item.detectBin ? (
+                              ok ? (
+                                <span style={{ marginLeft: "auto", color: "var(--ok)" }}>
+                                  installed
+                                </span>
+                              ) : canInstall ? (
+                                <span style={{ marginLeft: "auto", color: "var(--warn)" }}>
+                                  install
+                                </span>
+                              ) : null
+                            ) : null}
+                          </button>
+                        );
+                      })}
                     </div>
-                    {groupItems.map((item) => {
-                      const ok = !item.detectBin || installed[item.detectBin];
-                      const canInstall = !!item.install;
-                      return (
-                        <button
-                          key={item.id}
-                          type="button"
-                          role="menuitem"
-                          title={
-                            ok || !canInstall
-                              ? item.title
-                              : `Not installed — opens a terminal primed with: ${item.install}`
-                          }
-                          onClick={() => onLaunch(item)}
-                          style={menuItem()}
-                        >
-                          <span aria-hidden="true">{glyph}</span> {item.title}
-                          {item.kind === "ai-preset" && item.detectBin ? (
-                            ok ? (
-                              <span style={{ marginLeft: "auto", color: "var(--ok)" }}>
-                                installed
-                              </span>
-                            ) : canInstall ? (
-                              <span style={{ marginLeft: "auto", color: "var(--warn)" }}>
-                                install
-                              </span>
-                            ) : null
-                          ) : null}
-                        </button>
-                      );
-                    })}
-                  </div>
-                );
-              })}
-            </div>
+                  );
+                })}
+              </div>
             </>,
             document.body,
           )}

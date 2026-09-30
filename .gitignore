@@ -47,6 +47,21 @@ coverage/
 # leak in the whole tree (found 2026-09-26 by scripts/check-personal-data.sh). A note is a note
 # whichever end of the name says so, so the PREFIX forms are ignored too.
 /FIXES-*.md
+
+# Scratch API responses saved while poking at an endpoint, and then committed by the
+# auto-committer, which runs `git add -A` and cannot tell a probe from a fixture.
+# Found 2026-09-30: studio/ held `nd.json` (nodejs.org's release index, 26k lines),
+# `eol.json` (endoflife.date), `py.json` (python releases), `ov.json` (`{"version":"0.34.1"}`)
+# and `u.json` (one ollama download URL) — five files, tracked, referenced by NOTHING, and
+# destined for a public repo. `studio/pyruntime.lock.json` is the real one and stays.
+#
+# Anchored to the two directories where the probing happens, so a package.json, tsconfig or
+# any legitimately-named config elsewhere is untouched. If you are saving a response to look
+# at, give it one of these names and it can never be committed by accident:
+/scratch-*.json
+/*.probe.json
+/studio/scratch-*.json
+/studio/*.probe.json
 /FIXES/
 /HANDOFF*.md
 /*-HANDOFF.md

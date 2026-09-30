@@ -214,9 +214,7 @@ export async function runMcpCommand(
        */
       return {
         text: c.red(
-          `mcp add: "${name}" was BLOCKED by nemesis (${stored.gate?.verdict}).\n` +
-            `  recorded as blocked and DISABLED — it cannot be started. ` +
-            `Remove it with \`prometheus mcp remove ${name} --yes\`.`,
+          `mcp add: "${name}" was BLOCKED by nemesis (${stored.gate?.verdict}).\n  recorded as blocked and DISABLED — it cannot be started. Remove it with \`prometheus mcp remove ${name} --yes\`.`,
         ),
         json: {
           ok: false,

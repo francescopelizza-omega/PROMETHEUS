@@ -36,6 +36,24 @@ cd "$ROOT"
 
 echo "pre-push: scanning for credentials and personal data before publishing…" >&2
 
+# git feeds this hook one line per ref: <local ref> <local sha> <remote ref> <remote sha>.
+# Collect the local tips so the history scan walks EXACTLY what is about to be published.
+#
+# Without this the scan uses `--all`, which includes `refs/remotes/origin/*` — and on the one
+# push that matters, a history rewrite that REMOVES a leak, those stale remote-tracking refs
+# still hold the dirty commits. The check then refuses the push that would delete them from
+# the server (measured 2026-09-30). Scanning the pushed tips is both more correct and stricter
+# about the thing that is actually being disclosed.
+PUSHED=""
+while read -r _localref localsha _remoteref _remotesha; do
+  # all-zero local sha = a branch DELETION. Nothing is being published, so nothing to scan.
+  case "$localsha" in
+    "" | 0000000000000000000000000000000000000000) continue ;;
+  esac
+  PUSHED="$PUSHED $localsha"
+done
+# No stdin (a manual `sh .githooks/pre-push`) leaves it empty, and the scan falls back to --all.
+
 if ! sh scripts/secret-scan.sh; then
   echo >&2
   echo "pre-push: REFUSING to push — the secret scan did not pass (see above)." >&2
@@ -47,7 +65,14 @@ if ! sh scripts/secret-scan.sh; then
   exit 1
 fi
 
-if ! bash scripts/check-personal-data.sh; then
+# --history is the whole point of running this HERE rather than at commit time.
+# Without it the check reads the working tree only, and a leak that was deleted
+# from the tree but left in history passes every run — which is exactly what
+# happened: a clean tree on top of ten commits carrying a home path, plus a
+# personal address baked into a committed `dist/bin.js`. `gitleaks` above does
+# read history but matches credential shapes; identity is not one.
+# shellcheck disable=SC2086
+if ! bash scripts/check-personal-data.sh --history $PUSHED; then
   echo >&2
   echo "pre-push: REFUSING to push — personal data is present in tracked files (see above)." >&2
   echo "  A public repo is not revocable. If the hit is an internal working note, it should" >&2

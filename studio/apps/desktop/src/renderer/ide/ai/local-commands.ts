@@ -263,26 +263,13 @@ export function extractInDirective(text: string): InDirective {
 
 /** The sentence the model is told when an output folder is in force. Identical to the CLI's. */
 export function outputDirNote(dir: string): string {
-  return (
-    `Output directory for produced files: ${dir}\n` +
-    "Write anything this turn produces (downloads, conversions, exports) into that folder — " +
-    "pass it explicitly to the command (for example `-o`, `-P`, or an absolute output path). " +
-    "It is writable; the session working directory is unchanged and still where you read from."
-  );
+  return `Output directory for produced files: ${dir}\nWrite anything this turn produces (downloads, conversions, exports) into that folder — pass it explicitly to the command (for example \`-o\`, \`-P\`, or an absolute output path). It is writable; the session working directory is unchanged and still where you read from.`;
 }
 
 /** The `/in` status turn: where writes go now, and how to change it. */
 export function formatInTurn(dir: string | null, root: string): string {
   if (!dir) {
-    return (
-      "**/in** — _not set_\n\n" +
-      `Produced files go to the workspace folder: \`${root}\`\n` +
-      "Set one with `/in <folder>`, or inline: “… save it /in ~/Downloads”."
-    );
+    return `**/in** — _not set_\n\nProduced files go to the workspace folder: \`${root}\`\nSet one with \`/in <folder>\`, or inline: “… save it /in ~/Downloads”.`;
   }
-  return (
-    `**/in** — \`${dir}\`\n\n` +
-    "Produced files go here, and the agent may write here. Reading is unchanged.\n" +
-    "`/in --clear` to unset."
-  );
+  return `**/in** — \`${dir}\`\n\nProduced files go here, and the agent may write here. Reading is unchanged.\n\`/in --clear\` to unset.`;
 }

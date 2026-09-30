@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 /**
  * eviction-log.ts — the shared record of "Prometheus killed one of its OWN child processes to
  * stop the machine from freezing."
@@ -19,7 +20,6 @@
  * process (the watchdog entry script) that needs its own module graph, not a bundler's.
  */
 import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
-import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 
 import { acquireLock, releaseLock } from "./pid-lock.js";

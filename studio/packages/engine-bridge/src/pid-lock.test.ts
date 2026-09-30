@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { acquireLock, pidIsAlive, type PidLockFs, releaseLock } from "./pid-lock.js";
+import { type PidLockFs, acquireLock, pidIsAlive, releaseLock } from "./pid-lock.js";
 
 /** An in-memory fake fs: a map of path → file content. `writeFileSync` honours `{flag:"wx"}`
  *  by throwing EEXIST when the path already has content — the exact semantic the lock's
@@ -64,13 +64,22 @@ test("acquireLock: a corrupt (non-numeric) lock file is treated as unreadable �
   const fs = fakeFs({ [PATH]: "not-a-pid" });
   // Number("not-a-pid") is NaN, not > 0, so the guard takes the "not a live rival" branch and
   // reclaims — this asserts that path explicitly rather than leaving it implicit.
-  assert.equal(acquireLock(PATH, fs, 111, () => true), true);
+  assert.equal(
+    acquireLock(PATH, fs, 111, () => true),
+    true,
+  );
 });
 
 test("acquireLock: a stale lock leaves no leftover reclaim-marker file behind on success", () => {
   const fs = fakeFs({ [PATH]: "222" });
-  assert.equal(acquireLock(PATH, fs, 111, () => false), true);
-  assert.throws(() => fs.readFileSync(`${PATH}.reclaim`), "the reclaim marker must be released, win or lose");
+  assert.equal(
+    acquireLock(PATH, fs, 111, () => false),
+    true,
+  );
+  assert.throws(
+    () => fs.readFileSync(`${PATH}.reclaim`),
+    "the reclaim marker must be released, win or lose",
+  );
 });
 
 test("acquireLock: TOCTOU regression — a concurrent racer reclaiming the SAME stale lock can never also win", () => {
@@ -92,7 +101,11 @@ test("acquireLock: TOCTOU regression — a concurrent racer reclaiming the SAME 
         // The rival's ENTIRE acquireLock call happens here, nested inside the first
         // process's own read of the stale lock's content.
         const rivalWon = acquireLock(PATH, fs, 333, isAlive);
-        assert.equal(rivalWon, false, "a concurrent racer must NEVER also believe it won the same lock");
+        assert.equal(
+          rivalWon,
+          false,
+          "a concurrent racer must NEVER also believe it won the same lock",
+        );
       }
       return value;
     },

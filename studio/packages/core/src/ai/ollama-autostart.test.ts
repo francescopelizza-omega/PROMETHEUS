@@ -7,7 +7,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { type EnsureOllamaOptions, ensureLmStudioRunning, ensureOllamaRunning } from "./ollama-autostart.js";
+import {
+  type EnsureOllamaOptions,
+  ensureLmStudioRunning,
+  ensureOllamaRunning,
+} from "./ollama-autostart.js";
 
 /** Always-safe defaults: nothing installed, nothing listening, no real spawn, no real lock —
  *  every test overrides only what it needs to exercise. */
@@ -36,7 +40,10 @@ function runLmStudio(opts: EnsureOllamaOptions): ReturnType<typeof ensureLmStudi
 /** A fetch that always answers 200 with the given served model ids. */
 function fetchServing(models: string[]): typeof fetch {
   return (async () =>
-    ({ ok: true, json: async () => ({ data: models.map((id) => ({ id })) }) }) as Response) as unknown as typeof fetch;
+    ({
+      ok: true,
+      json: async () => ({ data: models.map((id) => ({ id })) }),
+    }) as Response) as unknown as typeof fetch;
 }
 
 /** A fetch that never answers (ECONNREFUSED-shaped). */

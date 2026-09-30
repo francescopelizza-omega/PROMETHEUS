@@ -42,7 +42,11 @@ test("acquireRunnerStartLock: two DIFFERENT runner ids never contend for the sam
   const files: Record<string, string> = {};
   const fs = fakeFs(files);
   assert.equal(acquireRunnerStartLock("ollama", fs), true);
-  assert.equal(acquireRunnerStartLock("lmstudio", fs), true, "a different runner must get its own lock");
+  assert.equal(
+    acquireRunnerStartLock("lmstudio", fs),
+    true,
+    "a different runner must get its own lock",
+  );
   assert.equal(Object.keys(files).length, 2);
 });
 

@@ -176,7 +176,7 @@ export function localKeepAlive(): string | undefined {
   const raw = process.env.PROMETHEUS_LOCAL_KEEP_ALIVE;
   if (raw === undefined) return DEFAULT_LOCAL_KEEP_ALIVE;
   const v = raw.trim();
-  return v === "" ? undefined : v;   // explicit empty = opt out, send nothing
+  return v === "" ? undefined : v; // explicit empty = opt out, send nothing
 }
 
 /**

@@ -127,8 +127,12 @@ test("createEndpointLlmClient: ollama autostart fires once, with the endpoint's 
   });
   const thread: Thread = { messages: [{ role: "user", content: "hi" }] };
   // Two turns on the SAME client: `resolveClient` memoises, so the gate must run exactly once.
-  await collect(llm.turn(thread, defaultTuning({ provider: "local", modelId: "qwen" }), [READ_TOOL]));
-  await collect(llm.turn(thread, defaultTuning({ provider: "local", modelId: "qwen" }), [READ_TOOL]));
+  await collect(
+    llm.turn(thread, defaultTuning({ provider: "local", modelId: "qwen" }), [READ_TOOL]),
+  );
+  await collect(
+    llm.turn(thread, defaultTuning({ provider: "local", modelId: "qwen" }), [READ_TOOL]),
+  );
   assert.equal(calls, 1, "the gate must run once per client, not once per turn");
   assert.equal(seenModelId, LOCAL_ENDPOINT.model, "the already-picked model must never be swapped");
 });
@@ -150,7 +154,9 @@ test("createEndpointLlmClient: lmstudio autostart fires for a port-1234 endpoint
     },
   });
   const thread: Thread = { messages: [{ role: "user", content: "hi" }] };
-  await collect(llm.turn(thread, defaultTuning({ provider: "local", modelId: "qwen" }), [READ_TOOL]));
+  await collect(
+    llm.turn(thread, defaultTuning({ provider: "local", modelId: "qwen" }), [READ_TOOL]),
+  );
   assert.equal(seenModelId, "qwen2.5-coder");
   assert.equal(ollamaCalls, 0, "an LM Studio endpoint must never start Ollama");
 });
@@ -175,7 +181,9 @@ test("createEndpointLlmClient: NEITHER autostart fires for an unmatched local en
     },
   });
   const thread: Thread = { messages: [{ role: "user", content: "hi" }] };
-  await collect(llm.turn(thread, defaultTuning({ provider: "local", modelId: "qwen" }), [READ_TOOL]));
+  await collect(
+    llm.turn(thread, defaultTuning({ provider: "local", modelId: "qwen" }), [READ_TOOL]),
+  );
   assert.equal(ollamaCalls, 0);
   assert.equal(lmstudioCalls, 0);
 });
@@ -202,7 +210,9 @@ test("createEndpointLlmClient: NEITHER autostart fires for a REMOTE endpoint on 
     },
   });
   const thread: Thread = { messages: [{ role: "user", content: "hi" }] };
-  await collect(llm.turn(thread, defaultTuning({ provider: "local", modelId: "qwen" }), [READ_TOOL]));
+  await collect(
+    llm.turn(thread, defaultTuning({ provider: "local", modelId: "qwen" }), [READ_TOOL]),
+  );
   assert.equal(ollamaCalls, 0, "a remote host is not ours to start a server for");
   assert.equal(lmstudioCalls, 0);
 });
@@ -226,11 +236,14 @@ test("createEndpointLlmClient: a resource-ceiling refusal is reported as such, a
   });
   const thread: Thread = { messages: [{ role: "user", content: "hi" }] };
   await assert.rejects(
-    () => collect(llm.turn(thread, defaultTuning({ provider: "local", modelId: "qwen" }), [READ_TOOL])),
+    () =>
+      collect(llm.turn(thread, defaultTuning({ provider: "local", modelId: "qwen" }), [READ_TOOL])),
     /resource ceiling \(RAM at 94%\)/,
   );
   // the memo was dropped, so the next message re-probes rather than replaying the rejection
-  await collect(llm.turn(thread, defaultTuning({ provider: "local", modelId: "qwen" }), [READ_TOOL]));
+  await collect(
+    llm.turn(thread, defaultTuning({ provider: "local", modelId: "qwen" }), [READ_TOOL]),
+  );
   assert.equal(calls, 2, "the refusal is retryable — a second turn samples the guard again");
 });
 

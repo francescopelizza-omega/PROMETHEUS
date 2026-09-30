@@ -10,7 +10,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { readModelActivity, sharedModelActivityPath, touchModelActivity } from "./model-activity-store.js";
+import {
+  readModelActivity,
+  sharedModelActivityPath,
+  touchModelActivity,
+} from "./model-activity-store.js";
 
 /** Point `prometheusHome()` at a temp dir for the duration of `fn` — awaited so an async `fn`'s
  *  body finishes BEFORE the temp dir is torn down and the env var restored. */

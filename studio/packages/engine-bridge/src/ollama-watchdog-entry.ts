@@ -87,7 +87,8 @@ export function pidfilePath(home: string, runnerId: string): string {
 export function readLastActiveAt(home: string): number {
   try {
     const raw = JSON.parse(readFileSync(activityPath(home), "utf8")) as unknown;
-    const at = raw && typeof raw === "object" ? (raw as { lastActiveAt?: unknown }).lastActiveAt : undefined;
+    const at =
+      raw && typeof raw === "object" ? (raw as { lastActiveAt?: unknown }).lastActiveAt : undefined;
     return typeof at === "number" && Number.isFinite(at) ? at : Date.now();
   } catch {
     return Date.now();

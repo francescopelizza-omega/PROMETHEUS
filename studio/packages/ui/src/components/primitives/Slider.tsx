@@ -21,7 +21,19 @@ export interface SliderProps
 }
 
 export const Slider = forwardRef<HTMLInputElement, SliderProps>(function Slider(
-  { value, min = 0, max = 100, step = 1, onValueChange, className, style, disabled, onFocus, onBlur, ...rest },
+  {
+    value,
+    min = 0,
+    max = 100,
+    step = 1,
+    onValueChange,
+    className,
+    style,
+    disabled,
+    onFocus,
+    onBlur,
+    ...rest
+  },
   ref,
 ) {
   const pct = max > min ? ((value - min) / (max - min)) * 100 : 0;

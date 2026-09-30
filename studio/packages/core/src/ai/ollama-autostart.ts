@@ -27,9 +27,9 @@
  * it, and vice versa.
  */
 import {
+  type LaunchGuardSample,
   acquireRunnerStartLock,
   canStart,
-  type LaunchGuardSample,
   launchGuardVerdict,
   listenersOnPort,
   releaseRunnerStartLock,

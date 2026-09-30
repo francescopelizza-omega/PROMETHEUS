@@ -260,6 +260,10 @@ export function ActivityBar({
 
       {/* ── the divider: present ONLY when there is a lower part to divide off ──── */}
       {hasLower && (
+        // A STATIC separator is a valid non-widget ARIA role — only a resize splitter is focusable.
+        // This divider carries grouping meaning (see the colour note below), so the role stays and
+        // keyboard focus does not belong on it.
+        // biome-ignore lint/a11y/useFocusableInteractive: a static separator is not a widget
         <div
           role="separator"
           aria-orientation="horizontal"

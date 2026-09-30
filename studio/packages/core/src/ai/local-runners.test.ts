@@ -33,7 +33,11 @@ test("both ollama and lmstudio have a start command — each can be autostarted 
 test("only lmstudio has a dedicated stop command — its server runs INSIDE the app process, so a raw signal would quit the whole app, not just the server", () => {
   const ollama = LOCAL_RUNNERS.find((r) => r.id === "ollama");
   const lmstudio = LOCAL_RUNNERS.find((r) => r.id === "lmstudio");
-  assert.equal(ollama?.stop, undefined, "ollama serve has no stop subcommand — signalling the daemon directly IS correct for it");
+  assert.equal(
+    ollama?.stop,
+    undefined,
+    "ollama serve has no stop subcommand — signalling the daemon directly IS correct for it",
+  );
   assert.deepEqual(lmstudio?.stop, ["lms", "server", "stop"]);
 });
 

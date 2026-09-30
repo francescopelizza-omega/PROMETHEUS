@@ -88,8 +88,7 @@ test("no registered command is a SILENT no-op", async () => {
   assert.deepEqual(
     silent,
     [],
-    `these commands returned without writing anything or driving any seam — ` +
-      `a user sees nothing happen:\n${silent.join("\n")}`,
+    `these commands returned without writing anything or driving any seam — a user sees nothing happen:\n${silent.join("\n")}`,
   );
 });
 

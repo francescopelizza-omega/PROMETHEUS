@@ -222,53 +222,55 @@ export function BottomPanel({
           }}
         >
           {tabs.map((t, i) => {
-          const n = counts?.[t.id];
-          // selection is independent of collapse — a collapsed panel still marks which
-          // tab is active (else it reads as "nothing selected").
-          const selected = active === t.id;
-          return (
-            <button
-              key={t.id}
-              type="button"
-              role="tab"
-              aria-selected={selected}
-              // APP-100: roving tabindex (only the active tab is a tab stop) + Left/Right/Home/End
-              // movement (ARIA APG tab pattern — aria-selected alone is not enough). Fallback: if
-              // `active` isn't among the rendered tabs, the first tab is the stop (else the whole
-              // tablist would be unreachable by Tab).
-              tabIndex={rovingTabIndex(selected || (i === 0 && !tabs.some((t) => t.id === active)))}
-              onKeyDown={(e) => {
-                const ni = arrowMove(tabs.length, i, e.key);
-                if (ni === null) return;
-                e.preventDefault();
-                onSelect(tabs[ni]!.id);
-                const rail = e.currentTarget.parentElement;
-                rail?.querySelectorAll<HTMLElement>('[role="tab"]')[ni]?.focus();
-              }}
-              onClick={() => {
-                if (collapsed) onToggle();
-                onSelect(t.id);
-              }}
-              style={tabStyle(selected)}
-            >
-              {t.label}
-              {shouldShowBadge(n) && (
-                // §2.4: a warn-tinted mono chip, not a parenthesised number.
-                <span
-                  style={{
-                    fontFamily: "var(--font-mono)",
-                    fontSize: 10,
-                    padding: "0 5px",
-                    borderRadius: 6,
-                    background: "color-mix(in srgb, var(--warn) 15%, transparent)",
-                    color: "var(--warn)",
-                  }}
-                >
-                  {n}
-                </span>
-              )}
-            </button>
-          );
+            const n = counts?.[t.id];
+            // selection is independent of collapse — a collapsed panel still marks which
+            // tab is active (else it reads as "nothing selected").
+            const selected = active === t.id;
+            return (
+              <button
+                key={t.id}
+                type="button"
+                role="tab"
+                aria-selected={selected}
+                // APP-100: roving tabindex (only the active tab is a tab stop) + Left/Right/Home/End
+                // movement (ARIA APG tab pattern — aria-selected alone is not enough). Fallback: if
+                // `active` isn't among the rendered tabs, the first tab is the stop (else the whole
+                // tablist would be unreachable by Tab).
+                tabIndex={rovingTabIndex(
+                  selected || (i === 0 && !tabs.some((t) => t.id === active)),
+                )}
+                onKeyDown={(e) => {
+                  const ni = arrowMove(tabs.length, i, e.key);
+                  if (ni === null) return;
+                  e.preventDefault();
+                  onSelect(tabs[ni]!.id);
+                  const rail = e.currentTarget.parentElement;
+                  rail?.querySelectorAll<HTMLElement>('[role="tab"]')[ni]?.focus();
+                }}
+                onClick={() => {
+                  if (collapsed) onToggle();
+                  onSelect(t.id);
+                }}
+                style={tabStyle(selected)}
+              >
+                {t.label}
+                {shouldShowBadge(n) && (
+                  // §2.4: a warn-tinted mono chip, not a parenthesised number.
+                  <span
+                    style={{
+                      fontFamily: "var(--font-mono)",
+                      fontSize: 10,
+                      padding: "0 5px",
+                      borderRadius: 6,
+                      background: "color-mix(in srgb, var(--warn) 15%, transparent)",
+                      color: "var(--warn)",
+                    }}
+                  >
+                    {n}
+                  </span>
+                )}
+              </button>
+            );
           })}
         </div>
         {rightSlot && (
