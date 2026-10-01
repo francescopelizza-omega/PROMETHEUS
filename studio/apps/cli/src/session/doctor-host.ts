@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * session/doctor-host.ts — measure the machine, so `onboarding/doctor.ts` can judge it.
  *

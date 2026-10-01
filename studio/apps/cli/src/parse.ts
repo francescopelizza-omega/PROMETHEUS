@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * parse.ts — the hand-rolled arg parser for `prometheus`. ZERO deps.
  *

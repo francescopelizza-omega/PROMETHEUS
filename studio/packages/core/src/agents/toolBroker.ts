@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * agents/toolBroker.ts — the §4.3 capability chokepoint (PURE, the load-bearing rule).
  *

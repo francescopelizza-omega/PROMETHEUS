@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * e2e/baselines.spec.ts — the §9 VISUAL ACCEPTANCE gate.
  *

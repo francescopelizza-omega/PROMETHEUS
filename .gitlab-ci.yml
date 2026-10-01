@@ -9,14 +9,17 @@
 # The remote is GitLab (gitlab.com/red-beard-phoenix/PROMETHEUS), hence this file rather than
 # .github/workflows.
 #
-# THERE ARE FOUR GITHUB WORKFLOWS IN THIS REPO AND NONE OF THEM HAS EVER RUN. They live at
-# `studio/.github/workflows/`, and GitHub only reads `.github/workflows/` at the REPOSITORY
-# root — which is one level up. They were also written for a different repository layout
-# (`working-directory: PROMETHEUS/studio`), against a remote that is not this one. Worse, they
-# verify with `turbo run test`, and turbo runs the PER-PACKAGE `test` script: apps/desktop
-# declares none at all and apps/cli declares one that names a single file, so that command
-# exercises roughly a third of the suite and reports green. This file calls the root runner
-# directly for exactly that reason.
+# THERE WERE FOUR GITHUB WORKFLOWS IN THIS REPO AND NONE OF THEM EVER RAN — deleted 2026-09-30,
+# before the first public release. They lived at `studio/.github/workflows/`, and GitHub only
+# reads `.github/workflows/` at the REPOSITORY root, one level up. They were also written for a
+# different repository layout (`working-directory: PROMETHEUS/studio`) against a remote that is
+# not this one, and they verified with `turbo run test` — which runs the PER-PACKAGE `test`
+# script, and apps/desktop declares none at all while apps/cli declares one naming a single file.
+# That command exercised roughly a third of the suite and reported green.
+#
+# They were removed rather than fixed: a public contributor reading `release.yml` would
+# reasonably conclude this project publishes from GitHub Actions, and it does not. This file
+# calls the root test runner directly, which is the reason it exists.
 #
 # TWO THINGS ARE DELIBERATELY NOT IN THE BLOCKING PATH, and both are about not shipping a red
 # pipeline on day one:
@@ -156,9 +159,9 @@ verify:
 
 # ── Windows smoke (best-effort, informational until proven) ──────────────────
 # There was previously NO Windows coverage anywhere: four GitHub Actions workflows under
-# studio/.github/workflows/ had a Windows job, but that whole directory has never run (wrong
-# path for GitHub Actions, wrong repo layout, wrong forge — see the comment at the top of this
-# file). This is the first Windows job that actually has a chance of executing, on the real CI.
+# studio/.github/workflows/ carried a Windows job, but that whole directory never ran (wrong path
+# for GitHub Actions, wrong repo layout, wrong forge) and was deleted 2026-09-30 — see the comment
+# at the top of this file. This is the first Windows job that has a chance of executing, on real CI.
 #
 # Honesty about what's NOT verified: this job has never been run — there is no Windows machine
 # available to test it from. `saas-windows-medium-amd64` is GitLab.com's documented shared

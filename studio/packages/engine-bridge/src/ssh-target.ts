@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * ai/ssh-target.ts — how Prometheus addresses a machine over SSH, and why the argv is built here.
  *

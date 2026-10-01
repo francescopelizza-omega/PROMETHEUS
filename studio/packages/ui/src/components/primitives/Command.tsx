@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * Command.tsx — the ⌘K command palette primitive (file 08 §3.1 / §4.2 / §4.3).
  *

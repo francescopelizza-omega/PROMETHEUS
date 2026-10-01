@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * stretch — run-a-too-big-model toolkit: the curated AirLLM/offload technique
  * registry + a pure feasibility assessor that recommends the cheapest viable way

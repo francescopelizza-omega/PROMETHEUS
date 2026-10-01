@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 import { type EngineClient, createEngineClient } from "./client.js";
 /**
  * engine.ts — PrometheusEngine, the typed command FACADE (file 02 §3.4).

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * ai/index.ts — the AI-Providers surface (file 12 §4/§5): the Tier-A-first picker, the
  * loud §4.1 typed-confirm cost modal, the §4.3 live spend meter, and the §5.1 screen

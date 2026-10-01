@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * agent/protocol/frame-body.ts — neutralize frame delimiters inside untrusted CONTENT.
  *

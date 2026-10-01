@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * session/agent-runtime.ts — the P4 in-session agent runtime (file 11 §3.2 wiring).
  *

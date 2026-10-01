@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * updates/tool-registry.ts — what PROMETHEUS depends on, how to read its version, how to update it.
  *
@@ -61,7 +63,7 @@ export type ToolRole =
  *
  * Ordered preference lives on the row, not here — see `ToolCheck.latest`.
  */
-export type LatestChannel =
+type LatestChannelKind =
   /** npm registry `/<pkg>/latest` → `.version`. */
   | { kind: "npm"; pkg: string }
   /** `formulae.brew.sh/api/formula/<name>.json` → `.versions.stable`. */
@@ -79,6 +81,24 @@ export type LatestChannel =
   | { kind: "vendor-delta"; url: string; note: string }
   /** No machine-readable source exists. `why` is shown to the user instead of a version. */
   | { kind: "none"; why: string };
+
+/**
+ * A channel, plus the installs it is actually a valid comparison FOR.
+ *
+ * `onlyOwners` mirrors `UpdateCommand.onlyOwners` and exists for the same reason: a source can be
+ * authoritative for one install of a tool and meaningless for another. `askLatest` only ever
+ * REORDERED channels by owner, never excluded one, so a feed that tracks a different artifact
+ * still answered and was still compared.
+ *
+ * Measured on LM Studio: the app installed here is `/Applications/Bionic.app` at 1.0.3+3, while
+ * the Homebrew cask `lm-studio` publishes 0.4.25 — two different numbering schemes for two
+ * different artifacts. Comparing them does not yield a wrong update, it yields a meaningless
+ * one: 1.0.3 "beats" 0.4.25, so an app install would be reported as ahead of the latest release.
+ * Omitted means "valid for any install", which is right for npm and PyPI feeds.
+ */
+export type LatestChannel = LatestChannelKind & {
+  onlyOwners?: readonly InstallOwner[];
+};
 
 /**
  * One way to update, tied to how the tool was installed.
@@ -133,7 +153,18 @@ export interface ToolCheck {
    * A macOS app bundle whose `Info.plist` carries the authoritative installed version.
    * Checked BEFORE `probe` on darwin, because the app and the CLI can differ.
    */
-  appBundle?: string;
+  /**
+   * Where a macOS `.app` for this tool lives, in preference order.
+   *
+   * A LIST because the single hardcoded path was measured to be wrong, and wrong silently. The
+   * lmstudio row said `/Applications/LM Studio.app`; on this machine LM Studio ships as
+   * `/Applications/Bionic.app` (CFBundleIdentifier `ai.elementlabs.bionic`), so `exists()` failed,
+   * no version was read, and the report said "installed version unreadable" about an app whose
+   * version sits in its Info.plist exactly where it always has.
+   *
+   * One string is still accepted — the common case has one answer.
+   */
+  appBundle?: string | readonly string[];
   /** channels in preference order — the first that answers wins. */
   latest: readonly LatestChannel[];
   update: readonly UpdateCommand[];
@@ -196,14 +227,54 @@ export const TOOL_CHECKS: readonly ToolCheck[] = Object.freeze([
     id: "lmstudio",
     label: "LM Studio",
     role: "engine",
+    /**
+     * `lms --version` is NOT a version source, measured: it prints `CLI commit: 71bd99c`, a git
+     * commit of the CLI. `lms version` is worse — there is no such subcommand, so it prints the
+     * ASCII banner and exits 0, which looks like success. The probe stays for PATH attribution;
+     * the version comes from the bundle.
+     */
     probe: { bin: "lms", args: ["--version"] },
-    appBundle: "/Applications/LM Studio.app",
-    latest: [{ kind: "brew-cask", token: "lm-studio" }],
+    appBundle: [
+      "/Applications/LM Studio.app",
+      /**
+       * Measured 2026-09-30: LM Studio ships on this machine as `/Applications/Bionic.app`
+       * (CFBundleIdentifier `ai.elementlabs.bionic`, "Element Labs Inc."). Nothing named
+       * "LM Studio.app" exists here, and `~/.lmstudio/.internal/app-install-location.json`
+       * points at the Bionic bundle. A single hardcoded path made the version unreadable.
+       */
+      "/Applications/Bionic.app",
+    ],
+    latest: [
+      {
+        kind: "brew-cask",
+        token: "lm-studio",
+        /**
+         * Only meaningful for a copy Homebrew actually installed. The cask publishes 0.4.25
+         * while the app bundle here is 1.0.3+3 — different artifacts, different numbering. Left
+         * ungated, `askLatest` answered with the cask version for an app install and the
+         * comparison said the app was ahead of the latest release.
+         */
+        onlyOwners: ["brew-cask"],
+      },
+      /**
+       * The fallback for the app install, and it is deliberately a refusal to compare.
+       *
+       * With the cask feed gated to cask installs, an app install has NO channel left — and an
+       * empty channel list renders as the meaningless "could not check — no channel", which
+       * reads like a failure. It is not one: there is genuinely no feed publishing this app's
+       * version scheme, and saying so is the honest answer. LM Studio updates itself from
+       * inside the app, so nothing is lost by not comparing.
+       */
+      {
+        kind: "none",
+        why: "LM Studio updates itself; no feed publishes the app's own version scheme (the Homebrew cask tracks a different one)",
+      },
+    ],
     update: [
       { via: "app", command: "", note: "LM Studio updates itself from inside the app." },
       { via: "brew-cask", platform: "darwin", command: "brew upgrade --cask lm-studio" },
     ],
-    note: "The cask version carries a revision suffix (e.g. 0.4.25,1); compare only the part before the comma.",
+    note: "Installed as /Applications/Bionic.app here (Element Labs), not 'LM Studio.app'. The app and the Homebrew cask use different version schemes (1.0.3+3 vs 0.4.25), so the cask feed is only compared against a cask install; `lms --version` prints a CLI commit, never the app version.",
   },
   {
     id: "llama.cpp",

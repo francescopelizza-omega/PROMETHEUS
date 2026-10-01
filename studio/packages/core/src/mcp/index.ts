@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * mcp/index.ts — the MCP public-surface barrel (file 09 §2, APP-095).
  *

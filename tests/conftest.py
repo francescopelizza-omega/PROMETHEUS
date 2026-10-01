@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Francesco Pelizza
 """Test isolation for the engine's own config dir.
 
 `prometheus.py` resolves `PROM_DIR` (and the skills dir, trust file and URL-pin manifest

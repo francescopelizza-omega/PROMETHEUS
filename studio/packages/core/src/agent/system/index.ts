@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * agent/system/index.ts — Tier R barrel (full_wrapper_compose Phase 1).
  *

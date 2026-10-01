@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * shell/theme-resolve.ts — the §6 theming RESOLUTION model (file 08 §6).
  *

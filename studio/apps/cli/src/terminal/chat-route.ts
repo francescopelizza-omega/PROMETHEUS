@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * terminal/chat-route.ts — lift a parsed `chat --cli …` invocation into the P5/P6
  * terminal-chat handoff (runTerminalChat). This is the ONE place that maps

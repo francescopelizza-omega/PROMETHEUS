@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * ai/usage.ts — accumulating token usage across the frames of one streamed turn.
  *

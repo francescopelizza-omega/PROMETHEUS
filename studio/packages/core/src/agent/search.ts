@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * agent/search.ts — `web_search`, behind a provider seam, with no fabrication.
  *

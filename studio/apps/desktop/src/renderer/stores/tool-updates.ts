@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * stores/tool-updates.ts — Studio's view of the THIRD-PARTY update report.
  *

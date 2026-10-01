@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * settings/schema.ts — the Studio settings shape + a lenient validator (file 09 §7.1).
  *

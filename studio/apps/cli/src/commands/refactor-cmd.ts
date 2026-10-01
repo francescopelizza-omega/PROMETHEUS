@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * commands/refactor-cmd.ts — `prometheus refactor <structure|imports|callgraph> <file>`
  * over the refactor.py sidecar (CLI-009). Read-only AST analyses: a structure

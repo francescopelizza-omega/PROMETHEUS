@@ -4,7 +4,7 @@
   "private": false,
   "type": "module",
   "description": "prometheus — Prometheus Studio terminal CLI / interactive TUI (Node). Full GUI feature parity over engine-bridge.",
-  "license": "MIT",
+  "license": "Apache-2.0",
   "author": "Francesco Pelizza <red-beard-phoenix@users.noreply.gitlab.com>",
   "repository": {
     "type": "git",
@@ -14,8 +14,8 @@
   "bugs": { "url": "https://gitlab.com/red-beard-phoenix/PROMETHEUS/-/issues" },
   "homepage": "https://gitlab.com/red-beard-phoenix/PROMETHEUS",
   "bin": { "prometheus": "dist/bin.js" },
-  "files": ["dist/bin.js", "dist/ollama-watchdog-entry.js", "README.md"],
-  "engines": { "node": ">=20" },
+  "files": ["dist/bin.js", "dist/ollama-watchdog-entry.js", "README.md", "LICENSE"],
+  "engines": { "node": ">=22.6" },
   "publishConfig": { "access": "public" },
   "//publish-note": "CLI-098 (M7): the published tarball ships TWO self-contained files — dist/bin.js and dist/ollama-watchdog-entry.js — produced by `prepack` = `tsc -b` (build + typecheck the workspace deps) then esbuild bundles src/bin.ts with the @prometheus/* WORKSPACE deps INLINED. Those live in devDependencies (dev gets the pnpm symlink for tsc/tests; publish DROPS devDependencies), so the tarball has NO dangling `workspace:*` and NO registry dependency on the sibling packages. The Ink REPL externals (ink/react/yargs/chalk) are also devDependencies + `--external`: the one-shot CLI + the bundled REPL brain need none of them (bin.ts loads the Ink view via a guarded dynamic import and degrades to the one-shot help when absent), so `dependencies` is empty and `npm i -g` is truly zero-dependency. `files` is a strict whitelist ⇒ src/, *.test.*, *.map, .d.ts, dev-register.mjs, tsconfig NEVER reach the tarball (verify with `pnpm pack --dry-run`). The second file is engine-bridge's local-runner WATCHDOG, bundled by its own esbuild pass because it is SPAWNED BY PATH and never imported: nothing in bin.js's module graph references it, so the single-outfile build simply omitted it and the detached idle-shutdown + critical-RAM eviction silently never existed in any published CLI. It must stay in `files` and keep exactly the basename ollama-watchdog-entry.js, which is what `watchdogEntryPath()` resolves beside the bundle. The engine (prometheus.py/nemesis) is NOT bundled — set PROMETHEUS_PY / NEMESIS_BIN or put it on PATH (see README + doctor-bridge.ts).",
   "scripts": {

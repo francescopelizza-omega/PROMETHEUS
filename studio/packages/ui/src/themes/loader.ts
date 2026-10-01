@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 import { type ThemeTokens, applyTheme, schemeToTheme, themeToCssVars } from "../theme.js";
 /**
  * themes/loader.ts — load/apply/save schemes (file 13 §3.7), wiring 08's engine.

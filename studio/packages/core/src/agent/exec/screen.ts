@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * agent/exec/screen.ts — LAYER 6: the catastrophic-pattern denylist (§6, Phase 6).
  *

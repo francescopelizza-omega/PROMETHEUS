@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * main/repo-ipc.ts — the typed `repo:*` ipcMain handlers (file 06 §3, FEATURE #5a).
  *
@@ -45,6 +47,7 @@ import {
   type RepoRescanResult as BridgeRescanResult,
   type RepoClientOptions,
   createRepoClient,
+  describeEngineFailure,
 } from "@prometheus/engine-bridge";
 
 import {
@@ -68,10 +71,10 @@ import {
 } from "./repo-validate.js";
 
 /** Coerce an unknown caught value to a short error string. */
-function errString(e: unknown): string {
-  if (e instanceof Error) return e.message;
-  return typeof e === "string" ? e : "unknown error";
-}
+// `errString` was a LOCAL copy here, one of twenty across main/*.ts, and every copy returned
+// `e.message` alone — discarding `EngineError.stderrTail`, which is where the engine puts the
+// actual reason when it exits before emitting JSON. See `describeEngineFailure`'s doc.
+const errString = describeEngineFailure;
 
 /** Map an engine-bridge RepoGateSummary → the renderer-safe shape (already plain). */
 function toGate(g: BridgeRepoResult["gate"]): RepoGateSummary | undefined {

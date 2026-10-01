@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * routes/models-hub-view.ts — PURE view model for the handoff_3 §3 Model Hub.
  *
@@ -213,6 +215,59 @@ export function endpointRow(
     usable,
     ...(usable ? {} : { note: `key in keychain · A${CLOUD_MIN_AUTH}+ only` }),
   };
+}
+
+/**
+ * The LOCAL rows of the Endpoints island, built from the machine scan rather than a catalog.
+ *
+ * `endpointRow` above returns `usable: true` for every local endpoint unconditionally, and the
+ * list it was fed came from the engine's `LOCAL_AI_ENDPOINTS` — a five-row constant of default
+ * URLs (prometheus.py §6H). The two together meant the island rendered five green dots on a
+ * machine where nothing was listening, and showed the identical five on a machine serving all
+ * of them. A green dot that is always green is not a status indicator.
+ *
+ * Cloud rows keep coming from the catalog, correctly: a list of remote API base URLs IS static
+ * knowledge, and there is nothing on this machine to ask about it. The bug was never "static
+ * data is bad" — it was making a static claim about the local machine.
+ */
+export function localEndpointRows(
+  runners: readonly {
+    id: string;
+    name: string;
+    baseUrl: string;
+    state: "serving" | "installed" | "absent";
+    models: readonly string[];
+    canStart: boolean;
+  }[],
+): EndpointRow[] {
+  return runners.map((r) => {
+    if (r.state === "serving") {
+      const n = r.models.length;
+      return {
+        name: r.id,
+        baseUrl: r.baseUrl,
+        locality: "local" as const,
+        usable: true,
+        // Serving-but-empty is a real and confusing state: the port answers, so every liveness
+        // check passes, and then the turn fails because there is nothing to run.
+        ...(n === 0
+          ? { note: "running · no model loaded" }
+          : { note: `${n} model${n === 1 ? "" : "s"}` }),
+      };
+    }
+    return {
+      name: r.id,
+      baseUrl: r.baseUrl,
+      locality: "local" as const,
+      usable: false,
+      note:
+        r.state === "installed"
+          ? r.canStart
+            ? "installed · not running"
+            : "installed · start it yourself (needs a model argument)"
+          : "not installed",
+    };
+  });
 }
 
 /* ── the Installed island ────────────────────────────────────────────────────*/

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * catalog/types.ts — the Studio-side data models for the catalog surface (file 06 §2).
  *

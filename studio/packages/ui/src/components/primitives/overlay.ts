@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * primitives/overlay.ts — the shared overlay behaviour the Dialog/AlertDialog/Sheet/
  * Popover/DropdownMenu/ContextMenu primitives compose (file 08 §3.1 / §7).

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * agent/compact.ts — autocompact + the session-event bus (file 14 §3.11).
  *

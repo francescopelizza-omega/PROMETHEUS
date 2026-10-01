@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Francesco Pelizza
 """test_read_json_typesafe.py — `_read_json` must never hand a non-dict to its callers.
 
 The annotation said `-> dict` and the body returned whatever `json.loads` produced. All ~18 call

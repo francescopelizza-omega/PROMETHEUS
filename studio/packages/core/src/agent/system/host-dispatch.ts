@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * agent/system/host-dispatch.ts — the ONE list of tools a host's system-tool channel can run.
  *

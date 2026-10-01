@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * ai/footprint-ledger.ts — what a model ACTUALLY took, remembered, so the next estimate is right.
  *

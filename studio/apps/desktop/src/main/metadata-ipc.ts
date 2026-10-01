@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 import { stat } from "node:fs/promises";
 import { isAbsolute } from "node:path";
 /**
@@ -19,7 +21,11 @@ import { isAbsolute } from "node:path";
  */
 import { dialog, ipcMain, shell } from "electron";
 
-import { type MetadataClientOptions, createMetadataClient } from "@prometheus/engine-bridge";
+import {
+  type MetadataClientOptions,
+  createMetadataClient,
+  describeEngineFailure,
+} from "@prometheus/engine-bridge";
 
 import {
   type FileOpenResult,
@@ -38,9 +44,10 @@ import {
   validateMetadataTimestomp,
 } from "./metadata-validate.js";
 
-function errString(e: unknown): string {
-  return e instanceof Error ? e.message : String(e);
-}
+// `errString` was a LOCAL copy here, one of twenty across main/*.ts, and every copy returned
+// `e.message` alone — discarding `EngineError.stderrTail`, which is where the engine puts the
+// actual reason when it exits before emitting JSON. See `describeEngineFailure`'s doc.
+const errString = describeEngineFailure;
 
 /** Construction-time wiring (the metadata client options). */
 export interface MetadataIpcWiring {

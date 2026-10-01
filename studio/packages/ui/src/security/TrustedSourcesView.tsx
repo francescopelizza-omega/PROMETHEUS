@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * TrustedSourcesView.tsx — the trust-store list (file 03 §8).
  *

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * marketplace/index.ts — the in-GUI marketplace barrel (file 09 §6).
  *

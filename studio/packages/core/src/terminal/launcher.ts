@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * terminal/launcher.ts — the terminal-panel session model (file 13 §1.2/§1.7).
  *

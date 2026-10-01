@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * GateVerdictSheet.tsx — a THIN wrapper re-using the file-03 VerdictSheet (§3.3/§6).
  *

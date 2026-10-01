@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * renderer/stores/tool-updates-derive.ts — the PURE shaping of the update report for Studio.
  *

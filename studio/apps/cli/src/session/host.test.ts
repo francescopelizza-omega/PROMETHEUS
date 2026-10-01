@@ -23,6 +23,7 @@ const TMP_HOME = mkdtempSync(join(tmpdir(), "prom-home-"));
 import type { CommandOutcome } from "../context.js";
 import type { ParsedArgs } from "../parse.js";
 import { setColorEnabled } from "../render.js";
+import { stringWidth } from "../tui/width.js";
 import type { MessageTurnResult } from "./agent-runtime.js";
 import { type SessionHandlers, launchSession, makeBudgetGuard, seedTuning } from "./host.js";
 import type { SlashResult } from "./slash-exec.js";
@@ -187,6 +188,80 @@ test("banner + footer render; a message routes to runMessageTurn (which streams 
   // the host must not DOUBLE-print the reply (runtime already streamed it).
   assert.equal(out.match(/hi back/g)?.length, 1);
   assert.match(out, /session ended/); // clean close note
+});
+
+/**
+ * The two etched initials.
+ *
+ * P and M are filled with `▓` and milled with `▒`/`░` instead of being drawn in solid `█`.
+ * The thing that can silently go wrong is NOT the texture — it is the two invariants the
+ * texture has to respect, so both are asserted rather than eyeballed:
+ *
+ *   • CELL OCCUPANCY. De-texturing (`░▒▓` → `█`) must give back the classic letterforms
+ *     exactly. If a future edit moves ink into a blank cell or drops a filled one, the
+ *     silhouette drifts and nobody notices, because a shaded letter already "looks wrong".
+ *   • COLUMN WIDTH. Every shade glyph must measure ONE column. The banner box pads from
+ *     `visibleLen`, so a two-column glyph here tears the right border and every row below it.
+ *
+ * Color is OFF for this suite (`setColorEnabled(false)`), which is exactly the NO_COLOR case:
+ * the etching must still be visible with every escape stripped, and these assertions are what
+ * says so.
+ */
+test("the etched initials: P and M are shaded and milled, and neither shape nor width moved", async () => {
+  const { out } = await runSession(["hello there"], {
+    runMessageTurn: async () => turnResult("hi back"),
+  });
+
+  // The five assembled wordmark rows, verbatim. P and M carry the texture; every other
+  // letter is untouched solid `█`, which is what pins the alignment between them.
+  const ROWS = [
+    "▓▒▓  ███  ▟██▙ ▓   ▓ ████ █████ █  █ ████ █  █ ▟███",
+    "▒  ▒ █  █ █  █ ▒▓ ▓▒ █      █   █  █ █    █  █ █   ",
+    "░▓▒  ███  █  █ ▓ ▓ ░ ███    █   ████ ███  █  █ ▜██▙",
+    "▓    █ █  █  █ ░   ▓ █      █   █  █ █    █  █    █",
+    "▒    █  █ ▜██▛ ▓   ▓ ████   █   █  █ ████ ▜██▛ ███▛",
+  ];
+  for (const row of ROWS) {
+    assert.ok(out.includes(row), `wordmark row missing or altered:\n${row}`);
+  }
+
+  // Both initials carry the base shade and at least one mill line; neither is solid any more.
+  assert.match(out, /▓▒▓/); // P, row 0 — base + mill
+  assert.match(out, /░▓▒/); // P, row 2 — the deep gouge across the stem
+  // A string, not a regex: the gap between the legs is three literal spaces, and biome's
+  // noMultipleSpacesInRegularExpressionLiterals rightly objects to counting them by eye.
+  assert.ok(out.includes("░   ▓"), "M, row 3 — the gouge on the left leg");
+
+  // The M's inner V must stay UNMILLED, or the middle of the letter reads as noise and the
+  // M collapses into two bars. All three V cells at the base shade, and the row-1 stems that
+  // flank them one step lighter — that contrast is what separates the V from the right stem.
+  const vRow = ROWS[1]?.slice(15, 20);
+  const tipRow = ROWS[2]?.slice(15, 20);
+  assert.equal(vRow, "▒▓ ▓▒", "M row 1: ▒ stems flanking ▓ V arms");
+  assert.equal(tipRow?.[2], "▓", "M row 2: the V tip is never milled");
+
+  // Both of the M's legs must ANCHOR on the base shade. A leg that ends on a mill line or a
+  // gouge fades out at the baseline and the letter reads as if it were cropped — which is
+  // what the left leg did while its last cell was `▒`.
+  const lastRow = ROWS[4]?.slice(15, 20);
+  assert.equal(lastRow?.[0], "▓", "M: left leg lands on the base shade");
+  assert.equal(lastRow?.[4], "▓", "M: right leg lands on the base shade");
+
+  // Invariant 1: de-texturing restores the ORIGINAL solid silhouettes, cell for cell.
+  const solid = ROWS.map((r) => r.replace(/[░▒▓]/g, "█"));
+  const col = (rows: string[], from: number, to: number): string[] =>
+    rows.map((r) => r.slice(from, to));
+  assert.deepEqual(col(solid, 0, 4), ["███ ", "█  █", "███ ", "█   ", "█   "], "P silhouette");
+  assert.deepEqual(
+    col(solid, 15, 20),
+    ["█   █", "██ ██", "█ █ █", "█   █", "█   █"],
+    "M silhouette",
+  );
+
+  // Invariant 2: one column per shade glyph, or the banner's right border tears.
+  for (const g of ["░", "▒", "▓", "█"]) {
+    assert.equal(stringWidth(g), 1, `${g} must measure one column`);
+  }
 });
 
 test("banner shows the REAL, full home path — never a bare '~' — when cwd IS the home directory", async () => {

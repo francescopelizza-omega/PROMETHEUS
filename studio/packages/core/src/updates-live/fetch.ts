@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * updates/fetch.ts — the network seams for update checks (global fetch, fail-soft).
  *

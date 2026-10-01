@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * memory — the agent's durable cross-session fact store: parse/validate/assemble (PURE).
  * The host reads/writes `~/.prometheus/memory/<project-key>/*.md`

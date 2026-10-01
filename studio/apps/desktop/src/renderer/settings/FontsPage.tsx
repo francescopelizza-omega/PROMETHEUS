@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * FontsPage.tsx — Settings ▸ Fonts (PyCharm-style editor + terminal font config).
  *

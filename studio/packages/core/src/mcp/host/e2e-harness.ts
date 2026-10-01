@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * mcp/host/e2e-harness.ts — opt-in REAL reference-MCP-server e2e harness (CLI-038). NODE-ONLY.
  *

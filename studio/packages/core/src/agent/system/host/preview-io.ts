@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * agent/system/host/preview-io.ts — the real filesystem behind `previewMutation`.
  *

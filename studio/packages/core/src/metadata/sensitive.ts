@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * metadata/sensitive.ts — which metadata keys commonly leak personal, location or device info.
  *

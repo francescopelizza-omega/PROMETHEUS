@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Francesco Pelizza
 """test_envmgr.py — exercise envmgr.py's read-only verbs end to end.
 
 Each test runs the verb as a SUBPROCESS (the same way the bridge will), asserts that

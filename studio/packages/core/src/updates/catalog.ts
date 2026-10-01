@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * updates/catalog.ts — one shape for "a model you could install", from several sources.
  *

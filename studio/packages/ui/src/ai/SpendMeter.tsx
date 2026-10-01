@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * SpendMeter.tsx — the live metered-spend widget (file 12 §4.3).
  *

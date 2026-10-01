@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Francesco Pelizza
 """repo.py — the gated arbitrary-URL GitHub repo manager (file 06 §3, feature #5a).
 
 A repo the user just wants to clone/read/use — distinct from the engine's pre-declared

@@ -1,4 +1,6 @@
 #!/usr/bin/env node
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * dev-logged.mjs — run the desktop app in dev (`electron-vite dev`) and TEE every
  * line of stdout + stderr to a log file, verbatim, while still printing to the

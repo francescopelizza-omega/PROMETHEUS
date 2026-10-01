@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * render/catalog-view.ts — P3 ANSI projectors for the catalog surface.
  *

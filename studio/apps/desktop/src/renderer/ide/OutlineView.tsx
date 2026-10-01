@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * ide/OutlineView.tsx — the Structure / Outline tool window (JetBrains Structure ·
  * VS Code Outline parity).

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * main/security-validate.ts — the ZOD validation seam for the security IPC (§5,§7).
  *

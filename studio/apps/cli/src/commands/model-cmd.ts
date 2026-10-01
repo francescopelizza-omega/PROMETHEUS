@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * commands/model-cmd.ts — the FULL `prometheus model …` surface over the modelhub.py
  * sidecar (C7 / file 05), at parity with the GUI Model Hub. Discovery + fit + the

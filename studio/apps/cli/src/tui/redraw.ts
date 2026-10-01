@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * tui/redraw.ts — the inline (no-alt-screen) repaint engine.
  *

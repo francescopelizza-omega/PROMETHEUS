@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * ide/state/rebase-plan.ts — the PURE interactive-rebase view-model (APP-082).
  *

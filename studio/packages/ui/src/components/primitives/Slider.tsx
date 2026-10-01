@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * Slider.tsx — a single-thumb range slider (file 08 §3.1).
  *

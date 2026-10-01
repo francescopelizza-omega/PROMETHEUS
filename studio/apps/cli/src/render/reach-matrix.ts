@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * render/reach-matrix.ts — P3 projector for the `matrix` envelope (file 02 §3.3).
  *

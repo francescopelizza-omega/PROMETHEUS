@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * security/gate-full.ts — the RICH gate (file 03 §4, §5; reconciliation note).
  *

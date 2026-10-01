@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * tui/clipboard.ts — OSC 52 "set clipboard" escape sequence (CLI-068).
  *

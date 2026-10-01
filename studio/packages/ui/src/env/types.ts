@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * env/types.ts — the renderer-facing DISPLAY shapes the §3/§5 env components
  * render, as @prometheus/ui-LOCAL structural mirrors (same discipline as

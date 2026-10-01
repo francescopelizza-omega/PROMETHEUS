@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * session.ts — one chat session: core's `runAgentTurn`, driven for the VS Code host.
  *

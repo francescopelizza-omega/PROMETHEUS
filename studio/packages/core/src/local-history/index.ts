@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * local-history — file 13 §2.6: a git-independent, capped file-snapshot timeline with
  * diff + revert (survives uncommitted work). Pure ring buffer + capture policy +

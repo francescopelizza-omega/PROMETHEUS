@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * main/ide/exec-host.ts — the one-shot, capture-only command runner for `ide:exec`.
  *

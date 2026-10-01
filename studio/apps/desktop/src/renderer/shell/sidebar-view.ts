@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * shell/sidebar-view.ts — PURE helpers for the shell Sidebar (APP-002).
  *

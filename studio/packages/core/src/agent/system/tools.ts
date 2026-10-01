@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * agent/system/tools.ts — Tier R: the agent's read-only view of the machine (Phase 1).
  *

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * DangerRibbon.tsx — the persistent forced-danger ribbon (file 03 §5.4).
  *

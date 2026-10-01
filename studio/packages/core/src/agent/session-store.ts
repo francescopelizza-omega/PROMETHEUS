@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * agent/session-store.ts — named, searchable, resumable conversation store (file 14 §3.10).
  *

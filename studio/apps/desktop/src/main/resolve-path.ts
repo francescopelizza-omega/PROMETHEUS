@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * resolve-path.ts — repair PATH for a GUI-launched (Finder/Dock) desktop app.
  *

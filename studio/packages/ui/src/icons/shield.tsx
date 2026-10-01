@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * icons/shield.tsx — the nemesis security mark (08 §2.5 custom set).
  *

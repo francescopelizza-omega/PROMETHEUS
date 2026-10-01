@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * main/pr-gateway.ts — the MAIN-side glue for gated PR review (APP-085).
  *

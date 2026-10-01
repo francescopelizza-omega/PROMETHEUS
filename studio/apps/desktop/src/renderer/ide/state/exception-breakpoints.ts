@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * ide/state/exception-breakpoints.ts — the PURE exception-breakpoint filter model
  * (APP-079).

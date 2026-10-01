@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * ide/ClipboardHistory.tsx — the "Paste from History" picker (JetBrains ⌘⇧V · VS Code
  * clipboard-ring parity; plan file 01).

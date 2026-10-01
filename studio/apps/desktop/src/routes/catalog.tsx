@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * routes/catalog.tsx — the Catalog browser tab (file 06 §4,§5,§6).
  *

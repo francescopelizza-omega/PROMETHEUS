@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * mcp/host/tool-pinning.ts — detect an MCP server's tool descriptors changing after approval.
  *

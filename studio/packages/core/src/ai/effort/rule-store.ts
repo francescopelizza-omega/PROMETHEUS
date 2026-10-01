@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * ai/effort/rule-store.ts — adding the 40th model should be a data edit, not a code change.
  *

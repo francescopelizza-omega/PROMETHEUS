@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * scripts/capture-contract.mjs — snapshot the engine envelope contract (file 10 §6.4).
  *

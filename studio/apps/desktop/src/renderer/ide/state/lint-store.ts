@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * ide/state/lint-store.ts — the linter fan-in diagnostics slice (APP-062).
  *

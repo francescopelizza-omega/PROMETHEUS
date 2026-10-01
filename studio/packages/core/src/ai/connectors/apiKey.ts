@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * ai/connectors/apiKey.ts — Tier-C metered connector (file 12 §1.2 / §4).
  *

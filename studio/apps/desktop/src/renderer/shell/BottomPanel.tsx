@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * shell/BottomPanel.tsx — the §4.2 "telemetry of the moment" panel (file 08 §4.2).
  *

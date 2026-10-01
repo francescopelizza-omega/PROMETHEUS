@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * routes/repos.tsx — the GitHub Repo Manager tab (file 06 §3, FEATURE #5a).
  *

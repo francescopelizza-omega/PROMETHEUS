@@ -1,4 +1,6 @@
 #!/usr/bin/env node
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * fake-engine.mjs — a deterministic stand-in for `python3 prometheus.py` used by
  * the sidecar tests (mutation-queue serialization + cancelAll). It mimics the

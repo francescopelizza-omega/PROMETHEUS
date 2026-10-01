@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * agent/protocol/feedback.ts — telling a model its call was unreadable, in a way it can act on.
  *

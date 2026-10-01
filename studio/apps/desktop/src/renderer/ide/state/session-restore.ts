@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * ide/state/session-restore.ts — crash-safe workbench persistence (APP-067).
  *

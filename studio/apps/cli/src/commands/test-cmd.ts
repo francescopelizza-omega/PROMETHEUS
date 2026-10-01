@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * commands/test-cmd.ts — `prometheus test <discover|run>` over the testmgr.py sidecar (CLI-007).
  *

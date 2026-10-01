@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * agent/protocol/contributors/host-tools.ts — "these external tools exist on this machine".
  *

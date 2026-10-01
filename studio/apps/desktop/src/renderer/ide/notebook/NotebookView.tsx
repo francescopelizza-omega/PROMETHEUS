@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * NotebookView.tsx — Monaco-multicell notebook (file 14 §3.25).
  *

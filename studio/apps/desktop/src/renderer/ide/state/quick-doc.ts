@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * ide/state/quick-doc.ts — PURE documentation helpers for Quick Doc (⌘J), the docstring-stub
  * generator, and reader-mode (APP-098). React-free/DOM-free so it unit-tests under node:test.

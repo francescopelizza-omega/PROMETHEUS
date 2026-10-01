@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * runner-census.ts — which model servers are up, and what are they holding?
  *
@@ -27,8 +29,21 @@ export interface RunnerProbe {
   api: "ollama" | "openai";
 }
 
-/** The two runners this repo models today (`core/src/ai/local-runners.ts`). */
-export const DEFAULT_RUNNERS: readonly RunnerProbe[] = Object.freeze([
+/**
+ * A minimal fallback probe set. **Prefer passing your own**, derived from
+ * `core/src/ai/local-runners.ts` — see `runnerCensus`'s doc for why this is not the registry.
+ *
+ * This used to be documented as "the two runners this repo models today", written as a manual
+ * copy of `LOCAL_RUNNERS`. On 2026-10-01 that registry grew to four (llama.cpp, vLLM) and this
+ * list did not, because nothing connects them: `engine-bridge` deliberately does not depend on
+ * `@prometheus/core` (the dependency boundary in CLAUDE.md §3), so the copy cannot be replaced
+ * by an import and will go stale again the next time a runner is added.
+ *
+ * It is therefore no longer a DEFAULT — `runnerCensus` requires its probes explicitly, so a
+ * caller cannot silently census two runners on a four-runner machine. It is kept, exported, for
+ * the narrow case of a caller that genuinely has no access to core.
+ */
+export const FALLBACK_RUNNER_PROBES: readonly RunnerProbe[] = Object.freeze([
   { id: "ollama", baseUrl: "http://127.0.0.1:11434", api: "ollama" },
   { id: "lmstudio", baseUrl: "http://127.0.0.1:1234", api: "openai" },
 ]);
@@ -51,6 +66,20 @@ export interface RunnerStatus {
   /** models resident right now. Empty for a daemon that is up but idle. */
   models: ResidentModelInfo[];
   host?: string;
+  /**
+   * Does `models` mean "HOLDING these", or only "could serve these"?
+   *
+   * `/api/ps` (ollama) reports residency, so `true`. The OpenAI-shaped `/v1/models` reports a
+   * CATALOGUE — see `parseOpenAiModels`' own doc — so `false`, and the comment above about
+   * "empty for a daemon that is up but idle" is simply NOT TRUE for that dialect: an idle
+   * LM Studio returns its whole library.
+   *
+   * This field exists because a consumer could not tell the two apart and one of them made a
+   * decision out of it: `admitModelLoad`'s one-server rule counted `models.length > 0` and
+   * would refuse every load on a machine where LM Studio was merely open. Carried through to
+   * `ResidentServer.residencyKnown`, which documents the full failure.
+   */
+  residencyKnown: boolean;
 }
 
 type FetchFn = typeof fetch;
@@ -104,27 +133,51 @@ export async function probeRunner(
   const timer = setTimeout(() => ac.abort(), opts.timeoutMs ?? 2000);
   try {
     const res = await f(`${base}${path}`, { signal: ac.signal });
-    if (!res.ok) return { runner: probe.id, baseUrl: probe.baseUrl, up: false, models: [] };
+    if (!res.ok) {
+      return {
+        runner: probe.id,
+        baseUrl: probe.baseUrl,
+        up: false,
+        models: [],
+        residencyKnown: probe.api === "ollama",
+      };
+    }
     const json = (await res.json()) as unknown;
     return {
       runner: probe.id,
       baseUrl: probe.baseUrl,
       up: true,
       models: probe.api === "ollama" ? parseOllamaPs(json) : parseOpenAiModels(json),
+      // ONLY the ollama dialect reports residency. See `RunnerStatus.residencyKnown`.
+      residencyKnown: probe.api === "ollama",
       ...(opts.host ? { host: opts.host } : {}),
     };
   } catch {
     // Unreachable, refused, timed out, or answered something that is not JSON — all mean the
     // same thing for admission: it is not holding weights we have to plan around.
-    return { runner: probe.id, baseUrl: probe.baseUrl, up: false, models: [] };
+    return {
+      runner: probe.id,
+      baseUrl: probe.baseUrl,
+      up: false,
+      models: [],
+      residencyKnown: probe.api === "ollama",
+    };
   } finally {
     clearTimeout(timer);
   }
 }
 
-/** Ask every runner, concurrently. Only those that answered are returned. */
+/**
+ * Ask every runner, concurrently. Only those that answered are returned.
+ *
+ * `probes` is REQUIRED. It defaulted to a hardcoded two-runner list that was a manual copy of
+ * `core`'s registry; when that registry grew to four, a no-argument census silently reported on
+ * half the machine — and a census is used for memory admission, where "nothing else is
+ * resident" is exactly the wrong answer to get wrong. Every existing caller already passed its
+ * probes explicitly, so requiring them costs nothing and removes the trap.
+ */
 export async function runnerCensus(
-  probes: readonly RunnerProbe[] = DEFAULT_RUNNERS,
+  probes: readonly RunnerProbe[],
   opts: { fetchFn?: FetchFn; timeoutMs?: number; host?: string } = {},
 ): Promise<RunnerStatus[]> {
   const all = await Promise.all(probes.map((p) => probeRunner(p, opts)));

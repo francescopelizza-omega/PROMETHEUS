@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * commands/model.ts — `prometheus model hw` / `prometheus model list` via modelhub.py (C7).
  *   model hw   -> hw.scan: host CPU/RAM/GPU + usable-weight budget for fit.

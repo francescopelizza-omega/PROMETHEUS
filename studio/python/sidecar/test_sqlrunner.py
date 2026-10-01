@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Francesco Pelizza
 """test_sqlrunner.py — unittest for the SQL console sidecar (APP-041).
 
 Live sqlite (a temp DB): connect, typed rows (int/float/text/null/blob), params, row-

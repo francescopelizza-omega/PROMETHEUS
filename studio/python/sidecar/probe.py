@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Francesco Pelizza
 """probe.py — system-Python capability probe (file 10 §3.2).
 
 Studio can run the engine with a BYO / system Python ("system-python mode") when a

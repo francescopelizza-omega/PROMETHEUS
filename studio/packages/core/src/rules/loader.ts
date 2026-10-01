@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * rules/loader.ts — AGENTS.md / CLAUDE.md precedence chain + /init (file 14 §3.3).
  *

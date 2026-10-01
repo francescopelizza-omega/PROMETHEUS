@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * db/sql-sources.ts — the SQL data-source store (file 14 §3.26, APP-043).
  *

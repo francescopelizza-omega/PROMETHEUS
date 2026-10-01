@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * main/model-validate.ts — the ZOD validation seam for the Model-Hub IPC
  * (file 05 §1/§7/§8). Mirrors env-validate.ts / security-validate.ts exactly:

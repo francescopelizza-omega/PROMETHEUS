@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * main/ide/fs-watch.ts — the file-tree watcher + fs read/write/tree (file 07 §6 / §3.2).
  *

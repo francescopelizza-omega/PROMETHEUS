@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Francesco Pelizza
 """Follow-up round: engine verbs that answered confidently about work they had not done.
 
 Each of these was reported by a hunt whose verification stage never ran, and each was then

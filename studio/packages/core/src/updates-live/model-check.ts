@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * updates/model-check.ts — the network seam for "is there a newer build of this model".
  *

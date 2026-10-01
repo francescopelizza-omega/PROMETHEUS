@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * ext/manifest.ts — parse + structurally validate `prometheus.extension.json` (§5.1).
  *

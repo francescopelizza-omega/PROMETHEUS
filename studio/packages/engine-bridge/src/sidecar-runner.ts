@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * sidecar-runner.ts — the canonical runner for the Studio Python helper sidecars
  * (python/sidecar/envmgr.py, modelhub.py, locate_engine.py, …). These are NOT

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * commands/invoke.ts — the `/invoke` repo-install picker (CLI side of the unified install).
  *

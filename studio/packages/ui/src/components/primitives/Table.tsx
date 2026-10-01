@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * Table.tsx — a token-styled data table (file 08 §3.1; the §5.3 package table, §5.4
  * serving list). Column-driven so callers declare headers + cell renderers. Density-

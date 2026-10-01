@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Francesco Pelizza
 """test_structsearch.py — unittest for the structural search/replace sidecar (APP-076).
 
 Runs structsearch.py as a SUBPROCESS (the real C7 envelope contract) + exercises the pure

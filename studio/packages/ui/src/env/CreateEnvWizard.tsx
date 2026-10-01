@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * CreateEnvWizard.tsx — the three-step Create-Environment wizard (file 04 §3.3).
  *

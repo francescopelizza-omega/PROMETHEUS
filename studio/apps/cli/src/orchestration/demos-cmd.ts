@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * orchestration/demos-cmd.ts — the `/demos` command: setup ↔ run ↔ status.
  *

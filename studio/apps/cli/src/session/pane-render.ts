@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 // core exposes the REPL brain as a NAMESPACE (`export * as repl`), so PaneId /
 // ReplState / footerLine live under `repl.*` — not as flat top-level exports.
 import { repl } from "@prometheus/core";

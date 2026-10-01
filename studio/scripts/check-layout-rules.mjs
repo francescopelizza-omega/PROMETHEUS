@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * scripts/check-layout-rules.mjs — HANDOFF_2 §9 "Layout rules, codified".
  *

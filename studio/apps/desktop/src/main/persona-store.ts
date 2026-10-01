@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * main/persona-store.ts — Persona Sharing (roadmap point 3): export/import of user-defined
  * sub-agent persona files, desktop half.

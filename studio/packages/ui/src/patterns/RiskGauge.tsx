@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * RiskGauge.tsx — the §5.2 risk meter (08 §3.2). A linear gauge 0–100 banded by the
  * nemesis verdict thresholds (block ≥ 70, warn ≥ 30): the one place a number becomes

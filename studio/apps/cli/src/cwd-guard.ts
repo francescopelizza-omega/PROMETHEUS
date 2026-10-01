@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * cwd-guard.ts — the ONE place every CLI entry point resolves its working directory through,
  * so none of them can ever end up pointed at Prometheus's OWN source repo.

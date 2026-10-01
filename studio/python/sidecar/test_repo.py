@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Francesco Pelizza
 """test_repo.py — exercise repo.py's gated arbitrary-URL clone manager (file 06 §3).
 
 The SECURITY-load-bearing path is the GATE DECISION over a STAGED clone, so we drive the

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * ai/remote-hosts.ts — self-hosted model servers on another machine you own.
  *
@@ -222,4 +224,52 @@ export function warnings(entry: RemoteHost): string[] {
     out.push("  (--ssh <user@host> measures it instead of taking your word for it)");
   }
   return out;
+}
+
+/**
+ * The settings key the declared remote hosts live under.
+ *
+ * Flat, and a JSON STRING rather than a nested object, because `saveSettings` is a shallow
+ * `{...loadSettings(), ...patch}` that rewrites the whole file — a nested object written from
+ * one surface would silently drop its siblings written by the other.
+ */
+export const REMOTE_HOSTS_KEY = "models.remoteHosts";
+
+/**
+ * Parse the stored `models.remoteHosts` value into the entries LOCALITY cares about.
+ *
+ * Lives in core because both surfaces must read the same store the same way. It did not, and
+ * the consequence was concrete: a GPU box declared with the terminal's `/remote add` was
+ * `locality: "local"` in the CLI and `"cloud"` in Studio, so under a local-only posture the
+ * IDE refused the very endpoint the terminal was happily using. `apps/cli/src/session/
+ * remote-hosts-store.ts` keeps the richer parse (it also validates the SSH target, which needs
+ * engine-bridge); this is the subset every surface can agree on.
+ *
+ * FAIL-SOFT, and the direction matters: a corrupt or hand-edited value yields an EMPTY list,
+ * never a throw and never a partial one. The list is an ALLOWLIST, so losing it costs access,
+ * not safety — an unparseable entry must never become a host treated as local.
+ */
+export function parseRemoteHostsSetting(raw: unknown): RemoteHost[] {
+  if (typeof raw !== "string" || !raw.trim()) return [];
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (!Array.isArray(parsed)) return [];
+    const out: RemoteHost[] = [];
+    for (const row of parsed) {
+      const r = row as Record<string, unknown>;
+      if (typeof r?.host !== "string" || typeof r?.baseUrl !== "string") continue;
+      if (!r.host.trim() || !r.baseUrl.trim()) continue;
+      out.push({
+        host: normalizeHost(r.host),
+        baseUrl: r.baseUrl,
+        ...(typeof r.label === "string" && r.label ? { label: r.label } : {}),
+        ...(typeof r.totalMemoryBytes === "number" && r.totalMemoryBytes > 0
+          ? { totalMemoryBytes: r.totalMemoryBytes }
+          : {}),
+      });
+    }
+    return out;
+  } catch {
+    return [];
+  }
 }

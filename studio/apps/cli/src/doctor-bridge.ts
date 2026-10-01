@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * doctor-bridge.ts — `prometheus doctor --bridge` engine-discovery check (file 11 §8).
  *

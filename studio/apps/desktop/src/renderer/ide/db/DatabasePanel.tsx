@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * db/DatabasePanel.tsx — the Database bottom-tab container (file 14 §3.26, APP-043).
  *

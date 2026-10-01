@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * marketplace/MarketplaceView.tsx — the four-tab marketplace browser (file 09 §6).
  *

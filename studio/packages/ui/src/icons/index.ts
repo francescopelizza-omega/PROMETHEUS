@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * icons/ barrel (08 §2.5 + §3 tree). The custom engine-concept set (Prometheus
  * flame, nemesis shield, verdict glyphs) plus the lucide-react re-exports the

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * types/methods.ts — the `methods <id>` envelope (every documented install method).
  *

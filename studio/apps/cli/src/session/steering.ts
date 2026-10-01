@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * session/steering.ts — discover + assemble AGENTS.md / CLAUDE.md / PROMETHEUS.md steering (CLI-061).
  *

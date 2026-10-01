@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * security/index.ts — the Security-Center component barrel (file 03 §4–§9).
  *

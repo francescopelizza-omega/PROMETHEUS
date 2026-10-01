@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * updates/package-sweep.ts — ask every package manager on this machine what is upgradable.
  *

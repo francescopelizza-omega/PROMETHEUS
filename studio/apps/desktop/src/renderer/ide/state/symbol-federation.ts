@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * ide/state/symbol-federation.ts — PURE merge/dedupe for Cmd-T workspace-symbol federation
  * across every live LSP server (APP-077). DOM/monaco-free so it is node:test-able; the palette

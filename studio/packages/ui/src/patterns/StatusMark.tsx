@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * StatusMark.tsx — the install-presence glyph shared by the catalog row, the install panel,
  * and (via the same tri-state) the CLI `/invoke` picker.

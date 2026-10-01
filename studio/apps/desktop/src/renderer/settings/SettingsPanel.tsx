@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * settings/SettingsPanel.tsx — the two-pane Settings surface (file 13 §2, leap #5b).
  *
@@ -41,6 +43,7 @@ import { PersonasPage } from "./PersonasPage.js";
 import { ScheduledTasksPage } from "./ScheduledTasksPage.js";
 import { SettingsTreePage } from "./SettingsTreePage.js";
 import { TemplatesPage } from "./TemplatesPage.js";
+import { UpdatesPage } from "./UpdatesPage.js";
 import {
   KEYMAP_BASE_STORAGE,
   KEYMAP_CHANGED_EVENT,
@@ -63,6 +66,7 @@ type Page =
   | "personas"
   | "budget"
   | "codebase-overview"
+  | "updates"
   | "all";
 
 const NAV: { id: Page; label: string }[] = [
@@ -77,6 +81,7 @@ const NAV: { id: Page; label: string }[] = [
   { id: "personas", label: "Personas" },
   { id: "budget", label: "Budget & Spend" },
   { id: "codebase-overview", label: "Meet Your Codebase" },
+  { id: "updates", label: "Updates & Conflicts" },
   { id: "all", label: "All Settings" },
 ];
 
@@ -287,6 +292,7 @@ export function SettingsPanel({ workspaceRoot }: SettingsPanelProps = {}): React
         {page === "scheduled-tasks" && <ScheduledTasksPage />}
         {page === "personas" && <PersonasPage />}
         {page === "budget" && <BudgetPage />}
+        {page === "updates" && <UpdatesPage />}
         {page === "codebase-overview" && <CodebaseOverviewPage />}
         {page === "keymap" && (
           <KeymapPage

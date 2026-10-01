@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * components/health-view.ts — PURE math + view types for the health visuals (Reliability
  * & Polish pack). The gauge ring geometry, score banding, and status glyphs/roles —

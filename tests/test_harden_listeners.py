@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Francesco Pelizza
 """test_harden_listeners.py — `harden`'s "listening on ALL interfaces" check.
 
 The check used to substring-search the whole line for "0.0.0.0", "*:" or ":::". `ss -tlnp`

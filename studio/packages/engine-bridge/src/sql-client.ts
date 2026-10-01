@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * sql-client.ts — a thin typed marshaller over `runSidecar("sqlrunner.py", …)` for the
  * SQL console (file 14 §3.26, APP-041).

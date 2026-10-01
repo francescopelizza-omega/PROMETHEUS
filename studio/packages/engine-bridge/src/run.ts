@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * run.ts — the ONLY place that spawns python3/prometheus.py (C5).
  *

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * mcp/server/tools.ts — the embedded MCP server's tool catalog (file 09 §1/§3).
  *

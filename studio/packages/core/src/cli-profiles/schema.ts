@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * cli-profiles/schema.ts — the typed CONFIG schema + validation (CLI-045). PURE (no fs).
  *

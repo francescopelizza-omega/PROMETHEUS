@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * updates/index.ts — the update-checking engine barrel (PURE).
  *
@@ -67,6 +69,7 @@ export {
   parseZypperListUpdates,
   parseCheckupdates,
   parseNpmOutdated,
+  parsePipxOutdated,
   parseApkVersion,
 } from "./package-managers.js";
 
@@ -106,6 +109,26 @@ export {
  */
 export type { ConflictKind, Conflict, ConflictInput } from "./conflicts.js";
 export { findConflicts, plainUpgrades, MANAGED_OWNERS } from "./conflicts.js";
+
+/**
+ * REMEDIES — the half `conflicts.ts` stops short of: what to RUN about it.
+ *
+ * A diagnosis whose consequence is "update notices for the others will never clear" hands the
+ * user a permanent problem with no way out attached. The repair is usually one command, is
+ * never the one they would guess, and several of the plausible guesses are destructive — so
+ * the correct ones live here as data, next to the commands that must never be emitted.
+ */
+export type { RemedyRisk, RemedyStep, Remedy, RemedyContext, RemedyPlanInput } from "./remedies.js";
+export {
+  CASK_ZAP_PATHS,
+  NEVER_RUN,
+  EDIT_GUARD,
+  isNeverRun,
+  remedyFor,
+  remediesFor,
+  runnable,
+  displayCommand,
+} from "./remedies.js";
 
 export type {
   ToolRole,

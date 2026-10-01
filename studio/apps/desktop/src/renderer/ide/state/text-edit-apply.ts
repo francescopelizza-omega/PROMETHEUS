@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * ide/state/text-edit-apply.ts — PURE LSP TextEdit / WorkspaceEdit application (leap #3/#2).
  *

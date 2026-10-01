@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * fleet/meters.ts — the three-way resource split the fleet bar draws.
  *

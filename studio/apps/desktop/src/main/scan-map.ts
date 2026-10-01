@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * main/scan-map.ts — PURE mappers for the engine `scan` envelope → renderer shape.
  *

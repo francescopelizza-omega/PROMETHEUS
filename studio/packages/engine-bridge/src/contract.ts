@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * contract.ts — the CANONICAL wire-type import site (file 01 §11.2).
  *

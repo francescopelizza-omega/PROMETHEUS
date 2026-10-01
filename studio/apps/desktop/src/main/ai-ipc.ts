@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * main/ai-ipc.ts — model chat streaming, in the MAIN process (HANDOFF_2 §9c).
  *
@@ -32,7 +34,9 @@ import {
   ai,
   cliProfiles,
   settings as coreSettings,
+  discoverRunners,
   localKeepAliveField,
+  nextStepHint,
   orchestration,
   probeContextWindow,
   secrets as secretsNs,
@@ -50,6 +54,7 @@ import {
 } from "@prometheus/core/agent-idle-watchdog";
 import { looksLikeToolsRejection } from "@prometheus/core/agent-protocol";
 import { createCliSecretsStore } from "@prometheus/core/agent-system-host";
+import { probeHostTools } from "@prometheus/core/agent-system-host";
 import { applyEffort, applyEffortToMessages } from "@prometheus/core/ai-effort";
 import type { EffortResolution } from "@prometheus/core/ai-effort";
 import {
@@ -61,12 +66,15 @@ import {
 } from "@prometheus/core/ai-retry";
 import {
   type EvictionEvent,
+  describeEngineFailure,
   findRecentEviction,
   readEvictionEvents,
+  whichBin,
 } from "@prometheus/engine-bridge";
 
 import { getBudgetGate, isLocalModelId } from "./budget-gate.js";
 import { touchModelActivity } from "./model-activity-store.js";
+import { admitDesktopModelLoad } from "./model-admission-gate.js";
 
 /**
  * Native tool calls as they accumulate, keyed by the wire's GROUPING key rather than by
@@ -135,12 +143,14 @@ function harvestCalls(
 }
 
 import {
+  type AiDiscoverRunnersResult,
   type AiProbeEndpointResult,
   type AiProbeModelsResult,
   type AiProgressEvent,
   type AiStreamRequest,
   type AiStreamResult,
   type AiToolCall,
+  type HostToolsResult,
   IPC,
   IPC_EVENTS,
 } from "../shared/ipc-contract.js";
@@ -236,16 +246,25 @@ export async function freeLocalModels(doFetch: typeof fetch = fetch): Promise<vo
  * included, because "I could not tell" must not resolve to "allowed".
  */
 export function localityOfUrl(baseUrl: string): "local" | "cloud" {
-  try {
-    const u = new URL(baseUrl);
-    if (u.protocol === "unix:" || u.protocol === "file:") return "local";
-    const h = u.hostname.toLowerCase().replace(/^\[|\]$/g, ""); // URL wraps IPv6 in brackets
-    if (h === "localhost" || h === "127.0.0.1" || h === "::1" || h === "0.0.0.0") return "local";
-    if (h.endsWith(".local")) return "local";
-    return "cloud";
-  } catch {
-    return "cloud";
-  }
+  return ai.localityWithRemotes(baseUrl, declaredRemoteHosts);
+}
+
+/**
+ * Remote model servers the user DECLARED as their own, read from the shared settings file.
+ *
+ * Default EMPTY, and that default is the whole safety story: a host is trusted only once the
+ * user adds it by hand, and nothing is inferred from a private IP range. An unreadable or
+ * corrupt value yields an empty list, so losing it costs access rather than safety.
+ *
+ * Populated by `adoptSecurityPosture`, which already reads the same file before any handler can
+ * serve a model call — so the allowlist is in place before the first egress decision, not
+ * fetched lazily on one.
+ */
+let declaredRemoteHosts: readonly ai.RemoteHost[] = [];
+
+/** Test seam, and the hook for a future "the user just declared one" signal. */
+export function setDeclaredRemoteHosts(hosts: readonly ai.RemoteHost[]): void {
+  declaredRemoteHosts = hosts;
 }
 
 /**
@@ -385,6 +404,11 @@ export async function adoptSecurityPosture(globalPath: string): Promise<void> {
         profile,
       ),
     );
+    // The remote-host allowlist rides the SAME read. A GPU box declared with the terminal's
+    // `/remote add` was `locality:"local"` there and `"cloud"` here, so under a local-only
+    // posture Studio refused the very endpoint the CLI was using — one settings file, two
+    // answers. Parsed by core so both surfaces read the store identically.
+    setDeclaredRemoteHosts(ai.parseRemoteHostsSetting(raw[ai.REMOTE_HOSTS_KEY]));
   } catch {
     /* no settings yet (fresh install) — the permissive default stands, as it did before. */
   }
@@ -455,6 +479,18 @@ export async function runAiStream(
    * `MIN_IDLE_TIMEOUT_MS` floor (30s) made it too slow to exercise honestly.
    */
   retryOpts: {
+    /**
+     * The memory-admission gate, OPT-IN.
+     *
+     * Production passes `admitDesktopModelLoad`; every existing `runAiStream` test omits it and
+     * therefore reaches no probe and spawns no `sysctl`. That discipline is why this is a seam
+     * rather than a direct import — the same reason `ensureOllamaRunningFn` is one.
+     */
+    admitModelFn?: (
+      baseUrl: string,
+      model: string,
+      contextTokens: number,
+    ) => Promise<{ allow: boolean; lines: string[]; notes: string[] }>;
     sleep?: (ms: number) => Promise<void>;
     retries?: number;
     idleWatchdogNow?: () => number;
@@ -651,6 +687,47 @@ export async function runAiStream(
   }
 
   const model = req.endpoint.model ?? req.endpoint.id;
+
+  /**
+   * MEMORY ADMISSION — the gate in front of the only line that allocates.
+   *
+   * Placed AFTER the autostart block and BEFORE the first request, because that is the window
+   * where the daemon is up and nothing is loaded yet. `ensureOllamaRunning` only probes
+   * `/models` and may spawn the daemon; weights are not paged in until the POST below.
+   *
+   * LOCAL ONLY: a cloud endpoint's memory is not this machine's problem, and probing for it
+   * would be both meaningless and a privacy leak.
+   *
+   * A refusal is a PAUSED, resumable turn rather than an error, for the same reason
+   * `resource-ceiling` above is: the prompt is never lost, and the user is told what would fit
+   * instead of being told no. See `AiStreamResult.pausedReason`.
+   */
+  if (locality === "local" && retryOpts.admitModelFn) {
+    // The MEASURED window, not the 8192 default. The KV cache is linear in context, so judging
+    // a 262144-window model by the floor under-counts its footprint by up to 32x — the gate
+    // would wave through precisely the load it exists to stop.
+    const probed = await probeEndpointCapabilities(req.endpoint.baseUrl, model, doFetch);
+    const contextTokens =
+      probed.source !== "default" && probed.contextWindow > 0
+        ? probed.contextWindow
+        : (req.endpoint.contextWindow ?? ai.DEFAULT_CONTEXT_WINDOW);
+    const verdict = await retryOpts.admitModelFn(req.endpoint.baseUrl, model, contextTokens);
+    // `status` is the watchdog-heartbeat channel — the right one for an advisory the user
+    // should see but which is not part of the answer (an eviction, or an uncertain figure).
+    for (const note of verdict.notes) {
+      emit(sender, { runId: req.runId, kind: "status", text: note });
+    }
+    if (!verdict.allow) {
+      return {
+        ok: true,
+        paused: true,
+        pausedReason: "resources-critical",
+        text: verdict.lines.join("\n"),
+        toolCalls: [],
+      };
+    }
+  }
+
   const effort = req.effort as EffortResolution | undefined;
   /**
    * The FORMAT this endpoint speaks — main used to assume OpenAI's, unconditionally.
@@ -660,24 +737,46 @@ export async function runAiStream(
    * path does not exist, and a meaningless body against Gemini. Both read to the user as the
    * model being broken. `ai/wire.ts` owns those differences, including tool calling.
    */
-  const wire = ai.selectWire(ai.runtimeFromBaseUrl(req.endpoint.baseUrl, locality));
+  const runtime = ai.runtimeFromBaseUrl(req.endpoint.baseUrl, locality);
+  const wire = ai.selectWire(runtime);
+  /**
+   * PROMPT CACHING — asked for by the terminal on every cloud turn, and by Studio on none.
+   *
+   * `shouldRequestPromptCache`/`applyPromptCache` had zero callers under `apps/desktop`, so a
+   * user running the same project context through the app re-sent — and re-paid for — the
+   * whole stable prefix every turn, while the identical conversation in the terminal was
+   * billed at the cache rate. A silent, recurring cost difference between two surfaces reading
+   * the same settings.
+   *
+   * Applied to the MESSAGES, before `wire.body`, for the reason the CLI's copy states: the
+   * cache breakpoint goes on the stable system prefix, and the wire format decides where that
+   * prefix ends up. A no-op on every provider that caches on its own or not at all —
+   * `shouldRequestPromptCache` takes the RUNTIME (derived from the base URL) rather than a
+   * provider name, because the runtime is what actually determines the wire.
+   */
+  const cacheable = ai.shouldRequestPromptCache(undefined, runtime);
   // Whether this request actually CARRIES tools. A tools-shaped rejection can only be read as
   // one if we sent tools in the first place — otherwise a provider that happens to say the word
   // for an unrelated reason would demote a perfectly capable endpoint.
   const sentTools = toWireTools(req.tools).length > 0;
   let body: Record<string, unknown> = {
     ...wire.body(
-      applyEffortToMessages(
-        // Desktop tool results carry no call id — the renderer's loop does not thread one —
-        // so they go as plain `user` context. Two user turns in a row would be a 400 on
-        // Anthropic and Gemini; `wire.body` merges them, which is why that must not be
-        // pre-flattened into a single string here.
-        req.messages.map((m) => ({
-          role: m.role === "tool" ? ("user" as const) : m.role,
-          content: m.content,
-        })),
-        effort,
-      ),
+      ((): ai.WireMessage[] => {
+        const withEffort = applyEffortToMessages(
+          // Desktop tool results carry no call id — the renderer's loop does not thread one —
+          // so they go as plain `user` context. Two user turns in a row would be a 400 on
+          // Anthropic and Gemini; `wire.body` merges them, which is why that must not be
+          // pre-flattened into a single string here.
+          req.messages.map((m) => ({
+            role: m.role === "tool" ? ("user" as const) : m.role,
+            content: m.content,
+          })),
+          effort,
+        );
+        return (
+          cacheable ? ai.applyPromptCache(withEffort, ai.cacheDialectFor(runtime)) : withEffort
+        ) as ai.WireMessage[];
+      })(),
       {
         model,
         // `locality`, not `req.endpoint.locality`. The comment above the derivation says the
@@ -1427,6 +1526,9 @@ export function registerAiIpc(ipc: IpcMain): void {
     return runAiStream(req, sender, undefined, undefined, {
       ensureOllamaRunningFn: ai.ensureOllamaRunning,
       ensureLmStudioRunningFn: ai.ensureLmStudioRunning,
+      // PRODUCTION ONLY. Every `runAiStream` test omits this and so reaches no probe and
+      // spawns no process — see the seam's doc on `retryOpts`.
+      admitModelFn: admitDesktopModelLoad,
     });
   });
 
@@ -1494,4 +1596,67 @@ export function registerAiIpc(ipc: IpcMain): void {
       return probeEndpointCapabilities(baseUrl, model);
     },
   );
+
+  ipc.handle(IPC.aiDiscoverRunners, async (): Promise<AiDiscoverRunnersResult> => {
+    return runDiscoverRunners();
+  });
+
+  ipc.handle(IPC.hostToolsList, (): HostToolsResult => listHostTools());
+}
+
+/**
+ * The external-tool inventory behind `hostTools:list` — the terminal's `/deps`.
+ *
+ * Reads the SAME `HOST_TOOLS` manifest that the agent's system prompt is rendered from, so the
+ * user sees what the model was told. That equivalence is the point: the CLI's `/deps` is
+ * documented as the human twin of `renderHostToolManifest`, and Studio showed neither.
+ *
+ * Synchronous and cheap. `probeHostTools` is a pure `access(X_OK)` walk with a process-lifetime
+ * cache — no spawn, by design (see its header). Exported for the test.
+ */
+export function listHostTools(probe: typeof probeHostTools = probeHostTools): HostToolsResult {
+  try {
+    return {
+      ok: true,
+      tools: probe().map((s) => ({
+        id: s.tool.id,
+        bins: [...s.tool.bins],
+        purpose: s.tool.purpose,
+        found: s.found,
+        install: { ...s.tool.install },
+      })),
+    };
+  } catch (e) {
+    // A failed probe is an empty inventory, never a broken panel.
+    return { ok: false, tools: [], error: describeEngineFailure(e) };
+  }
+}
+
+/**
+ * The scan behind `ai:discoverRunners`, with `whichBin` as the PATH resolver.
+ *
+ * `whichBin` lives in engine-bridge because it spawns, and core may not (C5/SPINE). That is the
+ * whole reason `discoverRunners` takes it as a dependency instead of reaching for it: core gets
+ * to own the logic, main supplies the one capability core is not allowed to have.
+ *
+ * Exported for the test, which injects both halves and so never touches PATH or the network.
+ */
+export async function runDiscoverRunners(
+  deps: Parameters<typeof discoverRunners>[0] = {},
+): Promise<AiDiscoverRunnersResult> {
+  try {
+    const runners = await discoverRunners({ whichFn: whichBin, ...deps });
+    const hint = nextStepHint(runners);
+    return {
+      ok: true,
+      // Structured-clone across the bridge: `readonly string[]` is fine, but a frozen array is
+      // not, and these rows go straight into renderer state.
+      runners: runners.map((r) => ({ ...r, models: [...r.models] })),
+      ...(hint ? { hint } : {}),
+    };
+  } catch (err) {
+    // `discoverRunners` is documented never to throw; this is the belt-and-braces path, and it
+    // still returns a USABLE shape rather than an error the renderer has to special-case.
+    return { ok: false, runners: [], error: (err as Error)?.message ?? String(err) };
+  }
 }

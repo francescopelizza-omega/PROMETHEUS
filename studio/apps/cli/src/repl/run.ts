@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * repl/run.ts — launch the interactive Ink REPL (file 11 §3).
  *

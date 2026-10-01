@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * ide/state/editor-vision-store.ts — the zustand wrapper around the PURE vision toggles
  * (editor-vision.ts, APP-074). Loads from localStorage on init + persists on every change

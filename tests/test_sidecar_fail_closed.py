@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Francesco Pelizza
 """test_sidecar_fail_closed.py — a sidecar must not report success for work it never did.
 
 Two sidecars answered `ok:true` for inputs they had not actually processed, and in both cases the

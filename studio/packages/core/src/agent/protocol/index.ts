@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * agent/protocol/index.ts — how a model is told about tools, and how its calls are read back.
  *

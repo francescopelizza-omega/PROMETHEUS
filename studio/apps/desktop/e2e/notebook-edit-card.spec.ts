@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * e2e/notebook-edit-card.spec.ts — the `notebook_edit` tool's task-card click path actually
  * updating a real OPEN notebook tab, from inside a live chat turn in the real built app

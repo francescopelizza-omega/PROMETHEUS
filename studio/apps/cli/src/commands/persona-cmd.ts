@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * commands/persona-cmd.ts — `prometheus persona <list|export|import|remove>`: the CLI surface
  * over "persona sharing" — handing one of your own sub-agent persona files (`agents/*.md`, used

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * index.ts — the module `@vscode/test-electron` loads as `--extensionTestsPath`.
  *

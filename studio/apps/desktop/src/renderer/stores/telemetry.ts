@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * renderer/stores/telemetry.ts — the live PC-telemetry Zustand slice.
  *

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * scripts/fix-pty-helper.mjs — restore the executable bit on node-pty's
  * `spawn-helper` binary (wired as `postinstall`).

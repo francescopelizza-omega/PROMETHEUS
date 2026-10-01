@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * orphan-guard-boot.ts — start the orphan defences for this CLI run.
  *

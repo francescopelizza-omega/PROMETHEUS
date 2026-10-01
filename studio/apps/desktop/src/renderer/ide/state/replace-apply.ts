@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * state/replace-apply.ts — the bulk replace-in-files loop, as a pure function over seams.
  *

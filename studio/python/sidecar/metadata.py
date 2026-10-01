@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Francesco Pelizza
 """metadata.py — atomic file-metadata control sidecar (file 0C, privacy protection).
 
 Gives the user full, atomic control over the metadata of any file THEY choose: read it,

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * ide/fonts/registry.ts — the monospace font catalog for the PyCharm-style font
  * picker (Settings → Fonts), shared by the editor (Monaco) and the terminal (xterm).

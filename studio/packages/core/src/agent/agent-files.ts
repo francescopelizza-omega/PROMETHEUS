@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * agent/agent-files.ts — user-defined sub-agent personas from markdown, safely.
  *

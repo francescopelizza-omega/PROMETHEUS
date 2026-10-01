@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * primitives/styles.ts — the shared inline-style atoms the vendored shadcn
  * primitives compose (file 08 §3).

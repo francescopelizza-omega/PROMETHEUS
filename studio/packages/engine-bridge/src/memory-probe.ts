@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * memory-probe.ts — how much memory is really free, asked of the KERNEL.
  *

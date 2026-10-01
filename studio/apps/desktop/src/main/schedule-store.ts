@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * main/schedule-store.ts — pure(ish) disk persistence for `ScheduleStore` (Scheduled/
  * Autonomous Runs). Split out exactly like model-health-store.ts (which is itself split out

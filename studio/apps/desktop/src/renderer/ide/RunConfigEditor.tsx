@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * ide/RunConfigEditor.tsx — the Run/Debug configuration editor form (APP-033).
  *

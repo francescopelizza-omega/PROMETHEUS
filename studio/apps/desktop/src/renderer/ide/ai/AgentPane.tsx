@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * ide/ai/AgentPane.tsx — the agent / chat side pane (file 07 §7.2/§7.3/§7.5).
  *
@@ -103,7 +105,8 @@ import { DiffReview } from "./DiffReview.js";
 import { type AgentLoopDeps, createProposeEditTool } from "./agent-loop.js";
 import { runChatTurn } from "./ai-client.js";
 import { compactTurns } from "./compaction.js";
-import { AGENT_PANE_SYSTEM } from "./core-agent.js";
+import { AGENT_PANE_SYSTEM, runPaneSessionStartHooks } from "./core-agent.js";
+import { createSessionStartBlock } from "./session-start-block.js";
 
 /**
  * Run a `notebook_edit` task card in the renderer and shape it like an `agent:systemTool`
@@ -787,12 +790,32 @@ export function AgentPane({
       },
     }),
   );
+  /**
+   * The user's SessionStart hooks, run ONCE per workspace and replayed into every turn's
+   * system prompt — the pane's half of a feature Settings already let people configure and
+   * nothing ever executed. See `session-start-block.ts` for the whole story.
+   *
+   * Captured on the same workspace-change effect as the memory block because that is when the
+   * CLI captures it too (session start), and because `cwd` is what a SessionStart hook is
+   * told it is running in.
+   */
+  const sessionStartBlockRef = useRef(
+    createSessionStartBlock({
+      // `?? undefined` because the ref is `string | undefined` but the pane's workspace root
+      // can arrive as null from the store; a null cwd must mean "no cwd", not a type error.
+      run: async () => runPaneSessionStartHooks(ide(), workspaceRootRef.current ?? undefined),
+    }),
+  );
   const workspaceRootRef = useRef<string | undefined>(workspaceRoot);
   useEffect(() => {
     workspaceRootRef.current = workspaceRoot;
     memoryBlockRef.current.clear();
+    // A different workspace means different hooks and a different cwd, so the previous
+    // capture must not leak into it — `clear()` re-arms, it does not merely blank.
+    sessionStartBlockRef.current.clear();
     if (!workspaceRoot) return;
     void memoryBlockRef.current.refresh();
+    void sessionStartBlockRef.current.refresh();
   }, [workspaceRoot]);
 
   // index the workspace files for the @-mention picker (one walk per root).
@@ -1487,7 +1510,10 @@ export function AgentPane({
     // to the system prompt — same order as the CLI (steering, then memory).
     const projectRules = projectRulesRef.current;
     const memoryBlock = memoryBlockRef.current.current();
-    const systemContent = [AGENT_PANE_SYSTEM, projectRules, memoryBlock]
+    // SessionStart hook output, in the SAME slot the CLI gives it: after steering and memory
+    // (`agent-runtime.ts:263-266` orders them steering 30, memory 40, session-start-hooks 50).
+    const sessionStartBlock = sessionStartBlockRef.current.current();
+    const systemContent = [AGENT_PANE_SYSTEM, projectRules, memoryBlock, sessionStartBlock]
       .filter((s) => s.trim() !== "")
       .join("\n\n");
     // Deps carry NO signal — the controller mints the AbortController in `start` and injects

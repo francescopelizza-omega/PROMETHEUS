@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * routes/security.tsx — the Security workbench route (file 08 §4.1 🛡 / §5.2).
  *

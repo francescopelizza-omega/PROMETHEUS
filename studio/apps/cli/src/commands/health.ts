@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * commands/health.ts — `prometheus health`: the engine/scanner RUNTIME posture pill the
  * GUI's System Health panel renders, in the terminal. Distinct from `prometheus doctor`

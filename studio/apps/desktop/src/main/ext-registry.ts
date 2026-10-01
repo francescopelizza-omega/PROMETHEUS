@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * main/ext-registry.ts — the extension enable/verdict registry (APP-060).
  *

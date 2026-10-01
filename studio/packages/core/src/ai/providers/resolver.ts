@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 import { effectiveTier, getProvider } from "./registry.js";
 /**
  * ai/providers/resolver.ts — pick the brain + guard the wiring (file 12 §3).

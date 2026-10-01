@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * updates/check.ts — assemble the UpdateReport from the live seams, throttled + cached.
  *
@@ -16,11 +18,12 @@ import { join } from "node:path";
 import type { EngineClient } from "@prometheus/engine-bridge";
 import * as u from "../updates/index.js";
 
-import { fetchGitlabLatest } from "./channel-fetch.js";
+import { fetchGitlabRelease } from "./channel-fetch.js";
 import { fetchGithubLatest, fetchNpmLatest, fetchOllamaTags } from "./fetch.js";
 import { checkModelUpdates, fetchOllamaVersion } from "./model-check.js";
 import { type ManagerSweep, sweepPackages } from "./package-sweep.js";
 import { cliVersion, detectInstallMethod, engineVersion, which } from "./probe.js";
+import { type ShellInitTarget, shellInitFor } from "./remedies-live.js";
 import { npmGlobalBinDir, onSearchPath } from "./resolve.js";
 import { type ToolSweepDeps, legacyCliRows, sweepTools } from "./tool-sweep.js";
 
@@ -85,6 +88,8 @@ export interface CheckDeps extends ToolSweepDeps {
   detectMethod?: () => { method: u.InstallMethod; repoDir?: string };
   sweepPackagesFn?: (deps: CheckDeps) => ManagerSweep[];
   onPath?: (dir: string) => boolean;
+  /** test seam: where a PATH repair would be written. Default = the real filesystem probe. */
+  shellInit?: (dir: string) => ShellInitTarget;
 }
 
 const DEFAULT_TTL_MS = 6 * 60 * 60 * 1000; // 6h
@@ -222,11 +227,21 @@ async function checkSelf(deps: CheckDeps): Promise<u.SelfUpdateStatus> {
    * guaranteed 404, every single check.
    */
   const cfg = { ...u.DEFAULT_SELF_UPDATE, ...deps.selfConfig };
-  const fetchLatest = deps.fetchSelfLatest ?? ((repo: string) => fetchGitlabLatest(repo));
-  const latest = await fetchLatest(cfg.repo);
   /**
-   * `null` means the lookup FAILED — not "nothing newer". Collapsing the two is what turned a
-   * check that could never succeed into a reassuring message.
+   * The detailed form is used whenever the caller has not injected its own lookup, because a
+   * bare `null` cannot say WHY. See `fetchGitlabRelease`: this project answers 404 because it is
+   * PRIVATE, which is a definitive answer about visibility rather than a failed request — and
+   * printing "could not check for updates" for it sends the user debugging a network problem
+   * that does not exist.
+   */
+  const detailed = deps.fetchSelfLatest
+    ? { version: await deps.fetchSelfLatest(cfg.repo) }
+    : await fetchGitlabRelease(cfg.repo);
+  const latest = detailed.version;
+  const why = "why" in detailed ? detailed.why : undefined;
+  /**
+   * `null` means the lookup produced no version — not "nothing newer". Collapsing the two is what
+   * turned a check that could never succeed into a reassuring message.
    */
   const updateAvailable = latest === null ? null : u.isNewer(latest, deps.promVersion);
   return {
@@ -234,6 +249,7 @@ async function checkSelf(deps: CheckDeps): Promise<u.SelfUpdateStatus> {
     ...(engine ? { engine } : {}),
     ...(latest ? { latest } : {}),
     updateAvailable,
+    ...(latest === null && why ? { note: why } : {}),
     plan,
   };
 }
@@ -338,10 +354,57 @@ export async function checkUpdates(deps: CheckDeps): Promise<CheckResult> {
         state: t.state,
         ...(t.copies[0] ? { winner: t.copies[0] } : {}),
         shadowed: t.copies.slice(1),
+        /**
+         * Without this the `shadowed-newer` branch of `findConflicts` was unreachable.
+         *
+         * `sweepTools` resolves each tool with `resolveTool`, which computes `newerShadow`; this
+         * function then rebuilds a `ToolResolution` from the flattened row. Every field not
+         * copied here is a fact the cross-check cannot use, and this one carried the highest-
+         * severity finding the module can make: a newer copy already on disk that PATH never
+         * reaches, where updating is not the fix and would not help.
+         */
+        ...(t.newerShadow ? { newerShadow: t.newerShadow } : {}),
       })),
     outdated: sweeps.flatMap((s) => s.packages),
     unreachableBinDirs: unreachableBinDirs(deps),
     ...(deps.serverVersions ? { serverVersions: deps.serverVersions } : {}),
+  });
+
+  /**
+   * The repairs, computed from the conflicts plus the facts only the disk can supply.
+   *
+   * Done here rather than at render time so every surface — CLI, desktop IPC, `--json` — gets the
+   * same plan from the same measurement, instead of each one re-deriving "which rc file" and
+   * disagreeing. `shellInitFor` refuses rather than guesses (symlinked dotfiles, a generated
+   * block), and a refusal turns the remedy into instructions instead of commands.
+   */
+  const binDirs: Record<string, string> = {};
+  for (const d of unreachableBinDirs(deps)) binDirs[d.manager] = d.dir;
+  const firstBinDir = Object.values(binDirs)[0];
+  const shellInit = firstBinDir ? (deps.shellInit ?? shellInitFor)(firstBinDir) : undefined;
+  const remedies = u.remediesFor({
+    conflicts,
+    resolutions: tools
+      .filter((t) => t.installed)
+      .map((t) => ({
+        tool: t.id,
+        copies: t.copies,
+        state: t.state,
+        ...(t.copies[0] ? { winner: t.copies[0] } : {}),
+        shadowed: t.copies.slice(1),
+        ...(t.newerShadow ? { newerShadow: t.newerShadow } : {}),
+      })),
+    userHome: deps.userHome,
+    ...(shellInit && !shellInit.refused
+      ? {
+          shellInit: {
+            path: shellInit.path,
+            line: shellInit.line,
+            alreadyPresent: shellInit.alreadyPresent,
+          },
+        }
+      : {}),
+    binDirs,
   });
 
   const report: u.UpdateReport = {
@@ -354,6 +417,13 @@ export async function checkUpdates(deps: CheckDeps): Promise<CheckResult> {
     ...(tools.length > 0 ? { tools } : {}),
     ...(managers.length > 0 ? { managers } : {}),
     ...(conflicts.length > 0 ? { conflicts } : {}),
+    ...(remedies.length > 0 ? { remedies } : {}),
+    /**
+     * Recorded, not inferred. `skipPackages` removes the rows that `downgrade-offer` and
+     * `shadowed-upgrade` are derived from, so any count taken off this report is a floor. The
+     * startup notice reads this and says so, instead of printing a partial number as a total.
+     */
+    ...(deps.skipPackages ? { partial: { packages: true } } : {}),
   };
   saveState(deps.home, { checkedAt: report.checkedAt, digests: models.digests, report });
   return { report, fromCache: false };

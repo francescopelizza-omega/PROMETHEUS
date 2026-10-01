@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * main/arg-guards.ts — PURE structural validation for renderer-supplied IPC args.
  *

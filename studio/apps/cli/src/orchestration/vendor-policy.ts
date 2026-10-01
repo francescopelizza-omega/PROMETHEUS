@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * orchestration/vendor-policy.ts — per-vendor stance on THIRD-PARTY automated driving.
  *

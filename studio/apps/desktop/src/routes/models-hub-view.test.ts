@@ -15,6 +15,7 @@ import {
   formatBytes,
   installedRows,
   installedTotal,
+  localEndpointRows,
   metricChips,
   parsePullProgress,
 } from "./models-hub-view.js";
@@ -114,6 +115,87 @@ test("a cloud endpoint is refused below A5 and carries §3's reason", () => {
       `A${level} could not use a cloud endpoint`,
     );
   }
+});
+
+/* ── local endpoint rows (the machine scan) ──────────────────────────────────*/
+
+const SCAN = {
+  serving: {
+    id: "ollama",
+    name: "Ollama",
+    baseUrl: "http://localhost:11434/v1",
+    state: "serving" as const,
+    models: ["qwen3.6:latest", "gemma4:27b"],
+    canStart: true,
+  },
+  servingEmpty: {
+    id: "lmstudio",
+    name: "LM Studio",
+    baseUrl: "http://localhost:1234/v1",
+    state: "serving" as const,
+    models: [] as string[],
+    canStart: true,
+  },
+  installed: {
+    id: "llamacpp",
+    name: "llama.cpp",
+    baseUrl: "http://localhost:8080/v1",
+    state: "installed" as const,
+    models: [] as string[],
+    canStart: false,
+  },
+  absent: {
+    id: "vllm",
+    name: "vLLM",
+    baseUrl: "http://localhost:8000/v1",
+    state: "absent" as const,
+    models: [] as string[],
+    canStart: false,
+  },
+};
+
+test("a local row is usable ONLY when something is actually serving", () => {
+  // `endpointRow` returns `usable: true` for every local endpoint unconditionally, and it was
+  // fed the engine's five-URL constant — so the island showed five green dots on a machine
+  // with nothing listening. A dot that is always green is not a status indicator.
+  const rows = localEndpointRows([SCAN.serving, SCAN.installed, SCAN.absent]);
+  assert.deepEqual(
+    rows.map((r) => r.usable),
+    [true, false, false],
+  );
+  assert.ok(rows.every((r) => r.locality === "local"));
+});
+
+test('a serving row says how many models it has — the answer to "can I chat right now"', () => {
+  assert.equal(localEndpointRows([SCAN.serving])[0]?.note, "2 models");
+  assert.equal(
+    localEndpointRows([{ ...SCAN.serving, models: ["one"] }])[0]?.note,
+    "1 model",
+    'singular, not "1 models"',
+  );
+});
+
+test("running-but-empty is called out, because every liveness check passes and the turn still fails", () => {
+  const row = localEndpointRows([SCAN.servingEmpty])[0];
+  assert.equal(row?.usable, true, "the port DOES answer — this is not a dead endpoint");
+  assert.match(row?.note ?? "", /no model loaded/);
+});
+
+test("installed-but-stopped is distinguished from not-installed, and from unstartable", () => {
+  assert.equal(localEndpointRows([SCAN.absent])[0]?.note, "not installed");
+  assert.match(localEndpointRows([SCAN.installed])[0]?.note ?? "", /start it yourself/);
+  assert.equal(
+    localEndpointRows([{ ...SCAN.installed, canStart: true }])[0]?.note,
+    "installed · not running",
+  );
+});
+
+test("localEndpointRows keeps the scan's order and length — no row is dropped", () => {
+  const all = [SCAN.serving, SCAN.servingEmpty, SCAN.installed, SCAN.absent];
+  assert.deepEqual(
+    localEndpointRows(all).map((r) => r.name),
+    ["ollama", "lmstudio", "llamacpp", "vllm"],
+  );
 });
 
 /* ── installed rows ──────────────────────────────────────────────────────────*/

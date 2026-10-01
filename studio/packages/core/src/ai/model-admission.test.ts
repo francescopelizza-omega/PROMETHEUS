@@ -112,6 +112,65 @@ test("ONE SERVER: a second runner is refused even when the model itself would fi
   assert.match(d.reason, /one model server running at a time/);
 });
 
+test("ONE SERVER: an IDLE LM Studio does not lock the machine out", () => {
+  /**
+   * The regression that would have shipped the moment any surface made this gate real.
+   *
+   * `parseOpenAiModels` (engine-bridge/runner-census.ts) returns every model LM Studio CAN
+   * SERVE, each with `sizeBytes: 0` — its own doc says it answers "is a runner up" honestly and
+   * "how much is it holding" not at all. Rule 1 counted `models.length > 0`, so an LM Studio
+   * that was merely OPEN, holding nothing, refused every single load with "lmstudio is already
+   * serving a model". Forever, on an empty machine.
+   *
+   * The terminal never surfaced it because its admission only skips a warm-up
+   * (`apps/cli/src/session/host.ts:774` is a `void` after the endpoint is already adopted), so
+   * the refusal had no teeth. Any gate with teeth hits it immediately.
+   */
+  const idleLmStudioCatalogue = [
+    { id: "qwen2.5-7b-instruct", sizeBytes: 0 },
+    { id: "llama-3.1-8b", sizeBytes: 0 },
+  ];
+  const d = admitModelLoad({
+    candidate: { ...gemma, runner: "ollama" },
+    budget: budget(55),
+    resident: [{ runner: "lmstudio", models: idleLmStudioCatalogue, residencyKnown: false }],
+    alternatives: [gemma],
+  });
+  assert.equal(d.ok, true, "a catalogue is not residency — this must not refuse");
+});
+
+test("ONE SERVER: a runner that genuinely IS holding weights still blocks", () => {
+  // The other half: the flag must not become a blanket exemption. Ollama's /api/ps reports
+  // real residency, so `residencyKnown` is true and Rule 1 applies exactly as before.
+  const d = admitModelLoad({
+    candidate: { ...gemma, runner: "lmstudio" },
+    budget: budget(55),
+    resident: [
+      {
+        runner: "ollama",
+        models: [{ id: "qwen3.6:latest", sizeBytes: 26e9 }],
+        residencyKnown: true,
+      },
+    ],
+    alternatives: [gemma],
+  });
+  assert.equal(d.ok, false);
+  if (d.ok) return;
+  assert.equal(d.code, "second-server");
+});
+
+test("ONE SERVER: an absent residencyKnown still counts as KNOWN", () => {
+  // Back-compatibility for the ollama-only callers that predate the flag. Omitting it must not
+  // silently disable the rule they rely on.
+  const d = admitModelLoad({
+    candidate: { ...gemma, runner: "lmstudio" },
+    budget: budget(55),
+    resident: [{ runner: "ollama", models: [{ id: "qwen3.6:latest", sizeBytes: 26e9 }] }],
+    alternatives: [gemma],
+  });
+  assert.equal(d.ok, false);
+});
+
 test("…but an explicit opt-in allows it", () => {
   const d = admitModelLoad({
     candidate: { ...gemma, runner: "lmstudio" },

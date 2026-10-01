@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * ide/ai/agent-loop.ts — the agentic tool-calling loop (file 07 §7.2/§7.3, leap #2).
  *

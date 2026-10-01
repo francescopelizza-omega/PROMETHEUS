@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * ai/guardrails/budgetWindows.ts — session + daily USD budget windows (CLI-030).
  *

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * scopes/scopes.ts — Scopes & Favorites (file 13 §2.6).
  *

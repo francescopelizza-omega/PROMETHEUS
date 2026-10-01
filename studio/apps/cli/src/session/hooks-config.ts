@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * session/hooks-config.ts — load the user's lifecycle HOOKS for a CLI session.
  *

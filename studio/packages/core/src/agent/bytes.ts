@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * agent/bytes.ts — UTF-8 byte helpers that work in the SANDBOXED renderer.
  *

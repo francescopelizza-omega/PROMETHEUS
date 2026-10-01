@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * main/path-frecency-store.ts — the per-workspace "most-used @-path" memory (opt-in;
  * see the "Tools ▸ Path Completion" setting, `completion.pathFrecency`). Reuses

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * main/mcp-ipc.ts — the `mcp:*` ipcMain handlers (file 09 §2).
  *
@@ -11,6 +13,7 @@
  */
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
+import { describeEngineFailure } from "@prometheus/engine-bridge";
 
 import { mcpHost } from "@prometheus/core";
 import * as agentProtocol from "@prometheus/core/agent-protocol";
@@ -37,9 +40,10 @@ import { createMcpTransportFactory } from "./mcp/transport.js";
 
 type McpServerConfig = mcpHost.McpServerConfig;
 
-function errString(e: unknown): string {
-  return e instanceof Error ? e.message : String(e);
-}
+// `errString` was a LOCAL copy here, one of twenty across main/*.ts, and every copy returned
+// `e.message` alone — discarding `EngineError.stderrTail`, which is where the engine puts the
+// actual reason when it exits before emitting JSON. See `describeEngineFailure`'s doc.
+const errString = describeEngineFailure;
 
 /** Extract an `id` string from `{ id }` or a bare string arg. */
 function idOf(arg: unknown): string {

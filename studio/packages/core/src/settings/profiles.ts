@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * settings/profiles.ts — the built-in profiles (file 09 §7.1).
  *

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * ChordRecorder.tsx — the inline key-capture recorder for the Keymap editor (APP-057).
  *

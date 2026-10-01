@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * PurgeDialog.tsx — the irreversible-deletion confirm (file 03 §9.3).
  *

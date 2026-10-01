@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 import { existsSync } from "node:fs";
 /**
  * commands/profile.ts — `prometheus profile …` + `prometheus config …` (file 11 §6, prom-native).

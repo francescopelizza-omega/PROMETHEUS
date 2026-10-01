@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /** theme.ts — colors + glyphs shared across views. */
 export const COLOR = {
   brand: "magenta",

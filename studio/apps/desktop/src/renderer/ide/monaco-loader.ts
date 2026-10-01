@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * ide/monaco-loader.ts — the LAZY monaco-editor loader (file 07 §3/§12).
  *

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * tui/app.ts — the raw-mode interactive controller (the only IO-bearing TUI file).
  *

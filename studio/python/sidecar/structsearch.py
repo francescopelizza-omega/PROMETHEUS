@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Francesco Pelizza
 """structsearch.py — structural search-and-replace (SSR) over Python ASTs (MDS parity 06).
 
 Read-only AST *shape* matching (not text): a pattern template like ``print($X)`` matches every

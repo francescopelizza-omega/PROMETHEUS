@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * gen-docs.ts — regenerate docs/TOOLS.md from the tool table (CLI-035). Run `npm run docs`.
  * Pure over TOOLS via renderToolsDoc, so the reference can never drift by hand.

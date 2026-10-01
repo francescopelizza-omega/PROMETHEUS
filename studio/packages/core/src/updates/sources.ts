@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * updates/sources.ts — where each vendor CLI's latest version lives, + the pure parsers.
  *

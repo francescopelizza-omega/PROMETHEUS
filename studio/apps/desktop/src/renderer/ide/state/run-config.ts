@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * ide/state/run-config.ts — the pure run/debug configuration model (plan file 13 ·
  * JetBrains Run Configurations · VS Code launch.json parity).
@@ -711,17 +713,54 @@ export function substituteVars(value: string, ctx: SubstitutionContext): string 
   });
 }
 
-/** Env keys that can hijack the loader / resolution — NEVER user-overridable
- *  (a value is data; a malicious KEY is a code-exec vector, safe-env invariant). */
+/**
+ * Env keys that can hijack the loader / resolution — NEVER user-overridable
+ * (a value is data; a malicious KEY is a code-exec vector, safe-env invariant).
+ *
+ * ADVISORY ONLY. The renderer is sandboxed and cannot import `@prometheus/engine-bridge`
+ * (C5), so this cannot be `isHijackEnvKey` itself. Enforcement lives in MAIN —
+ * `main/ide/run-host.ts` `sanitizeRunEnvKeys`, which calls that predicate — and a renderer
+ * that skipped this list entirely would change nothing about what actually reaches a child.
+ * This exists so the UI can tell the user which keys will be dropped, before they submit.
+ *
+ * It is kept in step BY HAND with `safe-env.ts`'s `STRIP_EXACT` + `STRIP_PREFIX`, plus `PATH`
+ * (which engine-bridge permits for its own children but a user-supplied run request may not
+ * repoint). It was seven names until 2026-10-01 and had fallen ten behind, so the dialog
+ * promised keys would survive that main then dropped — harmless to security, actively
+ * confusing to the user. If the two ever disagree again, MAIN WINS; fix this list.
+ */
 export const RUN_ENV_KEY_DENYLIST: readonly string[] = [
+  // user-supplied override only — engine-bridge deliberately permits PATH for its own children
   "PATH",
-  "PYTHONHOME",
+  // dynamic linker preload / search-path hijacks (glibc + musl)
   "LD_PRELOAD",
   "LD_LIBRARY_PATH",
-  "DYLD_INSERT_LIBRARIES",
-  "DYLD_LIBRARY_PATH",
+  "LD_AUDIT",
+  // Python import-path / startup-code hijacks
+  "PYTHONPATH",
+  "PYTHONSTARTUP",
+  "PYTHONHOME",
+  "PYTHONEXECUTABLE",
+  "PYTHONUSERBASE",
+  "PYTHONBREAKPOINT",
+  "PYTHONCASEOK",
+  // Node loader hijacks
   "NODE_OPTIONS",
+  "NODE_REPL_EXTERNAL_MODULE",
+  // shell startup-file hooks (defensive even with shell:false)
+  "BASH_ENV",
+  "ENV",
 ];
+
+/** Every variable in the macOS dyld family is a loader hijack — matched by PREFIX, because
+ *  naming two of them (as this file did) lets DYLD_FRAMEWORK_PATH and the rest through. */
+const RUN_ENV_KEY_DENY_PREFIXES: readonly string[] = ["DYLD_"];
+
+/** Does this key match the advisory denylist (exact name or hijack prefix)? */
+export function isDeniedRunEnvKey(name: string): boolean {
+  const k = name.toUpperCase();
+  return RUN_ENV_KEY_DENYLIST.includes(k) || RUN_ENV_KEY_DENY_PREFIXES.some((p) => k.startsWith(p));
+}
 
 const ENV_KEY = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
@@ -733,7 +772,7 @@ export function sanitizeRunEnv(env: Readonly<Record<string, string>> | undefined
   const out: Record<string, string> = {};
   const dropped: string[] = [];
   for (const [k, v] of Object.entries(env ?? {})) {
-    if (!ENV_KEY.test(k) || RUN_ENV_KEY_DENYLIST.includes(k.toUpperCase())) {
+    if (!ENV_KEY.test(k) || isDeniedRunEnvKey(k)) {
       dropped.push(k);
       continue;
     }

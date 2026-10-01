@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Francesco Pelizza
 """test_url_injection.py — URL-injection safeguard (PHASE 2 L5 pinning + audit, and
 the nemesis L0/L1 contract). Pure stdlib (unittest), no pytest / third-party deps.
 

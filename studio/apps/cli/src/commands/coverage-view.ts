@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * commands/coverage-view.ts — PURE terminal coverage-bar renderer for `prometheus test coverage` (CLI-095).
  *

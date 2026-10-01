@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * rules — file 14 §3.3: AGENTS.md/CLAUDE.md precedence chain + /init scaffold. Pure;
  * the caller reads files + gates remote instruction fetches (C12).

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * locate.ts — resolve the bundled-or-dev engine paths (file 10 §1).
  *

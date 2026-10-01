@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * agent/protocol/parse.ts — read tool calls out of a model's PLAIN TEXT.
  *

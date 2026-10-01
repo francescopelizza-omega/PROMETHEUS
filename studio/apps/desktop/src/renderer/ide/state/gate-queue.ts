@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * ide/state/gate-queue.ts — the buffered run-gate handoff for AI-authored new files.
  *

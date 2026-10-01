@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * main/settings-sync-ipc.ts — git-backed Studio settings sync (`settings-sync:*`, APP-095).
  *
@@ -12,6 +14,7 @@
  */
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { describeEngineFailure } from "@prometheus/engine-bridge";
 
 import type { mcpHost } from "@prometheus/core";
 import { ipcMain } from "electron";
@@ -35,9 +38,10 @@ type McpServerConfig = mcpHost.McpServerConfig;
 
 const BUNDLE_FILE = "prometheus-settings.json";
 
-function errString(e: unknown): string {
-  return e instanceof Error ? e.message : String(e);
-}
+// `errString` was a LOCAL copy here, one of twenty across main/*.ts, and every copy returned
+// `e.message` alone — discarding `EngineError.stderrTail`, which is where the engine puts the
+// actual reason when it exits before emitting JSON. See `describeEngineFailure`'s doc.
+const errString = describeEngineFailure;
 
 /** Read the FULL (unredacted) connector configs from the disk store — redaction happens in
  *  buildSettingsBundle, so the token bytes never leave this process. Fail-soft → []. */

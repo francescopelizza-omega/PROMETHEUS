@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Francesco Pelizza
 """nemesis_gate.py — the Model-Hub security spine (file 05 §5).
 
 EVERY downloaded model artifact is STAGED into ``~/.prometheus/models/.stage/<id>/``
@@ -49,7 +51,13 @@ _SAFE_EXTS = {".safetensors", ".gguf", ".ggml", ".onnx", ".mlx", ".npz"}
 # --- library layout --------------------------------------------------------- #
 
 def models_root() -> Path:
-    """The live model library root. ``$PROMETHEUS_MODELS_HOME`` overrides for tests."""
+    """The GATED model library root. ``$PROMETHEUS_MODELS_HOME`` overrides for tests.
+
+    Distinct from ``modelhub._default_models_dir()`` (``$PROMETHEUS_MODELS_DIR``), which is the
+    download cache. See that function's docstring for why the two must not be collapsed despite
+    the near-identical names: this one holds ``.stage/``, the quarantine the gate moves weights
+    through, and a cache and a security record have different deletion semantics.
+    """
     env = os.environ.get("PROMETHEUS_MODELS_HOME")
     if env:
         return Path(env).expanduser()

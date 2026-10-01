@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * StatusPill.tsx — a compact role-tinted status chip (Reliability & Polish pack).
  *

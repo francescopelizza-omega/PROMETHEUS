@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * session/mcp-session.ts — connect the configured MCP servers for a CHAT session, and expose
  * their tools to the agent.

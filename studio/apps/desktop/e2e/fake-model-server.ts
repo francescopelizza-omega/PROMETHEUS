@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * e2e/fake-model-server.ts — a REAL local OpenAI-compatible `/v1/chat/completions` stub.
  *

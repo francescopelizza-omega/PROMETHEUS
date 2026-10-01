@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * main/codebase-overview-ipc.ts — the `codebase:overview` ipcMain handler for "meet your
  * codebase" (roadmap point 6, RELAY-ONLY, mirrors persona-ipc.ts's workspace-root handling).
@@ -20,6 +22,7 @@
  * bounded by the same file cap), not a regression this handler introduces on its own.
  */
 import { readFileSync, readdirSync, statSync } from "node:fs";
+import { describeEngineFailure } from "@prometheus/engine-bridge";
 
 import { tokenEconomy } from "@prometheus/core";
 import { ipcMain } from "electron";
@@ -42,9 +45,10 @@ function nodeRepoFs(): tokenEconomy.RepoFs {
   };
 }
 
-function errString(e: unknown): string {
-  return e instanceof Error ? e.message : String(e);
-}
+// `errString` was a LOCAL copy here, one of twenty across main/*.ts, and every copy returned
+// `e.message` alone — discarding `EngineError.stderrTail`, which is where the engine puts the
+// actual reason when it exits before emitting JSON. See `describeEngineFailure`'s doc.
+const errString = describeEngineFailure;
 
 /**
  * Register the `codebase:overview` handler. `workspaceRoot` is a GETTER — called fresh on every

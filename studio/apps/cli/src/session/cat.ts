@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * session/cat.ts — the `/cat` viewer: print a file into the transcript, with syntax colour.
  *

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * cli-profiles/paths.ts — profile file locations (file 11 §6).
  *

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * ai/permission-queue.ts — the §3 write-permission queue, keyed by the session that owns it.
  *

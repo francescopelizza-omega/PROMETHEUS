@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * ide/state/nav-history.ts — the editor navigation stack (JetBrains Back/Forward ⌘[/⌘]
  * + "Last Edit Location" ⌘⇧⌫ · VS Code Alt+←/→ parity; plan file 05).

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * ai/run-controller.ts — the MODULE-LEVEL agent run controller (APP-056).
  *
@@ -62,6 +64,10 @@ import {
   makeIdeHookRunner,
   runCoreAgentTurn,
 } from "./core-agent.js";
+// The autonomy ladder lives in permission-gate.ts beside `needsPermission`, so there is ONE
+// module in the renderer that answers "must a human be asked" — and it answers with core's
+// functions rather than a renderer copy of them.
+import { autoApprovesToolCall } from "./permission-gate.js";
 
 import { type UsageTotals, accumulateUsage, emptyTotals } from "./usage-cost.js";
 
@@ -465,7 +471,8 @@ class AgentRunController {
               runToolRef
                 ? runToolRef(tool, a)
                 : Promise.resolve({ ok: false, summary: "the tool runner is not ready" }),
-            confirm: (call) => this.confirmToolCall(sid, deps, call),
+            // The CHILD's exposed tools, not the parent's — see `confirmToolCall`'s param doc.
+            confirm: (call) => this.confirmToolCall(sid, deps, call, exposedTools(child.tools)),
             // Point 6b: a sub-agent is exactly the surface most likely to touch untrusted
             // content — it must not run with the canary tripwire silently disabled just because
             // it's a delegated turn.
@@ -475,6 +482,23 @@ class AgentRunController {
           });
           deps.onToolNote(`⤶ sub-agent done (${out.toolCalls} tool call(s))`);
           return { ok: out.ok, summary: out.text };
+        } catch (err) {
+          /**
+           * A sub-agent that THROWS is a failed tool call, not a failed turn.
+           *
+           * This block was `try`/`finally` with no `catch`, so an exception from `runSubagent`
+           * — a provider rejecting, a transport dying mid-delegation, a tool runner that is not
+           * ready — escaped the `spawn_agent` handler instead of becoming its result. The
+           * parent model never learned the delegation failed and could not adapt; the user saw
+           * the turn die rather than the sub-agent fail.
+           *
+           * The CLI has always returned the failure as a tool result
+           * (`apps/cli/src/session/agent-runtime.ts:4394`). Same shape here, deliberately:
+           * `ok:false` plus a summary the model can read and act on.
+           */
+          const message = err instanceof Error ? err.message : String(err);
+          deps.onToolNote(`⤶ sub-agent failed: ${message}`);
+          return { ok: false, summary: `sub-agent failed: ${message}` };
         } finally {
           spawnBudget.depth -= 1;
         }
@@ -534,24 +558,28 @@ class AgentRunController {
         // broker already routed to a human, never add an approval the broker refused. A `deny`
         // grant still wins, structurally, over any allow.
         confirm: grants
-          ? withRememberedGrants((call) => this.confirmToolCall(sid, deps, call), grants, {
-              workspaceRoot: deps.root ?? ".",
-              onRemember: (subject, scope) => {
-                // Only the two scopes that outlive the session are worth writing; `once` and
-                // `session` have already expired by the time anything could read them back.
-                if (scope !== "project" && scope !== "user") return;
-                void deps.ide?.grantsAdd?.({
-                  subject,
-                  decision: "allow",
-                  scope,
-                  ...(scope === "project" && deps.root ? { root: deps.root } : {}),
-                });
-                deps.onToolNote(`🔓 remembered: ${subject} (${scope})`);
+          ? withRememberedGrants(
+              (call) => this.confirmToolCall(sid, deps, call, exposedTools(tuning.tools)),
+              grants,
+              {
+                workspaceRoot: deps.root ?? ".",
+                onRemember: (subject, scope) => {
+                  // Only the two scopes that outlive the session are worth writing; `once` and
+                  // `session` have already expired by the time anything could read them back.
+                  if (scope !== "project" && scope !== "user") return;
+                  void deps.ide?.grantsAdd?.({
+                    subject,
+                    decision: "allow",
+                    scope,
+                    ...(scope === "project" && deps.root ? { root: deps.root } : {}),
+                  });
+                  deps.onToolNote(`🔓 remembered: ${subject} (${scope})`);
+                },
+                onAutoApprove: (subject) =>
+                  deps.onToolNote(`↩ auto-approved ${subject} (remembered)`),
               },
-              onAutoApprove: (subject) =>
-                deps.onToolNote(`↩ auto-approved ${subject} (remembered)`),
-            })
-          : (call) => this.confirmToolCall(sid, deps, call),
+            )
+          : (call) => this.confirmToolCall(sid, deps, call, exposedTools(tuning.tools)),
       });
     } finally {
       useAiSessionStore.getState().clearEphemeral(sid);
@@ -703,6 +731,14 @@ class AgentRunController {
     sid: string,
     deps: AgentLoopDeps,
     call: ToolCall,
+    /**
+     * The tools exposed to THIS turn, for the annotation lookup the ladder needs.
+     *
+     * Passed in rather than read from a field because a `spawn_agent` child runs under its own
+     * narrowed tuning — grading a child's call against the parent's tool list would classify
+     * a tool the child cannot even see.
+     */
+    exposed: readonly ToolDef[] = [],
   ): Promise<ConfirmResult> {
     if (call.name === "propose_edit" || call.name === "write_file") return Promise.resolve(true);
     // The membership check is the pane's ALLOW-LIST, not its `extra` array — this is the guard
@@ -719,6 +755,21 @@ class AgentRunController {
         reason: `"${call.name}" is not available in the editor`,
       });
     }
+    /**
+     * The autonomy ladder, AFTER the allow-list and before the card.
+     *
+     * Order is the point. The allow-list is a membership question ("may this surface run this
+     * tool at all") and must be answered first — a level of 7 does not admit a tool the editor
+     * does not expose. The ladder is a frequency question ("must a human be asked this time"),
+     * so it comes second, and a refusal here is never a denial: it falls through to the card,
+     * which is the same informed decision as before.
+     *
+     * The pane previously had no ladder at all and asked at every level, which made the
+     * persisted authorisation setting mean one thing in the terminal and another here. See
+     * `autoApprovesToolCall`.
+     */
+    const annotations = exposed.find((t) => t.name === call.name)?.annotations;
+    if (autoApprovesToolCall(call, annotations)) return Promise.resolve(true);
     /**
      * Phase 6: the card presents ANY system tool the broker routed to a human, not only
      * `run_command`.

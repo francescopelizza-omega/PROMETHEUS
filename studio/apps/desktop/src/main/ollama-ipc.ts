@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * main/ollama-ipc.ts — the `model:ollamaStart` handler: a manual "Start" trigger for the raw
  * Ollama daemon, wired to the SAME `ensureOllamaRunning` that `ai-ipc.ts`'s `runAiStream`

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * ide/state/usages-store.ts — the live Find-Usages tool-window state (APP-023).
  *

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * shell/ErrorBoundary.tsx — a React error boundary so a render-time throw in ONE
  * route (an undefined deref, a bad API shape) shows a recoverable fallback instead

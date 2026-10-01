@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * updates/tool-sweep.ts — resolve every tool in `TOOL_CHECKS` and ask the right channel.
  *
@@ -114,6 +116,13 @@ export async function sweepTools(
       state: res.state,
       copies: res.copies,
       current,
+      /**
+       * Carried through, because `check.ts` rebuilds a `ToolResolution` from this row to run the
+       * conflict cross-check — and a field missing here is a conflict kind that can never fire.
+       * `resolveTool` has already paid for the version comparison; dropping the answer meant
+       * `shadowed-newer` was dead code in every surface.
+       */
+      ...(res.newerShadow ? { newerShadow: res.newerShadow } : {}),
       ...(tool.note ? { note: tool.note } : {}),
     };
 

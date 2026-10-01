@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * ServingPanel.tsx — the §7 Serving panel: a ServeProfile list with status chips
  * + Start/Stop/"Use in IDE" → repoint. Each row shows the reproducible recipe

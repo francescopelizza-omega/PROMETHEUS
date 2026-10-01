@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Francesco Pelizza
 """Deterministic envmgr.py stand-in for env.test.ts — emits the file 04 §8 BLOCKED
 install envelope on stdout (one JSON object), exit 2. NO fetch, NO pip, NO nemesis:
 it lets the TS boundary mapper be proven against a nemesis-BLOCK shape without ever

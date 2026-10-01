@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * routes/models.tsx — the Model Hub tab (file 05 §1,§7,§8).
  *
@@ -51,6 +53,7 @@ import { ForceGate, useForceGate } from "../renderer/shell/ForceGate.js";
 import { effectiveAuthLevel, useAuthorisationStore } from "../renderer/stores/authorisation.js";
 import { useModelsStore } from "../renderer/stores/models.js";
 import type {
+  AiDiscoveredRunner,
   ModelDownloadResult,
   ModelEndpointsResult,
   ModelFitResult,
@@ -68,6 +71,7 @@ import {
   formatBytes,
   installedRows,
   installedTotal,
+  localEndpointRows,
   metricChips,
   parsePullProgress,
 } from "./models-hub-view.js";
@@ -124,6 +128,31 @@ function useEndpoints() {
   return useQuery({
     queryKey: qk.modelEndpoints(),
     queryFn: (): Promise<ModelEndpointsResult> => modelsApi().endpoints(),
+    refetchInterval: 10_000,
+  });
+}
+
+/**
+ * The machine scan behind the LOCAL half of the Endpoints island.
+ *
+ * Separate from `useEndpoints` on purpose. That query asks the ENGINE for a catalog — the right
+ * source for remote API base URLs, which no amount of looking at this machine can discover. This
+ * one asks the machine, which is the only thing that can say whether a local port answers. They
+ * were conflated, and the result was five permanently-green local rows (see `localEndpointRows`).
+ *
+ * The scan is metadata-only (`GET /api/tags`, `GET /v1/models`) and therefore safe on a 10s
+ * interval; a route that polled `/v1/chat/completions` would make ollama hold weights resident
+ * forever (CLAUDE.md §2.3).
+ */
+function useRunnerScan() {
+  return useQuery({
+    queryKey: ["ai", "discoverRunners"],
+    queryFn: async (): Promise<AiDiscoveredRunner[]> => {
+      const api = window.prometheus.ai;
+      if (typeof api?.discoverRunners !== "function") return [];
+      const r = await api.discoverRunners();
+      return r.ok ? r.runners : [];
+    },
     refetchInterval: 10_000,
   });
 }
@@ -210,6 +239,7 @@ export function ModelsRoute(): ReactElement {
   // the one authorisation store every surface reads — the cloud rows gate on it (§3).
   const libraryQ = useLibrary();
   const endpointsQ = useEndpoints();
+  const runnerScanQ = useRunnerScan();
   /**
    * The EFFECTIVE level — what main will actually enforce, not what the dial shows.
    *
@@ -680,12 +710,39 @@ export function ModelsRoute(): ReactElement {
   const library: InstalledRow[] = installedRows(
     (asModels(libraryQ.data) as unknown as Parameters<typeof installedRows>[0]) ?? [],
   );
-  /** every endpoint, classified local/cloud and gated on the A-level (§3). */
-  const endpoints = [...(endpointsQ.data?.local ?? []), ...(endpointsQ.data?.openApi ?? [])].map(
-    (e) => endpointRow(e, localityOf(e.baseUrl), authLevel),
-  );
-  /** the local endpoint the Serving header names (`ollama · :11434`). */
-  const localEndpoint = endpoints.find((e) => e.locality === "local") ?? null;
+  /**
+   * Every endpoint: LOCAL rows measured on this machine, cloud rows from the engine catalog and
+   * gated on the A-level (§3).
+   *
+   * Until the scan lands, fall back to the engine's local catalog so the island is not empty on
+   * first paint — but once it has answered, the scan is authoritative for everything local. See
+   * `localEndpointRows` for why the two sources are not interchangeable.
+   */
+  const scanned = runnerScanQ.data ?? [];
+  const localRows =
+    scanned.length > 0
+      ? localEndpointRows(scanned)
+      : (endpointsQ.data?.local ?? []).map((e) => endpointRow(e, localityOf(e.baseUrl), authLevel));
+  const endpoints = [
+    ...localRows,
+    ...(endpointsQ.data?.openApi ?? []).map((e) =>
+      endpointRow(e, localityOf(e.baseUrl), authLevel),
+    ),
+  ];
+  /**
+   * The local endpoint the Serving header names (`ollama · :11434`).
+   *
+   * A USABLE one first. This was "the first local row", which was harmless while every local row
+   * claimed to be usable — the engine's catalog always listed ollama first, so the header named
+   * ollama and that was that. Now that the rows report what the machine actually said, taking
+   * the first one would have the header announce a runner that is not installed while LM Studio
+   * serves beside it. Fall back to the first row only so the header is not blank when nothing
+   * works at all.
+   */
+  const localEndpoint =
+    endpoints.find((e) => e.locality === "local" && e.usable) ??
+    endpoints.find((e) => e.locality === "local") ??
+    null;
   const serveList: ServeProfileData[] = Object.values(serveRows).sort((a, b) =>
     a.id < b.id ? -1 : 1,
   );
@@ -740,7 +797,8 @@ export function ModelsRoute(): ReactElement {
         <EndpointsIsland
           endpoints={endpoints}
           authLevel={authLevel}
-          loading={endpointsQ.isPending}
+          loading={endpointsQ.isPending && runnerScanQ.isPending}
+          nothingServing={!endpoints.some((e) => e.locality === "local" && e.usable)}
           startingDaemon={startingDaemon}
           onStartDaemon={(which) => void startDaemon(which)}
           {...(daemonMsg ? { daemonMsg } : {})}
@@ -1356,13 +1414,57 @@ function EndpointsIsland(props: {
   }[];
   authLevel: number;
   loading: boolean;
+  /**
+   * No LOCAL endpoint can serve a turn right now.
+   *
+   * Replaces `endpoints.length === 0` as the trigger for the start controls. Once the machine
+   * scan feeds this island, the list is NEVER empty — an absent runner is a grey row saying
+   * "not installed", which is information the old empty state threw away. But that also made
+   * the one branch holding the Start buttons unreachable, so the condition has to be "nothing
+   * here works" rather than "there is nothing here".
+   */
+  nothingServing: boolean;
   /** which daemon is mid-start, so both buttons disable together */
   startingDaemon: "ollama" | "lmstudio" | null;
   onStartDaemon: (which: "ollama" | "lmstudio") => void;
   /** the outcome of the last start attempt — a refusal reason is as important as a success */
   daemonMsg?: string;
 }): ReactElement {
-  const { endpoints, authLevel, loading, startingDaemon, onStartDaemon, daemonMsg } = props;
+  const {
+    endpoints,
+    authLevel,
+    loading,
+    nothingServing,
+    startingDaemon,
+    onStartDaemon,
+    daemonMsg,
+  } = props;
+  const startControls = (
+    <div style={{ display: "flex", flexDirection: "column", gap: "var(--space-3, 6px)" }}>
+      {/* The panel that reports the daemon missing is the one that can start it. */}
+      <div style={{ display: "flex", gap: "var(--space-3, 6px)", flexWrap: "wrap" }}>
+        <Button
+          variant="secondary"
+          disabled={startingDaemon !== null}
+          onClick={() => onStartDaemon("ollama")}
+        >
+          {startingDaemon === "ollama" ? "Starting Ollama…" : "Start Ollama"}
+        </Button>
+        <Button
+          variant="secondary"
+          disabled={startingDaemon !== null}
+          onClick={() => onStartDaemon("lmstudio")}
+        >
+          {startingDaemon === "lmstudio" ? "Starting LM Studio…" : "Start LM Studio"}
+        </Button>
+      </div>
+      {daemonMsg && (
+        <p style={{ color: "var(--text-secondary)", margin: 0, fontSize: "0.85rem" }}>
+          {daemonMsg}
+        </p>
+      )}
+    </div>
+  );
   return (
     <Panel
       elevation="e1"
@@ -1387,28 +1489,7 @@ function EndpointsIsland(props: {
           <p style={{ color: "var(--text-secondary)", margin: 0 }}>
             No endpoints are reachable. Start a local runner, or pull a model.
           </p>
-          {/* The panel that reports the daemon missing is the one that can start it. */}
-          <div style={{ display: "flex", gap: "var(--space-3, 6px)", flexWrap: "wrap" }}>
-            <Button
-              variant="secondary"
-              disabled={startingDaemon !== null}
-              onClick={() => onStartDaemon("ollama")}
-            >
-              {startingDaemon === "ollama" ? "Starting Ollama…" : "Start Ollama"}
-            </Button>
-            <Button
-              variant="secondary"
-              disabled={startingDaemon !== null}
-              onClick={() => onStartDaemon("lmstudio")}
-            >
-              {startingDaemon === "lmstudio" ? "Starting LM Studio…" : "Start LM Studio"}
-            </Button>
-          </div>
-          {daemonMsg && (
-            <p style={{ color: "var(--text-secondary)", margin: 0, fontSize: "0.85rem" }}>
-              {daemonMsg}
-            </p>
-          )}
+          {startControls}
         </div>
       ) : (
         <ul style={{ listStyle: "none", margin: 0, padding: 0 }}>
@@ -1457,7 +1538,14 @@ function EndpointsIsland(props: {
                 style={{
                   flex: "none",
                   fontSize: "0.68rem",
-                  color: e.locality === "local" ? "var(--ok)" : "var(--text-secondary)",
+                  // Keyed on USABLE, not on locality. It was `locality === "local" ? ok : …`,
+                  // which painted "not installed" in the success colour the moment the local
+                  // rows started telling the truth about themselves.
+                  color: e.usable
+                    ? "var(--ok)"
+                    : e.locality === "local"
+                      ? "var(--text-muted)"
+                      : "var(--text-secondary)",
                   whiteSpace: "nowrap", // §7
                 }}
               >
@@ -1467,6 +1555,9 @@ function EndpointsIsland(props: {
           ))}
         </ul>
       )}
+      {!loading && endpoints.length > 0 && nothingServing ? (
+        <div style={{ marginTop: "var(--space-3, 6px)" }}>{startControls}</div>
+      ) : null}
     </Panel>
   );
 }

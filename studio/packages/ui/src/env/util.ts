@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * env/util.ts — the PURE, dependency-free display helpers the Environments
  * components lean on (file 04 §3/§5/§9). NO react, NO node, NO engine-bridge

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * science-view.ts — pure helpers for the APP-088 scientific-mode windows.
  *

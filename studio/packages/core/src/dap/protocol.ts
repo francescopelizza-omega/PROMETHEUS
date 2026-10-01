@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * dap/protocol.ts — the Debug Adapter Protocol wire TYPES + the DAP stdio framing
  * (file 07 §5).

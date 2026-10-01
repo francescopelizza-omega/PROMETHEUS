@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * templates/index.ts — load the 6 shipped init-package templates (file 04 §7).
  *

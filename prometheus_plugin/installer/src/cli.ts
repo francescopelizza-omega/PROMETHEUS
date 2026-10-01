@@ -1,4 +1,6 @@
 #!/usr/bin/env node
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * cli.ts — prometheus-install
  *
@@ -57,15 +59,73 @@ function parseArgs(argv: string[]): Opts {
   return o;
 }
 
+/**
+ * Where the engine lives, in precedence order.
+ *
+ * ── WHY THIS ORDER, AND WHY `~/ALPHA` IS LAST ───────────────────────────────────────────────
+ *
+ * This list used to end at `~/ALPHA/PROMETHEUS/prometheus.py` — the author's own directory
+ * layout — and used it as the BEST-EFFORT DEFAULT when nothing else matched. On every other
+ * machine that path does not exist, so the package's answer to "where is the engine" was a
+ * guess about a filesystem it had never seen.
+ *
+ * Worse, the list never contained the one location the documented installer actually uses.
+ * `install.sh` creates `$PROMETHEUS_HOME/engine/prometheus.py` and calls it "the documented
+ * lookup lane"; `engine-bridge/locate.ts` resolves exactly that. So a user who installed the
+ * supported way had the engine sitting in the supported place, and these three published
+ * packages looked everywhere except there.
+ *
+ * The order now mirrors `engine-bridge/locate.ts`, which is the canonical resolver:
+ *
+ *   1. `PROMETHEUS_PY`            — an explicit answer always wins, and a wrong one is an ERROR
+ *                                   rather than a silent fall-through to a guess.
+ *   2. package-relative           — a source checkout being run in place.
+ *   3. the working directory      — running from inside a clone.
+ *   4. `$PROMETHEUS_HOME/engine`  — the documented lane the installer creates.
+ *   5. `$PROMETHEUS_HOME/app`     — the checkout the installer clones.
+ *   6. `~/.prometheus/{engine,app}` — the same two, for the default home.
+ *   7. `~/ALPHA/PROMETHEUS`       — a legacy layout, kept so an existing install keeps working.
+ *                                   It is LAST because it is one machine's convention, not a
+ *                                   property of the software.
+ *
+ * `PROMETHEUS_HOME` is expanded for a leading `~`: the shell does not expand it inside a
+ * variable, so `PROMETHEUS_HOME=~/prom` otherwise means a directory literally named `~`.
+ */
+function engineCandidates(cwdFirst: string[]): string[] {
+  const rawHome = process.env.PROMETHEUS_HOME ?? "";
+  const home = homedir();
+  const promHome = rawHome
+    ? rawHome === "~"
+      ? home
+      : rawHome.startsWith("~/")
+        ? join(home, rawHome.slice(2))
+        : rawHome
+    : "";
+  const out = [...cwdFirst];
+  for (const base of [promHome, join(home, ".prometheus")]) {
+    if (!base) continue;
+    out.push(join(base, "engine", "prometheus.py"));
+    out.push(join(base, "app", "prometheus.py"));
+  }
+  out.push(join(home, "ALPHA", "PROMETHEUS", "prometheus.py"));
+  return out;
+}
+
+/** The path named when nothing was found — documented, never machine-specific. */
+function documentedDefault(): string {
+  return join(homedir(), ".prometheus", "engine", "prometheus.py");
+}
+
 function resolveDefaultPy(): string {
   if (process.env.PROMETHEUS_PY) return process.env.PROMETHEUS_PY;
-  const cands = [
+  const cands = engineCandidates([
     join(process.cwd(), "prometheus.py"),
     join(process.cwd(), "..", "prometheus.py"),
-    join(homedir(), "ALPHA", "PROMETHEUS", "prometheus.py"),
-  ];
+  ]);
   for (const c of cands) if (existsSync(c)) return c;
-  return join(homedir(), "ALPHA", "PROMETHEUS", "prometheus.py"); // best-effort default
+  // Nothing on disk. Name the DOCUMENTED default rather than one machine's layout, so the
+  // message a stranger sees points at a path that could plausibly be theirs.
+  return documentedDefault();
 }
 
 function printHelp(): void {

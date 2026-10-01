@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Francesco Pelizza
 """test_vault_json.py — CLI-048: vault invoke/invoke-all/rollback over --json.
 
 Exercises the machine channel (dry-run default, --yes gating, --target validation, fail-closed

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * commands/completion.ts — `prometheus completion bash|zsh|fish` shell-completion generators (CLI-100).
  *

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * commands/help.ts — `prometheus help [topic]` / `prometheus <cmd> --help` / the global usage screen.
  *

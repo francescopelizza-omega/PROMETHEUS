@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * session/turn-summary.ts — a one-line, mechanical "what did this prompt do" summary.
  *

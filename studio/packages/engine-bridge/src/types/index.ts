@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * types/index.ts — the discriminated `Envelope` union + the narrowing helper
  * (file 02 §3.3). One re-export barrel for every per-command typed envelope.

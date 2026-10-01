@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * resilience — durability/stability primitives (Reliability & Polish pack): bounded
  * retry+backoff+jitter, a circuit breaker, and a timeout race. Pure; clock/rng/timer

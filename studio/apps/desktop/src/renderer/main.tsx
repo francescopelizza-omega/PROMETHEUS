@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * renderer/main.tsx — the React 19 root (sandboxed renderer entry).
  *

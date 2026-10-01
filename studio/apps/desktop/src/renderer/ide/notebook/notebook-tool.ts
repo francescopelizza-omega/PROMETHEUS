@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * notebook-tool.ts — the `notebook_edit` agent tool (desktop only).
  *

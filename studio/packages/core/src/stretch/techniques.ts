@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * stretch/techniques.ts — the curated registry of ways to run a model that is too big
  * for a machine's RAM/VRAM (the "stretch" toolkit), from the 33-agent resource

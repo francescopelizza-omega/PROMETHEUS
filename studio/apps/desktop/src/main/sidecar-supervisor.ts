@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * main/sidecar-supervisor.ts — the MAIN-process sidecar supervisor (file 01 §5,
  * §Open-Q2). PLAIN Node module: node:child_process + node:events ONLY, NO

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * session/faq.ts — the `/faq` knowledge base: short answers to the most frequent
  * questions, covering EVERY major Prometheus functionality (getting started, models

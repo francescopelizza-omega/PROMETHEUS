@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * main/serve-supervisor.ts — the Model-Hub serve status-machine over the C8
  * ServerSupervisor (file 05 §8).

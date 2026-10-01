@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * ide/state/inline-blame-store.ts — the persisted opt-in for inline blame (APP-083).
  *

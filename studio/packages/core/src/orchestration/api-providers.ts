@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * orchestration/api-providers.ts — trustworthy OpenAI-compatible API providers as subagents.
  *

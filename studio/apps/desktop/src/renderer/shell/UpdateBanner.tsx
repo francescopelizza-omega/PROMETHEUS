@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * shell/UpdateBanner.tsx — the non-modal update strip (file 10 §5, APP-005).
  *

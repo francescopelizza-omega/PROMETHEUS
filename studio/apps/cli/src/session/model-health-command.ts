@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * session/model-health-command.ts — the body of the `/model-health` slash command: print the
  * on-disk `EndpointHealthRecord` for every endpoint this install has ever talked to, as a table.

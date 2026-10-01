@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * agent/diff-view.ts — a PURE structured diff for the "surgical edit card" (CLI-EDIT).
  *

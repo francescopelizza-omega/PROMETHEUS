@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * agent/auto-continue.ts — PURE decision core for the run-to-done posture (WRAPPER Subsystem 3).
  *

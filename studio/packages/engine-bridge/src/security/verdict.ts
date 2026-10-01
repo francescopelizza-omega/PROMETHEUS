@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * security/verdict.ts — the SINGLE SOURCE OF TRUTH for the verdict model (C3).
  *

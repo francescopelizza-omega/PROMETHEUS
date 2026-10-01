@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * TestExplorer.tsx — the Test tool window (file 14 §3.19, mounted+run-wired APP-014).
  *

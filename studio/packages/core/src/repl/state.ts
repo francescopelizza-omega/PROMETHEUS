@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * repl/state.ts — the REPL state machine (file 11 §3, PURE reducer).
  *

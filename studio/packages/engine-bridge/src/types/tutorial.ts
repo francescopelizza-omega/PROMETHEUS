@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * types/tutorial.ts — the `tutorial <id>` envelope (the "Learn more" deep dossier).
  *

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * format/editorconfig.ts — a PURE, dependency-free `.editorconfig` resolver
  * (APP-019 · MDS parity file 29). Parses the INI-ish format, matches its section

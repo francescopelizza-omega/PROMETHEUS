@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * ide/ChangelistsPanel.tsx — JetBrains-style changelists in the Git panel (APP-038).
  *

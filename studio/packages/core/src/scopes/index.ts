@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * scopes — file 13 §2.6: named file-glob Scopes (filter search/inspections/problems) +
  * Favorites + Bookmarks. Pure; glob matching reuses 07/09's globMatch.

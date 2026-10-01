@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * ide/state/code-index.ts — the PURE codebase-index model (plan file 39 · the platform
  * layer under Search Everywhere / go-to-symbol / offline navigation).

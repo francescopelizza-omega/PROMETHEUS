@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * repl/App.tsx — the claude-style Ink REPL view (file 11 §3), GROWN from the TUI.
  *

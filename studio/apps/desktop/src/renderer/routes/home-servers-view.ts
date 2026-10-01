@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * routes/home-servers-view.ts — PURE row derivation for the Home server controls
  * (APP-008). JSX-free so node:test pins the state→pill/action mapping and the

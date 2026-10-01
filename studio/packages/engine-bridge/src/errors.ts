@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * errors.ts — the EngineError taxonomy.
  *
@@ -138,4 +140,44 @@ export const ENGINE_ERROR_KINDS: readonly EngineErrorKind[] = [
 /** Narrowing helper for callers that catch unknown. */
 export function isEngineError(e: unknown): e is EngineError {
   return e instanceof EngineError;
+}
+
+/**
+ * A one-line, USER-FACING description of any failure crossing the engine seam.
+ *
+ * Twenty copies of a local `errString(e)` existed across `apps/desktop/src/main/*.ts`, in three
+ * slightly different spellings, and every one of them returned `e.message` alone. For an
+ * `EngineError` that is the wrong half of the information: `run.ts` rejects a crashed engine
+ * with the generic `"prometheus.py produced no JSON on stdout (crashed before emitting)"` and
+ * puts the engine's REAL complaint in `stderrTail`. The copies dropped it, so a precise
+ * diagnosis arrived at the user as a crash report.
+ *
+ * Measured instance (2026-10-01): Studio's Chat offered a runner the engine's argparse did not
+ * accept. The engine said, exactly, `argument --runner: invalid choice: 'llamacpp' (choose from
+ * 'ollama', 'lmstudio')`. The banner said `prometheus.py produced no JSON on stdout (crashed
+ * before emitting)`. The word `llamacpp` never reached the screen, and nothing pointed at the
+ * runner selection. The argparse list has since been fixed, but the reporting defect was
+ * independent of it and would have hidden the next one too.
+ *
+ * `stderrTail` can be long and can contain a traceback, so only the LAST non-empty line is
+ * appended — that is where both argparse and a Python traceback put the actual reason.
+ */
+export function describeEngineFailure(e: unknown): string {
+  if (e instanceof EngineError) {
+    const tail = lastMeaningfulLine(e.stderrTail);
+    // Avoid "X — X" when the engine's own line is already the message.
+    return tail && !e.message.includes(tail) ? `${e.message} — ${tail}` : e.message;
+  }
+  if (e instanceof Error) return e.message;
+  return typeof e === "string" ? e : "unknown error";
+}
+
+/** The last non-empty line of a stderr tail — where argparse and tracebacks put the reason. */
+function lastMeaningfulLine(stderr: string | undefined): string | undefined {
+  if (!stderr) return undefined;
+  const lines = stderr
+    .split("\n")
+    .map((l) => l.trim())
+    .filter((l) => l.length > 0);
+  return lines[lines.length - 1];
 }

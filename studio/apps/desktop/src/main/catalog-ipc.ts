@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * main/catalog-ipc.ts — the typed `catalog:*` ipcMain handlers (file 06 §4,§8).
  *
@@ -48,6 +50,7 @@ import {
   type RawEngineResult,
   createCatalogClient,
   createLifecycleClient,
+  describeEngineFailure,
 } from "@prometheus/engine-bridge";
 
 import {
@@ -75,10 +78,10 @@ import {
 } from "./catalog-validate.js";
 
 /** Coerce an unknown caught value to a short error string. */
-function errString(e: unknown): string {
-  if (e instanceof Error) return e.message;
-  return typeof e === "string" ? e : "unknown error";
-}
+// `errString` was a LOCAL copy here, one of twenty across main/*.ts, and every copy returned
+// `e.message` alone — discarding `EngineError.stderrTail`, which is where the engine puts the
+// actual reason when it exits before emitting JSON. See `describeEngineFailure`'s doc.
+const errString = describeEngineFailure;
 
 /** Extract the renderer's WebContents `sender` WITHOUT importing the electron type. */
 function senderOf(

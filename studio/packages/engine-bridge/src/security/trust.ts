@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * security/trust.ts — Audit Log, Trusted Sources, Verify (file 03 §8).
  *

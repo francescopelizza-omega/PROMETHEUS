@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * metadata-panel-view.ts — PURE view-model for the Metadata panel (file 0C, privacy).
  *

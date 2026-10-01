@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * security/progress.ts — parse a nemesis stderr progress line into a typed scan STAGE (CLI-040).
  *

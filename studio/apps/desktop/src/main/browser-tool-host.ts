@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * main/browser-tool-host.ts — the Electron half of `browser_navigate` / `browser_screenshot` /
  * `browser_extract_text` (core's host-generic gate lives in

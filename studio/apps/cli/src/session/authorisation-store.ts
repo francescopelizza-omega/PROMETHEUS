@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * session/authorisation-store.ts — the CLI's view of the ONE saved authorisation level.
  *

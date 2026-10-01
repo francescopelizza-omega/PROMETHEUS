@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * Tree.tsx — a disclosure tree (file 08 §3.1; the §5.6 file explorer + §5.5 catalog
  * tree of tiers/scopes). `role="tree"` / `role="treeitem"` with `aria-expanded` +

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * updates/model-actions.ts — what may be DONE about a model, and how to read a pull's progress.
  *

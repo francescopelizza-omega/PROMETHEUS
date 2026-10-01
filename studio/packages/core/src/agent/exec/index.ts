@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * agent/exec/index.ts — the exec core (full_wrapper_compose Phase 2).
  *

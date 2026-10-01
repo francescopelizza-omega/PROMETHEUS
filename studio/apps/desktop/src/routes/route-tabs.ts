@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * routes/route-tabs.ts — the segment ids of the merged routes + the tab latch (handoff_3 §1).
  *

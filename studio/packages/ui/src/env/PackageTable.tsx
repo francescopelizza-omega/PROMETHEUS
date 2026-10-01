@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * PackageTable.tsx — the package list of the selected env (file 04 §3.2 / §9).
  *

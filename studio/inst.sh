@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Francesco Pelizza
 
 # Color support: check NO_COLOR or non-TTY (stdout)
 if [ -n "${NO_COLOR+x}" ] || [ ! -t 1 ]; then

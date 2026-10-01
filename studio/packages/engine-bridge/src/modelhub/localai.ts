@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * modelhub/localai.ts — a typed LIVE passthrough to the engine's `localai` command
  * (file 05 §6) for {audit, models, endpoints, show, model}.

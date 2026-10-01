@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * modelhub/index.ts — the Model-Hub component barrel (file 05 §7/§8).
  *

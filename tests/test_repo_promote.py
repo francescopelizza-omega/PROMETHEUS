@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Francesco Pelizza
 """`repo.py::_promote` must REPLACE the live tree, or leave it untouched.
 
 Regression: the old body was `rmtree(live, ignore_errors=True)` then `shutil.move(stage, live)`.

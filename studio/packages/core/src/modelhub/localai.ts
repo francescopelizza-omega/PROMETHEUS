@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * modelhub/localai.ts — a PURE typed view over the engine's `localai` v1 JSON envelope
  * (CLI-026). Core never spawns python (that is engine-bridge, C5): this module only takes

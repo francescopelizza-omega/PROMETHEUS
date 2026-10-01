@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * settings-scope.ts — PURE display/mapping helpers for the layered-scope settings UI
  * (APP-058). The scope tabs (Default / User / Project) and the provenance summary line are

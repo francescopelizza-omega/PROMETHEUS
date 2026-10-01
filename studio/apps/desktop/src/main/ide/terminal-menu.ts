@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * main/ide/terminal-menu.ts — the MAIN-side terminal-launcher bridge over @prometheus/core
  * (APP-048). The sandboxed renderer must NOT import core (C5), so the "+ New terminal ▾"

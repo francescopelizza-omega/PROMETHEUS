@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * drop-target.ts — what an OS drag-and-drop onto a window MEANS, decided in one pure place.
  *

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * settings/tree.ts — the PyCharm-parity Settings tree (file 13 §2.1/§2.7).
  *

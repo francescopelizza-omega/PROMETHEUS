@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * token-economy/repo-map.ts — a token-budgeted repo map (file tree + exported symbols)
  * injected into the CLI agent's context so it can answer "where is X defined" WITHOUT a grep

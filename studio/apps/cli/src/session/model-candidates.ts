@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * session/model-candidates.ts — the switchable chat-model list behind `/model` (alias `/worker`).
  *

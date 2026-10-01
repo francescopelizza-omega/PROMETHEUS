@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * ai/connectors/oauthBridge.ts — Tier-B subscription connector (file 12 §1.2 / §3.1).
  *

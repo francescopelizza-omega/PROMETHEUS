@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * ide/state/stores.ts — the IDE renderer Zustand stores (file 07 §3.1/§11).
  *

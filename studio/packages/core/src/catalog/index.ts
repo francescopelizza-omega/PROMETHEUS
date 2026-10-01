@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * catalog/index.ts — the @prometheus/core catalog surface (file 06 §2, §7).
  *

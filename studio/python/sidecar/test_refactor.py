@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Francesco Pelizza
 """Tests for refactor.py — AST verbs + the rope-backed WorkspaceEdit engine (APP-025).
 
 Style matches the sibling suites (test_testmgr.py / test_envmgr.py): stdlib unittest,

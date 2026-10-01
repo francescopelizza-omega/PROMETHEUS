@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * agent/repeat-guard.ts — stop a model that calls the SAME tool with the SAME arguments.
  *

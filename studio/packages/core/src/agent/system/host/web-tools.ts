@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 import type { ToolOutcome } from "../../loop.js";
 import { defangFrameMarkers } from "../../protocol/frame-body.js";
 /**

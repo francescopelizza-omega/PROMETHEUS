@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * settings-view.ts — PURE renderer-side display helpers for the Settings UI (file 13).
  *

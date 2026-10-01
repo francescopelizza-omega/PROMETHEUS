@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * ide/RefactorPreview.tsx — the universal GATED Refactor Preview (APP-027).
  *

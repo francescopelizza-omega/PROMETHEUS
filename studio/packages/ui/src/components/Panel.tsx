@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * Panel.tsx — a surface container (08 §2.4 elevation, §4 layout).
  *

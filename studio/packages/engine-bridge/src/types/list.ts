@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * types/list.ts — the `list` envelope + CatalogEntry (file 02 §3.3).
  *

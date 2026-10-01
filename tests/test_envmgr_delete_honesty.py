@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Francesco Pelizza
 """`env.delete --confirm` must not report success for a delete that did not happen.
 
 Regression: the body was `shutil.rmtree(path, ignore_errors=True)` followed by an unconditional

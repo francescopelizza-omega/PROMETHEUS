@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * agent/modes.ts — modes-as-agents: Plan/Build + roster + @-mention + extra tools (file 14 §3.1).
  *

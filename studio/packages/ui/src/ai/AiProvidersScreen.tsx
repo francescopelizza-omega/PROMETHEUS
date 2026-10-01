@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * AiProvidersScreen.tsx — the Settings → AI Providers screen (file 12 §5.1).
  *

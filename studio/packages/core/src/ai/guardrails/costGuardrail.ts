@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * ai/guardrails/costGuardrail.ts — the metered-spend control subsystem (file 12 §4).
  *

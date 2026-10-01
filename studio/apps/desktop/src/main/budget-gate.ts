@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * main/budget-gate.ts — the desktop's spend cap, enforced in MAIN (Task #1 item 2).
  *

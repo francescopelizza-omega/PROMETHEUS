@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * orchestration/guards.ts — the runaway / cost / cycle safety guards.
  *

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * commands/budget-cmd.ts — `prometheus budget <status|set-session|set-daily|set-warn|
  * set-unpriced>`: visibility and friendly configuration for the REAL, already-enforced spend

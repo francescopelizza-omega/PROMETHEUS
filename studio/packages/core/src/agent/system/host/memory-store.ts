@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * agent/system/host/memory-store.ts — the durable cross-session memory store, in ONE place
  * (shared by CLI and desktop, same discipline as `grants-store.ts`'s "ONE FILE FOR BOTH

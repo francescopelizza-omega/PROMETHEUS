@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * lsp/servers.ts — the language → language-server registry map (file 07 §4.1).
  *

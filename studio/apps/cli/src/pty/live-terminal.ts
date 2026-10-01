@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * pty/live-terminal.ts — LAUNCH the engine's previewed terminal argv as a live,
  * interactive child (P5). This is the `chat --cli <svc> --open` in-session path:

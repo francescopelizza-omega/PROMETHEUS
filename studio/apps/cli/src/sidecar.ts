@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * sidecar.ts — the CLI's view of the Studio Python helper sidecars (C7).
  *

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * ide/TypeHierarchyView.tsx — the Type/Class Hierarchy tool window (JetBrains "Type
  * Hierarchy" ⌃H · VS Code "Show Type Hierarchy" parity; plan file 09).

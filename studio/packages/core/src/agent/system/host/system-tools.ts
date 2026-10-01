@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * session/system-tools.ts — the CLI's dispatch for Tier R (full_wrapper_compose Phase 1).
  *

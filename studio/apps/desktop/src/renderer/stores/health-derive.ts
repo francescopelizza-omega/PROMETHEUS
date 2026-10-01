@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * renderer/stores/health-derive.ts — the PURE health→pill derivation (§5).
  *

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * CatalogItem.tsx — one cmd_list catalog row (08 §3.2 / §5.5). A tier glyph
  * (Official ◆ / External ✓ / Documented-only ⓘ), the name, scope, an optional rank,

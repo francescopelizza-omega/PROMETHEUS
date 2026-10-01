@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * ide/ai/endpoints.ts — PURE Model-Hub endpoint resolution (file 07 §7.5).
  *

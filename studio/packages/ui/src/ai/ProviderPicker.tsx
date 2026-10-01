@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * ProviderPicker.tsx — the Tier-A-first provider rows (file 12 §5 / §5.1).
  *

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * ide/state/diff-split.ts — split a unified git diff into its two sides (file 07 §6.2).
  *

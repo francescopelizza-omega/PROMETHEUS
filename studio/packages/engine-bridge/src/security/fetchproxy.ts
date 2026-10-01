@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * security/fetchproxy.ts — engine-bridge API for the L6 safe-fetch proxy
  * (url_injection_safeguard.md §3 L6). The ONLY sanctioned way for Studio / the

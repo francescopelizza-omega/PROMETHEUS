@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * scripts/fetch-pyruntime.mjs — fetch + verify + strip the relocatable CPython (file 10 §3.1).
  *

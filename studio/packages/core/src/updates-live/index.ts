@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * updates-live/index.ts — the update checker's IO half, shared by every surface.
  *
@@ -38,7 +40,13 @@ export {
 export { fetchNpmLatest, fetchGithubLatest, fetchOllamaTags } from "./fetch.js";
 
 export type { ChannelAnswer, FetchDeps } from "./channel-fetch.js";
-export { channelLabel, askChannel, askLatest, fetchGitlabLatest } from "./channel-fetch.js";
+export {
+  channelLabel,
+  askChannel,
+  askLatest,
+  fetchGitlabLatest,
+  fetchGitlabRelease,
+} from "./channel-fetch.js";
 
 export { which, cliVersion, detectInstallMethod, engineVersion } from "./probe.js";
 
@@ -105,6 +113,14 @@ export {
   Q4_K_M_BYTES_PER_PARAM,
   detectRepoFormats,
 } from "./catalog-fetch.js";
+
+/**
+ * REMEDY FACTS — the filesystem half of `updates/remedies.ts`.
+ *
+ * Which init file the user's shell actually reads, and whether writing to it is safe at all.
+ */
+export type { ShellInitTarget, ShellInitDeps } from "./remedies-live.js";
+export { pathBlock, shellInitFor } from "./remedies-live.js";
 
 export type { CheckDeps, CheckResult } from "./check.js";
 export { checkUpdates } from "./check.js";

@@ -36,6 +36,7 @@ import {
   parseListing,
   parseNpmOutdated,
   parseOsRelease,
+  parsePipxOutdated,
   parseZypperListUpdates,
   rankByDistro,
   upgradeCommand,
@@ -460,19 +461,29 @@ test("zypper column order is read from the header, not hardcoded", () => {
   ]);
 });
 
-test("pipx DECLARES that it cannot answer, instead of answering zero", () => {
+test("`unsupported` now describes NOTHING, because pipx can in fact be asked", () => {
   /**
-   * `pipx list --json` enumerates installed venvs; pipx has no outdated command. An empty list
-   * from a manager that was never actually asked is indistinguishable from "everything current",
-   * so the row carries `unsupported` and the caller must say so.
+   * This test used to assert the opposite, and the thing it asserted was false.
+   *
+   * The old claim — "pipx has no outdated command" — was baked into the row as
+   * `unsupported: true`, and `sweepManager` returns early on that flag WITHOUT SPAWNING THE
+   * MANAGER. So the claim could never be re-tested against whatever pipx is installed, and the
+   * user was told "pipx has no 'what is outdated' command — PROMETHEUS cannot check it" by a
+   * check that had never run. Measured on pipx 1.17.6: `pipx list --help` documents
+   * `--outdated  List packages with an available upgrade.`
+   *
+   * The flag itself is kept, deliberately. It is the right answer for a manager that genuinely
+   * cannot answer, and an empty list from one that was never asked really is indistinguishable
+   * from "everything current". It simply describes nothing today — which this asserts, so that
+   * the next row to claim it has to justify the claim.
    */
-  assert.equal(manager("pipx")?.unsupported, true);
-  assert.deepEqual(parseListing("pipx", '{"venvs":{"black":{}}}'), []);
-  // …and nothing else claims to be unsupported, so the flag stays meaningful.
+  assert.notEqual(manager("pipx")?.unsupported, true);
   assert.deepEqual(
     MANAGERS.filter((m) => m.unsupported).map((m) => m.id),
-    ["pipx"],
+    [],
   );
+  // A listing that carries no packages array is still an empty list, never a fabricated row.
+  assert.deepEqual(parseListing("pipx", '{"venvs":{"black":{}}}'), []);
 });
 
 test("an apt multiarch name loses its :arch, so an upgrade command can be built for it", () => {
@@ -508,4 +519,87 @@ test("EVERY manager either parses its own output or says it cannot", () => {
       "S | Name | Current Version | Available Version\n--+--+--+--\nv | a | 1 | 2",
     ).length > 0,
   );
+});
+
+/**
+ * pipx CAN be asked what is outdated, and this repo used to insist that it could not.
+ *
+ * The row carried `unsupported: true`, so `sweepManager` returned early WITHOUT EVER SPAWNING
+ * PIPX — which meant the claim could never be re-tested against the installed version. The user
+ * was told "pipx has no 'what is outdated' command", which is false on pipx 1.17.6:
+ * `pipx list --help` documents `--outdated  List packages with an available upgrade.`
+ *
+ * The payload shape below is read out of pipx's own `commands/outdated.py`, not guessed.
+ */
+test("pipx --outdated JSON parses into rows, carrying `pinned`", () => {
+  const stdout = JSON.stringify({
+    command: ["list"],
+    exit_code: 0,
+    status: "success",
+    data: {
+      packages_checked: 2,
+      packages: [
+        {
+          environment: "httpie",
+          package: "httpie",
+          version: "3.2.2",
+          latest_version: "3.2.4",
+          injected: false,
+          pinned: false,
+        },
+        {
+          environment: "black",
+          package: "black",
+          version: "24.1.0",
+          latest_version: "25.1.0",
+          injected: false,
+          pinned: true,
+        },
+      ],
+      skipped: [],
+    },
+  });
+  const rows = parsePipxOutdated(stdout);
+  assert.equal(rows.length, 2);
+  assert.deepEqual(rows[0], {
+    manager: "pipx",
+    name: "httpie",
+    installed: "3.2.2",
+    available: "3.2.4",
+  });
+  // `pinned` is what stops us proposing an upgrade that will simply refuse.
+  assert.equal(rows[1]?.pinned, true);
+});
+
+test("a pipx SKIP is not an upgrade — an editable local checkout has no index to compare to", () => {
+  /**
+   * Measured on this machine: the only pipx venv is `--editable` from a local path
+   * (`/Users/<name>/ALPHA/remnutrition[gui,http2,pdf]`), so pipx correctly reports zero packages
+   * and one skip. Turning that skip into a row would mean querying PyPI for a private project
+   * name and either 404ing or — far worse — matching an UNRELATED public package and offering to
+   * "upgrade" the user's own code to it.
+   */
+  const stdout = JSON.stringify({
+    data: {
+      packages_checked: 0,
+      packages: [],
+      skipped: [{ environment: "remnutrition", package: "remnutrition", reason: "editable" }],
+    },
+  });
+  assert.deepEqual(parsePipxOutdated(stdout), []);
+});
+
+test("pipx is no longer flagged unsupported, and asks the right question", () => {
+  const pipx = manager("pipx");
+  assert.ok(pipx);
+  assert.notEqual(pipx.unsupported, true, "the sweep must actually spawn pipx and find out");
+  assert.deepEqual(pipx.list.argv, ["pipx", "list", "--outdated", "--output", "json"]);
+  // Exit 1 is a BROKEN VENV, never "updates found" — the opposite of npm's convention.
+  assert.deepEqual(pipx.list.exit, { kind: "stdout-only", okCodes: [0] });
+});
+
+test("garbage in, empty out — never a fabricated row", () => {
+  assert.deepEqual(parsePipxOutdated("not json"), []);
+  assert.deepEqual(parsePipxOutdated("{}"), []);
+  assert.deepEqual(parsePipxOutdated(JSON.stringify({ data: { packages: "nope" } })), []);
 });

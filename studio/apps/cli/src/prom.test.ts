@@ -567,8 +567,27 @@ test("CLI-098 package.json is npm-publish-ready (pack-audit: whitelist + zero wo
   // the detached idle-shutdown and critical-RAM eviction then silently did not exist in any
   // published CLI. It gets its own esbuild pass (see `bundle` + the //publish-note) and must
   // keep exactly this basename, which is what `watchdogEntryPath()` resolves beside the bundle.
-  assert.deepEqual(pkg.files, ["dist/bin.js", "dist/ollama-watchdog-entry.js", "README.md"]);
-  assert.equal(pkg.engines?.node, ">=20");
+  //
+  // LICENSE is the fourth entry, and it is a REDISTRIBUTION CONDITION rather than a nicety.
+  // Apache-2.0 §4(a) requires that recipients of the Work get a copy of the License, so a
+  // tarball that claims Apache-2.0 and carries no licence text does not satisfy the licence it
+  // claims. `studio/scripts/release-preflight.mjs` fails the release on exactly this.
+  //
+  // This package was MIT until 2026-10-01, on the theory that an independently-publishable
+  // client should be embeddable with fewer conditions. That was reversed: MIT obliges a
+  // redistributor to keep the copyright line and nothing more, while Apache-2.0 §4(d) obliges
+  // every derivative work to reproduce the NOTICE file's attribution. The packages most likely
+  // to be vendored into someone else's product had the weakest attribution of anything here.
+  assert.deepEqual(pkg.files, [
+    "dist/bin.js",
+    "dist/ollama-watchdog-entry.js",
+    "README.md",
+    "LICENSE",
+  ]);
+  // Matches the workspace's own floor. `engines.node` said ">=20" while
+  // studio/pnpm-workspace.yaml sets engineStrict with engines.node ">=22.6", so the published
+  // manifest advertised a runtime the build itself refuses.
+  assert.equal(pkg.engines?.node, ">=22.6");
   // `prometheus` is the ONE published command name — the old `prom` alias is gone.
   assert.equal(pkg.bin?.prometheus, "dist/bin.js");
   assert.deepEqual(Object.keys(pkg.bin ?? {}), ["prometheus"]);

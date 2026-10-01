@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * session/slash-registry.ts — the host-side `/command` registry (80+ commands) that
  * makes the interactive session as proficient as Claude Code / Codex, and then some.
@@ -2531,13 +2533,18 @@ export const SLASH_REGISTRY: readonly SlashCmd[] = Object.freeze([
     aliases: ["update", "upgrade"],
     group: "config",
     summary:
-      "Check for updates: vendor CLIs (claude/codex/gemini/…), local models, + Prometheus itself.",
+      "Check for updates: vendor CLIs (claude/codex/gemini/…), local models, + Prometheus itself. `fix` shows how to clear an install conflict for good.",
     /**
-     * The two ACTION subcommands live here rather than on a `/models` command because `models`
+     * The ACTION subcommands live here rather than on a `/models` command because `models`
      * is an engine verb and `/model` already means "switch the active one" — see the note on
      * `/ram` above for why one word must not answer to two commands.
+     *
+     * `fix` is the one that answers the question the report used to leave open. A conflict whose
+     * stated consequence is "update notices for the others will never clear" hands the user a
+     * permanent problem; `fix` names the single command that makes it stop being true, and the
+     * commands that look like it and are destructive.
      */
-    args: "[catalog | pull <tag> | rm <tag> | convert <ref>]",
+    args: "[fix [tool] | catalog | pull <tag> | rm <tag> | convert <ref>]",
     run: (rest, ctx) => ctx.runUpdates(rest),
   },
   verb("accounts", "config", "List installed agent CLIs (claude/codex/gemini/…).", {

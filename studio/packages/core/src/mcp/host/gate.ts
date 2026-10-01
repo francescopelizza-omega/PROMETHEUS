@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * mcp/host/gate.ts — the §2.2 security gate on every external MCP server.
  *

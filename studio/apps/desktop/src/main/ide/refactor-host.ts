@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * main/ide/refactor-host.ts — the `ide:refactor` verb marshaller (APP-026).
  *

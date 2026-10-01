@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * session/working-set.ts — the per-session working set of extra directories the
  * agent is allowed to read (CLI-004).

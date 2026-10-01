@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * main/settings-ipc.ts — the `settings:*` ipcMain handlers (file 13 §2.1/§2.7).
  *
@@ -8,6 +10,7 @@
  * (built-in profiles are a fixed, non-editable bundle selected via `profileId`).
  */
 import { settings as coreSettings } from "@prometheus/core";
+import { describeEngineFailure } from "@prometheus/engine-bridge";
 import { ipcMain } from "electron";
 
 import { assertNotSensitivePath } from "./ide/path-guard.js";
@@ -28,9 +31,10 @@ import {
   writeLayerAtomic,
 } from "./settings-store.js";
 
-function errString(e: unknown): string {
-  return e instanceof Error ? e.message : String(e);
-}
+// `errString` was a LOCAL copy here, one of twenty across main/*.ts, and every copy returned
+// `e.message` alone — discarding `EngineError.stderrTail`, which is where the engine puts the
+// actual reason when it exits before emitting JSON. See `describeEngineFailure`'s doc.
+const errString = describeEngineFailure;
 
 function stringField(a: Record<string, unknown>, key: string): string | undefined {
   return typeof a[key] === "string" ? (a[key] as string) : undefined;

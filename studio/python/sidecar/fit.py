@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Francesco Pelizza
 """fit.py — VRAM-aware quant fit-scoring (the Cookbook math, file 05 §4).
 
 PURE arithmetic, no I/O, fully unit-testable offline. Given a model's params (or a

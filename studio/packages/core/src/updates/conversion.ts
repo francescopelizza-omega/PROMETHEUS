@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * updates/conversion.ts — getting a model into an engine that can run it, or saying why not.
  *

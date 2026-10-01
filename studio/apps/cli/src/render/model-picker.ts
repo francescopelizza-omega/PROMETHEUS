@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * render/model-picker.ts — P3 ANSI projector for the open-model "picker" list,
  * built from `models browse` (ModelsBrowseEnvelope.models: OpenModelRow[]).

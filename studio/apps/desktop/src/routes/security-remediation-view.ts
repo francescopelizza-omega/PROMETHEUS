@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * routes/security-remediation-view.ts — PURE helpers for the Security route's
  * remediation progress pane + purge-confirm seam (APP-010). JSX-free so node:test

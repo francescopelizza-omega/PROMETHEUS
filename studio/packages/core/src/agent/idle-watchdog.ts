@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * agent/idle-watchdog.ts — inactivity-based pausing for a long-running model request/turn.
  *

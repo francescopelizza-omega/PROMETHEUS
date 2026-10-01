@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * home.ts — the canonical `~/.prometheus/` HOME tree + the settings / per-category
  * download-path store + disk-usage helpers.

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * ai/repoint/localaiRepoint.ts — the "run it free locally" escape hatch (file 12 §6).
  *

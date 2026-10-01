@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * secrets/index.ts — the OS-keychain secrets barrel (file 09 §7.2).
  */

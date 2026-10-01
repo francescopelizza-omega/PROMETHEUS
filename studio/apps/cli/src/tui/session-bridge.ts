@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * tui/session-bridge.ts — the TUI's backend: routes a submitted line to the SAME
  * brains the readline host + GUI use (slash registry → verb router → agent runtime),

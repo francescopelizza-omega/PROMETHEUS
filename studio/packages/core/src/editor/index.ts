@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * editor/index.ts — the editor-core barrel (MDS parity file 01 / file 07 §3.1,§8).
  *

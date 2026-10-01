@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * shared/ipc-contract.ts — the typed contextBridge IPC seam (C5).
  *
@@ -84,6 +86,10 @@ export const IPC = {
   /** Measure ONE local model — real context window + runner capabilities (see
    *  AiProbeEndpointResult). Same MAIN detour, same CSP reason as `ai:probeModels`. */
   aiProbeEndpoint: "ai:probeEndpoint",
+  /** Scan THIS machine for local model servers (see AiDiscoverRunnersResult). */
+  aiDiscoverRunners: "ai:discoverRunners",
+  /** The external-tool inventory — the terminal's `/deps` (see HostToolsResult). */
+  hostToolsList: "hostTools:list",
   securityRemediate: "security:remediate",
   securityThreatdb: "security:threatdb",
   securityTrust: "security:trust",
@@ -1211,6 +1217,80 @@ export interface AiProbeEndpointResult {
   error?: string;
 }
 
+/**
+ * `ai:discoverRunners` — ASK the machine which local model servers it has.
+ *
+ * This replaces the only answer Studio ever had, which was a literal. The desktop's endpoint
+ * list came from `LOCAL_AI_ENDPOINTS` (prometheus.py §6H) returned verbatim: five default URLs,
+ * printed identically whether or not anything was listening, and the Chat runner dropdown was a
+ * two-item array in `chat.tsx`. Neither consulted the machine, so Studio offered LM Studio to
+ * people who do not have it and hid llama.cpp from people actively serving with it.
+ *
+ * In MAIN for the same reason `ai:probeModels` is: the production CSP (`connect-src 'self'`)
+ * refuses a renderer `fetch` to `http://127.0.0.1:<port>`, so this crosses the contextBridge or
+ * it does not happen (C5).
+ *
+ * The scan is METADATA-ONLY — `GET /api/tags` and `GET /v1/models`. It can never cause a model
+ * load, which is what makes it safe to run on window open; `/v1/chat/completions` makes ollama
+ * page in the weights before it can answer even a one-token ping (CLAUDE.md §2.3).
+ */
+export interface AiDiscoverRunnersResult {
+  ok: boolean;
+  runners: AiDiscoveredRunner[];
+  /** one line naming the cheapest next step, when nothing is serving. */
+  hint?: string;
+  error?: string;
+}
+
+/**
+ * `hostTools:list` — which EXTERNAL tools this machine has, and what each is for.
+ *
+ * The terminal's `/deps`. Studio had no equivalent and no reach into the manifest at all:
+ * `probeHostTools`, `renderHostToolManifest` and `HOST_TOOLS` returned zero hits across
+ * `apps/desktop/src`. So the agent was told in its prompt that `ffmpeg` and `imagemagick` were
+ * available (the manifest rides the system prompt on both surfaces) while the user had no way
+ * to see whether they actually were.
+ *
+ * The probe does NOT spawn. It is a pure `access(X_OK)` walk — `host-tool-probe.ts`'s header
+ * explains why that matters: 14 forks per turn is the cost CLAUDE.md §2.3 exists to prevent.
+ * It also re-adds the well-known bin directories, because a GUI-launched Electron app inherits
+ * launchd's minimal PATH and would otherwise report every tool missing.
+ */
+export interface HostToolsResult {
+  ok: boolean;
+  tools: HostToolRow[];
+  error?: string;
+}
+
+/** One external tool. `found` is the binary that resolved, or null when none did. */
+export interface HostToolRow {
+  id: string;
+  /** the binaries that would satisfy it, in preference order. */
+  bins: string[];
+  /** what Prometheus uses it FOR — the reason a missing one matters. */
+  purpose: string;
+  /** the binary actually found on PATH, or null. */
+  found: string | null;
+  /** the package name per manager, for a copyable install line. */
+  install: { brew?: string; apt?: string; dnf?: string; pacman?: string };
+}
+
+/** One runner's row. Mirrors core's `DiscoveredRunner`, flattened for the bridge. */
+export interface AiDiscoveredRunner {
+  id: string;
+  name: string;
+  baseUrl: string;
+  host: string;
+  port: number;
+  /** `serving` ⇒ it answered. `installed` ⇒ binary present, nothing listening. `absent` ⇒ neither. */
+  state: "serving" | "installed" | "absent";
+  models: string[];
+  canStart: boolean;
+  canInstall: boolean;
+  binPath?: string;
+  detail?: string;
+}
+
 export interface SecurityInstallOptions {
   /** preview-first (`--dry-run`) — defaults true (§2.1/§5.1). */
   dryRun?: boolean;
@@ -1596,6 +1676,10 @@ export interface AiApi {
   /** Measure ONE local model: real context window + runner capabilities (see
    *  AiProbeEndpointResult — this is what makes the effort chip work on a local model). */
   probeEndpoint(baseUrl: string, model: string): Promise<AiProbeEndpointResult>;
+  /** Scan this machine for local model servers (see AiDiscoverRunnersResult). */
+  discoverRunners(): Promise<AiDiscoverRunnersResult>;
+  /** The external-tool inventory — the terminal's `/deps` (see HostToolsResult). */
+  hostTools(): Promise<HostToolsResult>;
 }
 
 export interface PrometheusApi {
@@ -1947,6 +2031,18 @@ export interface ModelPullResult {
   install?: string;
   /** set when the launch guard refused the pull (host CPU/RAM already ≥ 90%). */
   blockedByResources?: boolean;
+  /**
+   * The sidecar's actionable next step when it refuses — e.g. "pick a smaller model
+   * (`model fit --id <id>` lists what fits), or re-run with --force".
+   *
+   * The sidecar's RAM-fit guard (`modelhub.py:1131`) correctly refuses a pull that will not fit,
+   * and this projection used to copy the headline sentence and drop both this and `reasons`. The
+   * desktop also exposes no `force`, so the result was a refusal with no stated way forward —
+   * the user is told no and not told how. The terminal has always printed both.
+   */
+  hint?: string;
+  /** per-quantisation explanations behind a fit refusal; empty unless the guard fired. */
+  reasons?: string[];
   error?: string;
 }
 
@@ -2910,6 +3006,62 @@ export interface UpdatesReportResult {
   };
   /** the one-line summary, identical to the terminal's startup nudge. */
   summary: string;
+  /**
+   * EXECUTABLE repair plans for the conflicts above — the terminal's `/updates fix`, in Studio.
+   *
+   * `UpdateConflictView` already carried two ADVISORY strings (`remedy`, `avoid`). These are the
+   * other thing: argv the user can actually run, with the undo, the verification command, and
+   * what the repair deliberately leaves alone.
+   *
+   * They were computed and thrown away. `updates-live/check.ts:385` builds them on every sweep
+   * and attaches them at `:420`; this projection simply never read the field, so the whole
+   * feature was terminal-only while the app re-ran the same expensive check to produce it.
+   */
+  remedies: UpdateRemedyView[];
+  /**
+   * Commands that must NEVER be offered, with the reason — `core`'s `NEVER_RUN`, verbatim.
+   *
+   * Shipped WITH the repairs, not instead of them, which is the terminal's rule and is
+   * load-bearing: the user who is not told why `--zap` is dangerous will find it in a forum
+   * answer and reach for it precisely because it sounds thorough. On this machine that one
+   * deletes the vendor Claude install (1.2 GB, all five builds) plus `~/.claude.json*`.
+   */
+  neverRun: { command: string; because: string }[];
+}
+
+/** One step of a repair plan. `argv` is never joined into a shell string. */
+export interface UpdateRemedyStepView {
+  /** display form of the argv, shell-quoted for READING — not for execution. */
+  command: string;
+  purpose: string;
+  risk: string;
+  /** display form of the undo argv, when the step has one. */
+  undo?: string;
+  /**
+   * A readable stand-in when the argv is correct but unreadable — the shell-init append is the
+   * one real case. See `RemedyStep.displayAs` in core.
+   */
+  displayAs?: string[];
+}
+
+/** One conflict's repair plan. Mirrors core's `Remedy`, flattened for the bridge. */
+export interface UpdateRemedyView {
+  kind: string;
+  subject: string;
+  title: string;
+  rationale: string;
+  steps: UpdateRemedyStepView[];
+  /** the command that PROVES the repair worked — every conflict here came from a command that
+   *  reported success while changing nothing. */
+  verify?: string;
+  /** what the repair deliberately does not touch. */
+  keeps?: string;
+  /** authorisation rung required on the 0–7 ladder. */
+  minAuthLevel: number;
+  /** set when the repair must NOT be offered as executable; shown INSTEAD of the steps. */
+  blocked?: string;
+  /** true when running this makes the conflict stop being true, not merely stop being shown. */
+  permanent: boolean;
 }
 
 export interface EffortPrefResult {

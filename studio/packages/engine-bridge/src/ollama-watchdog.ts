@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * ollama-watchdog.ts — spawn (or skip, if one is already alive) the detached idle-shutdown
  * watchdog for a Prometheus-managed `ollama serve`.

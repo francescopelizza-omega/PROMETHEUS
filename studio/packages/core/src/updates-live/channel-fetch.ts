@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * updates/channel-fetch.ts — ask one `LatestChannel` what the newest version is.
  *
@@ -158,11 +160,20 @@ export async function askLatest(
   installed: string | null,
   deps: FetchDeps = {},
 ): Promise<ChannelAnswer> {
+  /**
+   * EXCLUDE before reordering. Preference alone was not enough: a channel that is wrong for this
+   * install still answered when the preferred one did not, and the caller has no way to tell a
+   * comparison against the wrong artifact from a comparison against the right one. See
+   * `LatestChannel.onlyOwners` for the LM Studio measurement that forced this.
+   */
+  const usable = tool.latest.filter(
+    (c) => !c.onlyOwners || (owner && c.onlyOwners.includes(owner)),
+  );
   const preferred =
     owner === "brew-formula" ? "brew-formula" : owner === "brew-cask" ? "brew-cask" : null;
   const ordered = preferred
-    ? [...tool.latest].sort((a, b) => Number(b.kind === preferred) - Number(a.kind === preferred))
-    : tool.latest;
+    ? [...usable].sort((a, b) => Number(b.kind === preferred) - Number(a.kind === preferred))
+    : usable;
 
   let firstFailure: ChannelAnswer | null = null;
   for (const c of ordered) {
@@ -178,11 +189,45 @@ export async function fetchGitlabLatest(
   repo: string,
   deps: FetchDeps = {},
 ): Promise<string | null> {
+  return (await fetchGitlabRelease(repo, deps)).version;
+}
+
+/**
+ * The same lookup, keeping the REASON when there is no version.
+ *
+ * `null` answered three different questions with one value: "nothing is published", "the project
+ * is private", and "the network is down". The report then printed "could not check for updates"
+ * for all three — which for this repo is actively misleading, because nothing failed.
+ *
+ * Measured, read-only and unauthenticated:
+ *   GET /api/v4/projects/red-beard-phoenix%2FPROMETHEUS/releases/permalink/latest
+ *     → 404  {"message":"404 Project Not Found"}
+ *
+ * The URL encoding is correct (`encodeURIComponent` gives GitLab's documented `%2F` project-path
+ * form) and the bare project endpoint answers identically. GitLab returns 404 rather than 403 for
+ * a private project so that an unauthenticated caller cannot confirm it exists — so a 404 here is
+ * a definitive answer about visibility, not a failure. `git ls-remote` against the same repo
+ * succeeds, because that path is authenticated.
+ */
+export async function fetchGitlabRelease(
+  repo: string,
+  deps: FetchDeps = {},
+): Promise<{ version: string | null; why?: string }> {
   const r = await get(u.gitlabLatestUrl(repo), deps);
-  if (!r || r.status < 200 || r.status >= 300) return null;
+  if (!r) return { version: null, why: "the release feed could not be reached" };
+  if (r.status === 404) {
+    return {
+      version: null,
+      why: "no public release feed — the project is private or has no releases, so there is nothing to compare against",
+    };
+  }
+  if (r.status < 200 || r.status >= 300) {
+    return { version: null, why: `the release feed answered HTTP ${r.status}` };
+  }
   try {
-    return u.latestFromGitlab(JSON.parse(r.text));
+    const v = u.latestFromGitlab(JSON.parse(r.text));
+    return v ? { version: v } : { version: null, why: "the release feed named no version" };
   } catch {
-    return null;
+    return { version: null, why: "the release feed was not readable JSON" };
   }
 }

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * ai/local-runners.ts — the local model servers Prometheus can talk to, and control.
  *
@@ -58,6 +60,100 @@ export interface LocalRunnerSpec {
   processMatch: string;
   /** the runner's NATIVE (non-OpenAI) API root, where it has one — used for richer status. */
   nativeUrl?: string;
+  /**
+   * The environment variable the VENDOR itself documents for relocating this server, when one
+   * exists. Read by `localRunners()` below — never by a caller, so there is exactly one place
+   * that knows how a vendor spells its host override.
+   *
+   * Only `ollama` has one today (`OLLAMA_HOST`), and the Python side has honoured it since
+   * `modelhub.py:855` while every TypeScript surface hardcoded loopback. That split is the bug
+   * this field closes: a user who moved their daemon saw it from the sidecar and not from the
+   * CLI or the app.
+   */
+  hostEnv?: string;
+  /**
+   * The binary whose presence on PATH means "this runtime is installed but may not be serving".
+   *
+   * Distinct from `processMatch`, which names a RUNNING process. A runner can be installed and
+   * stopped, and those two states need different UI: "Start" versus "Install". Where the two
+   * strings coincide it is a coincidence, not a rule — LM Studio's binary is `lms` and its
+   * process reports as "Bionic".
+   */
+  bin?: string;
+  /**
+   * argv that INSTALLS this runtime on macOS, when Prometheus can do it unattended.
+   *
+   * `undefined` means "we will not install this for you" and the UI must say so and link out,
+   * rather than offering a button that cannot work. vLLM is the clear case: it is a Python
+   * package whose install depends on the CUDA/ROCm stack of the host, and guessing wrong there
+   * costs the user a multi-gigabyte download of the wrong wheel.
+   */
+  install?: readonly string[];
+}
+
+/**
+ * Apply the vendor's own host override to a spec, when the environment sets one.
+ *
+ * `OLLAMA_HOST` is accepted in every form the ollama CLI itself accepts, because a user who put
+ * it in their shell profile wrote it the way ollama's docs show, not the way a URL parser wants:
+ *
+ *     11434                 bare port
+ *     :11434                leading-colon port
+ *     gpu-box               bare host (ollama's own default port)
+ *     gpu-box:11434         host:port
+ *     http://gpu-box:11434  full URL
+ *
+ * A value that parses to nothing usable leaves the spec untouched — a typo in a shell profile
+ * must not make the runner undiscoverable, it must just not move it.
+ */
+export function applyHostEnv(
+  spec: LocalRunnerSpec,
+  env: Record<string, string | undefined>,
+): LocalRunnerSpec {
+  const generic = env[`PROMETHEUS_RUNNER_${spec.id.toUpperCase().replace(/[^A-Z0-9]/g, "_")}_URL`];
+  const vendor = spec.hostEnv ? env[spec.hostEnv] : undefined;
+  const raw = (generic ?? vendor ?? "").trim();
+  if (!raw) return spec;
+
+  let host = spec.host;
+  let port = spec.port;
+  let scheme = "http";
+  try {
+    if (/^[a-z][a-z0-9+.-]*:\/\//i.test(raw)) {
+      const u = new URL(raw);
+      scheme = u.protocol.replace(":", "");
+      host = u.hostname.replace(/^\[|\]$/g, "");
+      port = u.port ? Number(u.port) : scheme === "https" ? 443 : 80;
+    } else if (/^\d+$/.test(raw)) {
+      port = Number(raw);
+    } else if (raw.startsWith(":")) {
+      port = Number(raw.slice(1));
+    } else {
+      // `host`, `host:port`, `[::1]`, `[::1]:port` — and NOTHING else. The permissive version of
+      // this branch (split on the last colon, else treat the whole string as a host) turned
+      // `host:notaport!` into a hostname containing a colon, which the authority builder below
+      // then wrapped in brackets as if it were an IPv6 literal: a typo in a shell profile
+      // silently produced `http://[host:notaport!]:11434/v1`. An unparseable value must fall
+      // through to "leave the spec alone", which is what no match here does.
+      const m = /^(\[[^\]]+\]|[^:]+)(?::(\d+))?$/.exec(raw);
+      if (!m) return spec;
+      host = (m[1] as string).replace(/^\[|\]$/g, "");
+      if (m[2]) port = Number(m[2]);
+    }
+  } catch {
+    return spec;
+  }
+  if (!Number.isInteger(port) || port <= 0 || port > 65535 || host.length === 0) return spec;
+
+  // An IPv6 literal needs its brackets back before it goes into a URL.
+  const authority = `${host.includes(":") ? `[${host}]` : host}:${port}`;
+  return Object.freeze({
+    ...spec,
+    host,
+    port,
+    baseUrl: `${scheme}://${authority}/v1`,
+    ...(spec.nativeUrl ? { nativeUrl: `${scheme}://${authority}` } : {}),
+  });
 }
 
 export const LOCAL_RUNNERS: readonly LocalRunnerSpec[] = Object.freeze([
@@ -70,6 +166,9 @@ export const LOCAL_RUNNERS: readonly LocalRunnerSpec[] = Object.freeze([
     port: 11434,
     start: Object.freeze(["ollama", "serve"]),
     processMatch: "ollama",
+    hostEnv: "OLLAMA_HOST",
+    bin: "ollama",
+    install: Object.freeze(["brew", "install", "ollama"]),
   }),
   Object.freeze({
     id: "lmstudio",
@@ -91,8 +190,50 @@ export const LOCAL_RUNNERS: readonly LocalRunnerSpec[] = Object.freeze([
     // current build reports as "Bionic" in `ps`, not "LM Studio"; this string is kept as a
     // human-readable fallback label for the (rare) code path with no `stop` command to prefer.
     processMatch: "LM Studio",
+    bin: "lms",
+    install: Object.freeze(["brew", "install", "--cask", "lm-studio"]),
+  }),
+  Object.freeze({
+    id: "llamacpp",
+    name: "llama.cpp",
+    baseUrl: "http://localhost:8080/v1",
+    host: "localhost",
+    port: 8080,
+    // NO `start`. `llama-server` cannot be launched without being told WHICH weights to serve
+    // (`-m <gguf>` or `-hf <repo>`), and there is no defensible guess — picking a file out of
+    // the user's 90 GB Hugging Face cache on their behalf is the kind of "helpful" that loads
+    // 23 GB they did not ask for. `undefined` is the honest answer and the UI says so.
+    processMatch: "llama-server",
+    bin: "llama-server",
+    install: Object.freeze(["brew", "install", "llama.cpp"]),
+  }),
+  Object.freeze({
+    id: "vllm",
+    name: "vLLM",
+    baseUrl: "http://localhost:8000/v1",
+    host: "localhost",
+    port: 8000,
+    // NO `start` and NO `install`, both deliberately. vLLM needs `--model`, same as llama.cpp;
+    // and its wheel is chosen by the host's CUDA/ROCm stack, so an unattended `pip install vllm`
+    // is a multi-gigabyte download of quite possibly the wrong build. Detect it, use it, offer
+    // the docs — do not install it.
+    processMatch: "vllm",
+    bin: "vllm",
   }),
 ]) as readonly LocalRunnerSpec[];
+
+/**
+ * `LOCAL_RUNNERS` with each spec's vendor host override applied from `env`.
+ *
+ * Prefer this over the raw constant anywhere a real endpoint is about to be contacted.
+ * `LOCAL_RUNNERS` stays exported and unchanged because it is the DEFAULTS — the thing tests pin
+ * and documentation quotes — while this is the resolved view for a particular machine.
+ */
+export function localRunners(
+  env: Record<string, string | undefined> = process.env,
+): readonly LocalRunnerSpec[] {
+  return LOCAL_RUNNERS.map((r) => applyHostEnv(r, env));
+}
 
 /**
  * The runner whose base URL matches `url` — LOCAL host and port both (path and trailing slash
@@ -108,18 +249,29 @@ export const LOCAL_RUNNERS: readonly LocalRunnerSpec[] = Object.freeze([
  * Deliberately loopback-only (`isLocalUrl`), so an endpoint written as this machine's own LAN
  * address does not autostart either: refusing to spawn is the recoverable direction, spawning a
  * model server nobody asked for is not.
+ *
+ * The RESOLVED spec must be local too, not just the caller's URL. With `OLLAMA_HOST=gpu-box:11434`
+ * the daemon this machine would reach on 11434 is on another host, so `ollama serve` here would
+ * bind somewhere the caller is not asking about — the same "spawned for a request that was always
+ * going elsewhere" mistake the paragraph above describes, arriving by the other door.
  */
-export function runnerForBaseUrl(url: string): LocalRunnerSpec | undefined {
+export function runnerForBaseUrl(
+  url: string,
+  env: Record<string, string | undefined> = process.env,
+): LocalRunnerSpec | undefined {
   // `isLocalUrl` is declared below; function declarations hoist, so no reordering is needed.
   if (!isLocalUrl(url)) return undefined;
   const port = portOf(url);
   if (port === undefined) return undefined;
-  return LOCAL_RUNNERS.find((r) => r.port === port);
+  return localRunners(env).find((r) => r.port === port && isLocalUrl(r.baseUrl));
 }
 
-/** The runner with this id. */
-export function runnerById(id: string): LocalRunnerSpec | undefined {
-  return LOCAL_RUNNERS.find((r) => r.id === id);
+/** The runner with this id, with any vendor host override already applied. */
+export function runnerById(
+  id: string,
+  env: Record<string, string | undefined> = process.env,
+): LocalRunnerSpec | undefined {
+  return localRunners(env).find((r) => r.id === id);
 }
 
 /**

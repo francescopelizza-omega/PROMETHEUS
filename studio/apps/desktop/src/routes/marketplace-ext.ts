@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * routes/marketplace-ext.ts — PURE row-mapping + verdict-flow for the extensions
  * marketplace (APP-060). Node:test-able: no React, no window, no core.

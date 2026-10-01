@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * git/worktree.ts — thin, dependency-injected git wrappers shared by the CLI's `/worktree`
  * slash (CLI-054) and the desktop app's worktree command/panel (Task #5, desktop parity).

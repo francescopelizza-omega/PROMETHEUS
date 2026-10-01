@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * updates/report.ts — the assembled update report + its renderers (pure).
  *
@@ -11,6 +13,7 @@ import type { InstallState, ToolCopy } from "./install-owner.js";
 import type { ModelCheck } from "./model-registry.js";
 import type { CatalogModel, ModelDigestDiff } from "./models.js";
 import type { ManagerId, OutdatedPackage } from "./package-managers.js";
+import { type Remedy, displayCommand } from "./remedies.js";
 import type { SelfUpdatePlan } from "./self-update.js";
 import type { ToolRole, UpdateCommand } from "./tool-registry.js";
 
@@ -29,6 +32,20 @@ export interface ToolUpdateStatus {
   state: InstallState;
   /** every copy found, PATH order. `copies[0]` is what runs. */
   copies: readonly ToolCopy[];
+  /**
+   * The shadowed copy that is NEWER than the one PATH picked, when there is one.
+   *
+   * Carried on this row rather than recomputed downstream because it is the one fact a
+   * `ToolResolution` has that `copies` alone cannot express: the ordering is by PATH, not by
+   * version, so "copies[1] is newer than copies[0]" requires a version comparison that has
+   * already been done once in `resolveTool`.
+   *
+   * It was dropped here, and the loss was silent: `check.ts` rebuilds a `ToolResolution` from
+   * this row to feed `findConflicts`, so the `shadowed-newer` conflict — severity HIGH, the one
+   * that says "updating will not help, the newer version is already on disk and simply never
+   * reached" — could never fire in any surface. The branch existed, was tested, and was dead.
+   */
+  newerShadow?: ToolCopy;
   current: string | null;
   latest: string | null;
   /**
@@ -109,6 +126,18 @@ export interface SelfUpdateStatus {
    * cannot succeed must not render as reassurance.
    */
   updateAvailable: boolean | null;
+  /**
+   * WHY the lookup produced no version, when it produced none.
+   *
+   * "could not check" is the honest answer to a failure and the WRONG answer to a definitive
+   * one. Measured: `GET /api/v4/projects/red-beard-phoenix%2FPROMETHEUS/releases/permalink/latest`
+   * answers HTTP 404 with `{"message":"404 Project Not Found"}` — and the URL encoding is
+   * correct. GitLab deliberately returns 404 rather than 403 for a PRIVATE project seen by an
+   * unauthenticated caller, so the 404 means "there is no public release feed here", not "the
+   * request failed". Rendering that as "could not check for updates" invites the user to debug a
+   * network problem that does not exist.
+   */
+  note?: string;
   plan: SelfUpdatePlan;
 }
 
@@ -133,6 +162,36 @@ export interface UpdateReport {
    * useless, and only this section can say so.
    */
   conflicts?: readonly Conflict[];
+  /**
+   * The repair for each conflict, where one is known.
+   *
+   * Separate from `conflicts` rather than a field on it, because the diagnosis is PURE and the
+   * repair needs facts from the filesystem — which shell init file exists, whether it is a
+   * symlink, where npm's prefix points. Keeping them apart is what lets `conflicts.ts` stay
+   * testable without a disk, and lets a surface that cannot gather those facts still render the
+   * finding.
+   *
+   * A conflict with no remedy is normal and is never suppressed: some are facts about the
+   * machine that no command resolves, and a missing repair must not hide a real finding.
+   */
+  remedies?: readonly Remedy[];
+  /**
+   * What this report did NOT look at, when it did not look at everything.
+   *
+   * The startup notice runs with `skipPackages: true` so the prompt is not held for the ~2s
+   * `brew outdated` costs. That is the right trade — but two of the six conflict kinds
+   * (`downgrade-offer` and `shadowed-upgrade`) are produced only from the package-manager rows,
+   * so a skipped sweep makes them impossible to find.
+   *
+   * The user saw the consequence exactly: a header reading "4 install conflicts" above a body
+   * listing SIX. Neither number was wrong — they were two different reports, and only one of
+   * them said so. A partial count presented as a total is the same defect this whole feature
+   * exists to remove, one level up.
+   */
+  partial?: {
+    /** the package-manager sweep did not run, so manager-derived findings are missing. */
+    packages: boolean;
+  };
 }
 
 /**
@@ -306,7 +365,56 @@ export function summarizeForStartup(r: UpdateReport): string {
     bits.push(`${n.suggestions} new model${n.suggestions > 1 ? "s" : ""} to try`);
   if (bits.length === 0) return "";
   const tail = n.unknown ? ` (${n.unknown} could not be checked)` : "";
-  return `↑ Updates available: ${bits.join(", ")}${tail}. Run /updates to review.`;
+  /**
+   * Declare the blind spot. This line is computed from a report that skipped the package sweep,
+   * so its conflict count is a FLOOR, not a total — see `UpdateReport.partial`.
+   */
+  const partial = r.partial?.packages ? " — package managers not checked yet" : "";
+  return `↑ Updates available: ${bits.join(", ")}${tail}${partial}. Run /updates to review.`;
+}
+
+/**
+ * One remedy's lines, indented under the conflict it repairs.
+ *
+ * Shows the COMMANDS and the reason, in that order of prominence but not of reading: the
+ * rationale comes first because a repair the user does not understand is one they should not
+ * run. A BLOCKED remedy prints its refusal and no commands at all — that is the entire point of
+ * the field, and printing the steps "for reference" would put a command we have just called
+ * dangerous on the user's screen in copyable form.
+ */
+function formatRemedy(m: Remedy): string[] {
+  const out: string[] = [];
+  out.push(`      FIX — ${m.title}`);
+  for (const para of m.rationale.split("\n")) out.push(`        ${para}`);
+  if (m.blocked) {
+    out.push(`        NOT AUTOMATED: ${m.blocked}`);
+  } else {
+    for (const step of m.steps) {
+      if (step.displayAs) {
+        // A block write. The argv is correct and unreadable — see `RemedyStep.displayAs`.
+        for (const l of step.displayAs) out.push(`        ${l}`);
+      } else {
+        out.push(`        $ ${displayCommand(step.argv)}`);
+      }
+      out.push(`            ${step.purpose}`);
+      if (step.undo) out.push(`            undo:  ${displayCommand(step.undo)}`);
+    }
+    if (m.keeps) out.push(`        keeps: ${m.keeps}`);
+    /**
+     * `permanent` is the fact the user actually wants. Every one of these conflicts re-appears on
+     * every run until the duplicate is gone, and a repair that merely quiets one check would be
+     * the same broken promise in a new place.
+     */
+    if (m.permanent)
+      out.push("        this clears the notice for good — the conflict stops being true.");
+  }
+  /**
+   * The verification is printed even for a blocked remedy, because the first correct step is
+   * always to measure, and for the blocked ones measuring is the only step we are willing to
+   * recommend.
+   */
+  if (m.verify) out.push(`        verify:  ${displayCommand(m.verify)}`);
+  return out;
 }
 
 /** Group tools by the role that says why PROMETHEUS cares about them. */
@@ -332,11 +440,33 @@ export function formatUpdateReport(r: UpdateReport): string {
   if (r.conflicts && r.conflicts.length > 0) {
     lines.push("");
     lines.push("⚠ Install conflicts");
+    /** Subjects whose repair has already been printed — see the dedupe note below. */
+    const shownFor = new Set<string>();
     for (const c of r.conflicts) {
       lines.push(`  • ${c.summary}`);
       lines.push(`      ${c.consequence}`);
       if (c.avoid) lines.push(`      DO NOT RUN:  ${c.avoid}`);
       if (c.remedy) lines.push(`      Instead:  ${c.remedy}`);
+      /**
+       * THE REPAIR, under the finding that needs it.
+       *
+       * Printed here rather than in a section of its own, because a repair separated from its
+       * reason is a command the user has to match back up by hand — and the whole failure this
+       * feature addresses is a user acting on a true statement without its context.
+       */
+      /**
+       * ONE fix per subject, under the first finding that mentions it.
+       *
+       * The same duplicate install surfaces as several conflicts — `downgrade-offer` from the
+       * manager's row and `duplicate-install` from the resolution — and they share a single
+       * repair. Printing it under each turns one actionable command into three identical walls
+       * of text, and invites the user to run it three times.
+       */
+      const fix = (r.remedies ?? []).find((m) => m.kind === c.kind && m.subject === c.subject);
+      if (fix && !shownFor.has(fix.subject)) {
+        shownFor.add(fix.subject);
+        lines.push(...formatRemedy(fix));
+      }
     }
   }
 
@@ -348,9 +478,16 @@ export function formatUpdateReport(r: UpdateReport): string {
     lines.push(`  ${selfVer}  →  ${r.self.latest ?? "newer"} available`);
     for (const s of r.self.plan.steps) lines.push(`    ${s}`);
   } else if (r.self.updateAvailable === null) {
-    // NOT "up to date". The check did not succeed, and saying otherwise is the reassurance this
-    // whole tri-state exists to prevent.
-    lines.push(`  ${selfVer}  (could not check for updates)`);
+    /**
+     * NOT "up to date". The check did not yield a version, and saying otherwise is the
+     * reassurance this whole tri-state exists to prevent.
+     *
+     * But "could not check" is not the whole truth either, and for this repo it is misleading:
+     * the release feed answers a definitive 404 because the project is PRIVATE, which is an
+     * answer about visibility, not a failed request. `self.note` carries the distinction so the
+     * user is not sent debugging a network problem that does not exist.
+     */
+    lines.push(`  ${selfVer}  (${r.self.note ?? "could not check for updates"})`);
     lines.push(`    To update anyway:  ${r.self.plan.command}`);
   } else {
     lines.push(`  ${selfVer}  (up to date)`);
@@ -494,9 +631,21 @@ function formatTool(t: ToolUpdateStatus): string[] {
      * while the cask channel answered perfectly well. Printing "could not check" flat implies
      * the lookup failed, when in fact we know the latest and cannot read the installed one.
      */
+    /**
+     * THREE unknowns, not two, and the third is not a failure at all.
+     *
+     * A `none` channel means we looked and there is deliberately nothing to compare against —
+     * the tool has no published feed, or none whose numbering means anything for this install.
+     * Rendering that as "could not check" implies something went wrong and invites the user to
+     * go looking for a fault that does not exist; `source` already carries the reason, so the
+     * `none:` prefix is dropped and the reason stands on its own.
+     */
+    const noFeed = t.source?.startsWith("none:") ? t.source.slice("none:".length).trim() : "";
     const why = t.latest
       ? `installed version unreadable — latest is ${t.latest}`
-      : `could not check${t.source ? ` — ${t.source}` : ""}`;
+      : noFeed
+        ? `no version to compare against — ${noFeed}`
+        : `could not check${t.source ? ` — ${t.source}` : ""}`;
     lines.push(`${head}   (${why})`);
   } else {
     lines.push(`${head}   (up to date)`);

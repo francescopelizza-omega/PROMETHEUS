@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * render/harden-view.ts — P3 projector for the `harden` envelope (the defensive,
  * read-only self-audit of THIS machine: firewall, listening ports, sshd config,

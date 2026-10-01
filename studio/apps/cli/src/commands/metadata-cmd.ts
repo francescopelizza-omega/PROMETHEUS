@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * commands/metadata-cmd.ts — `prometheus metadata …` over the metadata.py sidecar
  * (C7 / file 0C), at parity with the GUI Metadata privacy panel. Read/strip/edit/

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * routes/docs-tutorials.ts — the in-app getting-started tutorials (APP-099). Pure static data
  * (no fetch, no remote markdown) so it stays node:test-able and can't leak. A step may deep-link

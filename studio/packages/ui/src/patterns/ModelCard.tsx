@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * ModelCard.tsx — the LM-Studio-style model card (08 §3.2 / §5.4). Name · params ·
  * license · a VRAM **fit meter** · quantization chips (GGUF/FP8/AWQ) · a local/served

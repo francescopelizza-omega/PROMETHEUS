@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * token-economy/codebase-overview.ts — "meet your codebase" (roadmap point 6): turn the
  * already-built, already-tested repo map (`repo-map.ts`'s `walkRepo`/`RepoMap`) into a friendly,

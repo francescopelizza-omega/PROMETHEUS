@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * llm.ts — the `LLMClient` seam core's `runAgentTurn` asks for, for the VS Code host.
  *

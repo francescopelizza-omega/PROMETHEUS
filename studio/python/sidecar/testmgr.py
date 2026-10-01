@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Francesco Pelizza
 """testmgr.py — test discovery + gated run sidecar (file 14 §3.19, APP-013).
 
 Discovers pytest/unittest/doctest-style tests by **AST scan** (never imports the target

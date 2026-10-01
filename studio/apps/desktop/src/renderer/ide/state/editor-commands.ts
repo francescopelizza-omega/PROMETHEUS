@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * ide/state/editor-commands.ts — PyCharm-signature editor-core actions surfaced in the
  * command palette (plan file 01 · JetBrains "editor actions" parity).

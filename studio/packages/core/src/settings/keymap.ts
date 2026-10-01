@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * settings/keymap.ts — the keymap model + presets + conflict detection (file 13 §2.2).
  *

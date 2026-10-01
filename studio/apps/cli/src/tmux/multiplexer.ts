@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * tmux/multiplexer.ts — the P6 tmux multiplexer entry point.
  *

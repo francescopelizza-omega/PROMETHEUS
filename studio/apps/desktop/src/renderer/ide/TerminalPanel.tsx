@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * ide/TerminalPanel.tsx — the SPLIT-PANE multi-session integrated terminal (07 §6.1 + APP-049).
  *

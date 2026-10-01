@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Francesco Pelizza
 """test_profile.py — profile.py sidecar tests (APP-046).
 
 Pure-unit (argv guard, fold determinism) + subprocess (envelope shape, guard refusal,

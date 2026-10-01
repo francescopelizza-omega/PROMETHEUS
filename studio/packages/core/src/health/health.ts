@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * health/health.ts — system-health aggregation (Reliability & Polish pack).
  *

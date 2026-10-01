@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * The OS-keychain SERVICE name every host stores an MCP bearer token under.
  *

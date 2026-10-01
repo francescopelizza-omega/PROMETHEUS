@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * agent/permission-engine.ts — user-editable allow/ask/deny autonomy policy (file 14 §3.4).
  *

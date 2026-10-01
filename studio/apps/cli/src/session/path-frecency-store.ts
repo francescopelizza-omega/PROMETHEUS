@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * session/path-frecency-store.ts — the per-project "most-used @-path" memory (opt-in;
  * toggled by the `/tab-complete` slash command, persisted as the CLI's own

@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Francesco Pelizza
 """test_locate_engine.py — prove locate_engine.py finds the real sibling engine.
 
 Two layers of coverage:

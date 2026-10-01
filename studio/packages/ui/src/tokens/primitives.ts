@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * primitives.ts — the raw primitive ramps (file 08 §2.1, 50..950). The CANONICAL
  * source of the hex values is ../tokens.ts (which the ~30 existing consumers import);

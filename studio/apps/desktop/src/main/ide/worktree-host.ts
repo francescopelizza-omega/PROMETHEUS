@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * main/ide/worktree-host.ts — the desktop IPC's worktree backend (Task #5, desktop parity).
  *

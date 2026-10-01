@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Francesco Pelizza
 """localai_bridge.py — LIVE passthrough to prometheus.py's `localai` (file 05 §6).
 
 The engine OWNS the open-model catalog + repoint recipes (``LOCAL_AI_ENDPOINTS`` /

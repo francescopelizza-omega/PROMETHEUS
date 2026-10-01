@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * steering-load.ts — which steering files the desktop agent pane loads, and from where.
  *

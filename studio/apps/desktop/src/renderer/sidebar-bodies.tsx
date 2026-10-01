@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * renderer/sidebar-bodies.tsx — the shell Sidebar body registry (APP-002).
  *

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * tokens/ barrel (file 08 §2/§3). The CANONICAL token source remains ../tokens.ts
  * (ramps + semantic maps + role maps + glyphs + typography/space/density), already

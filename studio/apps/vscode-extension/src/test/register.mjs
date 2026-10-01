@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * register.mjs — the loader hook for session.test.ts's plain node:test run: registers the CLI's
  * own dev-resolver (so "@prometheus/core/agent-loop" etc. resolve to SOURCE, not a possibly

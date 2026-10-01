@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * ai/guardrails/budgetGate.ts — the SHARED pre-turn spend gate (one per host, not three).
  *

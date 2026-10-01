@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * SettingsTreePage.tsx — mounts SettingsTree against the REAL `settings:*` IPC
  * (APP-017): the core-served keyed/layered tree, previously a finished-but-orphaned

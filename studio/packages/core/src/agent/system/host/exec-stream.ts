@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * session/exec-stream.ts — turn raw child-process chunks into whole lines for the terminal.
  *

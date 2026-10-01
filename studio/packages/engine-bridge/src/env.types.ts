@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * env.types.ts — the canonical TS shapes for the Package & Environment Manager
  * (file 04 §2). These are a deliberate SUPERSET of what `envmgr.py` emits today,

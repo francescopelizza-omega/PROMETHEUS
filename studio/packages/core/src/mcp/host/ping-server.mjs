@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * ping-server.mjs — a COMPLIANT MCP server that also sends requests of its own.
  *

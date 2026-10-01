@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * core/security/forceToken.ts — the deep-red override token + typed-name guards.
  *

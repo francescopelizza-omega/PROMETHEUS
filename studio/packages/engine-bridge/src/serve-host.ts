@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * serve-host.ts — the CLI-owned local model-runner supervisor (CLI-022).
  *

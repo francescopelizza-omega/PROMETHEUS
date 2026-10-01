@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * cli-profiles/effort-store.ts — the ONE saved thinking-effort tier, for every surface.
  *

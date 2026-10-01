@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * main/ide-validate.ts — the ZOD validation seam for the IDE IPC (file 07 §3.2).
  *

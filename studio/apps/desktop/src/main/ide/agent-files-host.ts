@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * main/ide/agent-files-host.ts — discover `*.md` sub-agent personas on disk (Task #5, desktop
  * parity).

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 import type { ToolCapabilityState } from "../agent/protocol/negotiate.js";
 /**
  * ai/model-health.ts — turn the capability/breaker/context-window state this repo already

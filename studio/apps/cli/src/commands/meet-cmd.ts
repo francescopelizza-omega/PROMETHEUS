@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * commands/meet-cmd.ts — `prometheus meet`: "meet your codebase" (roadmap point 6).
  *

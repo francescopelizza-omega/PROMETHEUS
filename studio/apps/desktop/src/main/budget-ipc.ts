@@ -1,3 +1,6 @@
+import { describeEngineFailure } from "@prometheus/engine-bridge";
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * main/budget-ipc.ts — the `budget:status` ipcMain handler for the Settings ▸ Budget & Spend
  * page (roadmap point 4, RELAY-ONLY).
@@ -30,9 +33,10 @@ const EMPTY_STATUS: BudgetStatusResult = {
   unpriced: [],
 };
 
-function errString(e: unknown): string {
-  return e instanceof Error ? e.message : String(e);
-}
+// `errString` was a LOCAL copy here, one of twenty across main/*.ts, and every copy returned
+// `e.message` alone — discarding `EngineError.stderrTail`, which is where the engine puts the
+// actual reason when it exits before emitting JSON. See `describeEngineFailure`'s doc.
+const errString = describeEngineFailure;
 
 /** Register the `budget:status` handler. Returns a disposer (mirrors sibling IPC modules). */
 export function registerBudgetIpcHandlers(): () => void {

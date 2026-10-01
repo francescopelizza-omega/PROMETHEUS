@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 import { readFileSync, statSync } from "node:fs";
 /**
  * providers/policy.ts — the C11 provider promotion policy.

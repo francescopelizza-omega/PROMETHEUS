@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * mcp/host/types.ts — the MCP HOST data model (file 09 §2.1, verbatim).
  *

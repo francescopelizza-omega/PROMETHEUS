@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * patterns/LatencyCard.tsx — "where the time went" (handoff §3, closes C3.11).
  *

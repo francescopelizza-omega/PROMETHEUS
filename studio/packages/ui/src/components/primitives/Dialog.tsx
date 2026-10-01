@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * Dialog.tsx — the modal primitive (file 08 §3.1, §5.2/§5.3 use it). Plus AlertDialog
  * (destructive confirm; the §5.2 Force-override path) and Sheet (a side drawer).

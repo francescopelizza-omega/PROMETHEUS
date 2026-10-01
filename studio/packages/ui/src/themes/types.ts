@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 import type { SyntaxStyle } from "../theme.js";
 /**
  * themes/types.ts — file 13's theming models (§3.6), built ON TOP of 08's engine.

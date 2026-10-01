@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * agent/authorization.ts — the `--authorisation(s)` autonomy SCALE (0–7).
  *

@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Francesco Pelizza
 """linters.py — fan ruff/flake8/mypy/pylint output into ONE normalized diagnostic stream.
 
 Stdlib-only (the C7 sidecar convention, `_envelope.py`). The four linters are the USER's

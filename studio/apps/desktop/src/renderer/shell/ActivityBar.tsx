@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * shell/ActivityBar.tsx — the 46px left icon rail (handoff §2.2), in TWO parts.
  *

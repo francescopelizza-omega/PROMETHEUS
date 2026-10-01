@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * AgentStatusDot.tsx — a superscan agent's presence + counts (08 §3.2). The TUI
  * ScanView dot grammar promoted to a GUI molecule: `● ◐ ○` + the counts string

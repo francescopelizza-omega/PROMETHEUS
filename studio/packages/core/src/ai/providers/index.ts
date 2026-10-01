@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * ai/providers — the billing-aware provider matrix + the 3-tier promotion policy
  * (file 12 §1–§3). Pure, dependency-free: load/validate the catalog, derive

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * e2e/hook-denial.spec.ts — a configured PreToolUse hook actually denying a real tool call,
  * from inside a live chat turn in the real built app (Task #14).

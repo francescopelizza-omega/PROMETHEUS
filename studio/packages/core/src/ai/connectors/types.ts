@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * ai/connectors/types.ts — the runtime shapes the 4 connector kinds produce (file 12 §1.2).
  *

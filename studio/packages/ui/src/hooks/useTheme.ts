@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * hooks/useTheme.ts — the reusable §6 theming hook (08 §6). React-only, no node.
  *

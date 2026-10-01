@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * ai/providers/registry.ts — load the matrix + derive tier/light/warn (file 12 §1/§2).
  *

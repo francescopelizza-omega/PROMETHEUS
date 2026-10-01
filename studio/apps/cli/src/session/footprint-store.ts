@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * session/footprint-store.ts — where the memory ledger lives, and how it is filled.
  *

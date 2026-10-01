@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * agent/system/host/index.ts — the SHARED host implementation of the system tools (Phase 6).
  *
@@ -212,3 +214,9 @@ export {
   probeHostTools,
   searchPath,
 } from "./host-tool-probe.js";
+// The CATALOGUE itself, beside the probe that walks it. A caller that renders the inventory
+// needs both — the probe answers "is it here", the manifest answers "what is it for" and
+// "which package installs it" — and having to reach a different subpath for the second half is
+// how a surface ends up showing a found/missing list with no way to act on a missing row.
+export { HOST_TOOLS, renderHostToolManifest } from "../../host-tools.js";
+export type { HostTool, HostToolStatus } from "../../host-tools.js";

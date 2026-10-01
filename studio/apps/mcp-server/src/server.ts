@@ -1,4 +1,6 @@
 #!/usr/bin/env node
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 import { pathToFileURL } from "node:url";
 /**
  * server.ts — Prometheus Studio MCP server (stdio) over the REAL @prometheus/core

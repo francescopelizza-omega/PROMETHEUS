@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * cli-profiles/toml.ts — a MINIMAL, dependency-free TOML subset parser (file 11 §6).
  *

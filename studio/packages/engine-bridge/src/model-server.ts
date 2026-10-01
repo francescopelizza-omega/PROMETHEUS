@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * model-server.ts — starting, inspecting and stopping a LOCAL model server.
  *
@@ -155,6 +157,32 @@ export async function canStart(argv: readonly string[] | undefined): Promise<boo
   // `command` is a shell builtin and execFile cannot run it; fall back to `which`.
   const which = await probeSystemCommand("which", [bin], { timeoutMs: 2000 });
   return which !== null && which.trim().length > 0;
+}
+
+/**
+ * Resolve a bare command to its absolute path, or `undefined`.
+ *
+ * `canStart` above answers the same question as a boolean and is kept, because most callers only
+ * need the yes/no. This one exists for `discoverRunners` (core), which distinguishes "installed
+ * but not serving" from "absent" and shows the path so a user with two ollamas can see WHICH one
+ * Prometheus found — the shadowed-install case `updates/conflicts.ts` exists to catch, and the
+ * reason `/usr/local/bin/ollama` versus `/opt/homebrew/bin/ollama` is worth printing.
+ *
+ * Same two-step as `canStart`: `command -v` first (it is what a login shell would resolve), then
+ * `which`, because `command` is a shell builtin that `execFile` cannot run on its own. Returns
+ * only the FIRST line — `which -a` is not used, but a wrapper could still print more.
+ */
+export async function whichBin(bin: string | undefined): Promise<string | undefined> {
+  if (!bin) return undefined;
+  for (const [cmd, args] of [
+    ["command", ["-v", bin]],
+    ["which", [bin]],
+  ] as const) {
+    const out = await probeSystemCommand(cmd, [...args], { timeoutMs: 2000 });
+    const first = out?.split("\n")[0]?.trim();
+    if (first) return first;
+  }
+  return undefined;
 }
 
 export interface StartResult {

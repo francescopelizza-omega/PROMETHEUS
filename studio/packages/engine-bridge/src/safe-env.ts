@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * safe-env.ts — the curated child environment for every engine/sidecar/nemesis spawn.
  *
@@ -52,6 +54,30 @@ const STRIP_PREFIX = ["DYLD_"];
  * that will eventually forget. A refused key is dropped silently — `extra` is a request, not a
  * command, and every legitimate in-repo use (MPLBACKEND, PYTHONUNBUFFERED) is unaffected.
  */
+/**
+ * Is this env var name one of the hijack class — a variable that changes what a child
+ * interpreter LOADS or EXECUTES before its own code runs?
+ *
+ * Exported because the denylist had been copied, badly, into surfaces that do their own env
+ * filtering. `apps/desktop/src/main/ide/run-host.ts` and its renderer twin each carried seven
+ * names and called it a "mirror" of this list; this list has fifteen plus the whole `DYLD_`
+ * family. The ten they were missing include `BASH_ENV` and `ENV` (shell startup hooks),
+ * `PYTHONSTARTUP` and `PYTHONPATH` (import/startup hijacks), `LD_AUDIT`, and every `DYLD_*`
+ * beyond the two spelled out — `DYLD_FRAMEWORK_PATH` and `DYLD_FALLBACK_LIBRARY_PATH` passed
+ * straight through.
+ *
+ * A security denylist is exactly the wrong thing to keep two of: the copy does not fail when it
+ * falls behind, it just quietly permits more. One predicate, imported.
+ *
+ * Note this does NOT include `PATH`. Stripping it would break every child here, which needs to
+ * find its interpreter. A caller filtering USER-SUPPLIED overrides (as opposed to the inherited
+ * parent env) should refuse `PATH` as well, on top of this.
+ */
+export function isHijackEnvKey(name: string): boolean {
+  const k = name.toUpperCase();
+  return STRIP_EXACT.has(k) || STRIP_PREFIX.some((p) => k.startsWith(p));
+}
+
 export function safeChildEnv(extra?: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   const out: NodeJS.ProcessEnv = {};
   for (const [k, v] of Object.entries(process.env)) {

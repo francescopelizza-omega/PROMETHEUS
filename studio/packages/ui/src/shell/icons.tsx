@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * shell/icons.tsx — the Prometheus custom activity-icon set (file 08 §4.1).
  *

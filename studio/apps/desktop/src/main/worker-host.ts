@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * main/worker-host.ts — the MAIN-process manager for the offloaded WORKER process
  * (file 01 §5, the worker layer). NO electron import.

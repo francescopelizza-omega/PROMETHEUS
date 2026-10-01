@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * VerdictBadge.tsx — the load-bearing atom (08 §3.2). Renders a nemesis
  * VerdictTier as a pill: glyph + UPPERCASE label + (optional) risk score in

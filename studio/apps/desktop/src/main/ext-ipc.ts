@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * main/ext-ipc.ts — the `ext:*` ipcMain handlers (file 09 §5, APP-059).
  *
@@ -11,6 +13,7 @@
  */
 import { readFile, readdir } from "node:fs/promises";
 import { join, resolve, sep } from "node:path";
+import { describeEngineFailure } from "@prometheus/engine-bridge";
 
 import { ext as coreExt } from "@prometheus/core";
 import { ipcMain } from "electron";
@@ -80,9 +83,10 @@ interface Installed {
   installPath: string;
 }
 
-function errString(e: unknown): string {
-  return e instanceof Error ? e.message : String(e);
-}
+// `errString` was a LOCAL copy here, one of twenty across main/*.ts, and every copy returned
+// `e.message` alone — discarding `EngineError.stderrTail`, which is where the engine puts the
+// actual reason when it exits before emitting JSON. See `describeEngineFailure`'s doc.
+const errString = describeEngineFailure;
 function stringField(a: Record<string, unknown>, key: string): string | undefined {
   return typeof a[key] === "string" ? (a[key] as string) : undefined;
 }

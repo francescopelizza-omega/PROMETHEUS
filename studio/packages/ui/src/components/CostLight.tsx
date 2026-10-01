@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * CostLight.tsx — the provider cost-tier light (C11 + 13 §1.4).
  *

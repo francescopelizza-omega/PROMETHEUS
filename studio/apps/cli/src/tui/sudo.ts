@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 import type { agent } from "@prometheus/core";
 /**
  * tui/sudo.ts — the elevated-privilege (sudo / root) startup gate.

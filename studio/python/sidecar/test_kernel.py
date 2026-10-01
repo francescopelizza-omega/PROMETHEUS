@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Francesco Pelizza
 """test_kernel.py — kernel.py sidecar tests (APP-044).
 
 Three tiers, so the suite is meaningful on a bare box AND on a full one:

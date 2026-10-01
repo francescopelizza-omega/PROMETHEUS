@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * agent/web.ts — the `web_fetch` agent tool (file 11 §3.2, CLI-011).
  *

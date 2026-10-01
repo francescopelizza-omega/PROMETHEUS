@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * agent/diagnose.ts — PURE structured retry hints for a failed edit (WRAPPER Phase A).
  *

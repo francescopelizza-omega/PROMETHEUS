@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * memory/loader.ts — the agent's durable cross-session fact store: parse + validate +
  * assemble (mirrors rules/loader.ts's discipline: PURE, no IO — the caller reads/writes files

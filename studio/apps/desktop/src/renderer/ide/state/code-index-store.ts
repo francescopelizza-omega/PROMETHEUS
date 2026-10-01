@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * ide/state/code-index-store.ts — the live wrapper around the PURE code-index model
  * (code-index.ts, plan 39). Holds the current symbol index + the WORD index (APP-065) +

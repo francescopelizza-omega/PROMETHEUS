@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * types/request.ts — the typed REQUEST builders (file 02 §3.3 request side).
  *

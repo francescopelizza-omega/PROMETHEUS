@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * session/exec-jobs.ts — background jobs for `run_command` (full_wrapper_compose Phase 4 / §9).
  *

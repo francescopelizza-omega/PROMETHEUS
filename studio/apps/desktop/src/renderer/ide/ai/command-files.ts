@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * ai/command-files.ts — user-defined slash commands from markdown, in the AgentPane composer
  * (Task #5, desktop parity with apps/cli/src/session/command-files.ts).

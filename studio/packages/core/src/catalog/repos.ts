@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * catalog/repos.ts — the Studio Repo-index projection + verdict-ref store (file 06 §3, §7).
  *

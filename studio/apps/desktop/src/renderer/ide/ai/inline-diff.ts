@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * ai/inline-diff.ts — PURE line diff for the Cmd-K/Cmd-I inline-edit before/after view (APP-092).
  *

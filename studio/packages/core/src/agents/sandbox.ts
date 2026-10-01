@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * agents/sandbox.ts — tool-ref parsing + the §4.4 FS/sandbox guards (PURE).
  *

@@ -12762,13 +12762,95 @@ def _update_model_tool(t: ModelTool, osi: OSInfo, path: Optional[str]) -> int:
 
 
 def _ollama_models_dir() -> Path:
-    return get_models_root() / "ollama"
+    """Where ollama ACTUALLY keeps its models — not where Prometheus would prefer them.
+
+    ── WHY THIS DOES NOT DEFAULT TO ~/.prometheus/models ──────────────────────────────────────
+
+    It used to, and the result was a second, empty model store that fought the real one.
+
+    Measured 2026-10-01 on the machine this was written for:
+
+        ~/.ollama/models        29 GB   gemma4, qwen3.6   ← the daemon's actual store
+        ~/.prometheus/models     0 B    created 2 Jul     ← what this function returned
+
+    `_ollama_env()` exported `OLLAMA_MODELS=~/.prometheus/models/ollama`, so `models pull`
+    downloaded into the empty directory while every model the user already had stayed invisible
+    to Prometheus — and `ollama list` in their own terminal disagreed with Prometheus about what
+    was installed. Pulling a 23 GB model they already had would have cost 23 GB of disk and an
+    hour, to produce a duplicate.
+
+    That is precisely the duplicate-install failure `updates/conflicts.ts` exists to detect,
+    inflicted by Prometheus on itself, with model weights.
+
+    PRECEDENCE, and the reasoning for each rung:
+
+      1. An explicitly configured `models_root` — the user asked for it, in so many words, via
+         `models config --set-root`. Honour it.
+      2. `OLLAMA_MODELS` already in the environment — the user, or their daemon, already decided.
+         Prometheus is a guest here; it does not get to overrule that.
+      3. ollama's own documented default, `~/.ollama/models`. This is where the models are.
+
+    `get_models_root()` still owns rung 1, and still defaults to ~/.prometheus/models for the
+    OTHER things that install under it (apps, worldsim engines, repos). Only the ollama lane
+    changes, because only ollama already has a store of its own.
+    """
+    cfg = load_config().get("models_root")
+    if cfg and _models_root_is_plausible(get_models_root()):
+        return get_models_root() / "ollama"
+    env_dir = os.environ.get("OLLAMA_MODELS", "").strip()
+    if env_dir:
+        return Path(os.path.expanduser(os.path.expandvars(env_dir)))
+    return Path.home() / ".ollama" / "models"
+
+
+def _models_root_is_plausible(root: Path) -> bool:
+    """False for a configured models_root that is obviously a mistake.
+
+    An explicit setting normally wins — the user said what they wanted. This refuses the narrow
+    class of values that cannot have been meant, because honouring them does real damage.
+
+    Found on this machine 2026-10-01, in the LEGACY config at ~/.config/prometheus/config.json:
+
+        {"models_root": "/Users/<name>/ALPHA/PROMETHEUS/studio/apps/cli"}
+
+    That is a SOURCE DIRECTORY inside the repository. A `models pull` would have written tens of
+    gigabytes of model weights into the working tree — where the auto-committer (`git add -A`)
+    would then have tried to commit them. Nobody chose that; it is the residue of a
+    `models config --set-root` run from the wrong working directory, kept alive because the
+    legacy config path is still read.
+
+    The test is deliberately narrow — inside a git working tree, or inside the running engine's
+    own checkout. A models_root ANYWHERE else is the user's business and is honoured, including
+    an external disk, a network mount, or a path that does not exist yet.
+    """
+    try:
+        root = root.resolve()
+    except OSError:
+        return False
+    engine_root = Path(__file__).resolve().parent
+    if root == engine_root or engine_root in root.parents:
+        Log.warn(f"ignoring models_root inside the Prometheus checkout: {root}")
+        Log.step("clear it with:  models config --set-root ~/.prometheus/models   (or edit the config)")
+        return False
+    for parent in (root, *root.parents):
+        if (parent / ".git").exists():
+            Log.warn(f"ignoring models_root inside a git working tree ({parent}): {root}")
+            Log.step("model weights do not belong in a repository — pick a path outside it")
+            return False
+    return True
 
 
 def _ollama_env() -> dict:
-    """os.environ + OLLAMA_MODELS pinned under the user's chosen models_root."""
+    """os.environ, with OLLAMA_MODELS set ONLY when Prometheus is entitled to choose it.
+
+    When the user has not configured a `models_root` and has not exported `OLLAMA_MODELS`
+    themselves, this returns the environment UNCHANGED — so ollama uses its own default and
+    Prometheus sees the same models the user does. Setting the variable to ollama's own default
+    would be harmless but dishonest: it would claim a decision Prometheus did not make.
+    """
     env = dict(os.environ)
-    env["OLLAMA_MODELS"] = str(_ollama_models_dir())
+    if load_config().get("models_root"):
+        env["OLLAMA_MODELS"] = str(_ollama_models_dir())
     return env
 
 
@@ -12814,7 +12896,14 @@ def _models_pull_run(action: str, model: Optional[str]) -> int:
         if JSON_OUT:
             return emit_json({"command": "models", "ok": True, "action": action, "dry_run": True,
                               "argv": ["ollama", action, tag], "ollama_models": str(mdir)})
-        Log.ok(f"[dry-run] OLLAMA_MODELS={mdir} ollama {action} {tag}"); return 0
+        # Say which of the two it is. Printing `OLLAMA_MODELS=<dir>` when Prometheus is in fact
+        # leaving the variable unset claims a decision it did not make — and the whole point of
+        # this change is that Prometheus stops pretending to own ollama's model store.
+        if load_config().get("models_root") and _models_root_is_plausible(get_models_root()):
+            Log.ok(f"[dry-run] OLLAMA_MODELS={mdir} ollama {action} {tag}")
+        else:
+            Log.ok(f"[dry-run] ollama {action} {tag}   (ollama's own store: {mdir})")
+        return 0
     if not shutil.which("ollama"):
         if JSON_OUT:
             return emit_json({"command": "models", "ok": False, "action": action,
@@ -12834,10 +12923,13 @@ def _models_pull_run(action: str, model: Optional[str]) -> int:
     if JSON_OUT:
         # A JSON caller can't be handed an interactive/streaming terminal — return the command to run.
         return emit_json({"command": "models", "ok": True, "action": action,
-                          "argv": ["ollama", action, "--", tag], "ollama_models": str(env["OLLAMA_MODELS"]),
+                          "argv": ["ollama", action, "--", tag], "ollama_models": str(mdir),
                           "interactive": action == "run",
                           "note": "run this in a terminal — JSON mode does not stream/exec"})
-    Log.info(f"{action} '{tag}'  (OLLAMA_MODELS={env['OLLAMA_MODELS']})")
+    # `mdir`, not env["OLLAMA_MODELS"]: the variable is now absent from the environment whenever
+    # Prometheus is deferring to ollama's own default, and reading it directly would KeyError on
+    # the common path. `mdir` always holds the directory the pull will really land in.
+    Log.info(f"{action} '{tag}'  (models dir: {mdir})")
     # "--" end-of-options: a tag starting with '-' must be a positional, never an ollama flag.
     if action == "pull":
         try:
@@ -15153,9 +15245,28 @@ def describe_effort(res: Optional[dict]) -> str:
     return res["applied"]
 
 
+# The local runners `chat --local` can talk to.
+#
+# Kept in step with `LOCAL_AI_ENDPOINTS` (§6H) and with the TypeScript registry
+# `studio/packages/core/src/ai/local-runners.ts` — THREE tables describing one fact, which is
+# two too many. They are not merged here only because §6H's table also carries `mythos` (a
+# gateway that re-serves ollama on the same port, so it is not a distinct runner to chat with).
+#
+# llamacpp and vllm were missing until 2026-10-01, and their absence was NOT inert: the argparse
+# `choices` below is derived from these keys, so a surface that discovered a running llama.cpp
+# and offered it got `invalid choice: 'llamacpp'`, exit 2, before any command body ran. Studio's
+# runner dropdown became machine-driven that same day and immediately hit it — on a llama.cpp-only
+# machine it auto-selected the one runner the engine refused, so every send failed from first
+# paint. `chat_local()` itself was always generic (it resolves through this dict and reports an
+# unknown runner cleanly); only the gate was narrow.
+#
+# Anything added here must speak the OpenAI `/v1/chat/completions` wire format, because that is
+# all `chat_local` sends.
 CHAT_LOCAL_ENDPOINTS = {
     "ollama":   "http://localhost:11434/v1",
     "lmstudio": "http://localhost:1234/v1",
+    "llamacpp": "http://localhost:8080/v1",   # ./llama-server --port 8080
+    "vllm":     "http://localhost:8000/v1",   # vLLM OpenAI-compatible server
 }
 
 # Per-CLI launch profile. ONLY real, documented flags (verified 2026-06). Each
@@ -15829,7 +15940,11 @@ def build_parser() -> argparse.ArgumentParser:
     # 9th functionality — CHAT: agentic local (free, on-device) OR terminal chat for paid CLIs
     p_chat = sub.add_parser("chat", help="9th functionality: agentic LOCAL chat (free) OR terminal chat for paid CLIs (claude/codex/gemini/cursor/opencode) — preview→OPEN, system-prompt, bypass, tmux")
     p_chat.add_argument("--local", metavar="MODEL", help="AGENTIC mode: run in-app against a local model (ollama tag / LM Studio model id)")
-    p_chat.add_argument("--runner", choices=["ollama", "lmstudio"], help="local runner for --local (default: ollama)")
+    # DERIVED, never a literal. The hardcoded ["ollama", "lmstudio"] here outlived the endpoint
+    # table by two runners, and argparse enforces `choices` during parse_args — so a caller that
+    # named a runner the table knew about was rejected before the command body could resolve it.
+    p_chat.add_argument("--runner", choices=sorted(CHAT_LOCAL_ENDPOINTS),
+                        help=f"local runner for --local (default: ollama) — one of {', '.join(sorted(CHAT_LOCAL_ENDPOINTS))}")
     p_chat.add_argument("--effort", choices=list(EFFORT_TIERS), metavar="TIER",
                         help="AGENTIC mode: reasoning effort — off|low|medium|high|xhigh|ultra|max. "
                              "Translated per-backend (reasoning_effort, a token budget, a "

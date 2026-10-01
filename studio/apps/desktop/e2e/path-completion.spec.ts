@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * e2e/path-completion.spec.ts — the "@"-path completion feature, driven end-to-end
  * against the REAL built app (no unit-level DOM/jsdom environment exists in this repo,

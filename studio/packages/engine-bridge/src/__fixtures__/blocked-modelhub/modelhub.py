@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Francesco Pelizza
 """Deterministic modelhub.py stand-in for client.test.ts — emits the file 05 §5
 download BLOCKED envelope on stdout (one JSON object), exit 2. NO fetch, NO nemesis:
 it lets the TS boundary mapper be proven against a nemesis-BLOCK shape WITHOUT touching

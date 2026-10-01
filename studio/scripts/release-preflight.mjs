@@ -1,4 +1,6 @@
 #!/usr/bin/env node
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * release-preflight.mjs — prove the documented install routes could actually work.
  *
@@ -20,7 +22,7 @@
  * Exit 0 = every route is coherent. Exit 1 = at least one would fail for a new user, and the
  * message says which one and why.
  *
- * Usage:  node scripts/release-preflight.mjs [--skip-bundle]
+ * Usage:  node scripts/release-preflight.mjs [--skip-bundle] [--no-network]
  */
 import { execFileSync, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -165,11 +167,39 @@ if (cliPkg) {
       : "";
     const rootIsApache = /Apache License/i.test(rootLicense);
     if (rootIsApache && cliPkg.license && cliPkg.license !== "Apache-2.0") {
+      /**
+       * The repository is Apache-2.0 THROUGHOUT as of 2026-10-01, and this check now enforces
+       * that rather than tolerating a documented exception.
+       *
+       * It previously accepted a divergence when the package shipped matching licence text,
+       * because the client packages were deliberately MIT so they could be embedded with fewer
+       * conditions. That trade was reversed before the first public release: MIT requires only
+       * that the copyright line travel with copies, while Apache-2.0 §4(d) requires every
+       * derivative work to reproduce the NOTICE file's attribution. The packages most likely to
+       * be vendored into someone else's product were the ones with the weakest attribution.
+       *
+       * A package declaring something else now fails. If a future package genuinely needs a
+       * different licence, that is a deliberate decision which should edit this check and say
+       * why — not slip past it.
+       */
       fail(
         "@prometheus/cli",
-        `declares "license": "${cliPkg.license}" while the repository LICENSE is Apache-2.0`,
-        "decide which is correct — this is a licensing question, not a packaging one",
+        `declares "license": "${cliPkg.license}" while this repository is Apache-2.0 throughout`,
+        "set it to Apache-2.0, or change this check deliberately and record the reason",
       );
+    } else if (cliPkg.license === "Apache-2.0") {
+      const localText = existsSync(join(cliDir, "LICENSE"))
+        ? readFileSync(join(cliDir, "LICENSE"), "utf8")
+        : "";
+      if (/Apache License/i.test(localText)) {
+        ok('declares "Apache-2.0" and ships the matching LICENSE');
+      } else {
+        fail(
+          "@prometheus/cli",
+          "declares Apache-2.0 but ships no Apache licence text of its own",
+          "cp LICENSE studio/apps/cli/LICENSE — a redistributed package must carry the licence it claims",
+        );
+      }
     }
   }
 }
@@ -286,6 +316,91 @@ if (existsSync(adapters)) {
     );
   } else {
     ok("no shipped manifest carries a placeholder engine path");
+  }
+}
+
+/* ── 4. the raw URL is reachable BY A STRANGER ─────────────────────────────*/
+/**
+ * The check above proves the file is on the branch. It cannot prove anyone can FETCH it.
+ *
+ * `git cat-file -e origin/main:install.sh` answers using the local remote-tracking ref, which
+ * exists because THIS clone is authenticated. A private project answers the same branch, the same
+ * file, and `403` to the whole internet — so every in-repo signal agrees the install route works
+ * while `curl -fsSL … | bash` delivers zero bytes to every user who tries it.
+ *
+ * Measured on this project, unauthenticated:
+ *   GET  /-/raw/main/install.sh                     → 302 (redirect to sign-in)
+ *   curl -fsSL (which follows, and -f rejects)      → exit 22, 0 bytes
+ *   GET  /api/v4/projects/<ns>%2F<name>             → 404 {"message":"404 Project Not Found"}
+ * GitLab returns 404 rather than 403 for a private project so an anonymous caller cannot even
+ * confirm it exists. Both are definitive answers about VISIBILITY, not transport failures.
+ *
+ * NETWORK-OPTIONAL BY DESIGN. Being offline is not a release defect, and a gate that fails on a
+ * train is a gate people stop running. Only a definitive HTTP answer counts; anything else is a
+ * note. Skip entirely with --no-network.
+ */
+if (!process.argv.includes("--no-network")) {
+  const remote = run("git", ["remote", "get-url", "origin"], { cwd: REPO }).stdout.trim();
+  const m = /gitlab\.com[:/](.+?)(?:\.git)?$/.exec(remote);
+  if (!m) {
+    notes.push(
+      `  · origin is not a gitlab.com remote (${remote || "none"}) — raw-URL check skipped`,
+    );
+  } else {
+    const project = m[1];
+    const url = `https://gitlab.com/${project}/-/raw/main/install.sh`;
+    // `-o /dev/null -w %{http_code}` with NO -L: a redirect is the answer, not something to follow.
+    const probe = run("curl", ["-sS", "-m", "20", "-o", "/dev/null", "-w", "%{http_code}", url], {
+      cwd: REPO,
+    });
+    const status = probe.stdout.trim();
+    if (probe.code !== 0 || !/^[1-5]\d\d$/.test(status)) {
+      notes.push(
+        "  · could not reach gitlab.com to check the raw URL (offline?) — not treated as a failure",
+      );
+    } else if (status === "200") {
+      ok("the raw install URL is publicly fetchable (HTTP 200)");
+    } else {
+      fail(
+        "curl | bash install route",
+        `${url} answers HTTP ${status} to an ANONYMOUS request, so \`curl -fsSL … | bash\` delivers nothing to a new user`,
+        status === "302" || status === "401" || status === "403" || status === "404"
+          ? "the project is private — make it public (GitLab → Settings → General → Visibility), then re-run. Until then this command in the README does not work for anybody."
+          : `investigate the ${status} before publishing the README command`,
+      );
+    }
+  }
+}
+
+/* ── 5. the GitHub mirror's README is still the same README ────────────────*/
+/**
+ * `.github/README.md` exists because GitHub renders it IN PREFERENCE to the root `README.md`
+ * (precedence: `.github/README.md` > `README.md` > `docs/README.md`), while GitLab has no such
+ * rule and renders the root one, ignoring `.github/` entirely. One repository, two forges, one
+ * landing page each — and they are supposed to be the SAME page.
+ *
+ * The failure mode is silent and slow: someone edits the root README, the GitLab page updates,
+ * and the GitHub mirror keeps serving a copy that is a month stale — including, eventually, an
+ * install command that no longer matches the script. Nothing surfaces it, because both files are
+ * valid Markdown and neither is broken.
+ *
+ * So the invariant is BYTE EQUALITY, checked here rather than trusted to memory.
+ */
+{
+  const rootReadme = join(REPO, "README.md");
+  const ghReadme = join(REPO, ".github", "README.md");
+  if (!existsSync(ghReadme)) {
+    notes.push("  · no .github/README.md — GitHub would render the root README (fine, but see §5)");
+  } else if (!existsSync(rootReadme)) {
+    fail("README", "root README.md is missing", "restore it");
+  } else if (readFileSync(rootReadme, "utf8") !== readFileSync(ghReadme, "utf8")) {
+    fail(
+      ".github/README.md",
+      "the GitHub mirror's README has drifted from the root README.md, so the two forges would show different pages",
+      "cp README.md .github/README.md",
+    );
+  } else {
+    ok(".github/README.md is byte-identical to README.md");
   }
 }
 

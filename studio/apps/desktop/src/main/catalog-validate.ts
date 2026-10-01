@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * main/catalog-validate.ts — the ZOD validation seam for the Catalog IPC
  * (file 06 §4 / §8). Mirrors model-validate.ts / env-validate.ts EXACTLY: every

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * security/types.ts — the renderer-facing data shapes the §4–§9 security
  * components render, as @prometheus/ui-LOCAL structural mirrors.

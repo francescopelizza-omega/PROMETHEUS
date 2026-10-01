@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * routes/chat.tsx — the Chat activity (SPECTACULAR power-up).
  *
@@ -14,7 +16,9 @@
  * with design tokens (no raw hex). No node/electron/engine-bridge imports.
  */
 import { Button, Checkbox, Input, Panel, Select, Spinner, Textarea } from "@prometheus/ui";
-import { type ReactElement, useCallback, useEffect, useState } from "react";
+import { type ReactElement, useCallback, useEffect, useMemo, useState } from "react";
+
+import type { AiDiscoveredRunner } from "../shared/ipc-contract.js";
 
 import { appendScrollback } from "../renderer/ide/terminal-view.js";
 
@@ -89,6 +93,35 @@ interface BuiltCommand {
   display: string;
 }
 
+/**
+ * The two runners Studio can both start AND install, shown before the machine scan returns.
+ *
+ * Deliberately NOT the whole registry: llama.cpp and vLLM cannot be started without being told
+ * which weights to serve, so offering them before we know they are up would be offering a
+ * choice that fails at Send time. Once `discoverRunners` answers, the real rows replace these.
+ */
+const FALLBACK_RUNNER_OPTIONS = [
+  { value: "ollama", label: "Ollama (:11434)" },
+  { value: "lmstudio", label: "LM Studio (:1234)" },
+] as const;
+
+/**
+ * Label a discovered runner so its STATE is visible in the closed dropdown.
+ *
+ * A picker that lists four names and says nothing about them is the static table again: the
+ * user learns which ones work by trying them. The model count is the useful part — "Ollama
+ * (:11434) · 2 models" answers "can I chat right now" without a click.
+ */
+export function runnerOptionLabel(r: AiDiscoveredRunner): string {
+  const where = `(:${r.port})`;
+  if (r.state === "serving") {
+    const n = r.models.length;
+    return `${r.name} ${where} · ${n === 0 ? "running, no model" : `${n} model${n === 1 ? "" : "s"}`}`;
+  }
+  if (r.state === "installed") return `${r.name} ${where} · installed, not running`;
+  return `${r.name} ${where} · not installed`;
+}
+
 function AgenticChat(): ReactElement {
   const [model, setModel] = useState("qwen3:8b");
   const [runner, setRunner] = useState("ollama");
@@ -104,6 +137,61 @@ function AgenticChat(): ReactElement {
   const [catalog, setCatalog] = useState<{ tag: string; name: string; params?: string }[]>([]);
   const [installedTags, setInstalledTags] = useState<Set<string>>(new Set());
   const [custom, setCustom] = useState(false);
+  /**
+   * What THIS machine actually has, from `ai:discoverRunners`.
+   *
+   * The runner dropdown below was a two-item literal — Ollama and LM Studio, offered
+   * identically on a machine with both, with neither, and on one serving llama.cpp. Picking a
+   * runner that is not there produced a connection error at Send time, several clicks after the
+   * point where the app already knew. Empty until the scan returns; the dropdown falls back to
+   * the two startable runners so the control is never blank.
+   */
+  const [runners, setRunners] = useState<AiDiscoveredRunner[]>([]);
+  const [runnerHint, setRunnerHint] = useState<string | null>(null);
+
+  /**
+   * Serving runners first, then installed, then absent — the order a user wants to pick in.
+   * Falls back to the two startable ones until the scan lands, so the control is never blank.
+   */
+  /**
+   * What to tell the user when a turn fails, derived from the SCAN rather than from a guess.
+   *
+   * The old text was two branches on the runner id: "click Install" for ollama, and for
+   * everything else "Open LM Studio and Start Server" — advice that named the wrong product
+   * for three of the four runners and was simply wrong for a user whose LM Studio was already
+   * running and whose failure was something else. The scan knows which of install / start /
+   * neither applies, so say that.
+   */
+  const recovery = useMemo(() => {
+    const r = runners.find((x) => x.id === runner);
+    if (!r) {
+      return runner === "ollama"
+        ? "Click ⚡ Install to download + serve this model on-device (via Ollama)."
+        : "No local model is running — start your model server and try again.";
+    }
+    if (r.state === "serving" && r.models.length === 0) {
+      return `${r.name} is running but serving no model. Load one in ${r.name}, or install one here.`;
+    }
+    if (r.state === "serving") {
+      return `${r.name} is running and serving ${r.models.join(", ")}. Check that the model name above matches one of those.`;
+    }
+    if (r.state === "installed") {
+      return r.canStart
+        ? `${r.name} is installed but not running — Prometheus can start it on the next attempt.`
+        : `${r.name} is installed but not running. Start it yourself: it needs to be told which weights to serve.`;
+    }
+    return r.canInstall
+      ? `${r.name} is not installed on this machine.${r.id === "ollama" ? " Click ⚡ Install to set it up." : ""}`
+      : `${r.name} is not installed on this machine, and Prometheus does not install it for you.`;
+  }, [runner, runners]);
+
+  const runnerOptions = useMemo(() => {
+    if (runners.length === 0) return [...FALLBACK_RUNNER_OPTIONS];
+    const rank = { serving: 0, installed: 1, absent: 2 } as const;
+    return [...runners]
+      .sort((a, b) => rank[a.state] - rank[b.state])
+      .map((r) => ({ value: r.id, label: runnerOptionLabel(r) }));
+  }, [runners]);
 
   // Seed the prompt typed on the Home AI bar (handed over via sessionStorage), once.
   useEffect(() => {
@@ -128,6 +216,44 @@ function AgenticChat(): ReactElement {
       .catch(() => {
         /* config read failed — leave root blank, never crash the route */
       });
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  /**
+   * Scan the machine for local model servers, once per mount.
+   *
+   * Safe to run on open: the scan is metadata-only (`GET /api/tags`, `GET /v1/models`), so it
+   * cannot cause a model load — unlike `/v1/chat/completions`, which makes ollama page in the
+   * weights before it can answer even a one-token ping (CLAUDE.md §2.3).
+   *
+   * Selecting the first SERVING runner is the point of doing this at all: the default was the
+   * string "ollama" whether or not ollama existed.
+   */
+  useEffect(() => {
+    let alive = true;
+    const api = window.prometheus.ai;
+    // An older preload has no `discoverRunners`; the hardcoded fallback below still renders.
+    if (typeof api?.discoverRunners !== "function") return;
+    void (async () => {
+      try {
+        const r = await api.discoverRunners();
+        if (!alive || !r.ok) return;
+        setRunners(r.runners);
+        setRunnerHint(r.hint ?? null);
+        const live = r.runners.find((x) => x.state === "serving");
+        if (live) {
+          setRunner(live.id);
+          // And prefer a model it is ACTUALLY serving over the `qwen3:8b` seed, which is only a
+          // plausible guess and is wrong on most machines.
+          const first = live.models[0];
+          if (first) setModel(first);
+        }
+      } catch {
+        /* scan failed — the fallback options below keep the control usable */
+      }
+    })();
     return () => {
       alive = false;
     };
@@ -278,15 +404,32 @@ function AgenticChat(): ReactElement {
 
   return (
     <div style={COL}>
-      <Panel title="Models folder" elevation="e1">
+      {/*
+        The label says where a NEW download would go, and nothing more.
+
+        It used to read "(default ~/.prometheus/models)", which was the single most misleading
+        string in the app. Measured 2026-10-01 on the machine this was written for, that
+        directory held 0 bytes and had never held a model, while 143 GB sat in three stores the
+        app did not mention: ~/.ollama/models (29 GB), ~/.lmstudio/models (24 GB) and
+        ~/.cache/huggingface/hub (90 GB). A user reading it reasonably concluded Prometheus kept
+        models somewhere they had never chosen and could not see their own.
+
+        Models you ALREADY have are not in this folder and are not governed by it — they are
+        indexed from each tool's own store by `model.list`, and shown in the library. Saying so
+        here is the difference between "a destination" and "where your models live".
+      */}
+      <Panel title="Download folder" elevation="e1">
         <div style={ROW}>
-          <span style={LABEL}>install folder:</span>
-          <code style={{ ...CODE, padding: "4px 8px" }}>
-            {root || "(default ~/.prometheus/models)"}
-          </code>
+          <span style={LABEL}>new downloads go to:</span>
+          <code style={{ ...CODE, padding: "4px 8px" }}>{root || "(not set yet)"}</code>
           <Button variant="secondary" size="sm" onClick={() => void pickFolder()}>
             Change folder…
           </Button>
+        </div>
+        <div style={{ ...LABEL, marginTop: 6 }}>
+          Models you already have are found where their own tool keeps them — Ollama, LM Studio and
+          the Hugging Face cache are all indexed automatically. This folder only decides where a NEW
+          download lands.
         </div>
       </Panel>
 
@@ -318,14 +461,12 @@ function AgenticChat(): ReactElement {
             <span style={LABEL}>runner</span>
             <Select
               aria-label="local runner"
-              options={[
-                { value: "ollama", label: "Ollama (:11434)" },
-                { value: "lmstudio", label: "LM Studio (:1234)" },
-              ]}
+              options={runnerOptions}
               value={runner}
               onValueChange={setRunner}
             />
           </div>
+          {runnerHint ? <div style={LABEL}>{runnerHint}</div> : null}
           <Textarea
             value={prompt}
             onChange={(e) => setPrompt(e.target.value)}
@@ -356,10 +497,8 @@ function AgenticChat(): ReactElement {
           {err ? (
             <div style={{ ...CODE, color: "var(--danger)" }}>
               {err}
-              {"\n\n"}No local model is running.
-              {runner === "ollama"
-                ? " Click ⚡ Install to download + serve it on-device (via Ollama)."
-                : " Open LM Studio and Start Server, or switch the runner to Ollama and install."}
+              {"\n\n"}
+              {recovery}
             </div>
           ) : null}
           {installMsg ? <div style={CODE}>{installMsg}</div> : null}

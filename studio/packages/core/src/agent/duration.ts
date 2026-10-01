@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * agent/duration.ts — human elapsed-time formatter for turn / subtask timing.
  *

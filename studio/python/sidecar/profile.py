@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Francesco Pelizza
 """profile.py — the Python profiler backend sidecar (APP-046, file 14 §3.28).
 
 Runs a target script IN-PROCESS under ``cProfile`` (via ``runpy.run_path``) and converts

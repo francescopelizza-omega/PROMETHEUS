@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * ai/mention.ts — the PURE @-mention model for the AgentPane (APP-054).
  *

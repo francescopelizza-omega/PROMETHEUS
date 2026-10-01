@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * orphan-guard.ts — orphan protection that survives `kill -9` of the CLI.
  *

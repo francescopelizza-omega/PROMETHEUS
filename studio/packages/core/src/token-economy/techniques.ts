@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * token-economy/techniques.ts — the curated TOKEN-SAVING toolkit Prometheus proposes
  * by default to new users. Cuts $ on paid closed models (the big win) and compute on

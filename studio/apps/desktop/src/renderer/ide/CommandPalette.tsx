@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * ide/CommandPalette.tsx — the fused tabbed "Search Everywhere" popup (file 07 §8 · MDS
  * parity plan 05 · APP-021).

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * ai/model-footprint.ts — how much memory a model will actually need, computed rather than guessed.
  *

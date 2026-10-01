@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * shell/icon-names.ts — the CANONICAL activity-icon name set (file 08 §4.1 / APP-071).
  *

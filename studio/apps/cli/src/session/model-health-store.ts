@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * session/model-health-store.ts — the ONE global on-disk record of every endpoint's health
  * (transport, breaker, context window), as last observed by any turn in any project.

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * renderer/open-resource.ts — the one place any surface asks the app to OPEN a thing.
  *

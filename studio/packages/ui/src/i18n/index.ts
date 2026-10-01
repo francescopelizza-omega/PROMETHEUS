@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * i18n/index.ts — the tiny message function (08 §7). ICU-lite `{param}`
  * substitution over the active catalog; NO runtime dependency (so node:test stays

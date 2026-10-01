@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * ide/state/terminal-session.ts — the PURE multi-session terminal reducer (file 07 §6.1).
  *

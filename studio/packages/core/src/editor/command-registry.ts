@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * editor/command-registry.ts — the EDITOR command registry (file 07 §8).
  *

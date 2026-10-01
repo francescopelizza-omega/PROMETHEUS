@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * session/slash-exec.ts — execute a REPL slash command inside the live session (P4).
  *

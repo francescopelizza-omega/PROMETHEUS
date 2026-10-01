@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * agent/ladder.ts — the DETERMINISTIC fallback ladder that locates a hunk's pre-image
  * when the model's `old` text does not match the file byte-for-byte (WRAPPER Phase A).

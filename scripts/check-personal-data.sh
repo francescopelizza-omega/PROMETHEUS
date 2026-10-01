@@ -156,21 +156,40 @@ if [ "$HISTORY" -eq 1 ]; then
 fi
 
 # ── 4. built artifacts (the ones users actually download) ────────────────────
+#
+# MATCHED AGAINST KNOWN IDENTITIES, exactly like sections 1 and 3b — and it used to be the one
+# section that was not.
+#
+# It grepped for the SHAPE `/Users/<anything>` or `/home/<anything>`, which is the heuristic the
+# header of section 1 already rejects at length: "this does NOT try to guess whether a path
+# segment 'looks like a real person' — that heuristic is unreliable in both directions."
+# Measured 2026-09-30: on a clean tree with zero real leaks, `--artifacts` failed with exit 1 on
+# `/home/tables`, `/home/work` and `/Users/operator` — three strings from inside bundled
+# dependencies, belonging to nobody. A release gate that fails when nothing is wrong is a gate
+# that gets skipped, and the next run is the one with the real finding in it.
+#
+# Why this section matters even though these files are gitignored: a DMG or a tarball built on a
+# developer's machine carries whatever the bundler inlined, and it is shipped to users without
+# ever passing through git. This is the only check that looks there — so it has to be believed.
 if [ "$ARTIFACTS" -eq 1 ]; then
+  # One alternation over the same identity list the rest of the script uses.
+  who_re=$(printf '%s\n' $IDENTITIES | paste -sd'|' -)
   found=""
+  scan_artifact() { # <label> <extractor-output>
+    [ -n "$who_re" ] || return 0
+    m=$(printf '%s\n' "$2" | grep -aoiE "(/Users/|/home/|\\\\Users\\\\)($who_re)" | sort -u || true)
+    [ -n "$m" ] && found="$found$1: $m"$'\n'
+    return 0
+  }
   for a in studio/apps/cli/dist/bin.js studio/apps/cli/release/prometheus*; do
     [ -f "$a" ] || continue
-    m=$(grep -aoE '(/Users/[a-z0-9_.-]+|/home/[a-z0-9_.-]+)' "$a" 2>/dev/null |
-      grep -vE '/home/runner|/Users/runner' | sort -u || true)
-    [ -n "$m" ] && found="$found$a: $m"$'\n'
+    scan_artifact "$a" "$(grep -aoE '(/Users/[a-zA-Z0-9_.-]+|/home/[a-zA-Z0-9_.-]+)' "$a" 2>/dev/null || true)"
   done
   for asar in studio/apps/desktop/release/*/*.app/Contents/Resources/app.asar; do
     [ -f "$asar" ] || continue
-    m=$(strings "$asar" 2>/dev/null | grep -oE '(/Users/[a-z0-9_.-]+|/home/[a-z0-9_.-]+)' |
-      grep -vE '/home/runner|/Users/runner' | sort -u || true)
-    [ -n "$m" ] && found="$found$asar: $m"$'\n'
+    scan_artifact "$asar" "$(strings "$asar" 2>/dev/null | grep -oE '(/Users/[a-zA-Z0-9_.-]+|/home/[a-zA-Z0-9_.-]+)' || true)"
   done
-  report "no home paths inside built artifacts" "$found"
+  report "no home path of a known identity inside built artifacts" "$found"
 fi
 
 echo

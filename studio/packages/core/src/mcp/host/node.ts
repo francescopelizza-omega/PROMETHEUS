@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * mcp/host/node.ts — the Node-only MCP transport barrel (`@prometheus/core/mcp-node`).
  *

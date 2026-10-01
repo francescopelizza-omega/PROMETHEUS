@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * ai/turn-outcome.ts — what to SAY when a turn produced no usable answer.
  *

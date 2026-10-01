@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * main/model-health-store.ts — pure(ish) disk persistence for `ModelHealthStore` (Model
  * Health feature). Split out exactly like settings-store.ts (which imports `electron`

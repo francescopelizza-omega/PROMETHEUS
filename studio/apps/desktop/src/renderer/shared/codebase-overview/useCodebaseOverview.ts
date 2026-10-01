@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * renderer/shared/codebase-overview/useCodebaseOverview.ts — "meet your codebase"'s data hook
  * (roadmap point 6).

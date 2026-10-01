@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * main/ide/run-host.ts — named run sessions for launch.json configs (APP-032).
  *
@@ -20,6 +22,8 @@
 
 import { EventEmitter } from "node:events";
 
+import { isHijackEnvKey } from "@prometheus/engine-bridge";
+
 import {
   type ActiveVenv,
   type PtyBackend,
@@ -28,26 +32,31 @@ import {
   processEnvSnapshot,
 } from "./pty-host.js";
 
-/** Loader-hijack env keys a run request may never override (mirror of the
- *  renderer builder's list — each side stays honest independently). */
-const ENV_KEY_DENYLIST = new Set([
-  "PATH",
-  "PYTHONHOME",
-  "LD_PRELOAD",
-  "LD_LIBRARY_PATH",
-  "DYLD_INSERT_LIBRARIES",
-  "DYLD_LIBRARY_PATH",
-  "NODE_OPTIONS",
-]);
+/**
+ * Keys a run request may never override, ON TOP of engine-bridge's hijack denylist.
+ *
+ * Only `PATH` lives here. `isHijackEnvKey` deliberately permits it — every child it curates
+ * needs to find its interpreter — but a run request is USER-SUPPLIED input, and letting it
+ * repoint `PATH` chooses which binary `cmd` resolves to.
+ *
+ * This file used to carry its own seven-name list described as a "mirror" of engine-bridge's.
+ * It was not: engine-bridge strips fifteen names plus every `DYLD_*`, and the ten missing here
+ * included `BASH_ENV`, `ENV`, `PYTHONSTARTUP`, `PYTHONPATH`, `LD_AUDIT` and `DYLD_*` beyond the
+ * two named — so a run request could set `PYTHONSTARTUP` and execute code in the child before
+ * its first line ran. Two copies of a security denylist do not stay in step; the copy simply
+ * permits more as the real list grows. See `isHijackEnvKey`.
+ */
+const EXTRA_DENIED_KEYS = new Set(["PATH"]);
 const ENV_KEY = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
-/** Strip malformed/denylisted keys from a run request's env overrides. */
+/** Strip malformed and hijack-class keys from a run request's env overrides. */
 export function sanitizeRunEnvKeys(
   env: Readonly<Record<string, string>> | undefined,
 ): Record<string, string> {
   const out: Record<string, string> = {};
   for (const [k, v] of Object.entries(env ?? {})) {
-    if (!ENV_KEY.test(k) || ENV_KEY_DENYLIST.has(k.toUpperCase())) continue;
+    if (!ENV_KEY.test(k)) continue;
+    if (EXTRA_DENIED_KEYS.has(k.toUpperCase()) || isHijackEnvKey(k)) continue;
     out[k] = v;
   }
   return out;

@@ -1,4 +1,6 @@
 #!/usr/bin/env node
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * ollama-watchdog-entry.ts — the standalone idle-shutdown loop for a Prometheus-managed local
  * runner (Ollama, LM Studio, …). Run as its OWN detached process (never imported), spawned by

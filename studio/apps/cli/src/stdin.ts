@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * stdin.ts — read a piped/redirected prompt from stdin for a one-shot `prometheus chat` (CLI-083).
  *

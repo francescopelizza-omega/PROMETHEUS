@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * session/run-notify.ts — an OS notification when a DETACHED agent run finishes.
  *

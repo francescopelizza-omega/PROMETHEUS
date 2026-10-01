@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * ide/ai/ai-client.ts — the renderer THIN AI client (file 07 §7).
  *

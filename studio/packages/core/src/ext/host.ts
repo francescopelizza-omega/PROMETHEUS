@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * ext/host.ts — the extension host SEAM (file 09 §5.2, interface-only).
  *

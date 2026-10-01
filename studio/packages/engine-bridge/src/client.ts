@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * client.ts — createEngineClient: the assembled EngineClient (the SHARED_API).
  *

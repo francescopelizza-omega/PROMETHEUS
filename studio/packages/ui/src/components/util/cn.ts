@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * components/util/cn.ts — the className compositor (file 08 §3, shadcn `cn`).
  *

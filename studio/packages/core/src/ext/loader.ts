@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * ext/loader.ts — the PURE .promext install decision (file 09 §5.3).
  *

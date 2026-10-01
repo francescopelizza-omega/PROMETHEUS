@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * main/settings-bundle.ts — the PURE git-sync settings bundle + STRUCTURAL redaction (APP-095).
  *

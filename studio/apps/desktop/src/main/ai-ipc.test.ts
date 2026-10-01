@@ -18,6 +18,7 @@ import {
   chatCompletionsUrl,
   freeLocalModels,
   getSecurityPosture,
+  listHostTools,
   localityOfUrl,
   parseSseChunk,
   probeEndpointCapabilities,
@@ -25,6 +26,8 @@ import {
   probeServedModels,
   resetProbeCache,
   runAiStream,
+  runDiscoverRunners,
+  setDeclaredRemoteHosts,
   setSecurityPosture,
 } from "./ai-ipc.js";
 
@@ -1572,4 +1575,285 @@ test("no sessionAuthLevel behaves exactly as before", async () => {
   );
   assert.equal(called, true);
   assert.equal(r.ok, true);
+});
+
+/* ── ai:discoverRunners — the machine scan ───────────────────────────────────*/
+
+const DEAD_FETCH: typeof fetch = (async () => {
+  throw new Error("connect ECONNREFUSED");
+}) as unknown as typeof fetch;
+
+test("runDiscoverRunners returns a row per runner and a hint when nothing serves", async () => {
+  const r = await runDiscoverRunners({
+    fetchFn: DEAD_FETCH,
+    whichFn: async () => undefined,
+    env: {},
+  });
+  assert.equal(r.ok, true);
+  assert.deepEqual(r.runners.map((x) => x.id).sort(), ["llamacpp", "lmstudio", "ollama", "vllm"]);
+  assert.ok(r.runners.every((x) => x.state === "absent"));
+  // Nothing is serving, so the handler must say what the cheapest next step is rather than
+  // handing the renderer four grey rows and no advice.
+  assert.match(String(r.hint), /No local model server found/);
+});
+
+test("the hint disappears once something is serving — the renderer then has real rows", async () => {
+  const r = await runDiscoverRunners({
+    env: {},
+    whichFn: async () => undefined,
+    fetchFn: (async (input: string | URL | Request) => {
+      if (String(input) !== "http://localhost:11434/api/tags") {
+        throw new Error("connect ECONNREFUSED");
+      }
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ models: [{ name: "qwen3.6:latest" }] }),
+      } as unknown as Response;
+    }) as unknown as typeof fetch,
+  });
+  assert.equal(r.hint, undefined);
+  const ollama = r.runners.find((x) => x.id === "ollama");
+  assert.equal(ollama?.state, "serving");
+  assert.deepEqual(ollama?.models, ["qwen3.6:latest"]);
+});
+
+test("the scan never requests a route that makes a runner load weights", async () => {
+  // The whole reason this is safe to call on window open and on a 10s refetch. A probe that
+  // reached /v1/chat/completions would make ollama page in the weights before it could answer
+  // even a one-token ping — 23 GB resident, from what reads like a liveness check (§2.3).
+  const seen: string[] = [];
+  await runDiscoverRunners({
+    env: {},
+    whichFn: async () => undefined,
+    fetchFn: (async (input: string | URL | Request) => {
+      seen.push(String(input));
+      throw new Error("connect ECONNREFUSED");
+    }) as unknown as typeof fetch,
+  });
+  assert.ok(seen.length > 0);
+  for (const forbidden of ["/chat/completions", "/api/generate", "/api/embeddings"]) {
+    assert.ok(
+      !seen.some((u) => u.includes(forbidden)),
+      `requested ${forbidden}: ${seen.join(", ")}`,
+    );
+  }
+});
+
+test("the models array crosses the bridge as a plain array, not a frozen one", async () => {
+  // These rows go straight into renderer state via structuredClone. A frozen array from core
+  // would be a runtime failure at the bridge, not a type error here.
+  const r = await runDiscoverRunners({
+    env: {},
+    whichFn: async () => undefined,
+    fetchFn: (async (input: string | URL | Request) => {
+      if (String(input) !== "http://localhost:11434/api/tags") throw new Error("ECONNREFUSED");
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ models: [{ name: "m" }] }),
+      } as unknown as Response;
+    }) as unknown as typeof fetch,
+  });
+  const models = r.runners.find((x) => x.id === "ollama")?.models;
+  assert.ok(Array.isArray(models));
+  assert.equal(Object.isFrozen(models), false);
+  assert.doesNotThrow(() => structuredClone(r.runners));
+});
+
+/* ── prompt caching ──────────────────────────────────────────────────────────*/
+
+test("an Anthropic turn ASKS for the prompt cache — the terminal always did, Studio never did", async () => {
+  // A silent, recurring cost difference: the same conversation was billed at the cache rate in
+  // the terminal and at full rate in the app, from the same settings.
+  const bodies: Record<string, unknown>[] = [];
+  const capture = async (_u: unknown, init: { body: string }): Promise<Response> => {
+    bodies.push(JSON.parse(init.body));
+    return sseResponse(["data: [DONE]\n"]);
+  };
+  // api.anthropic.com is a RECOGNISED provider, so the turn is refused before the POST without
+  // a key. An unrecognised cloud URL would skip that check but would also not resolve to the
+  // Anthropic runtime, and the runtime is what decides caching — so the key is the right seam.
+  const prevKey = process.env.ANTHROPIC_API_KEY;
+  process.env.ANTHROPIC_API_KEY = "test-key-not-a-real-credential";
+  try {
+    await runAiStream(
+      req({
+        endpoint: {
+          ...LOCAL,
+          baseUrl: "https://api.anthropic.com",
+          model: "claude-sonnet-4-6",
+          locality: "cloud",
+        },
+        // Over PROMPT_CACHE_MIN_CHARS (4096). Below it `applyPromptCache` deliberately returns
+        // the messages untouched: a shorter prefix earns a cache-WRITE charge and can never earn
+        // a read, so marking it would make short sessions MORE expensive.
+        messages: [
+          { role: "system", content: "x".repeat(5000) },
+          { role: "user", content: "hi" },
+        ],
+      }),
+      undefined,
+      capture as never,
+      undefined,
+      CLOUD_OK,
+    );
+    assert.equal(bodies.length, 1, "the request must actually have gone out");
+    assert.match(
+      JSON.stringify(bodies[0]),
+      /cache_control/,
+      `no cache_control in the Anthropic body: ${JSON.stringify(bodies[0])}`,
+    );
+  } finally {
+    if (prevKey === undefined) Reflect.deleteProperty(process.env, "ANTHROPIC_API_KEY");
+    else process.env.ANTHROPIC_API_KEY = prevKey;
+  }
+});
+
+test("a SHORT prefix is left unmarked — a cache write it can never read from costs more", async () => {
+  const bodies: Record<string, unknown>[] = [];
+  const capture = async (_u: unknown, init: { body: string }): Promise<Response> => {
+    bodies.push(JSON.parse(init.body));
+    return sseResponse(["data: [DONE]\n"]);
+  };
+  const prevKey = process.env.ANTHROPIC_API_KEY;
+  process.env.ANTHROPIC_API_KEY = "test-key-not-a-real-credential";
+  try {
+    await runAiStream(
+      req({
+        endpoint: {
+          ...LOCAL,
+          baseUrl: "https://api.anthropic.com",
+          model: "claude-sonnet-4-6",
+          locality: "cloud",
+        },
+        messages: [
+          { role: "system", content: "short preamble" },
+          { role: "user", content: "hi" },
+        ],
+      }),
+      undefined,
+      capture as never,
+      undefined,
+      CLOUD_OK,
+    );
+    assert.equal(bodies.length, 1);
+    assert.doesNotMatch(JSON.stringify(bodies[0]), /cache_control/);
+  } finally {
+    if (prevKey === undefined) Reflect.deleteProperty(process.env, "ANTHROPIC_API_KEY");
+    else process.env.ANTHROPIC_API_KEY = prevKey;
+  }
+});
+
+test("a LOCAL turn does not ask for a cache — the field would be meaningless to ollama", async () => {
+  const bodies: Record<string, unknown>[] = [];
+  const capture = async (_u: unknown, init: { body: string }): Promise<Response> => {
+    bodies.push(JSON.parse(init.body));
+    return sseResponse(["data: [DONE]\n"]);
+  };
+  await runAiStream(req(), undefined, capture as never);
+  assert.equal(bodies.length, 1);
+  assert.doesNotMatch(JSON.stringify(bodies[0]), /cache_control/);
+});
+
+/* ── host tools (the terminal's /deps) ───────────────────────────────────────*/
+
+test("the inventory reports what the agent's own manifest promises", async () => {
+  // The equivalence that matters: /deps is documented as the human twin of
+  // renderHostToolManifest, so a tool named in the model's prompt must be listed here too.
+  const { HOST_TOOLS } = await import("@prometheus/core/agent-system-host");
+  const r = listHostTools();
+  assert.equal(r.ok, true);
+  assert.deepEqual(
+    r.tools.map((t) => t.id).sort(),
+    HOST_TOOLS.map((t) => t.id).sort(),
+    "the panel and the prompt must describe the same catalogue",
+  );
+});
+
+test("each row carries the purpose and an install package — a missing tool is actionable", () => {
+  const r = listHostTools();
+  for (const t of r.tools) {
+    assert.ok(t.purpose.length > 0, `${t.id} has no purpose`);
+    assert.ok(t.bins.length > 0, `${t.id} names no binary`);
+    assert.ok(
+      Object.values(t.install).some((v) => typeof v === "string" && v.length > 0),
+      `${t.id} offers no install package, so "missing" would be a dead end`,
+    );
+  }
+});
+
+test("a found tool reports the binary that actually resolved", () => {
+  // `which` is injectable, so this touches no real filesystem.
+  const r = listHostTools(((which?: (b: string) => string | null) => [
+    {
+      tool: { id: "ripgrep", bins: ["rg"], purpose: "search", install: { brew: "ripgrep" } },
+      found: which ? null : "rg",
+    },
+  ]) as never);
+  assert.equal(r.tools[0]?.found, "rg");
+});
+
+test("a throwing probe yields an empty inventory, never a broken panel", () => {
+  const r = listHostTools((() => {
+    throw new Error("probe exploded");
+  }) as never);
+  assert.equal(r.ok, false);
+  assert.deepEqual(r.tools, []);
+  assert.match(r.error ?? "", /probe exploded/);
+});
+
+/* ── locality + the declared remote-host allowlist ───────────────────────────*/
+
+test("loopback stays local, and the whole 127/8 block counts — not just 127.0.0.1", () => {
+  setDeclaredRemoteHosts([]);
+  for (const u of [
+    "http://localhost:11434/v1",
+    "http://127.0.0.1:11434/v1",
+    "http://127.0.0.2:11434/v1",
+    "http://[::1]:1234/v1",
+    "http://box.local:11434/v1",
+  ]) {
+    assert.equal(localityOfUrl(u), "local", u);
+  }
+});
+
+test("an UNDECLARED host is cloud — the default is deny and nothing is inferred from a private IP", () => {
+  setDeclaredRemoteHosts([]);
+  assert.equal(localityOfUrl("http://192.168.1.50:11434/v1"), "cloud");
+  assert.equal(localityOfUrl("http://gpu-box.lan:11434/v1"), "cloud");
+  assert.equal(localityOfUrl("https://api.anthropic.com"), "cloud");
+});
+
+test("a host the user DECLARED is local — the same answer the terminal gives", () => {
+  // The divergence this closes: one settings file, two answers. Under a local-only posture
+  // Studio refused the endpoint the CLI was using.
+  setDeclaredRemoteHosts([{ host: "gpu-box.lan", baseUrl: "http://gpu-box.lan:11434/v1" }]);
+  try {
+    assert.equal(localityOfUrl("http://gpu-box.lan:11434/v1"), "local");
+    assert.equal(localityOfUrl("http://other-box.lan:11434/v1"), "cloud", "only the declared one");
+  } finally {
+    setDeclaredRemoteHosts([]);
+  }
+});
+
+test("an unparseable URL is cloud — 'I could not tell' must not resolve to 'allowed'", () => {
+  setDeclaredRemoteHosts([]);
+  assert.equal(localityOfUrl("not a url"), "cloud");
+  assert.equal(localityOfUrl(""), "cloud");
+});
+
+test("a corrupt allowlist yields NO trusted hosts rather than a partial list", async () => {
+  // The list is an allowlist, so the fail-soft direction is load-bearing: losing it costs
+  // access, not safety. A half-parsed entry must never become a host treated as local.
+  const { ai } = await import("@prometheus/core");
+  for (const junk of ["", "   ", "not json", "{}", "[1,2,3]", '[{"host":"x"}]', "null"]) {
+    assert.deepEqual(ai.parseRemoteHostsSetting(junk), [], JSON.stringify(junk));
+  }
+  // A VALID entry beside an invalid one: the invalid row is dropped, the valid one survives.
+  const mixed = JSON.stringify([{ host: "a.lan", baseUrl: "http://a.lan:1/v1" }, { host: "b" }]);
+  assert.deepEqual(
+    ai.parseRemoteHostsSetting(mixed).map((h: { host: string }) => h.host),
+    ["a.lan"],
+  );
 });

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * tokens/pelly-syntax.ts — the user's "Pelly Colors" PyCharm scheme (Pelly_Colors_copy.icls,
  * Darcula parent), mapped to the TUI's syntax-highlight roles. This file lives under `tokens/`,

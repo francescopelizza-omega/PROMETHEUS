@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * ide/state/diagnostics.ts — the PURE LSP-diagnostics aggregate (file 07 §3.3/§11).
  *

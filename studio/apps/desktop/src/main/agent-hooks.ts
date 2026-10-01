@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * main/agent-hooks.ts — the desktop's half of the lifecycle HOOKS (`core/agent/hooks.ts`).
  *

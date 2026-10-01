@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * keymap-overrides.ts — the PURE container-side glue for the keymap rebind editor (APP-057).
  *

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 import { brokerDecision } from "../agents/toolBroker.js";
 import type { ModelRef } from "../agents/types.js";
 import { type EffortTier, tierIndex } from "../ai/effort/types.js";

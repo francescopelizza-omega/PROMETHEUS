@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * Toggle.tsx — Checkbox + Switch + RadioGroup (file 08 §3.1).
  *

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * agent/protocol/contributors/effort-text.ts — effort tuning, as PROSE, for a model Prometheus
  * cannot address any other way.

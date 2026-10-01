@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * session/exec-stream.ts — re-export of the SHARED host implementation (Phase 6).
  *

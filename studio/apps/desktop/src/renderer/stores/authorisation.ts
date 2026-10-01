@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * stores/authorisation.ts — the A0…A7 authorisation level (handoff §5).
  *

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * main/model-health-store-path.ts — ONE place both surfaces keep endpoint health, mirroring
  * mcp-store-path.ts exactly (same bug, same fix).

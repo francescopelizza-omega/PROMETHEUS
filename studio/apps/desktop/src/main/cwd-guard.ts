@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * main/cwd-guard.ts — Prometheus Studio can never open a workspace inside Prometheus's OWN
  * source repo. Desktop twin of `apps/cli/src/cwd-guard.ts` — see that file's own header for the

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * tui/invoke-overlay.ts — the `/invoke` arrow-nav command overlay (CLI-059).
  *

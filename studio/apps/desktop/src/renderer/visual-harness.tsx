@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * renderer/visual-harness.tsx — the decision-card visual baseline surface (HANDOFF_2 §9).
  *

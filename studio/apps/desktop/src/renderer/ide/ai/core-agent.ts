@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * ide/ai/core-agent.ts — the agent pane runs CORE's loop (HANDOFF_2 §9c).
  *
@@ -31,6 +33,11 @@
  */
 
 import type { LoadedAgent } from "@prometheus/core/agent-files";
+// SessionStart assembly belongs to core: the matcher filter, the per-hook timeout, the stdin
+// envelope and the `<session-start-hooks>` wrapper are all its rules, and both CLI hosts use
+// exactly this function. Re-deriving any of it here is how two surfaces start disagreeing
+// about what a hook's output means.
+import { runSessionStartHooks } from "@prometheus/core/agent-hooks";
 import type {
   AgentTuning,
   ConfirmResult,
@@ -940,6 +947,39 @@ export async function listPaneHooks(ide: HookIdeBridge | undefined): Promise<Hoo
   } catch {
     return [];
   }
+}
+
+/**
+ * Run the user's SessionStart hooks and return the system block they produced.
+ *
+ * SessionStart is the one lifecycle event that is NOT a loop hook. PreToolUse and PostToolUse
+ * ride `AgentTuning` into core's shared loop, so both surfaces got them for free; SessionStart
+ * runs once, outside any turn, and its stdout becomes a system block. With no loop seam to
+ * carry it, Studio simply never ran it — while Settings offered full CRUD over SessionStart
+ * hooks, so the user could write one, see it listed, and reasonably believe the model had been
+ * told. Both CLI hosts have always run it (`apps/cli/src/session/host.ts:1180`).
+ *
+ * Fail-soft at every step, like `listPaneHooks`: no bridge, no hooks, or a failed round trip
+ * all mean "no block", never a broken turn. The spawning happens in MAIN, which re-checks the
+ * command against the configured list — the renderer cannot choose a command here.
+ */
+export async function runPaneSessionStartHooks(
+  ide: HookIdeBridge | undefined,
+  cwd?: string,
+): Promise<string | undefined> {
+  if (!ide?.hookRun) return undefined;
+  const hooks = await listPaneHooks(ide);
+  const runner = makeIdeHookRunner(ide, cwd);
+  // core owns the assembly — the matcher filter, the per-hook timeout, the stdin envelope and
+  // the `<session-start-hooks>` wrapper. Re-deriving any of that here is how the two surfaces
+  // would start disagreeing about what a hook's output means.
+  return runSessionStartHooks(hooks, runner, {
+    ...(cwd ? { cwd } : {}),
+    // Swallowed deliberately: a hook that errors must not raise a dialog mid-session. The
+    // terminal writes a dim line; the pane has no equivalent surface for a non-fatal notice,
+    // and inventing a toast for it is a separate decision.
+    onError: () => {},
+  });
 }
 
 /**

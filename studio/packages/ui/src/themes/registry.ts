@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * themes/registry.ts — the scheme registry (file 13 §3.7).
  *

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * ide/SearchPanel.tsx — project-wide search/replace-in-path (file 07 §6.3, APP-024).
  *

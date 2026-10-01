@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * settings/layering.ts — the §7.1 config precedence (PURE deep-merge).
  *

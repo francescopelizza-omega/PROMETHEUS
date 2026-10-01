@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * test.types.ts — the Test Explorer contract (file 14 §3.19), PURE types + helpers.
  *

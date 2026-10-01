@@ -2,6 +2,7 @@
   "name": "@prometheus/core",
   "version": "0.1.0",
   "private": true,
+  "license": "Apache-2.0",
   "type": "module",
   "description": "Shared domain types & logic for Prometheus Studio (consumed by both the desktop GUI and the prometheus CLI).",
   "main": "dist/index.js",

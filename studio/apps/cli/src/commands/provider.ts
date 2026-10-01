@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * commands/provider.ts — `prometheus provider list`: render the C11 provider
  * promotion policy from @prometheus/core. Sorted Tier-A-first; a green cost

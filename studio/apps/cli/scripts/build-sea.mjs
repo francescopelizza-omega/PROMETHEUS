@@ -1,4 +1,6 @@
 #!/usr/bin/env node
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * build-sea.mjs — build a self-contained `prometheus` binary via Node Single Executable Application (SEA).
  * (CLI-099 / plan 11 §8 M7.)

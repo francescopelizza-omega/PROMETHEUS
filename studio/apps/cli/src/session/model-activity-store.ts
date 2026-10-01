@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * session/model-activity-store.ts — the ONE global "when was a local model last used"
  * timestamp, mirroring model-health-store.ts's on-disk conventions (global, not

@@ -1,3 +1,10 @@
+import {
+  type PathEntry,
+  frecencyForDirectory,
+  rankEntries,
+} from "@prometheus/core/path-completion";
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * main/path-completion-ipc.ts — the `pathCompletion:*` ipcMain handlers for the "@"-path
  * fuzzy completion feature (shared with the CLI). RELAY-ONLY (mirrors settings-ipc.ts):
@@ -6,11 +13,7 @@
  * @prometheus/core/path-completion's pure fuzzy scorer + optional frecency boost from
  * path-frecency-store.ts (the opt-in per-workspace memory).
  */
-import {
-  type PathEntry,
-  frecencyForDirectory,
-  rankEntries,
-} from "@prometheus/core/path-completion";
+import { describeEngineFailure } from "@prometheus/engine-bridge";
 import { ipcMain } from "electron";
 
 import {
@@ -22,9 +25,10 @@ import { fsTree } from "./ide/fs-watch.js";
 import { assertNotSensitivePath } from "./ide/path-guard.js";
 import { loadPathFrecency, recordPathUse } from "./path-frecency-store.js";
 
-function errString(e: unknown): string {
-  return e instanceof Error ? e.message : String(e);
-}
+// `errString` was a LOCAL copy here, one of twenty across main/*.ts, and every copy returned
+// `e.message` alone — discarding `EngineError.stderrTail`, which is where the engine puts the
+// actual reason when it exits before emitting JSON. See `describeEngineFailure`'s doc.
+const errString = describeEngineFailure;
 
 /** Register the `pathCompletion:*` handlers. Returns a disposer (mirrors sibling IPC modules). */
 export function registerPathCompletionIpcHandlers(): () => void {

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * commands/man.ts — `prometheus man`: a roff-formatted man page generated from CLI-049's `COMMAND_SPECS`
  * registry (CLI-100). Same single source as help + completions — never a hand-maintained document.

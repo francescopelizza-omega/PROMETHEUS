@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * mcp/server/runner.ts — validate tool args + dispatch through the engine (file 09 §1/§3).
  *

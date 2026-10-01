@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * notebook-store.ts — the URI-keyed notebook state + kernel IPC (APP-045).
  *

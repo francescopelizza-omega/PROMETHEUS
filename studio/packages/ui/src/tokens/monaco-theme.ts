@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * monaco-theme.ts — generate the Monaco editor theme + the xterm terminal theme FROM
  * the active semantic token map (file 08 §6: editor + terminal never desync from

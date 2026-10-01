@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Francesco Pelizza
 """test_diagram.py — the ER-diagram verb of the diagram sidecar (APP-087)."""
 import contextlib
 import importlib.util

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * agent/exec/parse.ts — turn a shell command line into a STRUCTURE we can validate.
  *

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * orchestration/spawn-capture.ts — the hardened "run a CLI headlessly, capture stdout".
  *

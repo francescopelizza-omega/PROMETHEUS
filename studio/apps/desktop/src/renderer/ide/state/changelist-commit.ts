@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * ide/state/changelist-commit.ts — the commit-ONE-changelist git choreography (APP-038).
  *

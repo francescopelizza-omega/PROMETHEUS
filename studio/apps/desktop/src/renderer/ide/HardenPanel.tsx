@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * HardenPanel.tsx — the defensive self-audit surface (bottom "Security" tab).
  *

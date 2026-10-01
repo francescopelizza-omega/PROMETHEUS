@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * session/persona-store.ts — export/import of user-defined sub-agent personas ("persona
  * sharing"): let a user hand one of their own `agents/*.md` files to another user, and let that

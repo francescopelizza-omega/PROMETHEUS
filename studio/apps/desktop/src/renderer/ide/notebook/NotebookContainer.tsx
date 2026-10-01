@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * NotebookContainer.tsx — the stateful notebook host mounted for a `.ipynb` tab (APP-045).
  *

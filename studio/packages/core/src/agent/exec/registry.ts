@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * agent/exec/registry.ts — what each program IS, and which of its flags are a shell in disguise.
  *

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * main/ide/test-run-host.ts — stream a testmgr.py `run` / `rerun-failed` verb (APP-013).
  *

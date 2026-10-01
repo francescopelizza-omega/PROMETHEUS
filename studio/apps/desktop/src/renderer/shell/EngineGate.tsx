@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * shell/EngineGate.tsx — the §6 DEGRADED state, applied per route.
  *

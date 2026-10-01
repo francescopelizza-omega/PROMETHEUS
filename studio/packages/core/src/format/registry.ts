@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * format/registry.ts — formatter presets + format-on-save policy (file 14 §3.5).
  *

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * ide/state/inspection-profile-store.ts — the live wrapper around the PURE inspection
  * profile model (inspection-profile.ts, plan 03). Holds the active profile; the Problems

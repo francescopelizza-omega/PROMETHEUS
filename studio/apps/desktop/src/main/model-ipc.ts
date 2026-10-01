@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * main/model-ipc.ts — the typed `model:*` ipcMain handlers (file 05 §1,§7,§8).
  *
@@ -40,6 +42,7 @@ import {
   type MutationResult,
   type ServeProfile,
   createModelHubClient,
+  describeEngineFailure,
 } from "@prometheus/engine-bridge";
 
 import {
@@ -88,10 +91,10 @@ import type { ServeRecipe, ServeRow, ServeSupervisor } from "./serve-supervisor.
 import { readTelemetry } from "./telemetry.js";
 
 /** Coerce an unknown caught value to a short error string. */
-function errString(e: unknown): string {
-  if (e instanceof Error) return e.message;
-  return typeof e === "string" ? e : "unknown error";
-}
+// `errString` was a LOCAL copy here, one of twenty across main/*.ts, and every copy returned
+// `e.message` alone — discarding `EngineError.stderrTail`, which is where the engine puts the
+// actual reason when it exits before emitting JSON. See `describeEngineFailure`'s doc.
+const errString = describeEngineFailure;
 
 /**
  * The launch guard: refuse to spawn a HEAVY process (model pull / serve / runner
@@ -442,6 +445,16 @@ export function registerModelIpcHandlers(wiring: ModelIpcWiring): () => void {
       if (r.installable) out.installable = true;
       if (r.install !== undefined) out.install = r.install;
       if (r.error !== undefined) out.error = r.error;
+      // The HOW, not just the NO. `toPullResult` spreads the sidecar envelope, so a RAM-fit
+      // refusal arrives carrying `hint` ("pick a smaller model … or re-run with --force") and
+      // per-quant `reasons[]`. Rebuilding the DTO field-by-field dropped both, leaving a
+      // refusal the user could not act on — and the desktop exposes no force, so there was no
+      // other route either. The terminal prints both; so does this now.
+      const envelope = r as unknown as Record<string, unknown>;
+      if (typeof envelope.hint === "string") out.hint = envelope.hint;
+      if (Array.isArray(envelope.reasons)) {
+        out.reasons = envelope.reasons.filter((x): x is string => typeof x === "string");
+      }
       return out;
     } catch (e) {
       return { ok: false, error: errString(e) };

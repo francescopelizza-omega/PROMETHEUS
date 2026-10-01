@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * DownloadQueue.tsx — the §5 download queue: progress bars + nemesis-status
  * badges. Each row paints the §5 security flow — green admit / yellow confirm /

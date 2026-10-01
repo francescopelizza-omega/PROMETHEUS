@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * routes/catalog-uninstall-view.ts — PURE flow logic for the GUI uninstall path
  * (APP-006). JSX-free so node:test pins the confirm-gates-mutation contract:

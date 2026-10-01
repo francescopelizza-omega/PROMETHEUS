@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * security/mcp-gate.ts — the ONE nemesis runner every host uses to gate an MCP connector.
  *

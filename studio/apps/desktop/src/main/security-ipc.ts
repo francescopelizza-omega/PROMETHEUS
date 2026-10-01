@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * main/security-ipc.ts — the typed `security:*` ipcMain handlers (file 03 §5,§7).
  *
@@ -32,6 +34,7 @@ import {
   cacheStatus,
   clearCache,
   createEngineClient,
+  describeEngineFailure,
   disinfect,
   gateFull,
   listTrusted,
@@ -94,10 +97,10 @@ function configuredGateMode(): "enforce" | "warn" | "off" | "unknown" {
   return raw === "enforce" || raw === "warn" || raw === "off" ? raw : "unknown";
 }
 
-function errString(e: unknown): string {
-  if (e instanceof Error) return e.message;
-  return typeof e === "string" ? e : "unknown error";
-}
+// `errString` was a LOCAL copy here, one of twenty across main/*.ts, and every copy returned
+// `e.message` alone — discarding `EngineError.stderrTail`, which is where the engine puts the
+// actual reason when it exits before emitting JSON. See `describeEngineFailure`'s doc.
+const errString = describeEngineFailure;
 
 /**
  * The minimal `{ send }` surface used to push security progress events back to

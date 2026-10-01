@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * main/env-validate.ts — the ZOD validation seam for the env IPC (file 04 §1/§3).
  *

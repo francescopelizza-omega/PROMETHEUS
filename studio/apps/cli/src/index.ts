@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 import { cliProfiles, updates } from "@prometheus/core";
 import type { EngineClient } from "@prometheus/engine-bridge";
 import { runAgentsCommand } from "./commands/agents-cmd.js";

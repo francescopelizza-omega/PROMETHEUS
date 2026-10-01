@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * window.d.ts — the typed `window.prometheus` surface for the renderer.
  *

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * ext/types.ts — the extension manifest + context model (file 09 §5.1/§5.2).
  *

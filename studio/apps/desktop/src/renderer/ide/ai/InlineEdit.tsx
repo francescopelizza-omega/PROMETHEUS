@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * ide/ai/InlineEdit.tsx — the Cmd-K inline-edit overlay (file 07 §7.1).
  *

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * main/updates-ipc.ts — `updates:check`: the whole third-party update report, for Studio.
  *
@@ -36,7 +38,7 @@ import {
   searchHuggingFace,
   upgradeLineFor,
 } from "@prometheus/core/updates-live";
-import { localMemorySnapshot } from "@prometheus/engine-bridge";
+import { describeEngineFailure, localMemorySnapshot } from "@prometheus/engine-bridge";
 import { ipcMain } from "electron";
 
 import {
@@ -45,13 +47,15 @@ import {
   IPC,
   type UpdateConflictView,
   type UpdatePackageView,
+  type UpdateRemedyView,
   type UpdateToolView,
   type UpdatesReportResult,
 } from "../shared/ipc-contract.js";
 
-function errString(e: unknown): string {
-  return e instanceof Error ? e.message : String(e);
-}
+// `errString` was a LOCAL copy here, one of twenty across main/*.ts, and every copy returned
+// `e.message` alone — discarding `EngineError.stderrTail`, which is where the engine puts the
+// actual reason when it exits before emitting JSON. See `describeEngineFailure`'s doc.
+const errString = describeEngineFailure;
 
 /** The ollama daemon's version, for client/server skew. Fail-soft — a miss just omits the check. */
 async function serverVersions(): Promise<Record<string, string>> {
@@ -100,6 +104,49 @@ function projectPackages(report: u.UpdateReport): UpdatePackageView[] {
     }
   }
   return out;
+}
+
+/**
+ * The executable repair plans — the terminal's `/updates fix`, projected for the bridge.
+ *
+ * `core` builds these on every sweep (`updates-live/check.ts:385`, attached at `:420`) and this
+ * file used to drop them on the floor, so Studio paid for the computation and showed none of it.
+ *
+ * Two deliberate choices, both copied from the terminal renderer (`apps/cli/src/updates/
+ * updates-cmd.ts:191 renderFix`) rather than invented here:
+ *
+ *  1. ONE repair per SUBJECT. The same duplicate install surfaces as several conflicts sharing a
+ *     single fix; emitting it per-conflict invites running it three times. `u.runnable` already
+ *     dedupes by subject, so this uses it instead of re-deriving the rule.
+ *  2. `argv` is rendered to a STRING for display only, via `u.displayCommand`. The array is not
+ *     sent: nothing in the renderer may execute these, and shipping argv across the bridge would
+ *     invite a future "run it for me" button that bypasses the authorisation ladder. Prometheus
+ *     proposes; it never auto-updates.
+ */
+function projectRemedies(report: u.UpdateReport): UpdateRemedyView[] {
+  return u.runnable(report.remedies ?? []).map((m) => ({
+    kind: m.kind,
+    subject: m.subject,
+    title: m.title,
+    rationale: m.rationale,
+    steps: m.steps.map((step) => ({
+      command: u.displayCommand(step.argv),
+      purpose: step.purpose,
+      risk: step.risk,
+      ...(step.undo ? { undo: u.displayCommand(step.undo) } : {}),
+      ...(step.displayAs ? { displayAs: [...step.displayAs] } : {}),
+    })),
+    ...(m.verify ? { verify: u.displayCommand(m.verify) } : {}),
+    ...(m.keeps ? { keeps: m.keeps } : {}),
+    minAuthLevel: m.minAuthLevel,
+    ...(m.blocked ? { blocked: m.blocked } : {}),
+    permanent: m.permanent,
+  }));
+}
+
+/** `NEVER_RUN`, verbatim from core — shipped WITH the repairs, never instead of them. */
+function projectNeverRun(): { command: string; because: string }[] {
+  return u.NEVER_RUN.map((n) => ({ command: u.displayCommand(n.argv), because: n.because }));
 }
 
 function projectConflicts(report: u.UpdateReport): UpdateConflictView[] {
@@ -171,6 +218,11 @@ export function registerUpdatesIpcHandlers(opts: {
       unavailableManagers: [],
       models: [],
       summary: "",
+      remedies: [],
+      // Still populated on the FAILURE path, deliberately: `NEVER_RUN` is static knowledge that
+      // does not depend on the sweep succeeding, and a user whose check just failed is exactly
+      // the one about to go looking for a command on the internet.
+      neverRun: projectNeverRun(),
     };
     try {
       const a = (arg ?? {}) as Record<string, unknown>;
@@ -205,6 +257,8 @@ export function registerUpdatesIpcHandlers(opts: {
           steps: report.self.plan.steps,
         },
         summary: u.summarizeForStartup(report),
+        remedies: projectRemedies(report),
+        neverRun: projectNeverRun(),
       };
     } catch (e) {
       // A failed check must never take the window with it — and must not render as "up to date".

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * onboarding/doctor.ts — "what is missing, why it matters, and exactly what to type".
  *

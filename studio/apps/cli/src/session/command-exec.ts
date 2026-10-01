@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * session/command-exec.ts — run a `prometheus` VERB from inside the interactive
  * session (P4) through the SAME dispatcher the one-shot CLI uses. This is what makes

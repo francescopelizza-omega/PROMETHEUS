@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * orchestration/prom-msg.ts — generate the `prom-msg` helper agents run to talk to peers.
  *

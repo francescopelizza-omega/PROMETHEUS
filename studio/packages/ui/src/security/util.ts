@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * security/util.ts — the two pure guards the inert-text renderer leans on (file 03 §2.1).
  *

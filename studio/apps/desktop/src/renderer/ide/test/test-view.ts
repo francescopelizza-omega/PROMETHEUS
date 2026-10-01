@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * test-view.ts — PURE Test Explorer display helpers (file 14 §3.19).
  *

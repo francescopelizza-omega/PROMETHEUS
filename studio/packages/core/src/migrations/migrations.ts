@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * migrations/migrations.ts — versioned state migration runner (Reliability & Polish pack).
  *

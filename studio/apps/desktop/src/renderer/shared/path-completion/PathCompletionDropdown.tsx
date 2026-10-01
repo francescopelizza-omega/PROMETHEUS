@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * renderer/shared/path-completion/PathCompletionDropdown.tsx — the "@"-path suggestion
  * list, portaled to document.body and positioned by usePathCompletion's `box` (the SAME

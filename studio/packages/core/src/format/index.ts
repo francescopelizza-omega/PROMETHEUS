@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * format — file 14 §3.5: formatter presets (opencode set) + format-on-save/after-edit
  * policy + argv builder. Pure settings-data; each formatter is gate-registered by the

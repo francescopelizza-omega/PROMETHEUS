@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * session/one-shot.ts — `prometheus -p "<prompt>"`: ONE agent turn, no TTY, then exit.
  *

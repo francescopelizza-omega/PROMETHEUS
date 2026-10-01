@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * routes/extensions.tsx — the MCP / ACP connectors manager (file 09 §2).
  *

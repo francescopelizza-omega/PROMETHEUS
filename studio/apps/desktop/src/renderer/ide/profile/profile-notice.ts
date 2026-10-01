@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * profile-notice.ts — what the Profile panel should TELL the user about a completed run.
  *

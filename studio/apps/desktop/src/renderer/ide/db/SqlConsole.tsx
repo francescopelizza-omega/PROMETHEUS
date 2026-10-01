@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * SqlConsole.tsx — the SQL query console (file 14 §3.26).
  *

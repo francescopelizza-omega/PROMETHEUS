@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * renderer/query/hooks.ts — the TanStack Query hooks over the contextBridge (§5).
  *

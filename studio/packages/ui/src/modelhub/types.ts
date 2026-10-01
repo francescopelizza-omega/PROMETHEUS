@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * modelhub/types.ts — the renderer-facing DISPLAY shapes the §7/§8 Model-Hub
  * components render, as @prometheus/ui-LOCAL structural mirrors (same discipline

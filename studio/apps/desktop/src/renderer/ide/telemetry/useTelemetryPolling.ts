@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * ide/telemetry/useTelemetryPolling.ts — the single telemetry poll loop.
  *

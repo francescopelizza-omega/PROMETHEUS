@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Francesco Pelizza
 """`$PROMETHEUS_CONFIG_DIR` must redirect the engine's OWN config dir.
 
 Regression for: the engine had no config-dir override at all, so `PROM_DIR` always resolved

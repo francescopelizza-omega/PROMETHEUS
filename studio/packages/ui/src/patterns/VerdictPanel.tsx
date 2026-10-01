@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * VerdictPanel.tsx — the full scan_report rendered (08 §3.2 / §5.2): the body of the
  * security verdict modal/drawer. Verdict header (badge + risk gauge), blocking

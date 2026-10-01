@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * FloatingTerminalWindow.tsx — the ⧉ tear-off terminal window content (file 13 §1.2/§3.5).
  *

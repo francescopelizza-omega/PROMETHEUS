@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * modelhub/client.ts — the typed Model-Hub client (file 05 §1/§2/§3).
  *
@@ -838,8 +840,15 @@ export class ModelHubClient {
     return rows.map((r) => {
       // Honor the sidecar's real fields so Ollama-indexed models (spec §9) carry their
       // true source/modality/params instead of being flattened to a HF text model.
-      const source: Model["source"] =
-        r.source === "ollama" || r.source === "url" ? r.source : "huggingface";
+      // Honour every source the sidecar actually emits. This was
+      // `r.source === "ollama" || r.source === "url" ? r.source : "huggingface"`, which reported
+      // LM Studio and shared-HF-cache models as Hugging Face ones — the union had no member for
+      // them (see `ModelSource`). Anything genuinely unrecognised still falls back rather than
+      // widening the type at runtime.
+      const KNOWN: readonly Model["source"][] = ["ollama", "url", "lmstudio", "hf-cache"];
+      const source: Model["source"] = KNOWN.includes(r.source as Model["source"])
+        ? (r.source as Model["source"])
+        : "huggingface";
       const modality = (typeof r.modality === "string" ? r.modality : "text") as Model["modality"];
       const params =
         typeof r.params === "string" ? r.params : typeof r.quant === "string" ? r.quant : undefined;

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 import { homedir } from "node:os";
 /**
  * tui/path-mentions.ts — "@"-triggered fuzzy path completion for the main composer.

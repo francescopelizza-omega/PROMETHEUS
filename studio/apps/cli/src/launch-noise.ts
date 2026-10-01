@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * launch-noise.ts — wipe the launcher's rebuild log the moment the CLI first draws.
  *

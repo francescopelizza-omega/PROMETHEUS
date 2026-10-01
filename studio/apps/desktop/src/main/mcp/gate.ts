@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * main/mcp/gate.ts — the real nemesis gate for MCP connectors (file 09 §2.2).
  *

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * main/ipc.ts — the typed ipcMain handlers (MAIN-PROCESS ONLY).
  *
@@ -41,6 +43,7 @@ import {
   type SecurityVerdict,
   createEngineClient,
   createLifecycleClient,
+  describeEngineFailure,
   resolveEngine,
 } from "@prometheus/engine-bridge";
 
@@ -94,10 +97,10 @@ class IpcError extends Error {
 type RunRegistry = Map<string, AbortController>;
 
 /** Coerce an unknown caught value to a short error string. */
-function errString(e: unknown): string {
-  if (e instanceof Error) return e.message;
-  return typeof e === "string" ? e : "unknown error";
-}
+// `errString` was a LOCAL copy here, one of twenty across main/*.ts, and every copy returned
+// `e.message` alone — discarding `EngineError.stderrTail`, which is where the engine puts the
+// actual reason when it exits before emitting JSON. See `describeEngineFailure`'s doc.
+const errString = describeEngineFailure;
 
 /**
  * Extract the renderer's WebContents `sender` from an Electron IpcMainInvokeEvent

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * agent/system/host/hook-runner.ts — the REAL, spawn-backed `HookRunner` (see `agent/hooks.ts`).
  *

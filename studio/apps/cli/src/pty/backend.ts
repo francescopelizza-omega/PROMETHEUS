@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * pty/backend.ts — the CLI's pseudo-terminal backend seam (P5).
  *

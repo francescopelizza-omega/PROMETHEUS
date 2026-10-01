@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * themes — file 13 Area 3: the theming authoring surface on top of 08's token engine.
  * The registry (builtin = 08's 20 schemes, single source + user customs), the loader

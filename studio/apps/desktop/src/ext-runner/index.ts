@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * ext-runner/index.ts — the EXTENSION utility-process ENTRYPOINT (APP-059, file 09 §5.2).
  *

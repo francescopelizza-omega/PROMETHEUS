@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * session/repo-map-state.ts — the host-side holder for the built-in repo map (CLI-053).
  *

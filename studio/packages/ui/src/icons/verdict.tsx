@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * icons/verdict.tsx — the verdict glyphs as a labelled element (08 §2.5/§7).
  *

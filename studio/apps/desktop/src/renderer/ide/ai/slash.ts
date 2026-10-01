@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * ai/slash.ts — PURE slash-command detection + filtering for the AgentPane composer (APP-092).
  *

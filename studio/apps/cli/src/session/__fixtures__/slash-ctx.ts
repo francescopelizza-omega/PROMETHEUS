@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * __fixtures__/slash-ctx.ts — one fake `SlashCtx` every slash-command suite drives.
  *

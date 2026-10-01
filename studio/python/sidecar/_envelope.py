@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Francesco Pelizza
 """_envelope.py — the one-JSON-object emit helper shared by the Studio sidecars.
 
 Mirrors prometheus.py's ``emit_json`` contract (C2/C7):

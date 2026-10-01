@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * revert-outcome.ts — decide what a checkpoint revert may claim, from what the disk actually did.
  *

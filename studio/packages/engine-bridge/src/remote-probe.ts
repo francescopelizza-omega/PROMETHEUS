@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * ai/remote-probe.ts — the fixed script Prometheus runs on a remote machine, and how it is read.
  *

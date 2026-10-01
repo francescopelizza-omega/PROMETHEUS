@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * CostWarningModal.tsx — the loud PAY-PER-USE typed-confirm modal (file 12 §4.1).
  *

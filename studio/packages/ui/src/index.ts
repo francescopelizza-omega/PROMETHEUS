@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * @prometheus/ui — the Prometheus Studio design system (08-design-system-ux.md).
  *

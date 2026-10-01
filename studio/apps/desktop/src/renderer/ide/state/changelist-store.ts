@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * ide/state/changelist-store.ts — per-workspace changelist membership + persistence
  * (APP-038).

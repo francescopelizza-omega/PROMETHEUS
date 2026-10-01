@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * ai/types.ts — the AI-Providers screen's LOCAL view shapes + pure projections (file 12 §4/§5).
  *

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * ide/Problems.tsx — the LSP diagnostics aggregate (file 07 §3.3/§11).
  *

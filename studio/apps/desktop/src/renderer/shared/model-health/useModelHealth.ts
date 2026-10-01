@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * renderer/shared/model-health/useModelHealth.ts — Settings ▸ Model Health's data hook.
  *

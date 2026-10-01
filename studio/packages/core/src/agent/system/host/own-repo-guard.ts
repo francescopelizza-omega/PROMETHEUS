@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * agent/system/host/own-repo-guard.ts — refuse to ever operate with a cwd inside Prometheus's
  * OWN source repo.

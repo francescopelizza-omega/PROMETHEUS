@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * session/model-admission-host.ts — the memory gate in front of every model switch.
  *
@@ -246,6 +248,10 @@ export async function admitEndpoint(
     resident: census.map((s) => ({
       runner: s.runner,
       models: s.models,
+      // Carried, not dropped. Without it an LM Studio that is merely OPEN reports its whole
+      // catalogue through `parseOpenAiModels` and the one-server rule refuses every load on a
+      // machine holding nothing — see `ResidentServer.residencyKnown`.
+      residencyKnown: s.residencyKnown,
       ...(host ? { host } : {}),
     })),
     alternatives: candidates,

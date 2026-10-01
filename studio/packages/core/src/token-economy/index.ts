@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * token-economy — the curated token-saving toolkit Prometheus proposes by default
  * (terse output / prompt caching / repo map / local RAG / context pruning / …) +

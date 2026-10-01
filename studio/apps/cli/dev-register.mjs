@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * dev-register.mjs — register the workspace dev resolver so `node --import
  * ./dev-register.mjs src/bin.ts <cmd>` runs the prometheus CLI straight from TS source

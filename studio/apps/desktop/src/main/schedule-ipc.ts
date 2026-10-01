@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * main/schedule-ipc.ts — the `schedule:*` ipcMain handlers for the Scheduled/Autonomous Runs
  * feature (RELAY-ONLY, mirrors model-health-ipc.ts): lists the on-disk `ScheduleStore` for the
@@ -18,6 +20,7 @@
  * schedule-store.test.ts) — removing an id that doesn't exist is not an error.
  */
 import { agent as coreAgent } from "@prometheus/core";
+import { describeEngineFailure } from "@prometheus/engine-bridge";
 import { ipcMain } from "electron";
 
 import {
@@ -32,9 +35,10 @@ type ScheduledTask = coreAgent.ScheduledTask;
 
 const VALID_AUTONOMY = new Set(["readonly", "edits", "commands"]);
 
-function errString(e: unknown): string {
-  return e instanceof Error ? e.message : String(e);
-}
+// `errString` was a LOCAL copy here, one of twenty across main/*.ts, and every copy returned
+// `e.message` alone — discarding `EngineError.stderrTail`, which is where the engine puts the
+// actual reason when it exits before emitting JSON. See `describeEngineFailure`'s doc.
+const errString = describeEngineFailure;
 
 /** Defensively narrow `arg` into a plausible `ScheduledTask`, or explain what's wrong. Only the
  *  fields load-bearing for identifying/scheduling/authorizing the task are checked here —

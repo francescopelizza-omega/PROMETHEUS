@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * EngineState.tsx — the §3.2 status-bar molecule (08 §4.2 / §5.2). Projects the
  * bridge connectivity probe (python ok? nemesis present? DB freshness?) into the

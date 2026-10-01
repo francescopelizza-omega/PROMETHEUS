@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * agent/scoped-permission.ts — remembered "don't ask again" grants over the PURE permission
  * engine (WRAPPER Subsystem 3). Wraps `evaluatePermission` WITHOUT touching its math: it owns a

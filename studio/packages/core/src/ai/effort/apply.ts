@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * ai/effort/apply.ts — resolve a requested tier against a capability, then apply it.
  *

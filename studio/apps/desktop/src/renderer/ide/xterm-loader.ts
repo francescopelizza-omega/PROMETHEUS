@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * ide/xterm-loader.ts — the LAZY @xterm/xterm loader (file 07 §6.1/§12).
  *

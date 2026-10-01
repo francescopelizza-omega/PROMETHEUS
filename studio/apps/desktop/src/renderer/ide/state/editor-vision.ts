@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * ide/state/editor-vision.ts — PURE reading-aid helpers + toggle model (APP-074).
  *

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * agent/carry-forward.ts — what the agent REMEMBERS from one turn to the next.
  *

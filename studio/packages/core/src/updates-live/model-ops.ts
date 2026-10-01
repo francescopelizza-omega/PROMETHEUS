@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * updates-live/model-ops.ts — pull, remove, and the local facts no HTTP endpoint will tell you.
  *

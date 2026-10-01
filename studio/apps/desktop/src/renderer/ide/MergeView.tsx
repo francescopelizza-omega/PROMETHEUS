@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * ide/MergeView.tsx — the 3-way merge editor for a conflicted file (APP-039).
  *

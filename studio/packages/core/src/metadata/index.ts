@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * metadata — the shared rules for presenting a file's metadata (file 0C).
  *

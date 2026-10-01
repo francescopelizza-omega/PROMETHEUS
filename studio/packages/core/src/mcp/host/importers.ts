@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * mcp/host/importers.ts — read existing MCP configs + the §2.4 boot config (file 09 §2.3/§2.4).
  *

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * commands/token-toggles.ts — per-technique enable/disable persistence for `prometheus tokens` (CLI-088).
  *

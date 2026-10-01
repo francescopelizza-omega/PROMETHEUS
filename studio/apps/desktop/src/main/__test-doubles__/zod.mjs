@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * __test-doubles__/zod.mjs — a faithful MINIMAL zod stand-in for node:test.
  *

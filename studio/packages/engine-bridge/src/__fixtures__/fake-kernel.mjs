@@ -1,4 +1,6 @@
 #!/usr/bin/env node
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * fake-kernel.mjs — a deterministic stand-in for `python3 kernel.py serve`, used by
  * kernel-sidecar.test.ts so the bridge's NDJSON line-reader + fail-closed + dispose

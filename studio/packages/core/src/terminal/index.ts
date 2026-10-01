@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * terminal — the in-IDE terminal launcher UX model (file 13 Area 1). Pure: profiles +
  * AI presets (§1.3/§1.4), venv-activated spawn-arg resolution (§1.5), the session-list

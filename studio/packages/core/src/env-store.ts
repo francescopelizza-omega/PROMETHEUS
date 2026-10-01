@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * env-store.ts — the framework-free env + package lifecycle layer (file 04 §7,§9).
  *

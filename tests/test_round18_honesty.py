@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Francesco Pelizza
 """Round-18 regressions: three verbs that answered confidently about work they had not done.
 
 * `model serve <any-string>` built a runnable ServeProfile with a FITS verdict for a model that

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 import { agent } from "@prometheus/core";
 /**
  * session/install-tools.ts — `/install <tool>`: add a missing external tool, gated.

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * agent/system/host/os-keychain.ts — a `SecretsStore` over the OS keychain TOOLS.
  *

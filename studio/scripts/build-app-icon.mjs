@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * scripts/build-app-icon.mjs — generate the platform icon set from the pixel-art master.
  *

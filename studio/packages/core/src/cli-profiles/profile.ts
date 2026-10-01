@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * cli-profiles/profile.ts — the CLI profile schema + resolve/merge (file 11 §6).
  *

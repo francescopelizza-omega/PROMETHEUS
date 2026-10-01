@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * prom-home.ts — engine-bridge's LOCAL twin of core's canonical Prometheus-home resolver.
  *

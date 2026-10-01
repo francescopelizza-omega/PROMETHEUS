@@ -1,4 +1,6 @@
 #!/usr/bin/env node
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * fake-mcp-server.mjs — a tiny MCP stdio server for CLI-036 `mcp test` tests. Speaks
  * newline-delimited JSON-RPC 2.0: replies to `initialize` and `tools/list`, ignores the

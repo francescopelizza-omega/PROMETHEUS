@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Francesco Pelizza
 """test_coverage.py — the coverage runner sidecar (APP-086). Stdlib unittest."""
 import contextlib
 import importlib.util

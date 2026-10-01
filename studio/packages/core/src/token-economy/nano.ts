@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * token-economy/nano.ts — the HONEST Gemini Nano local-feasibility assessment (from a
  * dedicated research agent), as pure data so the CLI/GUI can surface it truthfully.

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * ide/TodoView.tsx — the aggregated, CONFIGURABLE TODO / FIXME tool window (PyCharm TODO ·
  * VS Code Todo-Tree parity; JetBrains parity item 31, APP-096).

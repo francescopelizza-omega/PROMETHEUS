@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * metered-consent.ts — the CLI's per-provider "ENABLE METERED" consent receipt (CLI-031).
  *

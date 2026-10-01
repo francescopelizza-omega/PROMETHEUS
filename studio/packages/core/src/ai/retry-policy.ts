@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * ai/retry-policy.ts — what a model endpoint's failure MEANS, and whether to try again.
  *

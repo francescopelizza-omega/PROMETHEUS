@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * version.ts — reconcile the Studio + engine + nemesis versions for About (file 10 §5).
  *

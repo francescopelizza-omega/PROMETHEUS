@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * tokens/ansi.ts — the §5.7 / §8.1 ANSI-16 resolver (file 08).
  *

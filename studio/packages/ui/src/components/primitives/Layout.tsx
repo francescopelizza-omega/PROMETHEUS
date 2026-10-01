@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * Layout.tsx — Separator, Avatar, Skeleton, Progress, ScrollArea (file 08 §3.1).
  *

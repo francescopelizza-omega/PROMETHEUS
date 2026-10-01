@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * ai/local-commands.ts — PURE built-in slash commands the AgentPane answers LOCALLY, without a
  * model call. Today: `/ls`, the same command the terminal TUI has — a quick check that the agent

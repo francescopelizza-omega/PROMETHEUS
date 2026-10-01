@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * chat-view.ts — the sidebar webview view provider, and the permission-confirm surface.
  *

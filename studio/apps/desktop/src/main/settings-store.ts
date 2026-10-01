@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 import { randomUUID } from "node:crypto";
 /**
  * main/settings-store.ts — pure(ish) disk persistence + view-mapping for the settings

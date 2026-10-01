@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * boot.spec.ts — the app boots and renders the shell (file 10 §6.3).
  */

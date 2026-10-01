@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * main/ide/exec-screen.ts — re-export of core's layer 6 (full_wrapper_compose Phase 6).
  *

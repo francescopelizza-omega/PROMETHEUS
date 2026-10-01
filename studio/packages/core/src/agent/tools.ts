@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * agent/tools.ts — the agent's exposed tool set (file 11 §3.2).
  *

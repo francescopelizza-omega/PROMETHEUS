@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * agent/permission-modes.ts — Claude-Code-parity permission MODES on top of the
  * §3.4 permission-engine (file 14). A mode is a NAMED autonomy posture the user

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * session/orchestrator.ts — the subagent fan-out policy for the interactive session.
  *

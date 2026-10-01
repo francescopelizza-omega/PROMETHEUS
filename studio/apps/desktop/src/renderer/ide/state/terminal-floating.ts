@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * ide/state/terminal-floating.ts — the PURE tear-out (dock/undock) reducer (APP-090).
  *

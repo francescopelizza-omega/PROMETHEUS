@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Francesco Pelizza
 """serve.py — ServeProfile + runner-argv construction (file 05 §8).
 
 PURE: builds the runner command-line and a reproducible ``ServeProfile`` from a

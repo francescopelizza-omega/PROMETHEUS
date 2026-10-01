@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * terminal/resolve.ts — turn a profile into spawn args (file 13 §1.5).
  *

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * ai/guardrails/spend-ledger.ts — THE shared daily spend ledger.
  *

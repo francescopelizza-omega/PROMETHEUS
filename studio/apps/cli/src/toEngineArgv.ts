@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * toEngineArgv.ts — map parsed §1 global flags → engine argv (file 11 §1, PURE).
  *

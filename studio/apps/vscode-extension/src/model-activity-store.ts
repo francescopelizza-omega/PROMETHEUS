@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * model-activity-store.ts — this extension's half of the ONE shared "when was a local model
  * last used" file, mirroring apps/desktop/src/main/model-activity-store.ts and

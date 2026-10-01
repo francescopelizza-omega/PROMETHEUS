@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * ide/state/clipboard-store.ts — the clipboard history ring (JetBrains "Paste from
  * History" ⌘⇧V · VS Code clipboard-ring parity; plan file 01).

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * main/effort-ipc.ts — the `effort:*` handlers: ONE saved thinking-effort tier for the app and
  * the terminal alike.
@@ -19,13 +21,15 @@
  */
 import { cliProfiles } from "@prometheus/core";
 import { isEffortTier } from "@prometheus/core/ai-effort";
+import { describeEngineFailure } from "@prometheus/engine-bridge";
 import { ipcMain } from "electron";
 
 import { type EffortPrefResult, IPC } from "../shared/ipc-contract.js";
 
-function errString(e: unknown): string {
-  return e instanceof Error ? e.message : String(e);
-}
+// `errString` was a LOCAL copy here, one of twenty across main/*.ts, and every copy returned
+// `e.message` alone — discarding `EngineError.stderrTail`, which is where the engine puts the
+// actual reason when it exits before emitting JSON. See `describeEngineFailure`'s doc.
+const errString = describeEngineFailure;
 
 /**
  * Register `effort:get` / `effort:set`. Returns a disposer, like every other IPC module here.

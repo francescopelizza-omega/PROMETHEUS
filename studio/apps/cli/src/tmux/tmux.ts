@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * tmux/tmux.ts — the injection-safe tmux command builder + runner (P6 core).
  *

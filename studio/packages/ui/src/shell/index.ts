@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * shell/ barrel (file 08 §4). The PURE, framework-free shell model shared by the
  * desktop IDE frame AND the `prometheus` TUI (file 08 §8): the activity-rail routing,

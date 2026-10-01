@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * ide/state/diff-hunks.ts — PURE unified-diff hunk toolkit for per-hunk / per-line
  * staging (APP-084). Parses a single file's `git diff` text into a file header + hunks,

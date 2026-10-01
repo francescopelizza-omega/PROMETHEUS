@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * modelhub/util.ts — the PURE, dependency-free display helpers the Model-Hub
  * components lean on (file 05 §4/§5/§7/§8). NO react, NO node, NO engine-bridge

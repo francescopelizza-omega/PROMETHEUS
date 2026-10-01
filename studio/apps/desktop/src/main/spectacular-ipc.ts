@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * main/spectacular-ipc.ts — the trusted side of the SPECTACULAR power-up seam.
  *
@@ -15,7 +17,7 @@
 
 import { BrowserWindow, dialog, ipcMain } from "electron";
 
-import { createPrometheusEngine } from "@prometheus/engine-bridge";
+import { createPrometheusEngine, describeEngineFailure } from "@prometheus/engine-bridge";
 
 import {
   type FolderOpenResult,
@@ -34,10 +36,10 @@ import { guardOwnRepo } from "./cwd-guard.js";
 import { grantWorkingSetRoot } from "./ide/path-guard.js";
 import { cleanId, cleanPathToken, isSafeToken } from "./spectacular-validate.js";
 
-function errString(e: unknown): string {
-  if (e instanceof Error) return e.message;
-  return typeof e === "string" ? e : "unknown error";
-}
+// `errString` was a LOCAL copy here, one of twenty across main/*.ts, and every copy returned
+// `e.message` alone — discarding `EngineError.stderrTail`, which is where the engine puts the
+// actual reason when it exits before emitting JSON. See `describeEngineFailure`'s doc.
+const errString = describeEngineFailure;
 
 /** Read + VALIDATE a catalog id (charset-pinned, never a leading-dash flag).
  *  Returns undefined when the value is missing or option-injection-shaped. */

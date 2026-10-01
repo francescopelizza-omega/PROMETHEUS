@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * session/host.ts — the P4 single-window interactive SESSION host.
  *
@@ -445,15 +447,52 @@ function zeusRow(row: ReadonlyArray<ZeusSeg>): string {
 /**
  * The big block WORDMARK — "PROMETHEUS" drawn 5 rows tall in full-block glyphs,
  * one strong-palette tint per letter so the title sweeps cool→warm
- * (cyan → blue → magenta → red → yellow). Each glyph is a fixed 5-col cell; rows
- * are assembled column-aligned, so the colored output stays visible-length even.
+ * (cyan → blue → magenta → red → yellow). Each glyph is a fixed 5-ROW cell (the
+ * columns vary: 4 for P, 5 for M); rows are assembled column-aligned, so the
+ * colored output stays visible-length even.
+ *
+ * ## The two etched initials
+ *
+ * P and M are the only letters NOT drawn in solid `█`. They are filled with the dark
+ * shade `▓` and worked over with a milled/scratched surface: `▒` mill lines, plus a
+ * deep `░` gouge — so the pair reads as the same metal, cut by the same tool.
+ * Deliberate, personal, and not to be "fixed" back to solid blocks.
+ *
+ * Their COLOUR is untouched — P keeps the accent cyan it shares with R, M keeps the
+ * blue it shares with O, and the cool→warm sweep is exactly what it always was. The
+ * whole effect is carried by the glyphs, which is also why it survives `NO_COLOR`
+ * intact: strip every escape and the etching is still there.
+ *
+ * ### The M's inner V
+ *
+ * M carries ONE extra rule, because texture nearly cost it its letterform. The V is only
+ * three cells — (r1,c1), (r1,c3), (r2,c2) — and once mill lines ran through them the
+ * middle of the M read as noise. So the V is the one run that is never milled: all three
+ * cells stay at the base `▓`, and the STEM cells flanking them on row 1 drop to `▒`. The
+ * V is therefore the densest, cleanest feature in the letter, and it separates from the
+ * right stem instead of merging with it. Mill the V and the M turns back into two bars.
+ *
+ * Three things keep this safe, and all three are load-bearing:
+ *
+ *   1. `░ ▒ ▓` live in the SAME Unicode block (U+2580–U+259F) as the `█ ▟ ▜ ▛ ▙` this
+ *      wordmark already uses, so the texture adds no new font-coverage risk.
+ *   2. Every shade glyph measures ONE column (`stringWidth`), exactly like `█`. The
+ *      banner box is padded from `visibleLen`, so a two-column glyph here would tear
+ *      the right border and every row under it.
+ *   3. The CELL OCCUPANCY is unchanged — every textured cell was a `█`, and no blank
+ *      became filled. The letterforms are byte-for-byte the old silhouettes; only the
+ *      ink inside them changed. Keep it that way, or the shapes drift.
+ *
+ * The texture survives NO_COLOR (it is in the glyphs), the brightness does not — which
+ * is the right way round: monochrome still shows the etching.
  */
 type Glyph = readonly [string, string, string, string, string];
 const WORDMARK: ReadonlyArray<readonly [Glyph, (s: string) => string]> = [
-  [["███ ", "█  █", "███ ", "█   ", "█   "], c.cyan], // P
+  [["▓▒▓ ", "▒  ▒", "░▓▒ ", "▓   ", "▒   "], c.cyan], // P — etched (colour unchanged)
   [["███ ", "█  █", "███ ", "█ █ ", "█  █"], c.cyan], // R
   [["▟██▙", "█  █", "█  █", "█  █", "▜██▛"], c.blue], // O
-  [["█   █", "██ ██", "█ █ █", "█   █", "█   █"], c.blue], // M
+  //   stems milled; the three V cells (▓ at r1c1, r1c3, r2c2) are left clean on purpose.
+  [["▓   ▓", "▒▓ ▓▒", "▓ ▓ ░", "░   ▓", "▓   ▓"], c.blue], // M — etched, V preserved
   [["████", "█   ", "███ ", "█   ", "████"], c.magenta], // E
   [["█████", "  █  ", "  █  ", "  █  ", "  █  "], c.magenta], // T
   [["█  █", "█  █", "████", "█  █", "█  █"], c.red], // H

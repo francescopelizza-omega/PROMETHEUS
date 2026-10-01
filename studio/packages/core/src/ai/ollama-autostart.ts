@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * ai/ollama-autostart.ts — the ONE shared "make sure a local runner is up, on ANY surface"
  * function — Ollama first, LM Studio (`lms server start`) the same way.
@@ -40,7 +42,7 @@ import {
 
 import type { AiEndpoint } from "./client.js";
 import { DEFAULT_CONTEXT_WINDOW } from "./context-window.js";
-import { LOCAL_RUNNERS, type LocalRunnerSpec } from "./local-runners.js";
+import { type LocalRunnerSpec, runnerById } from "./local-runners.js";
 
 const DEFAULT_TIMEOUT_MS = 900;
 const DEFAULT_RETRY_ATTEMPTS = 5;
@@ -169,7 +171,11 @@ async function ensureLocalRunnerRunning(
   runnerId: string,
   opts: EnsureOllamaOptions,
 ): Promise<EnsureOllamaResult> {
-  const runner = LOCAL_RUNNERS.find((r) => r.id === runnerId);
+  // `runnerById`, not a raw scan of the constant: it applies the vendor host override, so a
+  // user who moved their daemon with OLLAMA_HOST gets probed where the daemon actually is. It
+  // also returns undefined for a runner the override has moved off this machine, which is the
+  // correct refusal — see `runnerForBaseUrl`'s doc.
+  const runner = runnerById(runnerId);
   if (!runner) return { started: false, reason: "not-installed" };
   const fetchFn = opts.fetchFn ?? fetch;
   const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;

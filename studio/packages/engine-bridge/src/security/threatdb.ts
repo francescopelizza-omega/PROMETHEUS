@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * security/threatdb.ts — Threat-Intelligence DB status & control (file 03 §6).
  *

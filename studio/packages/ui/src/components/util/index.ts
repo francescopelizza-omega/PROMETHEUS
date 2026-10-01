@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * components/util — the shadcn class utilities (file 08 §3): `cn` (clsx +
  * tailwind-merge) and `cva` (class-variance-authority), reimplemented

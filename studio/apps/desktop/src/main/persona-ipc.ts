@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * main/persona-ipc.ts — the `persona:*` ipcMain handlers for Persona Sharing (roadmap point 3,
  * RELAY-ONLY, mirrors schedule-ipc.ts): lists the shared persona catalog (`~/.prometheus/agents`
@@ -39,6 +41,7 @@
  */
 import { readFileSync, statSync } from "node:fs";
 import { basename, isAbsolute } from "node:path";
+import { describeEngineFailure } from "@prometheus/engine-bridge";
 
 import { ipcMain } from "electron";
 
@@ -62,9 +65,10 @@ import {
  *  persona-store.ts would reject it anyway. */
 const MAX_IMPORT_BYTES = 65536;
 
-function errString(e: unknown): string {
-  return e instanceof Error ? e.message : String(e);
-}
+// `errString` was a LOCAL copy here, one of twenty across main/*.ts, and every copy returned
+// `e.message` alone — discarding `EngineError.stderrTail`, which is where the engine puts the
+// actual reason when it exits before emitting JSON. See `describeEngineFailure`'s doc.
+const errString = describeEngineFailure;
 
 /**
  * Whether `path` (already known to be `isAbsolute()`) is something OTHER than a genuine local

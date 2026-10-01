@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * modelhub/store.ts — the framework-free Model Hub state layer (file 05 §1,§5,§7).
  *

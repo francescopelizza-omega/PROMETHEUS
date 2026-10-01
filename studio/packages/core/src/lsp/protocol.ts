@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * lsp/protocol.ts — the shared LSP wire TYPES + a pure JSON-RPC framing helper
  * (file 07 §3.2/§4).

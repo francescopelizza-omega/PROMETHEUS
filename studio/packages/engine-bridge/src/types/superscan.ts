@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * types/superscan.ts — the `superscan` envelope (file 02 §3.3 fallthrough set).
  *

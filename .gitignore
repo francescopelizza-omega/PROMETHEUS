@@ -112,3 +112,41 @@ studio/**/.prometheus/
 # 2-second RAM trace written by handoffs/ram-2sec-log.sh — machine-local evidence,
 # regenerated per session, never published.
 /2_sec_ram_log.md
+
+# Backup files that reached the index because nothing matched them, found in the
+# pre-publication audit 2026-09-30.
+#
+# The case that got through was `CLAUDE.md.bak-<timestamp>`: an editor/agent backup of the
+# working-instructions file, carrying a SUPERSEDED copy of rules that are load-bearing
+# (CLAUDE.md §4: "Comments in this repo are load-bearing"), so a reader could have followed the
+# stale one believing it current. The timestamp suffix defeated every suffix rule already here —
+# the same way `FIXES-<dates>.md` did above.
+#
+# Agent-generated scratch at the repo root is the other half of this problem. A test fixture that
+# prompts "write <name>.py" produces a real file, and the auto-committer (`git add -A`) cannot
+# tell it from a fixture. There is no pattern that catches an arbitrary generated filename, so the
+# defence is the pre-publication audit: check the ROOT LISTING (`git ls-files | grep -v /`) before
+# publishing, and keep it to files a visitor should see.
+*.bak
+*.bak-*
+/CLAUDE.md.bak*
+
+# --- agent working instructions + vendor docs: local-only, never published -----
+#
+# CLAUDE.md is the working-instructions file for AI agents operating IN this checkout. It is not
+# product documentation: it carries one machine's incident forensics (kernel lockup counts, dates,
+# process tallies), and it points at `handoffs/` scripts that `/handoff*/` above deliberately
+# withholds from the repo. A public clone would get instructions referencing files it does not
+# have. Untracked rather than deleted — it still governs work in this checkout.
+/CLAUDE.md
+/PROMETHEUS.md
+/AGENTS.md
+#
+# `studio/auth.md` was a verbatim copy of LM STUDIO's own documentation, MDX `<Callout>` tags and
+# all. Redistributing another project's docs from a repo that ships a THIRD-PARTY-NOTICES.md is a
+# licensing question nobody needs; it was moved to ALPHA_local_only.
+/studio/auth.md
+#
+# Planning and audit notes generated while building (the `-PLAN`/`-REPORT` patterns above already
+# cover the common shapes). Moved to ~/ALPHA_local_only/PROMETHEUS/ on 2026-09-30.
+/*-SURVEY*.md

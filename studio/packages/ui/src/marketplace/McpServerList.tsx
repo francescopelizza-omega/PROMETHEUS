@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * marketplace/McpServerList.tsx — the MCP Servers tab body (file 09 §2/§6).
  *

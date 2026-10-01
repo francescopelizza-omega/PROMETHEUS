@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Francesco Pelizza
 """repomap.py — the tree-sitter/stdlib repo-map sidecar (APP-053, MDS parity 39).
 
 Parses a whole repo into a RANKED symbol/definition map for `@codebase` agent grounding

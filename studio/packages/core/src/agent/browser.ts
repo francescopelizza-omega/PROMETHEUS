@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * agent/browser.ts — the `browser_navigate` / `browser_screenshot` / `browser_extract_text`
  * agent tools: a SCOPED first step toward an agent that can prove its work with a real

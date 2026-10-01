@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * ide/state/tabs-reducer.ts — the PURE tab / model-swap reducer (file 07 §3.1).
  *

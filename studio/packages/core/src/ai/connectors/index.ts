@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * ai/connectors — the 4 connector kinds as pure builders + injected runtime seams
  * (file 12 §1.2). local-serve (Tier A), oauth-subscription-bridge (Tier B),

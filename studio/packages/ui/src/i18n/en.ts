@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * i18n/en.ts — the default (English) message catalog (08 §7 "Localization-ready:
  * all copy via an i18n catalog; no concatenated sentences").

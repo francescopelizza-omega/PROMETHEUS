@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 /**

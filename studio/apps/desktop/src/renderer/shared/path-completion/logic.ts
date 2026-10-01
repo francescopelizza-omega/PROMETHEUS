@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * renderer/shared/path-completion/logic.ts — the PURE half of "@"-path completion for
  * ANY text field (not just AgentPane's composer, which keeps its own richer sym:/folder:/

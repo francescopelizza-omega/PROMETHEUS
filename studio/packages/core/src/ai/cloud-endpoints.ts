@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * ai/cloud-endpoints.ts — turning a configured provider into an endpoint a session can use.
  *

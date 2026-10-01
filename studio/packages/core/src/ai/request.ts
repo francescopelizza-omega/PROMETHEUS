@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * ai/request.ts — one POST to a model endpoint, with bounded retries, for ALL four transports.
  *

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * main/ide/lsp-host.ts — spawn + supervise language servers (file 07 §4).
  *

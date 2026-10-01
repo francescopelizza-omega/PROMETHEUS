@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * main/spectacular-validate.ts — argv option-injection guard for the SPECTACULAR seam.
  *

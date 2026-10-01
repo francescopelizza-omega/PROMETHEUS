@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * commands/diagram-cmd.ts — `prometheus diagram <uml|deps> <path>` over the diagram.py
  * sidecar (CLI-008). A read-only AST walk → a Mermaid (+ Graphviz DOT) diagram

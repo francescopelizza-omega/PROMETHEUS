@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * ide/state/debug-inspect.ts — PURE inspection math for the DebugPanel (APP-030).
  *

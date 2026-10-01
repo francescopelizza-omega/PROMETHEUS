@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * stretch/suggest.ts — given a model's compute demand + the user's machine, decide
  * whether it fits and, if not, recommend the cheapest viable "stretch" technique(s)

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * main/model-health-ipc.ts — the `modelHealth:*` ipcMain handlers for the Model Health
  * feature (RELAY-ONLY, mirrors path-completion-ipc.ts): lists the on-disk
@@ -11,6 +13,7 @@
  * all, so there is nothing for a compromised/buggy renderer to redirect.
  */
 import { parseEndpointHealthRecord } from "@prometheus/core";
+import { describeEngineFailure } from "@prometheus/engine-bridge";
 import { ipcMain } from "electron";
 
 import {
@@ -20,9 +23,10 @@ import {
 } from "../shared/ipc-contract.js";
 import { loadModelHealth, recordEndpointHealth } from "./model-health-store.js";
 
-function errString(e: unknown): string {
-  return e instanceof Error ? e.message : String(e);
-}
+// `errString` was a LOCAL copy here, one of twenty across main/*.ts, and every copy returned
+// `e.message` alone — discarding `EngineError.stderrTail`, which is where the engine puts the
+// actual reason when it exits before emitting JSON. See `describeEngineFailure`'s doc.
+const errString = describeEngineFailure;
 
 /** Register the `modelHealth:*` handlers. Returns a disposer (mirrors sibling IPC modules). */
 export function registerModelHealthIpcHandlers(globalPath: string): () => void {

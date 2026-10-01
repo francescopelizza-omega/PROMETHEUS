@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * ide/state/code-action-classify.ts — PURE LSP code-action → run classifier (APP-078).
  *

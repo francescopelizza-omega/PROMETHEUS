@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * ide/state/changelists.ts — the renderer-local MIRROR of the pure changelist
  * reducers (APP-038).

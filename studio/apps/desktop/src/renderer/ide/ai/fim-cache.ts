@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * ai/fim-cache.ts — PURE ghost-text FIM (fill-in-the-middle) prompt shaping + completion
  * cache (APP-092). No react / monaco / electron — node:test-able.

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * commands/mcp-cmd.ts — `prometheus mcp [list|add|remove|test]` (CLI-036).
  *

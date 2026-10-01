@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * SystemHealthPanel.tsx — the System Health bottom-panel surface (Reliability & Polish pack).
  *

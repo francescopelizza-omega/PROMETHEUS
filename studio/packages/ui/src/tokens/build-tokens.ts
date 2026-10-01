@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * build-tokens.ts — the token GENERATOR (file 08 §2/§6). Emits the two committed build
  * artifacts from the canonical ../tokens.ts source:

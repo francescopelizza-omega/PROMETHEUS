@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * shell/rightrail-view.ts — PURE display helpers for the RightRail Inspector (APP-001).
  *

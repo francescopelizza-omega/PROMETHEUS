@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * vscode-stub.mjs — a stand-in for the "vscode" module, for the plain node:test runs.
  *

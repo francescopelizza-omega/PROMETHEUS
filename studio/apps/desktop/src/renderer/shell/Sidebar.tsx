@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * shell/Sidebar.tsx — the contextual sidebar (file 08 §4).
  *

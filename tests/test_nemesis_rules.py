@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Francesco Pelizza
 """test_nemesis_rules.py — rules and remediation that must not silently under-report.
 
 Each test here pins a defect that made the scanner claim more safety than it had:

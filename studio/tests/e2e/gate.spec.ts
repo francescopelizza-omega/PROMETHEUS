@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * gate.spec.ts — a BLOCK verdict makes install impossible in the UI (file 10 §6.3).
  *

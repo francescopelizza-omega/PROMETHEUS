@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * ide/RunToolbar.tsx — run/debug/stop one click away (APP-034).
  *

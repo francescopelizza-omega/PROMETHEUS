@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * ide/state/blame-inline.ts — PURE inline-blame decoration math (APP-083).
  *

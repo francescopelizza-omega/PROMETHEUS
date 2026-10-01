@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Francesco Pelizza
 """test_skills_integrate.py — CLI-078: the background skills-integrate status/log surface.
 Proves every run persists a status cache, `--status` reads it back via the SAME renderer, and a
 missing/corrupt cache is a clean 'never run yet' (not a crash). Pure stdlib (unittest)."""

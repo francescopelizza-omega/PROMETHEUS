@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * routes/home-view.ts — PURE derivations for the Home mission-control route (handoff §2.3).
  *

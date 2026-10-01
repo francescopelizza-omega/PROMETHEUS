@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * ForceOverrideDialog.tsx — the deep-red ☠ Force-override flow (file 03 §5.3).
  *

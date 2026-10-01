@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * ide/telemetry/TelemetryStrip.tsx — the compact live readout on the RIGHT of the
  * bottom-panel tab row. Always-visible CPU + RAM mini-meters + a guard dot; clicking

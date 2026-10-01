@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * ide/state/templates.ts — the live-templates registry (JetBrains Live Templates ·
  * VS Code snippets parity; plan file 08 / APP-020).

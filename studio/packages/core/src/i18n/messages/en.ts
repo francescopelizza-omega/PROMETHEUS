@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * i18n/messages/en.ts — the English catalog, which is also the SCHEMA.
  *

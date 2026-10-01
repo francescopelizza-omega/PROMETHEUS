@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * terminal-view.ts — PURE renderer helpers for the Terminal Launcher (file 13 §1.2).
  *

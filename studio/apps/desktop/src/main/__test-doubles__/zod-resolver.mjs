@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 import { dirname, resolve as resolvePath } from "node:path";
 /**
  * __test-doubles__/zod-resolver.mjs — an ESM resolver hook that maps the bare

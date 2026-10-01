@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * ide/state/gutter-decorations.ts — the PURE glyph-margin decoration registry (APP-011).
  *

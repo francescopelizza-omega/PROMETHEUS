@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * tailwind.config.ts — Tailwind for the desktop renderer (file 08 §6 / §2).
  *

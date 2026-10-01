@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * path-completion/index.ts — shared fuzzy path-fragment scoring + frecency ranking for
  * the "@"-triggered path completion feature (CLI composer + desktop "@"-mention pickers

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * onboarding/OnboardingWizard.tsx — the first-run wizard modal (APP-064).
  *

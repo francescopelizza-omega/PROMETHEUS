@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * security/urlfindings.ts — URL-injection verdict FUSION (url_injection_safeguard.md §4).
  *

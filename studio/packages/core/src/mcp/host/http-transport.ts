@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * mcp/host/http-transport.ts — the streamable-HTTP MCP client transport (CLI-037 core lift).
  *

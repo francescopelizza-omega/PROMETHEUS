@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * agent/protocol/injection-scan.ts — a lightweight, in-process indirect-prompt-injection
  * pattern scanner for TEXT a tool hands back (as opposed to a command the agent decided to run).

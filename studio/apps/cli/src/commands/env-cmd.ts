@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * commands/env-cmd.ts — the FULL `prometheus env …` surface over the envmgr.py sidecar
  * (C7), at parity with the GUI Environments panel (file 04). Reads run straight;

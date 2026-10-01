@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * routes/workspace.tsx — Repos + Environments + Docs, ONE island (handoff_3 §1/§5).
  *

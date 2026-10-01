@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * ide/CallHierarchyView.tsx — the Call Hierarchy tool window (JetBrains "Call Hierarchy"
  * ⌥⌘H · VS Code "Show Call Hierarchy" parity).

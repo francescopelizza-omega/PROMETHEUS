@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * commands/squat-guard.ts — a pre-install TYPOSQUAT / "slopsquatting" heuristic for
  * pip package names (file 11 §4 / nemesis thesis). AI assistants hallucinate package

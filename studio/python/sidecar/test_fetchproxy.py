@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Francesco Pelizza
 """test_fetchproxy.py — L6 safe-fetch proxy. Stdlib unittest, no third-party deps.
 
 Covers: SSRF/egress validation, HTML active-content stripping + indirect-prompt-

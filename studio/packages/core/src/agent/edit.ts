@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * agent/edit.ts — the `propose_edit` agent tool + its PURE exact-match applier and
  * line-diff helper (file 11 §3.2, CLI-010).

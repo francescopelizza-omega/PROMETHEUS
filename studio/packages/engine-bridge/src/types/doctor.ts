@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * types/doctor.ts — the `doctor` "envelope" (file 02 §3.3, with a CAVEAT).
  *

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * ai/guardrails/spendMeter.ts — the live spend meter view-model (file 12 §4.3).
  *

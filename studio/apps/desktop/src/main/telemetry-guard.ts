@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * main/telemetry-guard.ts — the PURE launch-guard math (no node:*, no engine-bridge).
  *

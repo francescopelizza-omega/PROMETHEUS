@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * ide/state/merge-conflict.ts — the PURE 3-way conflict model (APP-039).
  *

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * main/mcp/store.ts — the disk-backed MCP ConfigStore (file 09 §2.1/§6).
  *

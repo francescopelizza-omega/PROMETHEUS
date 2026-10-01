@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Francesco Pelizza
 """test_testmgr.py — exercise testmgr.py's run/rerun-failed verbs (APP-013).
 
 The load-bearing paths are the ARG GUARDS (option-injection / shell-metachar

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * agent/extract.ts — PURE extraction of edit intents from RAW model text (WRAPPER Phase A).
  *

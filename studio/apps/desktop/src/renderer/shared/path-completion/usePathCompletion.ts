@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * renderer/shared/path-completion/usePathCompletion.ts — the "@"-path completion hook for
  * ANY plain text input/textarea (not just AgentPane's composer). Reuses:

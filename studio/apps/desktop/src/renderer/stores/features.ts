@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * renderer/stores/features.ts — the per-FEATURE Zustand slice STUBS (§5).
  *

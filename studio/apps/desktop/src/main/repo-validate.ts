@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * main/repo-validate.ts — the ZOD validation seam for the GitHub Repo Manager IPC
  * (file 06 §3 / FEATURE #5a). Mirrors model-validate.ts / catalog-validate.ts:

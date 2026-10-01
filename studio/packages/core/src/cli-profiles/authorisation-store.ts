@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * cli-profiles/authorisation-store.ts — the ONE saved autonomy level, for every surface.
  *

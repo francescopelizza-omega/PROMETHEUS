@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * ide/WorktreesPanel.tsx — git worktree isolation for parallel sessions (Task #5, desktop
  * parity with the CLI's `/worktree` slash, CLI-054).

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * ide/state/nav-goto.ts — PURE LSP→navigation mapping for the Go-to family (APP-075).
  *

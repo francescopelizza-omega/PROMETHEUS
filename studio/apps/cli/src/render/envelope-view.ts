@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * render/envelope-view.ts — the LAST-RESORT projector for a plain engine envelope.
  *

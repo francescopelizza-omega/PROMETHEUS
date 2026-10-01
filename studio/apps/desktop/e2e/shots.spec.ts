@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * e2e/shots.spec.ts — the REDESIGN VERIFICATION harness (handoff rule: "render and
  * screenshot before claiming any UI fix done. Never guess from CSS.").

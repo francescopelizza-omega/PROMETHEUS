@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * ide/MethodHierarchyView.tsx — the Method Hierarchy tool window (JetBrains "Method
  * Hierarchy" · APP-097). For the method under the caret, walk the enclosing type's

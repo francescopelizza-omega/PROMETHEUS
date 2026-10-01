@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * shell/PrometheusMark.tsx — the official brand mark (HANDOFF_2 §8.2).
  *

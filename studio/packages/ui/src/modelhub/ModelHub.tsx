@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * ModelHub.tsx — the §7 Model-Hub shell: a [Discover | Library | Serving] tab
  * shell + an HW summary bar + a modality sidebar + the search box + a free /

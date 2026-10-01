@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * ipynb.ts — pure nbformat-4 parse/serialize (APP-045), the reducer↔file seam.
  *

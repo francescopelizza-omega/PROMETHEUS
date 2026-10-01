@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * primitives/anchor.ts — position a floating layer against a trigger, in VIEWPORT space.
  *

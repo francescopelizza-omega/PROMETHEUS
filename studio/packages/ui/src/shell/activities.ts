@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * shell/activities.ts — the §4.1 activity-rail model (file 08 §4).
  *

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * env/index.ts — the Environments component barrel (file 04 §3/§5).
  *

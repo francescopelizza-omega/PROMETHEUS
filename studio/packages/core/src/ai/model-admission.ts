@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * ai/model-admission.ts — may this model load on this host, and if not, what can?
  *
@@ -83,6 +85,28 @@ export interface ResidentServer {
   models: readonly { id: string; sizeBytes: number }[];
   /** the host it runs on; omitted means the same host as the budget. */
   host?: string;
+  /**
+   * Does `models` mean "HOLDING these in memory", or only "could serve these"?
+   *
+   * The distinction decides Rule 1 and the type could not express it, so every caller had to
+   * remember that one runner's list means something different from another's. They did not.
+   *
+   * Ollama's `/api/ps` reports what is RESIDENT, with real sizes — `residencyKnown: true`.
+   * LM Studio's OpenAI-shaped `/v1/models` reports its CATALOGUE with `sizeBytes: 0`, and
+   * `parseOpenAiModels`' own doc says it answers "is a runner up" honestly and "how much is it
+   * holding" not at all — `residencyKnown: false`.
+   *
+   * Rule 1 counts only servers whose residency is KNOWN. Without this, an LM Studio that is
+   * merely RUNNING AND IDLE reports its whole catalogue, Rule 1 sees `models.length > 0` on a
+   * different runner, and every single load is refused with "lmstudio is already serving a
+   * model" — forever, on a machine where nothing is loaded at all. The terminal never hit it
+   * because its admission call only skips a warm-up (`apps/cli/src/session/host.ts:774` is a
+   * `void` after the endpoint is already adopted), so the refusal had no teeth to show. Any
+   * surface that makes this gate real hits the bug immediately.
+   *
+   * `undefined` is treated as KNOWN, so the existing ollama-only callers keep their behaviour.
+   */
+  residencyKnown?: boolean;
 }
 
 export interface AdmissionRequest {
@@ -240,7 +264,14 @@ export function admitModelLoad(req: AdmissionRequest): AdmissionDecision {
   const resident = req.resident ?? [];
 
   // ── Rule 1: one model server at a time ────────────────────────────────────
-  const others = resident.filter((s) => s.runner !== candidate.runner && s.models.length > 0);
+  // `residencyKnown === false` means the probe could only see a CATALOGUE, not what is held
+  // (LM Studio). A runner we cannot prove is holding weights must not block a load — see
+  // `ResidentServer.residencyKnown`. Erring the other way turns an idle app into a permanent
+  // refusal, which is strictly worse than missing one over-commit the RAM arithmetic below
+  // still has a chance to catch.
+  const others = resident.filter(
+    (s) => s.runner !== candidate.runner && s.models.length > 0 && s.residencyKnown !== false,
+  );
   if (others.length > 0 && !req.allowSecondServer) {
     const names = others.map((s) => s.runner).join(", ");
     const headline = `${names} is already serving a model on ${budget.host ?? "this machine"}.`;

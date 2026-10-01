@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * scripts/check-no-raw-hex.mjs — the §6 "no raw hex" guard (file 08 §6 / file 10).
  *

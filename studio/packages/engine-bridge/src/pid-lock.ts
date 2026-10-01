@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * pid-lock.ts — an exclusive, crash-safe file lock keyed by an OS pid.
  *

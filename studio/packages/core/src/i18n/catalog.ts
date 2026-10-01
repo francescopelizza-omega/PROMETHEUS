@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * i18n/catalog.ts — the message lookup, and the two rules that keep it honest.
  *

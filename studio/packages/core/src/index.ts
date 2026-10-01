@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * @prometheus/core — the shared domain layer for Prometheus Studio.
  *
@@ -450,6 +452,8 @@ export {
 export type { LocalRunnerSpec } from "./ai/local-runners.js";
 export {
   LOCAL_RUNNERS,
+  localRunners,
+  applyHostEnv,
   runnerForBaseUrl,
   runnerById,
   portOf as localRunnerPortOf,
@@ -457,6 +461,16 @@ export {
   localKeepAlive,
   localKeepAliveField,
 } from "./ai/local-runners.js";
+export type { DiscoveredRunner, DiscoverDeps, RunnerState } from "./ai/runner-discovery.js";
+export {
+  DEFAULT_PROBE_TIMEOUT_MS,
+  describeProbeFailure,
+  discoverRunners,
+  modelsFromOpenAiList,
+  modelsFromTags,
+  nextStepHint,
+  servedModelOptions,
+} from "./ai/runner-discovery.js";
 export type { EnsureOllamaOptions, EnsureOllamaResult } from "./ai/ollama-autostart.js";
 export { ensureLmStudioRunning, ensureOllamaRunning } from "./ai/ollama-autostart.js";
 export type {

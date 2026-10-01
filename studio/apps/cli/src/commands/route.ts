@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * route.ts — route a prometheus command through the CANONICAL parity registry
  * (@prometheus/core COMMAND_SPECS / invoke).

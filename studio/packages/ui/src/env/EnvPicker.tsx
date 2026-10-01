@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * EnvPicker.tsx — the Environments left rail + detail header (file 04 §3.1).
  *

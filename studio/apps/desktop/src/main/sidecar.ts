@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * main/sidecar.ts — the MAIN-process adapter for the Studio Python helper
  * sidecars (C7/C8).

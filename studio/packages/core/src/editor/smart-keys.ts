@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * editor/smart-keys.ts — PURE smart-key logic + the clipboard-stack reducer
  * (MDS parity file 01: complete-statement ⇧⌘⏎, smart-enter, paste-history ring).

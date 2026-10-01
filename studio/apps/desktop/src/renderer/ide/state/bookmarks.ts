@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * ide/state/bookmarks.ts — persistent line bookmarks + numbered mnemonics (APP-061).
  *

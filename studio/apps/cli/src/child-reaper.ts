@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * child-reaper.ts — re-export of the shared reaper (Phase 6).
  *

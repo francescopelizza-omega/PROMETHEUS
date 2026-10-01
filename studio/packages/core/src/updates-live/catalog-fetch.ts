@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * updates-live/catalog-fetch.ts — filling the catalogue from the sources that publish one.
  *

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * main/ide/sql-host.ts — the MAIN-process SQL bridge over the sqlrunner.py sidecar
  * (file 14 §3.26, APP-042).

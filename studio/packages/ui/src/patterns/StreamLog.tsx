@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * StreamLog.tsx — the sidecar stderr JSON-lines tail (08 §3.2 / §2.5). Monospace,
  * auto-scroll, severity-tinted lines, with a "copy as text" affordance. Long engine

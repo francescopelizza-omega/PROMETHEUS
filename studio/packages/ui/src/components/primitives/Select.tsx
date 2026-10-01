@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * Select.tsx + Combobox.tsx — choice primitives (file 08 §3.1).
  *

@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Francesco Pelizza
 """modelhub.py — Studio model-hub sidecar (C7).
 
 Hardware capability + local model inventory + fit scoring + catalog search for the
@@ -255,6 +257,24 @@ def _scan_hw() -> Dict[str, Any]:
 # --- model.list ------------------------------------------------------------- #
 
 def _default_models_dir() -> Path:
+    """The DOWNLOAD CACHE root -- where `model.pull` puts bytes it fetched itself.
+
+    NOT the same thing as ``nemesis_gate.models_root()``, however alike the two env names look.
+    Keep them apart:
+
+        PROMETHEUS_MODELS_DIR   ~/.cache/prometheus/models   download cache, this function
+        PROMETHEUS_MODELS_HOME  ~/.prometheus/models         the nemesis-GATED library + .stage/
+
+    One is a cache: deleting it costs a re-download. The other holds the staging/quarantine tree
+    the security gate moves weights through, and deleting it loses the gate's record of what was
+    admitted. They were flagged as a naming duplicate to collapse; they are two concepts whose
+    names collided, and merging them would put unscanned downloads inside the gated library.
+    That is the same shape as the `home` field collision in `updates-live/resolve.ts` -- two
+    different directories behind one plausible name, invisible to the type checker.
+
+    Neither is where the user's EXISTING models live. Those stay in their own tool's store
+    (ollama, LM Studio, the HF cache) and are INDEXED, never moved -- see `v_model_list`.
+    """
     env = os.environ.get("PROMETHEUS_MODELS_DIR")
     if env:
         return Path(env).expanduser()
@@ -326,6 +346,95 @@ def _ollama_installed_models() -> List[Dict[str, Any]]:
     return out
 
 
+def _lmstudio_models_root() -> Optional[Path]:
+    """LM Studio's model directory, resolved the way LM Studio itself resolves it.
+
+    Not guessed. The home is named by `~/.lmstudio-home-pointer`, a plain file in $HOME holding
+    the path — LM Studio writes it so a user can move the home off the boot disk, which is
+    exactly what someone with 24 GB of weights tends to do. Falling straight to `~/.lmstudio`
+    would miss every relocated install.
+    """
+    pointer = Path.home() / ".lmstudio-home-pointer"
+    try:
+        if pointer.is_file():
+            target = pointer.read_text(encoding="utf-8").strip()
+            if target:
+                root = Path(target).expanduser() / "models"
+                if root.is_dir():
+                    return root
+    except OSError:
+        pass
+    default = Path.home() / ".lmstudio" / "models"
+    return default if default.is_dir() else None
+
+
+def _hf_cache_root() -> Optional[Path]:
+    """The HuggingFace hub cache — shared by llama.cpp, vLLM, MLX and transformers.
+
+    Precedence is HuggingFace's own: HF_HUB_CACHE, then HF_HOME/hub, then the documented
+    default. Measured on the machine this was written for, this was the LARGEST store present
+    (90 GB) and nothing in Prometheus looked at it.
+    """
+    for var, suffix in (("HF_HUB_CACHE", ""), ("HF_HOME", "hub")):
+        raw = os.environ.get(var, "").strip()
+        if raw:
+            root = Path(raw).expanduser()
+            if suffix:
+                root = root / suffix
+            if root.is_dir():
+                return root
+    default = Path.home() / ".cache" / "huggingface" / "hub"
+    return default if default.is_dir() else None
+
+
+def _scan_dir_models(root: Path, source: str, *, snapshots_only: bool = False) -> List[Dict[str, Any]]:
+    """Index model files under `root`, in the row shape `model.list` already emits.
+
+    `snapshots_only` is for the HuggingFace cache, whose layout is
+    `models--<org>--<name>/snapshots/<rev>/<file>` where each file is a SYMLINK into a sibling
+    `blobs/<sha>`. Walking the whole tree would therefore count every tensor twice — once under
+    its real name and once as a hash — so only the snapshot views are read. `stat()` follows the
+    link, so the size is the real one.
+    """
+    out: List[Dict[str, Any]] = []
+    try:
+        if snapshots_only:
+            candidates = root.glob("models--*/snapshots/*/*")
+        else:
+            candidates = root.rglob("*")
+        for p in sorted(candidates):
+            try:
+                if not p.is_file() or p.suffix.lower() not in _MODEL_EXTS:
+                    continue
+                size = p.stat().st_size
+            except OSError:
+                continue  # a broken symlink or an unreadable file is not a finding
+            # For the HF cache the repo id is the directory two levels above the snapshot.
+            repo = ""
+            if snapshots_only:
+                try:
+                    repo = p.parents[2].name.replace("models--", "", 1).replace("--", "/")
+                except IndexError:
+                    repo = ""
+            out.append({
+                "name": p.name,
+                "id": f"{source}:{repo or p.name}",
+                "source": source,
+                "modality": "text",
+                "path": str(p),
+                "format": p.suffix.lstrip("."),
+                "size_bytes": size,
+                "size_gb": round(size / 1024**3, 2),
+                "quant": _guess_quant(p.name),
+                "installed": True,
+                "served": False,
+                **({"repo": repo} if repo else {}),
+            })
+    except OSError:
+        return out
+    return out
+
+
 def v_model_list(argv: List[str]) -> int:
     pos = positional(argv)
     root = Path(pos[0]).expanduser() if pos else _default_models_dir()
@@ -342,10 +451,42 @@ def v_model_list(argv: List[str]) -> int:
                     "size_gb": round(size / 1024**3, 2),
                     "quant": _guess_quant(p.name),
                 })
-    # spec 05 §9 — ALSO index the Ollama store so already-pulled models (the ones a user
-    # can pick in chat right now) show up in the library, not just files we downloaded.
+    # ── index the stores the USER already has, not just the one Prometheus owns ──────────────
+    #
+    # spec 05 §9: the Hub does not own anyone else's bytes, it INDEXES them. That was honoured
+    # for Ollama and for nothing else, so the library showed a fraction of what was installed.
+    #
+    # Measured 2026-10-01 on the machine this was written for:
+    #
+    #     ~/.ollama/models                  29 GB   indexed
+    #     ~/.lmstudio/models                24 GB   NOT indexed
+    #     ~/.cache/huggingface/hub          90 GB   NOT indexed  (the largest store present)
+    #     <_default_models_dir()>            0 B    scanned, and empty
+    #
+    # So 114 GB of models a user had already downloaded were invisible, and the Hub would offer
+    # to "install" something already sitting on the disk. Each store is resolved by its OWN
+    # rules — LM Studio's home pointer, HuggingFace's HF_HUB_CACHE/HF_HOME — never by assuming
+    # a default that happens to be true here.
     models.extend(_ollama_installed_models())
-    return emit("model.list", root=str(root), exists=root.is_dir(),
+    lms = _lmstudio_models_root()
+    if lms:
+        models.extend(_scan_dir_models(lms, "lmstudio"))
+    hf = _hf_cache_root()
+    if hf:
+        # "hf-cache", NOT "huggingface". These bytes live in the SHARED hub cache that
+        # llama.cpp, vLLM and MLX all read; they are not in Prometheus's library and `remove`
+        # (which only walks `_default_models_dir()`) cannot and must not touch them. Labelling
+        # them "huggingface" made them indistinguishable from models Prometheus owns, so Remove
+        # answered "not found in the library" for a row the user could plainly see.
+        models.extend(_scan_dir_models(hf, "hf-cache", snapshots_only=True))
+    # `roots` is reported so a caller can show WHERE this came from, and so an empty result is
+    # distinguishable from "we only looked in one place".
+    roots = {
+        "library": str(root),
+        **({"lmstudio": str(lms)} if lms else {}),
+        **({"hf-cache": str(hf)} if hf else {}),
+    }
+    return emit("model.list", root=str(root), exists=root.is_dir(), roots=roots,
                 models=models, count=len(models))
 
 

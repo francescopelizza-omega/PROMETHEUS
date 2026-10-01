@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * ai/guardrails — the metered-spend control subsystem (file 12 §4): cost estimation,
  * the pre-call enforcement decision, the live meter fold + monthly reset, and the

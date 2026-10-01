@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * shell/Segmented.tsx — the segmented control the merged routes share (handoff_3 §1).
  *

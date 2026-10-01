@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * mcp/host/stdio-transport.ts — the real stdio MCP client transport (CLI-036 core lift).
  *

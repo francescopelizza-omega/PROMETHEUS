@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * tokens/scheme-derive.ts — one compact palette → one COMPLETE, LEGIBLE SemanticColors map.
  *

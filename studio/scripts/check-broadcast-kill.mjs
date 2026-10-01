@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * scripts/check-broadcast-kill.mjs — the "no unguarded kill(2)" guard.
  *

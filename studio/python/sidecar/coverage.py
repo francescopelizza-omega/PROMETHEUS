@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Francesco Pelizza
 """coverage.py — coverage runner sidecar (APP-086).
 
 Runs a target suite under coverage.py and emits the Studio `CoverageReport` shape

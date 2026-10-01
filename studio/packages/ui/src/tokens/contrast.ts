@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * contrast.ts — WCAG 2.1 relative-luminance + contrast-ratio math (file 08 §7).
  * Pure, dependency-free. The single place the design system proves its a11y target:

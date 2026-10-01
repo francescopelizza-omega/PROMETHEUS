@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * patterns/util.ts — the PURE, dependency-free display helpers the §3.2 product
  * patterns lean on (08 §3.2). NO react, NO node, NO engine-bridge runtime — only

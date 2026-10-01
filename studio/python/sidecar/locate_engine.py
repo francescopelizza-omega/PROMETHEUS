@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Francesco Pelizza
 """locate_engine.py — deterministic, cross-OS resolution of the Studio engine.
 
 File 01 §11.4. The Studio MAIN/engine-bridge needs to spawn the Python engine

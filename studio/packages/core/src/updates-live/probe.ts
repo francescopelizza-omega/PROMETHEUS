@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * updates/probe.ts — the local-process seams: a CLI's installed version + the install method.
  *

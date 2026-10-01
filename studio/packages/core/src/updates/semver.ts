@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * updates/semver.ts — a tiny, tolerant semver parse + compare for update checks.
  *

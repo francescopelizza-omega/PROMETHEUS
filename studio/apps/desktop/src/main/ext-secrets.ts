@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * main/ext-secrets.ts — encrypted per-extension secret storage (APP-059, file 09 §5.2).
  *

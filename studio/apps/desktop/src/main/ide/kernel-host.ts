@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * main/ide/kernel-host.ts — the MAIN-process live-kernel bridge over kernel.py serve
  * (APP-045). One supervised `spawnKernelSidecar` session per notebook, keyed by a

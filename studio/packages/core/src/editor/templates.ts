@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * editor/templates.ts — new-file + copyright-header templates (APP-028, MDS parity 07).
  *

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * ThreatDbPanel.tsx — the signature-DB control surface (file 03 §6).
  *

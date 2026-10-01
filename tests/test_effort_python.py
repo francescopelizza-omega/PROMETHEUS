@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Francesco Pelizza
 """test_effort_python.py — the Python `/think` ladder, and its PARITY with TypeScript.
 
 Phase 7 of the effort plan: `prometheus.py` sent one request body with no reasoning

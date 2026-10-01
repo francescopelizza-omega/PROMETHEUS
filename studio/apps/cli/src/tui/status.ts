@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * tui/status.ts — the status lines painted BELOW the composer box (Claude-Code chrome).
  *

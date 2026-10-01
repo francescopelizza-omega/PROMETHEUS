@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Francesco Pelizza
 """diagram.py — AST → UML / dependency diagrams (file 14 §3.17).
 
 Read-only AST walk of local code → a Mermaid (and Graphviz DOT) diagram **string** in

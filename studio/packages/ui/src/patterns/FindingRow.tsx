@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * FindingRow.tsx — one nemesis finding as a row (08 §3.2 / §5.2).
  *

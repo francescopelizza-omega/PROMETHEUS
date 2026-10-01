@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * mcp/host/policy.ts — the §4.3 capability & confirm policy (THE load-bearing rule).
  *

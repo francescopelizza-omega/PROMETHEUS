@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * tool-runner.ts — the `ToolRunner` seam core's `runAgentTurn` asks for, implemented for VS Code.
  *

@@ -80,7 +80,10 @@ different claims — be clear about which one you're making.
 
 ## License
 
-By contributing, you agree your contribution is licensed under the same terms as the file(s)
-you're changing — Apache-2.0 for the engine/Studio core, MIT for the CLI, the VS Code
-extension, and `prometheus_plugin`. See the root [README](./README.md#status) for exactly
-which license governs which subtree.
+By contributing, you agree your contribution is licensed under **Apache-2.0**, which governs
+every part of this repository — the engine, `nemesis`, Studio, the CLI, the VS Code extension
+and `prometheus_plugin`. Apache-2.0 §5 makes that the default for anything you submit here.
+
+That also means your contribution carries a patent grant (§3) and that you keep the copyright
+in what you wrote; you are licensing it, not assigning it. See [NOTICE](./NOTICE) for the
+attribution obligations that travel with any fork or derivative work.

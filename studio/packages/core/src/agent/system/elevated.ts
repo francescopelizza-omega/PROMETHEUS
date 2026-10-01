@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * agent/system/elevated.ts — the elevated-proposal flow (full_wrapper_compose §7 / Phase 5).
  *

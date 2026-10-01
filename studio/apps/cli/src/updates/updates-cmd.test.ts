@@ -392,3 +392,257 @@ test("a readable latest with an unreadable installed version says WHICH is unkno
   });
   assert.match(line, /installed version unreadable — latest is 0\.4\.25/);
 });
+
+/* ─────────────────── the two conflict kinds that could never fire ─────────────────── */
+
+/**
+ * `shadowed-newer` was DEAD CODE in every surface, and nothing said so.
+ *
+ * `resolveTool` computes `newerShadow`; `sweepTools` dropped it when flattening the resolution
+ * into a `ToolUpdateStatus`; `checkUpdates` then rebuilt a `ToolResolution` from that flattened
+ * row to feed `findConflicts`. The field was gone by then, so the branch guarded by
+ * `res.state === "shadowed" && res.newerShadow` was unreachable — while its unit test in
+ * `conflicts.test.ts` passed, because that test builds the resolution directly.
+ *
+ * That is the worst shape a gap can have: a tested function, a green suite, and no caller that
+ * can reach it. This test goes through the real pipeline, so the plumbing is what is asserted.
+ */
+test("shadowed-newer survives the flatten/rebuild round trip through checkUpdates", async () => {
+  const home = tmpHome();
+  try {
+    const { report } = await checkUpdates(
+      fakeDeps(home, {
+        resolve: (t) =>
+          t.id === "claude"
+            ? u.resolveTool("claude", [
+                {
+                  pathEntry: "/opt/homebrew/bin/claude",
+                  realPath: "/opt/homebrew/Caskroom/claude-code/2.1.190/claude",
+                  owner: "brew-cask",
+                  name: "claude-code",
+                  version: "2.1.190",
+                  versionSource: "path",
+                },
+                {
+                  pathEntry: "/Users/someone/.local/bin/claude",
+                  realPath: "/Users/someone/.local/share/claude/versions/2.1.284/claude",
+                  owner: "native-installer",
+                  name: "claude",
+                  version: "2.1.284",
+                  versionSource: "path",
+                },
+              ])
+            : u.resolveTool(t.id, []),
+      }),
+    );
+
+    const claude = (report.tools ?? []).find((t) => t.id === "claude");
+    assert.equal(claude?.newerShadow?.version, "2.1.284", "the row must carry the newer shadow");
+
+    const found = (report.conflicts ?? []).find((c) => c.kind === "shadowed-newer");
+    assert.ok(found, "a newer copy behind the PATH winner must be reported");
+    assert.equal(found.severity, "high");
+    // The point of the finding: updating is not the repair, because the bits are already here.
+    assert.match(found.consequence, /already on disk/);
+    assert.match(found.remedy ?? "", /PATH/);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+/**
+ * `client-server-skew` could not fire in the CLI, which is the surface this machine's owner uses.
+ *
+ * The branch existed, `check.ts` accepted `serverVersions`, and only the DESKTOP ever passed it.
+ * So ollama's split install — a 0.34.4 Homebrew CLI on PATH driving the 0.34.1 server inside
+ * Ollama.app — was reported as `duplicate-install` at severity LOW ("each owner will keep
+ * offering its own updates"), which is true and beside the point. CLAUDE.md §2.8 exists entirely
+ * because of this trap.
+ */
+test("client-server-skew fires for ollama once the CLI supplies the daemon version", async () => {
+  const home = tmpHome();
+  try {
+    const { report } = await checkUpdates(
+      fakeDeps(home, {
+        serverVersions: { ollama: "0.34.1" },
+        resolve: (t) =>
+          t.id === "ollama"
+            ? u.resolveTool("ollama", [
+                {
+                  pathEntry: "/opt/homebrew/bin/ollama",
+                  realPath: "/opt/homebrew/Cellar/ollama/0.34.4/bin/ollama",
+                  owner: "brew-formula",
+                  name: "ollama",
+                  version: "0.34.4",
+                  versionSource: "path",
+                },
+                {
+                  pathEntry: "/usr/local/bin/ollama",
+                  realPath: "/Applications/Ollama.app/Contents/Resources/ollama",
+                  owner: "app-bundle",
+                  name: "ollama",
+                  version: "0.34.1",
+                  versionSource: "probe",
+                },
+              ])
+            : u.resolveTool(t.id, []),
+      }),
+    );
+
+    const skew = (report.conflicts ?? []).find((c) => c.kind === "client-server-skew");
+    assert.ok(skew, "a client and server at different versions must be reported");
+    assert.equal(skew.severity, "high");
+    assert.match(skew.summary, /0\.34\.4/);
+    assert.match(skew.summary, /0\.34\.1/);
+    // The whole consequence: upgrading the client moves the number and not the behaviour.
+    assert.match(skew.consequence, /client only/);
+    assert.match(skew.remedy ?? "", /app/i);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+/**
+ * REGRESSION: the PROMETHEUS state dir must never be mistaken for the user's $HOME.
+ *
+ * `CheckDeps.home` is `~/.prometheus`. `ResolveDeps.home` meant `$HOME`. Both were `string`,
+ * `CheckDeps extends ToolSweepDeps extends ResolveDeps`, and `checkUpdates` forwards its whole
+ * deps object to `sweepTools` — so the two merged and the resolver read the state directory as
+ * the user's home. `tsc` had nothing to say about it, which is why it survived.
+ *
+ * The consequence was silent misattribution: `classifyPath`'s `underHome()` never matched, every
+ * $HOME-based layout fell through to `unknown`, `partitionCommands` withheld every command for
+ * lacking a matching owner, and the report said "no update command applies to how this copy was
+ * installed" about a tool with a working upgrade command.
+ *
+ * This test passes the two paths as the DIFFERENT things they are and asserts the resolver used
+ * the right one. If the fields are ever merged again, `userHome` goes undefined, the resolver
+ * falls back to the real `homedir()`, and the synthetic `/Users/someone` layout stops matching.
+ */
+test("REGRESSION: resolve uses $HOME, not the prometheus state dir, to attribute a copy", async () => {
+  const home = tmpHome(); // the PROMETHEUS state dir — deliberately NOT the user's home
+  const USER_HOME = "/Users/someone";
+  try {
+    const seen: (string | undefined)[] = [];
+    await checkUpdates(
+      fakeDeps(home, {
+        userHome: USER_HOME,
+        // Resolve for real, so `classifyPath` — and therefore `underHome()` — actually runs.
+        lookAll: (bin) => (bin === "opencode" ? [`${USER_HOME}/.opencode/bin/opencode`] : []),
+        realpath: (p) => p,
+        exists: () => false,
+        probeVersion: () => "1.18.4",
+        resolve: undefined,
+        ask: async (t) => {
+          seen.push(t.id);
+          return { latest: null, source: "test" };
+        },
+      }),
+    );
+    assert.ok(seen.includes("opencode"), "the sweep must have reached opencode");
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+/* ───────────────────────────── /updates fix ───────────────────────────── */
+
+/**
+ * The command that closes the loop. Before it, `/updates` diagnosed an install conflict and left
+ * the user with "update notices for the others will never clear" — a prediction of permanent
+ * nagging with no way out attached.
+ */
+test("/updates fix names the ONE correct command, and refuses --zap", async () => {
+  const home = tmpHome();
+  const USER_HOME = "/Users/someone";
+  try {
+    const lines: string[] = [];
+    await runUpdates("fix claude", {
+      home,
+      promVersion: "0.0.0",
+      write: (l) => lines.push(l),
+      check: (d) =>
+        checkUpdates({
+          ...fakeDeps(home),
+          userHome: USER_HOME,
+          resolve: (t) =>
+            t.id === "claude"
+              ? u.resolveTool("claude", [
+                  {
+                    pathEntry: `${USER_HOME}/.local/bin/claude`,
+                    realPath: `${USER_HOME}/.local/share/claude/versions/2.1.284/claude`,
+                    owner: "native-installer",
+                    name: "claude",
+                    version: "2.1.284",
+                    versionSource: "path",
+                  },
+                  {
+                    pathEntry: "/opt/homebrew/bin/claude",
+                    realPath: "/opt/homebrew/Caskroom/claude-code/2.1.274/claude",
+                    owner: "brew-cask",
+                    name: "claude-code",
+                    version: "2.1.274",
+                    versionSource: "path",
+                  },
+                ])
+              : u.resolveTool(t.id, []),
+          ...d,
+        }),
+    });
+    const out = lines.join("\n");
+
+    assert.match(out, /brew uninstall --cask claude-code/, "the correct command must be named");
+    assert.match(out, /undo:\s+brew install --cask claude-code/, "and it must be undoable");
+    assert.match(
+      out,
+      /clears the notice for good/,
+      "the user's actual question is 'will this stop'",
+    );
+
+    /**
+     * The refusals are printed WITH the repair, not instead of it. The user will otherwise find
+     * `--zap` somewhere that calls it the thorough option, and its stanza deletes
+     * ~/.local/share/claude — the 2.1.284 install being kept — plus ~/.claude.json.
+     */
+    assert.match(out, /Never run these/);
+    assert.match(out, /brew uninstall --zap --cask claude-code/);
+    assert.match(out, /the vendor install you are KEEPING/);
+
+    // It must never present the destructive flag as a step to run.
+    assert.ok(
+      !/\$ brew uninstall --zap/.test(out),
+      "--zap must never appear as a proposed command",
+    );
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("/updates fix with no conflicts says so, and an unknown tool does not silently run the report", async () => {
+  const home = tmpHome();
+  try {
+    const clean: string[] = [];
+    await runUpdates("fix", {
+      home,
+      promVersion: "0.0.0",
+      write: (l) => clean.push(l),
+      // fakeDeps resolves only claude, as a SINGLE brew-cask copy → nothing conflicts.
+      check: (d) => checkUpdates({ ...fakeDeps(home), ...d }),
+    });
+    assert.match(clean.join("\n"), /no install conflicts/);
+
+    const home2 = tmpHome();
+    const missing: string[] = [];
+    await runUpdates("fix nosuchtool", {
+      home: home2,
+      promVersion: "0.0.0",
+      write: (l) => missing.push(l),
+      check: (d) => checkUpdates({ ...fakeDeps(home2), ...d }),
+    });
+    // Not the full report: a verb the user typed that matched nothing must be heard about.
+    assert.ok(!/Local models/.test(missing.join("\n")), "must not fall through to the report");
+    rmSync(home2, { recursive: true, force: true });
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});

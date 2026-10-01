@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * pr/provider.ts — the GitHub/GitLab pull/merge-request client (APP-085).
  *

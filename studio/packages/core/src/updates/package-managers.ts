@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * updates/package-managers.ts — ask the system what is upgradable, instead of asking the internet.
  *
@@ -333,20 +335,38 @@ export const MANAGERS: readonly ManagerSpec[] = Object.freeze([
     bin: "pipx",
     platforms: ["darwin", "linux", "win32"],
     /**
-     * pipx can be ASKED what it has installed, and cannot be asked what is out of date — there is
-     * no `pipx outdated`. So the sweep must report "pipx: cannot be checked" rather than an empty
-     * list that reads as "pipx: everything current". `pipx upgrade-all` remains the honest
-     * remedy, and is offered as an action rather than as a consequence of a finding.
+     * pipx CAN be asked what is out of date, and this row used to insist that it could not.
+     *
+     * The old comment here read "there is no `pipx outdated`", `unsupported: true` was set beside
+     * it, and `sweepManager` therefore returned early WITHOUT EVER SPAWNING PIPX — so the claim
+     * could never be re-tested against whatever version is actually installed. The user saw
+     * "pipx: cannot be checked — pipx has no \"what is outdated\" command", which was simply
+     * false on their machine.
+     *
+     * Measured on pipx 1.17.6: `pipx list --help` documents `--outdated  List packages with an
+     * available upgrade.` and `--output {human,json}`. The command exits 0 and returns a
+     * structured envelope. Read out of pipx's own `commands/outdated.py`, the payload is
+     * `data.packages[] = {environment, package, version, latest_version, injected, pinned}`,
+     * plus `data.packages_checked` and `data.skipped[] = {environment, package, reason}`.
+     *
+     * `pinned` maps straight onto `OutdatedPackage.pinned`, which is the field that stops us
+     * proposing an upgrade that needs an explicit unpin first.
+     *
+     * If a pipx too old for `--outdated` is installed, it exits non-zero with a usage error —
+     * `okCodes: [0]` turns that into an honest "check failed" with the note below, rather than
+     * into an empty list that would read as "everything current".
      */
-    unsupported: true,
     list: {
-      argv: ["pipx", "list", "--json"],
+      argv: ["pipx", "list", "--outdated", "--output", "json"],
       readOnly: true,
       needsRoot: false,
-      // pipx documents EXIT_CODE_OK = 0 and, for `list`, 1 = "found an environment it could not
-      // read". So 1 is a BROKEN VENV, not a finding — the exact opposite of npm.
+      /**
+       * pipx's `list` exits 1 when it found an environment it could not READ — a broken venv,
+       * never "updates found". That is the exact opposite of npm's convention, and treating it
+       * as a finding would report a corrupt venv as an available upgrade.
+       */
       exit: { kind: "stdout-only", okCodes: [0] },
-      note: "Exit 1 means a broken venv, never 'updates found'. pipx has no documented 'outdated' exit code.",
+      note: "Needs a pipx with `list --outdated`; an older one exits non-zero and is reported as a failed check, not as 'up to date'. Exit 1 means a broken venv, never 'updates found'. Packages installed from a local or editable path are SKIPPED by pipx — an empty list means 'no index packages needed checking', not 'everything is current'.",
     },
     upgradeOne: ["pipx", "upgrade", "{}"],
     upgradeAll: ["pipx", "upgrade-all"],
@@ -618,6 +638,56 @@ export function parseCheckupdates(stdout: string): OutdatedPackage[] {
   return rows;
 }
 
+/**
+ * `pipx list --outdated --output json` → the packages with an available upgrade.
+ *
+ * The envelope and the row shape are read out of pipx's own `commands/outdated.py`, not guessed:
+ *
+ *     { "command": ["list"], "exit_code": 0, "status": "success",
+ *       "data": { "packages_checked": 0,
+ *                 "packages": [{ "environment", "package", "version", "latest_version",
+ *                                "injected", "pinned" }],
+ *                 "skipped":  [{ "environment", "package", "reason" }] } }
+ *
+ * Two fields are load-bearing and easy to miss:
+ *
+ *   • `pinned` — a package the user held back. `OutdatedPackage.pinned` exists so the renderer
+ *     can say "[PINNED — unpin first]" instead of proposing an upgrade that will refuse.
+ *   • `skipped` — pipx does not check a package installed from a local or editable path, because
+ *     there is no index to compare against. Measured on this machine, the only pipx venv is
+ *     exactly that (`--editable` from a local checkout), so the correct output is an EMPTY list
+ *     with one skip — and a naive PyPI lookup of that name would either 404 or, far worse, match
+ *     an unrelated public package and offer to "upgrade" a private project to it.
+ *
+ * Skips are not returned as rows: a skipped package is not an upgrade, and inventing one would
+ * be the same mistake in a different direction. The manager row's `note` states the caveat once.
+ */
+export function parsePipxOutdated(stdout: string): OutdatedPackage[] {
+  let doc: unknown;
+  try {
+    doc = JSON.parse(stdout);
+  } catch {
+    return [];
+  }
+  const data = (doc as { data?: unknown })?.data;
+  const list = (data as { packages?: unknown })?.packages;
+  if (!Array.isArray(list)) return [];
+  const rows: OutdatedPackage[] = [];
+  for (const raw of list) {
+    const p = raw as Record<string, unknown>;
+    const name = typeof p.package === "string" ? p.package : "";
+    if (name === "") continue;
+    rows.push({
+      manager: "pipx",
+      name,
+      ...(typeof p.version === "string" ? { installed: p.version } : {}),
+      ...(typeof p.latest_version === "string" ? { available: p.latest_version } : {}),
+      ...(p.pinned === true ? { pinned: true } : {}),
+    });
+  }
+  return rows;
+}
+
 /** `npm -g outdated --json` → `{ pkg: { current, wanted, latest } }`. */
 export function parseNpmOutdated(stdout: string): OutdatedPackage[] {
   let doc: unknown;
@@ -771,15 +841,7 @@ export function parseListing(id: ManagerId, stdout: string): OutdatedPackage[] {
     case "apk":
       return parseApkVersion(stdout);
     case "pipx":
-      /**
-       * Deliberately empty, and `MANAGERS`'s pipx row carries `unsupported: true` beside it.
-       *
-       * `pipx list --json` lists INSTALLED venvs; pipx has no "what is outdated" command at all,
-       * so no parser could answer the question. Returning [] without saying so would report
-       * every pipx machine as up to date — so the caller reads `unsupported` and says "pipx
-       * cannot be checked" instead.
-       */
-      return [];
+      return parsePipxOutdated(stdout);
     default: {
       /**
        * Exhaustiveness as a TYPE error, not a runtime one. A new ManagerId with no parser is now

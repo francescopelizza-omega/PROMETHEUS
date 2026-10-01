@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * ai/effort/emulation.ts — what "think harder" can honestly mean on a model with no knob.
  *

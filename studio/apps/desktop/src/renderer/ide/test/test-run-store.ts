@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * ide/test/test-run-store.ts — the Test Explorer RUN state + gutter provider (APP-014).
  *

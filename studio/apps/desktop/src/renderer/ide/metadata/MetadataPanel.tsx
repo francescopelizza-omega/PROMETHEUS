@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * MetadataPanel.tsx — the file-metadata control surface (file 0C — privacy protection).
  *

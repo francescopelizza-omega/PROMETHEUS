@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * ai/connectors/localServe.ts — Tier-A local connector (file 12 §1.2).
  *

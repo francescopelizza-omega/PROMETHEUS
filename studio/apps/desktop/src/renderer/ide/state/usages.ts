@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * ide/state/usages.ts — the PURE Find-Usages fan-in math (JetBrains Alt+F7 · MDS parity
  * plan 06 · APP-023).

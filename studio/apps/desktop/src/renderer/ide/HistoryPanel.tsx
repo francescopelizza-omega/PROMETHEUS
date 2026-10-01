@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * ide/HistoryPanel.tsx — the Local History window for the active file (APP-063, file 13 §2.6).
  *

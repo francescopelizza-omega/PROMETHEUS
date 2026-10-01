@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * patterns/types.ts — the renderer-facing DISPLAY shapes the §3.2 product patterns
  * render, as @prometheus/ui-LOCAL structural mirrors (same discipline as security/

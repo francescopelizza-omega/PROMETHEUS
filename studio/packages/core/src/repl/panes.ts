@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * repl/panes.ts — REPL pane ids + Ctrl+G cycle order (file 11 §3/§7, PURE).
  */

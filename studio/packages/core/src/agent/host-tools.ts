@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * agent/host-tools.ts — which external tools this machine has, and how to say so in ~100 tokens.
  *

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * metadata.ts — the file-metadata control client (file 0C, privacy protection).
  *

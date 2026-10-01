@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * agent/mutation-preview.ts — showing the human WHAT WILL CHANGE before they approve it.
  *

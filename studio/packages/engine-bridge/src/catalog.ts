@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * catalog.ts — the READ surface of the catalog manager (file 06 §4.2 / §8).
  *

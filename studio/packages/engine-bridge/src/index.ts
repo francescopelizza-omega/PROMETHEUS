@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * @prometheus/engine-bridge — the ONLY JS->engine gateway (C5).
  *
@@ -29,7 +31,12 @@ export {
 // EngineErrorCode = the established axis; EngineErrorKind = file 02 §3.5's axis
 // (every EngineError carries BOTH — one failure space, two spellings).
 export type { EngineErrorCode, EngineErrorKind, EngineErrorInit } from "./errors.js";
-export { EngineError, isEngineError, ENGINE_ERROR_KINDS } from "./errors.js";
+export {
+  EngineError,
+  isEngineError,
+  ENGINE_ERROR_KINDS,
+  describeEngineFailure,
+} from "./errors.js";
 
 // --- config / resolution ---------------------------------------------------
 export type { EngineConfig, ResolvedEngine } from "./config.js";
@@ -606,7 +613,7 @@ export { MetadataClient, createMetadataClient } from "./metadata.js";
 
 // the curated child-process env (strips linker/loader/interpreter hijack vars) — reused
 // by the IDE's gated command-exec host so it spawns with the same hardening as nemesis.
-export { safeChildEnv } from "./safe-env.js";
+export { safeChildEnv, isHijackEnvKey } from "./safe-env.js";
 export {
   probeSystemCommand,
   execCapture,
@@ -623,6 +630,7 @@ export type {
 } from "./model-server.js";
 export {
   canStart,
+  whichBin,
   listenersOnPort,
   modelServerStatus,
   parseLsofFields,
@@ -727,7 +735,7 @@ export {
 
 export type { ResidentModelInfo, RunnerProbe, RunnerStatus } from "./runner-census.js";
 export {
-  DEFAULT_RUNNERS,
+  FALLBACK_RUNNER_PROBES,
   parseOllamaPs,
   parseOpenAiModels,
   probeRunner,

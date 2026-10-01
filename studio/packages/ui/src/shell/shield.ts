@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * shell/shield.ts — the permanent nemesis SHIELD state model (file 08 §4.2/§4.3).
  *

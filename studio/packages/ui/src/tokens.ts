@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * tokens.ts — Prometheus Studio design tokens (per 08-design-system-ux.md §2).
  *

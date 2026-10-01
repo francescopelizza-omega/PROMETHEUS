@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * workspace-io.ts — the ONE seam between the agent's file tools and the editor's filesystem.
  *

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * VenvRow.tsx + PackageRow.tsx — the §5.3 environment rows (08 §3.2).
  *

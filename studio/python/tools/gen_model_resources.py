@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Francesco Pelizza
 """gen_model_resources.py — compute the per-model RAM/CPU/GPU compute-demand block and
 write it into config/open-models.json, from the VERIFIED architecture in
 config/model-arch.json.

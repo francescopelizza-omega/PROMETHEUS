@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * commands/flaky-detect.ts — PURE flaky-test classification for `prometheus test run --retry-failed` (CLI-094).
  *

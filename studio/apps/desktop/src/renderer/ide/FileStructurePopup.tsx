@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * ide/FileStructurePopup.tsx — the ⌘F12 File Structure popup (JetBrains "File Structure" ·
  * VS Code "Go to Symbol in Editor"; APP-097). A centered modal over the active editor listing

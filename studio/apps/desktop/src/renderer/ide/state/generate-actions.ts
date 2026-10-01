@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * ide/state/generate-actions.ts — PURE state math for the editor Generate menu
  * (APP-028).

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * updates/conflicts.ts — cross-check what a package manager OFFERS against what actually runs.
  *
@@ -176,17 +178,33 @@ export function findConflicts(input: ConflictInput): Conflict[] {
         severity: "high",
       });
     } else if (res.state === "duplicate" || res.state === "ambiguous") {
+      /**
+       * Two copies at the SAME version are not a conflict.
+       *
+       * "Each owner will keep offering its own updates, and only the one on PATH has any effect"
+       * is true of them and has no consequence: there is no divergence to act on, nothing to
+       * remove, and no command that behaves differently. Measured on LM Studio, whose app bundle
+       * (1.0.3+3) installs its own `lms` CLI — the two ARE one install, seen twice, and reporting
+       * it demands attention for a situation with no available action.
+       *
+       * Deliberately requires every copy to carry a KNOWN version. An unknown one may differ, and
+       * silence about a difference we could not measure is the failure mode this module exists to
+       * prevent.
+       */
+      const versions = res.copies.map((c) => c.version);
+      const identical = versions.every((v) => v && v === versions[0]);
       const others = res.shadowed.map(
         (c) => `${ownerLabel(c.owner)}${c.version ? ` ${c.version}` : ""}`,
       );
-      out.push({
-        kind: "duplicate-install",
-        subject: res.tool,
-        summary: `${res.tool} is installed ${res.copies.length} times: ${ownerLabel(winner.owner)}${winner.version ? ` ${winner.version}` : ""} (on PATH), ${others.join(", ")}.`,
-        consequence:
-          "Each owner will keep offering its own updates, and only the one on PATH has any effect. Update notices for the others will never clear.",
-        severity: "low",
-      });
+      if (!identical)
+        out.push({
+          kind: "duplicate-install",
+          subject: res.tool,
+          summary: `${res.tool} is installed ${res.copies.length} times: ${ownerLabel(winner.owner)}${winner.version ? ` ${winner.version}` : ""} (on PATH), ${others.join(", ")}.`,
+          consequence:
+            "Each owner will keep offering its own updates, and only the one on PATH has any effect. Update notices for the others will never clear.",
+          severity: "low",
+        });
     }
 
     /* --- a client driving a server of a different version --- */

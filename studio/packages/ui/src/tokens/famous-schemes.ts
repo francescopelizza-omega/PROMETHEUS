@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * tokens/famous-schemes.ts — 20 of the world's most-loved editor color schemes
  * (+ the operator's own "Pelly" scheme imported from a JetBrains .icls), authored

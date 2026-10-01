@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * commands/generic.ts — route the §2 command tree to the engine, or stub honestly.
  *

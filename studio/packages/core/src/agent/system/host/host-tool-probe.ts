@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * agent/system/host/host-tool-probe.ts — is this program on PATH? (no spawn, cached)
  *

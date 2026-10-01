@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * agent/permission-config.ts — the PRODUCER the §3.4 rule engine never had.
  *

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * commands/tokens.ts — `prometheus tokens`: the token-saving toolkit Prometheus proposes
  * to cut $ on paid closed models + compute on free local LLMs. Pure read over the

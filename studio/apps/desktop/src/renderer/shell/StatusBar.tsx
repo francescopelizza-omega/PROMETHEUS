@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * shell/StatusBar.tsx — the 26px "always-true facts" bar (handoff §7, file 08 §4.2/§5.6).
  *

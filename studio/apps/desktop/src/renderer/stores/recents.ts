@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * stores/recents.ts — the recently-opened PROJECT list (handoff §2.3.4).
  *

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * scopes/changelists.ts — JetBrains-style Changelists (APP-038).
  *

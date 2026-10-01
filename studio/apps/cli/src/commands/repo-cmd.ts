@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * commands/repo-cmd.ts — the FULL `prometheus repo …` surface over the repo.py sidecar
  * (C7 / file 06 §3), at parity with the GUI Repos panel. This is the ONLY

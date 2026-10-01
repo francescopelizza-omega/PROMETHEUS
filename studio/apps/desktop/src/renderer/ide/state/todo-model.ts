@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * ide/state/todo-model.ts — the PURE, react-free/DOM-free heart of the TODO tool window
  * (APP-096). Everything testable about configurable markers lives here so it runs under

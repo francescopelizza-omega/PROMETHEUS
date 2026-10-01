@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * catalog/normalize.ts — PURE projections of engine JSON into `CatalogItem[]` (file 06 §2).
  *

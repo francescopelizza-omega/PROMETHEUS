@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * state/active-venv.ts — which environment a new terminal inherits (§6.1).
  *

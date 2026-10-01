@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * ide/state/search-preview.ts — the PURE project search/replace-preview math (§6.3).
  *

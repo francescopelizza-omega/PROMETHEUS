@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * hooks/ barrel (08 §3 tree). The React hooks @prometheus/ui publishes for both
  * the desktop renderer and the CLI web-help/onboarding view: useTheme/useDensity

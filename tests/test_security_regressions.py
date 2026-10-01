@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Francesco Pelizza
 """test_security_regressions.py — regression tests for the 2026-06-29 security scout
 fixes (option-injection, defang data-loss / trust-bypass, quarantine HMAC verify).
 Pure stdlib (unittest). Run: python3 tests/test_security_regressions.py."""

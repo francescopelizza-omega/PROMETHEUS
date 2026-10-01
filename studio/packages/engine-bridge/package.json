@@ -2,6 +2,7 @@
   "name": "@prometheus/engine-bridge",
   "version": "0.1.0",
   "private": true,
+  "license": "Apache-2.0",
   "type": "module",
   "description": "Typed TS client over the prometheus.py --json contract + nemesis. The single gateway from JS to the Python engine — security logic is NEVER reimplemented here.",
   "main": "dist/index.js",

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * env-ref.ts — turning the Environments panel's row id into something the sidecar knows.
  *

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * agent/schedule.ts — scheduled/autonomous agent runs: "run this task on this cron schedule,
  * unattended, at a bounded autonomy level."

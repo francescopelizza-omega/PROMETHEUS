@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * orchestration/resource-guard.ts — ACTIVE EVICTION for one-shot orchestration agent-CLI
  * subprocesses (`opencode`, `hermes`), at the same cadence and ceiling as the protection

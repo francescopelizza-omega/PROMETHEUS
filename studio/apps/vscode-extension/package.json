@@ -5,7 +5,7 @@
   "version": "0.1.0",
   "private": true,
   "publisher": "prometheus-studio",
-  "license": "MIT",
+  "license": "Apache-2.0",
   "author": "Francesco Pelizza <red-beard-phoenix@users.noreply.gitlab.com>",
   "repository": {
     "type": "git",

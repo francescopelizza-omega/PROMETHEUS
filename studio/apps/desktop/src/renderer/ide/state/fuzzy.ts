@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * ide/state/fuzzy.ts — the PURE command-palette / quick-open fuzzy matcher (§8).
  *

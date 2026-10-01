@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * agent/system/host/exec-sandbox.ts — OS-ENFORCED confinement for `run_command`
  * (macOS Seatbelt, Linux bubblewrap).

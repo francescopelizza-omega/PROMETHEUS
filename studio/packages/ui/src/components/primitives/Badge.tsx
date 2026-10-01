@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * Badge.tsx + Tag.tsx — small status/label atoms (file 08 §3.1).
  *

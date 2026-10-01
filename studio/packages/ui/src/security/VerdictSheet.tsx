@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * VerdictSheet.tsx — the full nemesis verdict, rendered (file 03 §5).
  *

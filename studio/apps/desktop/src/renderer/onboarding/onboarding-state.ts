@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * onboarding/onboarding-state.ts — the PURE first-run wizard step machine + persistence
  * (APP-064). React-free + node:test-able. The wizard component is orchestration over shipped

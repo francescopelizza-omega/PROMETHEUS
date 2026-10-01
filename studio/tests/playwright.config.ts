@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * playwright.config.ts — the e2e test projects (file 10 §6.3).
  *

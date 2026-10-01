@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * health-panel-view.ts — PURE: derive the System Health view from the engine probe.
  *

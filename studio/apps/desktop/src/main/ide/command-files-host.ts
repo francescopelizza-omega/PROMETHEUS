@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * main/ide/command-files-host.ts — user-defined slash commands from markdown (Task #5,
  * desktop parity with the CLI's `command-files.ts`).

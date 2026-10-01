@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * SettingsTree.tsx — the §2.1 Settings tree UI (file 13).
  *

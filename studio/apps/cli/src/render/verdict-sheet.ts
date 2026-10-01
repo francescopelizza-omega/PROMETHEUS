@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * render/verdict-sheet.ts — P3 ANSI projector for a C3 SecurityVerdict.
  *

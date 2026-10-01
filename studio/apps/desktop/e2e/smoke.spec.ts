@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * e2e/smoke.spec.ts — Playwright smoke flows + a visual snapshot (APP-069).
  *

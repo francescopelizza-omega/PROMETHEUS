@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * shell/palette.ts — the ⌘K Command Palette filter model (file 08 §4.2/§4.3).
  *

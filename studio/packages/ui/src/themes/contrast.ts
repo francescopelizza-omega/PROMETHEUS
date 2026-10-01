@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * themes/contrast.ts — the §3.4 WCAG contrast checker + save-gate.
  *

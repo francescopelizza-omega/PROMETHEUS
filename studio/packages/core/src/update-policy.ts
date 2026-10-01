@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * update-policy.ts — the PURE auto-update policy (file 10 §5).
  *

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * renderer/floating-terminal-main.tsx — the React root for the APP-090 tear-out window.
  *

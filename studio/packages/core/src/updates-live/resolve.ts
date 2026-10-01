@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * updates/resolve.ts — find every installed copy of a tool, and attribute each one.
  *
@@ -34,7 +36,32 @@ const nodeRequire = createRequire(import.meta.url);
 export interface ResolveDeps {
   env?: NodeJS.ProcessEnv;
   platform?: NodeJS.Platform;
-  home?: string;
+  /**
+   * The USER's home (`$HOME`), for the `~/.local/share/<tool>/versions/<v>`, cargo and go layouts.
+   *
+   * ── WHY THIS IS NOT CALLED `home` ─────────────────────────────────────────────────────────
+   *
+   * It was, and the name collided with a DIFFERENT `home` meaning something else entirely.
+   * `CheckDeps.home` is the PROMETHEUS STATE DIRECTORY (`~/.prometheus`, consumed by `statePath`),
+   * and `CheckDeps extends ToolSweepDeps extends ResolveDeps` — so two fields with the same name
+   * and the same `string` type merged into one. `checkUpdates` passes its whole deps object down
+   * to `sweepTools`, which hands it to `resolveToolCheck`, and this file then read the state
+   * directory as if it were the user's home.
+   *
+   * `tsc` reports nothing. Both are `string`, so the shadowing is invisible to the type checker
+   * and the code stays perfectly type-correct while being wrong everywhere it matters.
+   *
+   * The damage is silent MISATTRIBUTION. `classifyPath`'s `underHome()` compares a real binary
+   * path against this value, so with `~/.prometheus` every $HOME-based layout fails to match and
+   * the install falls through to `unknown`. Measured: `opencode`, a native-installer layout under
+   * `~/.opencode`, came back "unattributed" — every `UpdateCommand` row was then withheld by
+   * `partitionCommands`, and the report printed "no update command applies to how this copy was
+   * installed" for a tool that has a perfectly good `opencode upgrade`.
+   *
+   * Renamed rather than patched at the call site, because a call-site fix leaves the trap armed
+   * for the next field either interface adds.
+   */
+  userHome?: string;
   /** test seams. */
   lookAll?: (bin: string, env: NodeJS.ProcessEnv) => string[];
   realpath?: (p: string) => string;
@@ -132,13 +159,13 @@ export function resolveCopies(
   bin: string,
   opts: {
     versionArgs?: readonly string[];
-    appBundle?: string;
+    appBundle?: string | readonly string[];
     probeWinner?: boolean;
   } = {},
   deps: ResolveDeps = {},
 ): u.ToolCopy[] {
   const env = deps.env ?? process.env;
-  const home = deps.home ?? homedir();
+  const home = deps.userHome ?? homedir();
   const platform = deps.platform ?? process.platform;
   const look = deps.lookAll ?? ((b, e) => lookPathAll(b, e));
   const rp = deps.realpath ?? ((p) => realpathSync.native(p));
@@ -193,9 +220,19 @@ export function resolveCopies(
   }
 
   /* --- the app bundle, which may not be on PATH at all --- */
-  if (opts.appBundle && platform === "darwin" && exists(opts.appBundle)) {
-    const v = readApp(opts.appBundle);
-    const already = out.find((c) => c.realPath.startsWith(`${opts.appBundle}/`));
+  /**
+   * The first candidate bundle that actually exists. A list, because the single hardcoded path
+   * for LM Studio pointed at a bundle this machine does not have — see `ToolCheck.appBundle`.
+   */
+  const bundle =
+    platform === "darwin" && opts.appBundle
+      ? (typeof opts.appBundle === "string" ? [opts.appBundle] : opts.appBundle).find((b) =>
+          exists(b),
+        )
+      : undefined;
+  if (bundle) {
+    const v = readApp(bundle);
+    const already = out.find((c) => c.realPath.startsWith(`${bundle}/`));
     if (already) {
       // The bundle IS on PATH via a symlink. Its Info.plist is the only version it has, so fill
       // it in rather than leaving the comparison unknown.
@@ -210,16 +247,36 @@ export function resolveCopies(
        * whose server is 0.34.1 — so it is appended as a copy that simply never wins PATH.
        */
       out.push({
-        pathEntry: opts.appBundle,
-        realPath: opts.appBundle,
+        pathEntry: bundle,
+        realPath: bundle,
         owner: "app-bundle",
         name:
-          opts.appBundle
+          bundle
             .split("/")
             .pop()
             ?.replace(/\.app$/, "") ?? bin,
         ...(v ? { version: v, versionSource: "bundle" as const } : {}),
       });
+      /**
+       * The app's version IS the tool's version when its CLI has none of its own.
+       *
+       * Measured on LM Studio: `lms` lives at `~/.lmstudio/bin/lms`, is installed by the app, and
+       * `lms --version` prints `CLI commit: 71bd99c` — a git commit, which `parseCliVersion`
+       * correctly refuses to read as a version. So the PATH winner carried no version, `current`
+       * stayed null, and the report said "installed version unreadable" for a product whose
+       * version was sitting in an Info.plist we had just read.
+       *
+       * Deliberately gated on the winner having NO version, which is what keeps it honest for the
+       * other app-backed tool here: ollama's PATH copy is a Homebrew formula with its own real
+       * version (0.34.4) that genuinely differs from the app's (0.34.1). That difference is a
+       * FINDING — `client-server-skew` — and overwriting it would erase the finding. This branch
+       * cannot fire there, because the winner already has a version.
+       */
+      const top = out[0];
+      if (v && top && !top.version) {
+        top.version = v;
+        top.versionSource = "bundle";
+      }
     }
   }
 

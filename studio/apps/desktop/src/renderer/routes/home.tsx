@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * routes/home.tsx — Home / MISSION CONTROL (handoff §2.3, file 08 §5.1).
  *

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * security/nemesis-verdict.ts — the FULL `nemesis.verdict/1` mirror (file 03 §3).
  *

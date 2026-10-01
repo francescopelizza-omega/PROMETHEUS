@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * TemplatesPage.tsx — Settings ▸ Live Templates (APP-020).
  *

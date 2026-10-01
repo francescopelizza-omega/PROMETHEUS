@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * worker/tasks.ts — the PURE-NODE task implementations the worker process runs
  * (file 01 §5, the offloaded worker layer).

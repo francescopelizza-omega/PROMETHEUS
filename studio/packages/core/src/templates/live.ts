@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * templates/live.ts — the PURE live/postfix/surround template engine (APP-020).
  *

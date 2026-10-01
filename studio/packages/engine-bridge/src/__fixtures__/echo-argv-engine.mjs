@@ -1,4 +1,6 @@
 #!/usr/bin/env node
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * echo-argv-engine.mjs — a deterministic stand-in for `python3 prometheus.py` that
  * ECHOES the exact argv it received back in the JSON envelope, so the lifecycle/catalog

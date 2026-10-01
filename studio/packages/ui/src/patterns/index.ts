@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * patterns/ — the product components that ARE Prometheus (08 §3.2).
  *

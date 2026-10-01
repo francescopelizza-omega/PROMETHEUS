@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * ide/state/git-log-graph.ts — the PURE branch-graph lane-assignment model (APP-036).
  *

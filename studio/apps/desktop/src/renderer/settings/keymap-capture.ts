@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * keymap-capture.ts — PURE keyboard-event → normalized chord string (APP-057).
  *

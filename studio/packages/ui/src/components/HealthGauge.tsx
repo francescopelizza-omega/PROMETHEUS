@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * HealthGauge.tsx — a 0–100 system-health score ring (Reliability & Polish pack).
  *

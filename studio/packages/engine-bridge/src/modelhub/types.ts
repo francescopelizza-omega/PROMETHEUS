@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * modelhub/types.ts — the canonical TS shapes for the Model Hub (file 05 §2).
  *
@@ -108,7 +110,21 @@ export interface Quant {
 
 // ── §2.2 Model ────────────────────────────────────────────────────────────────
 
-export type ModelSource = "huggingface" | "ollama" | "url";
+/**
+ * Where a model's bytes actually live.
+ *
+ * `"lmstudio"` and `"hf-cache"` were added 2026-10-01, when `model.list` began indexing the
+ * stores the user already had instead of only Prometheus's own. Until then this union could not
+ * express either, so `client.ts`'s mapper funnelled both into `"huggingface"` — not a mapper
+ * bug but a type that had nowhere to put the truth. An LM Studio model was reported to every
+ * consumer as a Hugging Face one.
+ *
+ * `"hf-cache"` is deliberately distinct from `"huggingface"`: the latter means "from the Hub,
+ * in Prometheus's library", the former means "already in the shared `~/.cache/huggingface/hub`
+ * that llama.cpp, vLLM and MLX all read". Same origin, different bytes on disk, and only one of
+ * them is Prometheus's to delete.
+ */
+export type ModelSource = "huggingface" | "ollama" | "url" | "lmstudio" | "hf-cache";
 export type Modality =
   | "text"
   | "embedding"

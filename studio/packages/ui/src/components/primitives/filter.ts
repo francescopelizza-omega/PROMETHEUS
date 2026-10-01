@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * primitives/filter.ts — the PURE subsequence filter the Combobox + Command palette
  * rank with (file 08 §3.1 / §4.3 "⌘K palette"). Framework-free + dependency-free so

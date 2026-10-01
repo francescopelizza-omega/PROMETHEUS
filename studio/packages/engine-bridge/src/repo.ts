@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 import type { NemesisVerdictRef, VerdictTier } from "./security/verdict.js";
 import { normalizeVerdict } from "./security/verdict.js";
 /**

@@ -1,3 +1,6 @@
+import { describeEngineFailure } from "@prometheus/engine-bridge";
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * main/telemetry-ipc.ts — the typed `system:telemetry` ipcMain handler.
  *
@@ -14,9 +17,10 @@ import { ipcMain } from "electron";
 import { IPC, type SystemTelemetry } from "../shared/ipc-contract.js";
 import { readTelemetry } from "./telemetry.js";
 
-function errString(e: unknown): string {
-  return e instanceof Error ? e.message : String(e);
-}
+// `errString` was a LOCAL copy here, one of twenty across main/*.ts, and every copy returned
+// `e.message` alone — discarding `EngineError.stderrTail`, which is where the engine puts the
+// actual reason when it exits before emitting JSON. See `describeEngineFailure`'s doc.
+const errString = describeEngineFailure;
 
 /** A fail-soft telemetry envelope so a probe error never white-screens the strip. */
 function errorTelemetry(message: string): SystemTelemetry {

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * ai/effort/reasoning-tag.ts — keep a model's thinking out of its answer.
  *

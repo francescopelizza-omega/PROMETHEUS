@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * worker/index.ts — the WORKER process ENTRYPOINT (file 01 §5).
  *

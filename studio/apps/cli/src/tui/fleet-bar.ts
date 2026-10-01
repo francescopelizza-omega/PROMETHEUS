@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * tui/fleet-bar.ts — the one-line fleet bar: who else is running, and what it costs.
  *

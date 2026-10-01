@@ -1,7 +1,8 @@
 PROMETHEUS
 Copyright 2026 Francesco Pelizza
 
-This product includes software developed by Francesco Pelizza.
+Original author and creator: Francesco Pelizza.
+Project home: https://gitlab.com/red-beard-phoenix/PROMETHEUS
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -12,3 +13,81 @@ You may obtain a copy of the License at
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
 WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+
+--------------------------------------------------------------------------
+ATTRIBUTION
+--------------------------------------------------------------------------
+
+This section exists because Section 4(d) of the License makes it travel.
+
+Section 4(d) requires that any Derivative Work you distribute include a
+readable copy of the attribution notices in this NOTICE file -- in a NOTICE
+file of your own, in your source or documentation, or in a display the work
+generates. That obligation is part of the License. It is not optional, and
+it is not waived by rewriting, refactoring, porting or renaming the code.
+
+So, if you fork, clone, vendor, port or build upon PROMETHEUS:
+
+  * Retain this NOTICE file, or reproduce its attribution notices somewhere
+    a user of your work can read them.
+
+  * Credit the original author -- Francesco Pelizza -- as the creator of
+    PROMETHEUS, and link to the project home above, in your README or the
+    equivalent place where you describe where your work came from.
+
+  * Per Section 4(b), mark the files you changed as changed. Do not present
+    modified code as the original.
+
+  * Per Section 4(c), keep the copyright, patent, trademark and attribution
+    notices that are already in the source you took.
+
+A suggested form of credit, for a derivative work:
+
+    Based on PROMETHEUS (https://gitlab.com/red-beard-phoenix/PROMETHEUS),
+    created by Francesco Pelizza, licensed under Apache-2.0.
+
+--------------------------------------------------------------------------
+TRADEMARKS
+--------------------------------------------------------------------------
+
+Section 6 of the License grants no trademark rights.
+
+"PROMETHEUS" and "nemesis", as names for this software, are reserved by the
+author. The License lets you use, modify and redistribute the CODE; it does
+not let you use these names to name, brand or market your own distribution,
+fork or service, or to imply that the author endorses it.
+
+Name your fork something else. You are still required to credit this project
+as its origin, as set out above -- the two obligations work together: say
+clearly where the work came from, without implying it is the original or
+that it is endorsed by the author.
+
+--------------------------------------------------------------------------
+SCOPE
+--------------------------------------------------------------------------
+
+The whole repository is Apache-2.0: the engine (prometheus.py), the nemesis
+security gate, Prometheus Studio, the prometheus CLI/TUI, the VS Code
+extension and the prometheus_plugin adapters.
+
+Earlier revisions licensed the client packages (the CLI, the VS Code
+extension and the prometheus_plugin adapters) under MIT. They were
+relicensed to Apache-2.0 on 2026-10-01, before the first public release, so
+that one licence governs the project and the attribution requirement in
+Section 4(d) reaches every part of it. MIT carries no equivalent NOTICE
+obligation; that difference is the reason for the change.
+
+Each package's own `license` field remains the source of truth for that
+package, and all eleven of them now read Apache-2.0.
+
+One deliberate exception, which is not part of the product:
+`studio/examples/extensions/csv-lens/` is a REFERENCE FIXTURE demonstrating what a
+third-party Studio extension looks like, and it carries its own MIT licence
+precisely to show that an external extension brings its own terms. It ships no
+code that PROMETHEUS depends on.
+
+Third-party components redistributed with this software are listed, with
+their own licences and attribution requirements, in THIRD-PARTY-NOTICES.md.
+Those obligations are independent of this file and are not modified by it.

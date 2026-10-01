@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * ai/providers/types.ts — the billing-aware AI provider model (file 12 §2).
  *

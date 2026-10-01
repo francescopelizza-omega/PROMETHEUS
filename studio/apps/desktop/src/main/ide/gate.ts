@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * main/ide/gate.ts — the GATE-BEFORE-RUN logic (file 07 §5.2 / §9, C4/C5).
  *

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 import { existsSync, readdirSync } from "node:fs";
 /**
  * updates/model-actions-cmd.ts — `/updates pull|rm`: the two actions that change the machine.
@@ -235,6 +237,8 @@ export type UpdatesSubcommand =
   | { kind: "remove"; tag: string }
   | { kind: "catalog"; query: string }
   | { kind: "convert"; rest: string }
+  /** `/updates fix [subject]` — the repair for an install conflict. */
+  | { kind: "fix"; subject: string }
   | { kind: "usage"; message: string };
 
 /**
@@ -253,11 +257,12 @@ export function parseSubcommand(rest: string): UpdatesSubcommand {
   if (v === "rm" || v === "remove") return { kind: "remove", tag };
   if (v === "catalog" || v === "browse" || v === "search") return { kind: "catalog", query: tag };
   if (v === "convert") return { kind: "convert", rest: tag };
+  if (v === "fix" || v === "repair") return { kind: "fix", subject: tag };
   // `--json` and friends belong to the report and must keep working.
   if (v.startsWith("-")) return { kind: "report" };
   return {
     kind: "usage",
-    message: `unknown: /updates ${verb}\n  /updates                 the full report\n  /updates catalog [q]     browse installable models\n  /updates pull <tag>      download a model (A${u.AUTH_INSTALL})\n  /updates rm <tag>        delete a model (A${u.AUTH_DESTRUCTIVE})\n  /updates convert <ref>   how to get a model into an engine that runs it`,
+    message: `unknown: /updates ${verb}\n  /updates                 the full report\n  /updates fix [tool]      how to clear an install conflict for good\n  /updates catalog [q]     browse installable models\n  /updates pull <tag>      download a model (A${u.AUTH_INSTALL})\n  /updates rm <tag>        delete a model (A${u.AUTH_DESTRUCTIVE})\n  /updates convert <ref>   how to get a model into an engine that runs it`,
   };
 }
 

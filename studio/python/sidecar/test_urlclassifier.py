@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Francesco Pelizza
 """test_urlclassifier.py — L4 behavioural classifier. Stdlib unittest, no deps."""
 import importlib.util
 import json

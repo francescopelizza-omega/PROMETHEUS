@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Francesco Pelizza
 """refactor.py — AST analysis + rope-backed WorkspaceEdit sidecar (file 14 §3.8, APP-025).
 
 Read-only AST analysis of local code (no import, no exec, no network) backing the

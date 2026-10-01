@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * ai/ollama-log-parse.ts — mining ollama's own log for what models REALLY cost.
  *

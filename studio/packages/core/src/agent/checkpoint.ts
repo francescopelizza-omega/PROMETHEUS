@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * agent/checkpoint.ts — per-agent-turn workspace checkpoint (file 14 E2).
  *

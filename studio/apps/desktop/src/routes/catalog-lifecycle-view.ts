@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * routes/catalog-lifecycle-view.ts — PURE helpers for the app/worldsim/model
  * lifecycle GUI (APP-007). JSX-free so node:test pins the verb→request mapping,

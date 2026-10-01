@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * security/urlaudit.ts — bridge to the L5 installed-source audit
  * (url_injection_safeguard.md §5.2 / §9). Runs `prometheus.py --json skills audit`

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * local-history/history.ts — git-independent file-snapshot history (file 13 §2.6).
  *

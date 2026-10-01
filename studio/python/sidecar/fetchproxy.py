@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Francesco Pelizza
 """fetchproxy.py — L6 safe-fetch proxy (URL-injection safeguard).
 
 The ONLY path by which an agent should dereference a URL. Every fetch is forced

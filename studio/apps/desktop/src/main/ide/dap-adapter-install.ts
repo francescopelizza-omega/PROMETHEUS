@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * main/ide/dap-adapter-install.ts — detect + stage→gate→install for debug adapters
  * (file 07 §5, APP-029).

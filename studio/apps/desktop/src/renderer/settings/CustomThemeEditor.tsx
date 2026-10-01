@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * CustomThemeEditor.tsx — author your own theme (file 13 §3.3/§3.4).
  *

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * mcp/server/tools.studio.ts — studio-local tool extensions (file 09 §1.1 / §9).
  *

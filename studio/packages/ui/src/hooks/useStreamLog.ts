@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * hooks/useStreamLog.ts — a JSON-lines tail buffer for <StreamLog> (08 §3.2/§3).
  *

@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Francesco Pelizza
 """urlclassifier.py — L4 behavioural classifier (malice + indirect-prompt-injection).
 
 Scores the PINNED, post-render content of a URL (from L3/L5) for malice and IPI.

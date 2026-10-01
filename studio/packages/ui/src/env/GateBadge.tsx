@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * GateBadge.tsx — the inline per-package gate verdict chip (file 04 §3.2 column).
  *

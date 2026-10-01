@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * commands/schedule-cmd.ts — `prometheus tasks <add|list|remove|enable|disable|run-due|
  * install-cron>`: the CLI surface over scheduled/autonomous agent runs.

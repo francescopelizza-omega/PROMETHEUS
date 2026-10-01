@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * ai/retry-index.ts — the model-request resilience surface, as one PURE subpath.
  *

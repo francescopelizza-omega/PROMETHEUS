@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * main/index.ts — the Electron MAIN process entry (Electron 44 / Node 24, C10).
  *

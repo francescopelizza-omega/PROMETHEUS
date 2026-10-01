@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * appearance-view.ts — PURE renderer helpers for the Appearance panel (file 13 §3.2).
  *

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * ide/ai/markdown.tsx — a MINIMAL, safe markdown renderer for assistant turns (#12).
  *

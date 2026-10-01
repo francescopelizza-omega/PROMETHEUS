@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * tui/list-overlay.ts — a generic arrow-nav "pick one" overlay (CLI-1xx).
  *

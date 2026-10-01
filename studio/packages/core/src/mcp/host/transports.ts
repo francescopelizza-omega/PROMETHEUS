@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * mcp/host/transports.ts — the MCP client transport seam (file 09 §2.2 / Open Q).
  *

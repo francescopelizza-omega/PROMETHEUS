@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * version.ts — file 01 §Open-Q7: ENGINE VERSION-SKEW NEGOTIATION.
  *

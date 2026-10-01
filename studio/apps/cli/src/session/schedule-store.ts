@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * session/schedule-store.ts — the ONE global on-disk record of every scheduled/autonomous
  * task, as registered by `prometheus tasks` (or the desktop's mirror of it).

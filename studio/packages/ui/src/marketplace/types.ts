@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * marketplace/types.ts — the in-GUI marketplace data model + PURE helpers (file 09 §6).
  *

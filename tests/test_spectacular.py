@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Francesco Pelizza
 """Robustness test suite for the SPECTACULAR POWER-UP (prometheus.py).
 
 Goal: prove the engine FAILS CLOSED and never crashes on bad/abusive input across

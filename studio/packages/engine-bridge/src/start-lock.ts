@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * start-lock.ts — "only one Prometheus surface may be mid-spawn for a given local runner at a
  * time."

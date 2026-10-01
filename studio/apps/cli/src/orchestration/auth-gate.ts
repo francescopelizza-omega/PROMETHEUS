@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * orchestration/auth-gate.ts — the ToS-compliance gate for automated /demos.
  *

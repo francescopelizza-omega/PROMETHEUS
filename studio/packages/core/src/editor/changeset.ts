@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * editor/changeset.ts — THE ChangeSet apply/reject engine (file 07 §7.4).
  *

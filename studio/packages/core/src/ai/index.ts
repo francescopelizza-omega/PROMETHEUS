@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * ai — the billing-aware AI-integration layer (file 12).
  *
@@ -87,11 +89,26 @@ export {
 export type { LocalRunnerSpec } from "./local-runners.js";
 export {
   LOCAL_RUNNERS,
+  localRunners,
+  applyHostEnv,
   runnerForBaseUrl,
   runnerById,
   portOf,
   isLocalUrl,
 } from "./local-runners.js";
+
+// The machine scan. Both surfaces used to answer "which runners do you have?" from a literal
+// table; this answers it by asking the machine. See runner-discovery.ts's docstring.
+export type { DiscoveredRunner, DiscoverDeps, RunnerState } from "./runner-discovery.js";
+export {
+  DEFAULT_PROBE_TIMEOUT_MS,
+  describeProbeFailure,
+  discoverRunners,
+  modelsFromOpenAiList,
+  modelsFromTags,
+  nextStepHint,
+  servedModelOptions,
+} from "./runner-discovery.js";
 
 export type { EnsureOllamaOptions, EnsureOllamaResult } from "./ollama-autostart.js";
 export { ensureLmStudioRunning, ensureOllamaRunning } from "./ollama-autostart.js";
@@ -227,6 +244,8 @@ export {
 // declared by hand; nothing is inferred from a private IP range.
 export type { RemoteHost } from "./remote-hosts.js";
 export {
+  REMOTE_HOSTS_KEY,
+  parseRemoteHostsSetting,
   findRemoteHost,
   hostOf,
   isDeclaredRemoteHost,

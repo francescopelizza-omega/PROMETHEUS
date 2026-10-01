@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * ide/telemetry/telemetry-view.ts — PURE presentation helpers for the telemetry UI.
  *

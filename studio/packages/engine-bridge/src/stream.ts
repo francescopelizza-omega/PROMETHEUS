@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * stream.ts — turn the engine's HUMAN stderr lines into progress events.
  *

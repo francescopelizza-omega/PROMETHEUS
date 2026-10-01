@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * session/exec-runner.ts — run a PARSED pipeline with real pipes and no shell (Phase 2).
  *

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * ide/state/lsp-convert.ts — PURE LSP↔Monaco translation helpers (file 07 §4, leap #3).
  *

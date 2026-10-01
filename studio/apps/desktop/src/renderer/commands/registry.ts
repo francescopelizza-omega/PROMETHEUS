@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * renderer/commands/registry.ts — the shell COMMAND REGISTRY (file 08 §4.3, leap #1).
  *

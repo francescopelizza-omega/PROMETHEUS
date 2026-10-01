@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * effort-pref.ts — which thinking-effort tier this extension runs at, and where it comes from.
  *

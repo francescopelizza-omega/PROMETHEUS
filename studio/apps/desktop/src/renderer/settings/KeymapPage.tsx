@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * KeymapPage.tsx — the §2.2 Keymap editor UI (file 13).
  *

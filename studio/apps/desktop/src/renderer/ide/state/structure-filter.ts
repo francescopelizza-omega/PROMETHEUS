@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * ide/state/structure-filter.ts — PURE symbol filtering for the File Structure popup (⌘F12)
  * and the membership check the Method Hierarchy view uses (APP-097). React-free/DOM-free so

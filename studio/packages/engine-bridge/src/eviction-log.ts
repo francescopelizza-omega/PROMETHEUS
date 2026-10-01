@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 import { randomUUID } from "node:crypto";
 /**
  * eviction-log.ts — the shared record of "Prometheus killed one of its OWN child processes to

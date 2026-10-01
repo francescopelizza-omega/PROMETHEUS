@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * session/idle-timeout-setting.ts — the user-configurable INACTIVITY-PAUSE threshold.
  *

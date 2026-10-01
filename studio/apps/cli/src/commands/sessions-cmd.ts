@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * commands/sessions-cmd.ts — `prometheus sessions <list|search|fork|delete>` (CLI-014).
  *

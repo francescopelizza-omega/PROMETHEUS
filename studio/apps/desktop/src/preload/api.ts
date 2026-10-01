@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * preload/api.ts — the EXACT narrow contextBridge API surface (file 01 §5).
  *
@@ -24,6 +26,7 @@
 import { ipcRenderer } from "electron";
 
 import {
+  type AiDiscoverRunnersResult,
   type AiProbeEndpointResult,
   type AiProbeModelsResult,
   type AiProgressEvent,
@@ -70,6 +73,7 @@ import {
   type FolderOpenResult,
   type GateResult,
   type HealthResult,
+  type HostToolsResult,
   IPC,
   IPC_CANCEL,
   IPC_EVENTS,
@@ -1255,6 +1259,15 @@ export function createPrometheusApi(): PrometheusApi {
       // resolve a probe-backed capability instead of falling through to "not available".
       probeEndpoint: (baseUrl: string, model: string): Promise<AiProbeEndpointResult> =>
         ipcRenderer.invoke(IPC.aiProbeEndpoint, { baseUrl, model }),
+      // Ask the MACHINE which local model servers exist, instead of rendering a literal. Same
+      // MAIN detour and same CSP reason as the two probes above. Metadata-only by construction
+      // (`/api/tags`, `/v1/models`), so it is safe to call on window open — see
+      // AiDiscoverRunnersResult.
+      discoverRunners: (): Promise<AiDiscoverRunnersResult> =>
+        ipcRenderer.invoke(IPC.aiDiscoverRunners),
+      // The external-tool inventory — the terminal's `/deps`. Same manifest the agent's system
+      // prompt is rendered from, so the user sees what the model was told.
+      hostTools: (): Promise<HostToolsResult> => ipcRenderer.invoke(IPC.hostToolsList),
     },
 
     // ── the FULL security surface (file 03 §5,§7) ────────────────────────────

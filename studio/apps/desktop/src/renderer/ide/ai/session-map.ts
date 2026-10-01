@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * ai/session-map.ts — the PURE bidirectional mapper between the live AgentPane tab shape
  * (AiTurn[] = flat role/content turns) and the durable core `Session`/`SessionTurn` model

@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Francesco Pelizza
 """test_dossier_dir.py — `tutorial` / `methods` / `describe` must be pointable at the dossiers.
 
 `DOSSIER_DIR` was a hardcoded `<repo>/AI_SKILLS_WONDERLAND`. That is right for a checkout that

@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Francesco Pelizza
 """test_sidecar_envelope_names.py — a sidecar's `command` must identify the verb UNAMBIGUOUSLY.
 
 `command` exists so a consumer can tell one envelope from another. `repo.py` emitted bare verb

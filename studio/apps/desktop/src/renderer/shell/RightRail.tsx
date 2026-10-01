@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * shell/RightRail.tsx — the agent rail (handoff §2.5, file 08 §4.2).
  *

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * ai/endpoint-probe.ts — keep a measured endpoint measured, across every rebind.
  *

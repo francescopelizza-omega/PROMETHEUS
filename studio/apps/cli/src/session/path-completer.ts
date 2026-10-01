@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * session/path-completer.ts — a filesystem path completer for the session readline
  * (the natural `tab` directory-completion the user expects when picking a download

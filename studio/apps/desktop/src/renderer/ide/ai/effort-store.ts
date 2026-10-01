@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * ide/ai/effort-store.ts — the composer's reasoning-effort tier (handoff §2.5 chip).
  *

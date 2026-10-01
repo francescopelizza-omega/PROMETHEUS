@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * hooks/useDensity.ts — flip <html data-density> (08 §2.4). React-only, no node.
  *

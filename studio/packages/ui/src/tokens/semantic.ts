@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * semantic.ts — the role-named, theme-swappable semantic tokens (file 08 §2.1/§2.2).
  * Apps + the component library reference ONLY semantic tokens (never primitives). The

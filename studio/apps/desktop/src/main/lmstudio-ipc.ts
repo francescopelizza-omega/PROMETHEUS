@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * main/lmstudio-ipc.ts — the `model:lmstudioStart` handler: a manual "Start" trigger for LM
  * Studio's own server (`lms server start`), wired to the SAME `ensureLmStudioRunning` that

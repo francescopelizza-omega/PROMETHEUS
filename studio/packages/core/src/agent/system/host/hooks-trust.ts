@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * agent/system/host/hooks-trust.ts — vet a workspace's lifecycle hooks before they may ever run.
  *

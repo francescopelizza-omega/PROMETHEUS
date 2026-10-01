@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * ide/fonts/store.ts — the PyCharm-style font settings store (editor + terminal).
  *

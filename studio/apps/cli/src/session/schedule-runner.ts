@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * session/schedule-runner.ts — the pass that actually EXECUTES scheduled/autonomous tasks.
  *

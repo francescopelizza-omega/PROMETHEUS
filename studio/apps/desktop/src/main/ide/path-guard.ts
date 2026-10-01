@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * ide/path-guard.ts — sensitive-path denylist for the renderer-driven fs IPC.
  *

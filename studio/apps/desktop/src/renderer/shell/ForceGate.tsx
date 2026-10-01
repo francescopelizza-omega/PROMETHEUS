@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * shell/ForceGate.tsx — the typed confirm in front of every BLOCK override (§9, HIGH).
  *

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * session/ls.ts — the `/ls` listing: what is in the directory this session is working in.
  *

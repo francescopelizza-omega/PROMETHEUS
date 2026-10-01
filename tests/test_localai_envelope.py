@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Francesco Pelizza
 """Contract tests for the `localai` v1 JSON envelope (CLI-026).
 
 Asserts the `--json localai <sub>` schema per subcommand and that the human (non-json)

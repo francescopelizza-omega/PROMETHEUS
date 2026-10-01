@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * components/util/cva.ts — the variant compositor (file 08 §3, `class-variance-authority`).
  *

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * harness.ts — a ~40-line test harness for the VS Code extension host.
  *

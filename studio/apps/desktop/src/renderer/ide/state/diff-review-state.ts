@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * ide/state/diff-review-state.ts — the PURE DiffReview selection state (§7.4).
  *

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * agent/verify.ts — PURE, offline, language-agnostic post-apply verification (WRAPPER Phase A).
  *

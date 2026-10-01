@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Francesco Pelizza
 """envmgr.py — Studio environment-manager sidecar (C7/C9, file 04).
 
 Detects and (under ``--confirm``) mutates Python environments: venv/virtualenv,

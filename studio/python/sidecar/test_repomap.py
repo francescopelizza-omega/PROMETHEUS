@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Francesco Pelizza
 """test_repomap.py — repomap.py sidecar tests (APP-053).
 
 A fixture mini-repo (python + ts + a binary + an ignored dir + a broken file) pins:

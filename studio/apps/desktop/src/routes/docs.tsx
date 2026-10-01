@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * routes/docs.tsx — the in-app help browser (the GUI help surface, APP-099).
  *

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * main/verdict-map.ts — pure mappers from engine/nemesis results to the
  * renderer-safe IPC shapes. Extracted from the ipcMain handlers so they are

@@ -234,7 +234,16 @@ test("DRIFT GUARD: the status chip re-reads the cwd every frame", () => {
   // The bottom-right chip is correct only because render() calls statusModel() fresh; hoisting
   // that call out of render would freeze the chip at the launch directory.
   const app = hostSrc("apps/cli/src/tui/app.ts");
-  assert.match(app, /function render\(\): void \{[\s\S]{0,300}?status: session\.statusModel\(\)/);
+  // The PARAMETER LIST is deliberately not pinned. This guard protects one invariant — that
+  // `statusModel()` is called from inside `render`, so the chip re-reads the cwd on every frame
+  // rather than freezing at the launch directory. It used to match `function render(): void`
+  // literally, so adding the reflow `slack` argument broke it while the invariant it guards was
+  // untouched: a drift guard that fails for a reason it does not care about gets muted, and then
+  // it is not guarding anything.
+  assert.match(
+    app,
+    /function render\([^)]*\): void \{[\s\S]{0,300}?status: session\.statusModel\(\)/,
+  );
 });
 
 test("DRIFT GUARD: /cwd only claims a move when one happened", () => {

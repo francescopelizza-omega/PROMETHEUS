@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * resilience/timeout.ts — race a promise against a deadline (fail-closed).
  *

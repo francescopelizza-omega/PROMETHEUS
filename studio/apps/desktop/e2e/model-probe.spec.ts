@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * e2e/model-probe.spec.ts — Task #18 regression: the Model Hub's local-runner probe survives
  * the REAL production CSP.

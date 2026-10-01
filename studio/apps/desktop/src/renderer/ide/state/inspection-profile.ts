@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * ide/state/inspection-profile.ts — the PURE inspection-profile model (plan file 03 ·
  * JetBrains Inspection Profiles · VS Code problem severities parity).

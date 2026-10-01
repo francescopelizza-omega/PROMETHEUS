@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * commands/keymap.ts — `prometheus keymap list [--preset <id>]`: the file-13 §2.2 keymap
  * presets + conflict report the GUI Settings keymap editor renders, headlessly.

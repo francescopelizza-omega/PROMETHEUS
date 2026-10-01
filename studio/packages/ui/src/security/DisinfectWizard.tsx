@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * DisinfectWizard.tsx — guided remediation, then the HONEST residual (file 03 §9.1).
  *

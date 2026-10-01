@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * system-probe.ts — read-only host-tool probes, centralized in engine-bridge (C5).
  *

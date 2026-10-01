@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * CudaPanel.tsx — the GPU/CUDA panel (file 04 §5.2).
  *

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * scripts/emit-effort-rules.mjs — publish the builtin effort table for NON-TypeScript readers.
  *

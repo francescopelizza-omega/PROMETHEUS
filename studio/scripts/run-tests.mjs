@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * scripts/run-tests.mjs — the ONE working node:test entry point for the whole
  * monorepo (file 02 §7.4 / task receipt). It runs every `*.test.ts(x)` straight

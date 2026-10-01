@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * agent/system/memory.ts — the `memory_write` / `memory_read` tool DEFS (durable cross-session
  * facts). Sibling to `fs-mutate.ts`: definitions only, PURE, no IO — the host

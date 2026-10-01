@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * session/onboarding.ts — first-run backend detection + the `/setup` wizard.
  *
@@ -18,7 +20,12 @@
  */
 import { createRequire } from "node:module";
 
-import { DEFAULT_CONTEXT_WINDOW, LOCAL_RUNNERS, type LocalRunnerSpec } from "@prometheus/core";
+import {
+  DEFAULT_CONTEXT_WINDOW,
+  type LocalRunnerSpec,
+  localRunners,
+  runnerById,
+} from "@prometheus/core";
 import type { AiEndpoint } from "@prometheus/core";
 import {
   type EngineClient,
@@ -313,7 +320,11 @@ export async function detectBackends(deps: DetectDeps): Promise<Backends> {
   const started = new Set<string>();
   const unavailableRunners: UnavailableRunner[] = [];
   const probed = await Promise.all(
-    LOCAL_RUNNERS.map((r) =>
+    // `localRunners()`, not the raw constant: the probe must go where the user's OLLAMA_HOST
+    // says the daemon is. The Python sidecar has honoured that variable since it existed and
+    // every TypeScript surface ignored it, so a relocated daemon was visible from one half of
+    // the product and not the other.
+    localRunners().map((r) =>
       probeAndMaybeStart(r, fetchFn, timeoutMs, started, unavailableRunners, ops),
     ),
   );
@@ -375,7 +386,7 @@ export async function stopSelfStartedRunners(
   const others = peers.filter((p) => !p.self && p.state !== "dead" && p.model);
   await Promise.all(
     Array.from(startedRunnerIds).map(async (id) => {
-      const spec = LOCAL_RUNNERS.find((r) => r.id === id);
+      const spec = runnerById(id);
       if (!spec) return;
       try {
         const status = await statusFn(spec, { timeoutMs: 1500 });
@@ -617,10 +628,29 @@ async function setupLocal(
       }
     }
   }
-  // point BOTH download mechanisms at the chosen dir: the engine modelhub sidecar
-  // ($PROMETHEUS_MODELS_DIR) and the `ollama pull` child ($OLLAMA_MODELS).
+  /**
+   * Prometheus's OWN download directory — and only that.
+   *
+   * This used to set `OLLAMA_MODELS = dir` as well, "to point BOTH download mechanisms at the
+   * chosen dir". That repointed ollama's entire model store at a Prometheus-chosen folder, and
+   * the consequences were measured on 2026-10-01:
+   *
+   *   ~/.ollama/models      29 GB, 2 models   the store ollama actually uses
+   *   <the chosen dir>       0 B              where this line sent every subsequent pull
+   *
+   * So a pull downloaded a duplicate into an empty folder while the models the user already had
+   * stayed invisible, and `ollama list` in their own terminal disagreed with Prometheus about
+   * what was installed. On this machine the chosen dir had itself drifted to a SOURCE DIRECTORY
+   * inside the repo, so a pull would have written tens of GB into the working tree.
+   *
+   * Ollama owns ollama's bytes. Prometheus indexes them (`model.list` reads the real store) and
+   * does not get to move them. A user who genuinely wants ollama's models elsewhere sets
+   * `OLLAMA_MODELS` themselves, and both the engine and the sidecar now honour that.
+   *
+   * `PROMETHEUS_MODELS_DIR` stays: it is Prometheus's own lane, for weights Prometheus itself
+   * downloads rather than ones another tool already manages.
+   */
   process.env.PROMETHEUS_MODELS_DIR = dir;
-  process.env.OLLAMA_MODELS = dir;
 
   if (!ollamaUp) {
     write("");

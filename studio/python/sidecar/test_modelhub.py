@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Francesco Pelizza
 """test_modelhub.py — exercise modelhub.py's verbs end to end.
 
 Runs each verb as a SUBPROCESS, asserts stdout is EXACTLY ONE JSON object carrying the
@@ -1551,6 +1553,109 @@ class InstallTargetTests(unittest.TestCase):
             self.assertFalse(obj["ok"])
             self.assertEqual(code, 2)
             self.assertIn("exited 1", obj["error"])
+
+
+class ExternalModelStores(unittest.TestCase):
+    """`model.list` must index the stores the USER already has, not only Prometheus's own.
+
+    Measured 2026-10-01 before this was fixed: the Hub indexed Ollama (29 GB) and its own
+    library directory (0 B, empty), and ignored LM Studio (24 GB) and the HuggingFace hub cache
+    (90 GB). 114 GB of already-downloaded weights were invisible, so the Hub would offer to
+    "install" a model sitting on the disk.
+
+    Each store is resolved by its OWN rules, which is what these tests pin — a hand-rolled
+    guess at a default path is the thing that was wrong.
+    """
+
+    def _run_isolated(self, home, extra_env=None):
+        """model.list with a fake $HOME, so the real machine's stores cannot leak in."""
+        env = dict(os.environ)
+        env["HOME"] = str(home)
+        # Neutralise the ambient HF vars; the point is to control resolution exactly.
+        for k in ("HF_HUB_CACHE", "HF_HOME", "PROMETHEUS_MODELS_DIR"):
+            env.pop(k, None)
+        env.update(extra_env or {})
+        proc = subprocess.run(
+            [sys.executable, str(MODELHUB), "model.list"],
+            capture_output=True, text=True, timeout=120, env=env,
+        )
+        lines = [ln for ln in proc.stdout.strip().splitlines() if ln.strip()]
+        self.assertEqual(len(lines), 1, proc.stdout + proc.stderr)
+        return json.loads(lines[0])
+
+    def test_lmstudio_home_pointer_is_followed(self) -> None:
+        """LM Studio's home can be moved; `~/.lmstudio-home-pointer` is where it says so.
+
+        Someone with 24 GB of weights routinely relocates them off the boot disk. Assuming
+        `~/.lmstudio` would miss every such install.
+        """
+        with tempfile.TemporaryDirectory() as td:
+            home = Path(td) / "home"
+            moved = Path(td) / "elsewhere" / "lmstudio-home"
+            (moved / "models" / "org" / "repo").mkdir(parents=True)
+            (moved / "models" / "org" / "repo" / "weights.gguf").write_bytes(b"x" * 2048)
+            home.mkdir(parents=True)
+            (home / ".lmstudio-home-pointer").write_text(str(moved))
+
+            obj = self._run_isolated(home)
+            self.assertTrue(obj["ok"], obj)
+            lms = [m for m in obj["models"] if m.get("source") == "lmstudio"]
+            self.assertEqual(len(lms), 1, obj.get("roots"))
+            self.assertEqual(lms[0]["name"], "weights.gguf")
+            self.assertEqual(lms[0]["size_bytes"], 2048)
+            self.assertEqual(obj["roots"]["lmstudio"], str(moved / "models"))
+
+    def test_hf_cache_counts_each_tensor_once(self) -> None:
+        """The HF cache stores bytes in `blobs/` and exposes them as SYMLINKS under `snapshots/`.
+
+        Walking the whole tree would count every tensor twice — once by name, once by hash — and
+        report double the real size. Only the snapshot views are read, and `stat` follows the
+        link so the size is the real one.
+        """
+        with tempfile.TemporaryDirectory() as td:
+            home = Path(td) / "home"
+            cache = home / ".cache" / "huggingface" / "hub"
+            repo = cache / "models--acme--tiny"
+            blobs, snap = repo / "blobs", repo / "snapshots" / "deadbeef"
+            blobs.mkdir(parents=True)
+            snap.mkdir(parents=True)
+            real = blobs / "abc123"
+            real.write_bytes(b"y" * 4096)
+            (snap / "model.safetensors").symlink_to(real)
+
+            obj = self._run_isolated(home)
+            hf = [m for m in obj["models"] if m.get("source") == "hf-cache"]
+            self.assertEqual(len(hf), 1, f"the blob must not be counted again: {hf}")
+            self.assertEqual(hf[0]["name"], "model.safetensors")
+            self.assertEqual(hf[0]["size_bytes"], 4096, "stat must follow the symlink")
+            self.assertEqual(hf[0]["repo"], "acme/tiny", "repo id comes from the models--org--name dir")
+
+    def test_HF_HUB_CACHE_wins_over_the_default(self) -> None:
+        """HuggingFace's own precedence, honoured rather than guessed."""
+        with tempfile.TemporaryDirectory() as td:
+            home = Path(td) / "home"
+            (home / ".cache" / "huggingface" / "hub").mkdir(parents=True)
+            elsewhere = Path(td) / "big-disk" / "hub"
+            snap = elsewhere / "models--acme--moved" / "snapshots" / "aa"
+            snap.mkdir(parents=True)
+            (snap / "w.gguf").write_bytes(b"z" * 1024)
+
+            obj = self._run_isolated(home, {"HF_HUB_CACHE": str(elsewhere)})
+            self.assertEqual(obj["roots"]["hf-cache"], str(elsewhere))
+            hf = [m for m in obj["models"] if m.get("source") == "hf-cache"]
+            self.assertEqual(len(hf), 1)
+            self.assertEqual(hf[0]["repo"], "acme/moved")
+
+    def test_absent_stores_are_simply_absent(self) -> None:
+        """A machine with no LM Studio and no HF cache reports neither — and does not invent one."""
+        with tempfile.TemporaryDirectory() as td:
+            home = Path(td) / "home"
+            home.mkdir(parents=True)
+            obj = self._run_isolated(home)
+            self.assertTrue(obj["ok"], obj)
+            self.assertNotIn("lmstudio", obj["roots"])
+            self.assertNotIn("hf-cache", obj["roots"])
+            self.assertEqual([m for m in obj["models"] if m.get("source") == "lmstudio"], [])
 
 
 if __name__ == "__main__":

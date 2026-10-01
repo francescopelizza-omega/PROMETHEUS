@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * main/model-activity-store.ts — the desktop's half of the ONE shared "when was a local model
  * last used" file, mirroring model-health-store-path.ts's sharing convention exactly: the CLI's

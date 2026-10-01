@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * preload/index.ts — the contextBridge wire (runs in the isolated preload world).
  *

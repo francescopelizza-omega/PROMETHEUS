@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * ide/state/palette-commands.ts — the PURE editor-palette command surface (APP-004).
  *

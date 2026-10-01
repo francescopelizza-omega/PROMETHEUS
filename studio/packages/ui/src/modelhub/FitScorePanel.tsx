@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * FitScorePanel.tsx — the §7 per-quant fit table + recommended-quant explainer.
  *

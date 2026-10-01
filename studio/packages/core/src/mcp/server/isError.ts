@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * mcp/server/isError.ts — the MCP result error policy (file 09 §1.1 / §3).
  *

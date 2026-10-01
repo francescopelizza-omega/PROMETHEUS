@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * commands/secure-cmd.ts — the FULL `prometheus secure …` surface (file 03), at parity
  * with the GUI Security panel: the C4 arbitrary-target gate, the threat-DB, the

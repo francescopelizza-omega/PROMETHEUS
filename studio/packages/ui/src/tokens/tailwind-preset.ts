@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * tailwind-preset.ts — the Tailwind theme extension (file 08 §2/§6). It maps every
  * color to a CSS variable from tokens.css (NO raw hex — the §6 lint rule). New shadcn

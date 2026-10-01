@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * commands/env.ts — `prometheus env [list]`: list Python environments via the
  * envmgr.py sidecar (C7, C9 conda first-class). One JSON object on stdout.

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * token-economy/propose.ts — pick the token-saving toolkit Prometheus surfaces to a
  * user, given how they're working (a paid closed model vs a free local one). PURE.

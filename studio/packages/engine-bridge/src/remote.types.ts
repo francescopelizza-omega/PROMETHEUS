@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * remote.types.ts — remote interpreters (file 14 §3.7), PURE types + launcher argv.
  *

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * ide/state/tasks-config.ts — the PURE tasks.json model (plan file 13/22 · VS Code Tasks
  * · JetBrains "npm/External Tool" parity).

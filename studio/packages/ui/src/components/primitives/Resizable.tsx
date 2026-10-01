@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * Resizable.tsx — a two-pane split with a draggable handle (file 08 §3.1, the §4
  * panel splits: sidebar | workbench, editor | right rail). Keyboard-resizable

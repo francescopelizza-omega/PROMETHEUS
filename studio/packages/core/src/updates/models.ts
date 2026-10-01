@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * updates/models.ts — local (Ollama) model update detection + a curated FREE catalog.
  *

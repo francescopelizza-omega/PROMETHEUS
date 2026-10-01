@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * tui/highlight.ts — a PURE, stateful, line-fed syntax highlighter (WRAPPER Subsystem 2).
  *

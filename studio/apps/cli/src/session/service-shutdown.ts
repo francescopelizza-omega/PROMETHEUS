@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * session/service-shutdown.ts — free local-AI memory on exit (CLI-SVC).
  *

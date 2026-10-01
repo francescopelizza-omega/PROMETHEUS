@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * repl/slash.ts — the §3.1 slash-command registry + parser (PURE).
  *

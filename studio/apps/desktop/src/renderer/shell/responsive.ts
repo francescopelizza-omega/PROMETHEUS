@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * shell/responsive.ts — the §2 collapse order, as a pure function of viewport width.
  *

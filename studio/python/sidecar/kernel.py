@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Francesco Pelizza
 """kernel.py — the live Jupyter kernel sidecar (APP-044, notebook backend).
 
 Two modes, one program:

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * memory-block.ts — the durable memory block the agent pane prepends to its system prompt.
  *

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * route-table.ts — the SINGLE source of truth for the routed-verb set (CLI-050).
  *

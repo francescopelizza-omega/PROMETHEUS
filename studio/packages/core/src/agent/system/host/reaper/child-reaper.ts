@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * child-reaper.ts — kill every process this CLI spawned, on every exit path.
  *

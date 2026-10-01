@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Francesco Pelizza
 /**
  * commands.ts — the CANONICAL COMMAND PARITY ROUTER (file 01 §11.3 / 11 §2+§5).
  *
