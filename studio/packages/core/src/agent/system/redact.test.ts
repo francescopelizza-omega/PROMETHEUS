@@ -21,7 +21,7 @@ const SHAPES: [label: string, sample: string, kind: string][] = [
   ["github oauth", "gho_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", "github-token"],
   ["github fine-grained", "github_pat_AAAAAAAAAAAAAAAAAAAAAAAA_BBBBBBBB", "github-token"],
   ["gitlab", "glpat-AAAAAAAAAAAAAAAAAAAA", "gitlab-token"],
-  ["slack bot", "xoxb-1111111111-2222222222-AAAAAAAAAAAAAAAAAAAAAAAA", "slack-token"],
+  ["slack bot", "xoxb-FIXTURE-SYNTHETIC-NOT-REAL-PLACEHOLDER", "slack-token"],
   ["google", "AIzaSyAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", "google-key"],
   ["huggingface", "hf_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", "huggingface-token"],
   ["npm", "npm_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", "npm-token"],
