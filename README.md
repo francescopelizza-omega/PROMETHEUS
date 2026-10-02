@@ -257,16 +257,18 @@ the full list of what is *not* finished.
 | **Reasoning-effort dial** | `off · low · medium · high · xhigh · ultra · max`, applied per provider including an Ollama `/v1` shim. `/think` |
 | **Background + scheduled runs** | Detach a prompt so it survives the prompt returning (`/background`), or scaffold cron/launchd headless runs (`prometheus tasks`) |
 
-### 🧰 The agent's toolbox — 49 tools
+### 🧰 The agent's toolbox — 52 tools
+
+49 on every surface, plus 3 `browser_*` tools that only the Studio desktop app offers (the CLI has no browser to drive).
 
 | | |
 |---|---|
 | **Read (16)** | `read_file` `list_dir` `glob` `grep` `semantic_search` `stat_path` `git_status` `git_diff` `git_log` `git_show` `system_info` `gpu_info` `process_list` `which` … |
-| **Write** | `propose_edit` (exact-match hunks, human-approved), `write_file`, `apply_patch`, `delete_file` (captures contents first, so it is undoable), `move_file` |
-| **Execute** | `run_command` under the OS sandbox, with `job_status` / `job_output` / `job_kill` for long jobs — plus `propose_elevated`, because the agent never escalates itself |
-| **Web** | `web_fetch` through a fail-closed SSRF/nemesis proxy, returning web content as **untrusted data, never instructions**; `web_search`; sandboxed `browser_*` tools ⚠ in the agent's *own* isolated tab, never your session |
-| **Memory + tasks** | `memory_write` / `memory_read` for durable cross-session facts; `todowrite` / `todoread` for the run's task list |
-| **Delegation** | `spawn_agent` returns only a sub-agent's final answer, so its intermediate work never enters the parent's context; `question` asks you one thing and waits |
+| **Write (6)** | `propose_edit` (exact-match hunks, human-approved), `write_file`, `apply_patch`, `delete_file` (captures contents first, so it is undoable), `move_file`, `mkdir` |
+| **Execute (5)** | `run_command` under the OS sandbox, with `job_status` / `job_output` / `job_kill` for long jobs — plus `propose_elevated`, because the agent never escalates itself |
+| **Web (2 + 3)** | `web_fetch` through a fail-closed SSRF/nemesis proxy, returning web content as **untrusted data, never instructions**; `web_search`; desktop-only: `browser_navigate` / `browser_screenshot` / `browser_extract_text` ⚠ in the agent's *own* isolated tab, never your session |
+| **Memory + tasks (4)** | `memory_write` / `memory_read` for durable cross-session facts; `todowrite` / `todoread` for the run's task list |
+| **Delegation (2)** | `spawn_agent` returns only a sub-agent's final answer, so its intermediate work never enters the parent's context; `question` asks you one thing and waits |
 | **Engine verbs (14)** | `prometheus_scan` `prometheus_superscan` `prometheus_list` `prometheus_info` `prometheus_audit` `prometheus_matrix` … |
 | **External programs** | Detect and gate-install `imagemagick`, `ffmpeg`, `yt-dlp` and friends, then use them. `/deps` |
 
