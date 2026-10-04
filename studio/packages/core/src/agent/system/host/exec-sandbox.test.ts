@@ -866,7 +866,15 @@ test("the persistence deny-list covers Prometheus's OWN state and agent hook con
    * command on the next session start — arbitrary code execution on a delay.
    */
   const home = homedir();
-  const plan = planExecSandbox({ writableRoots: [home], authLevel: 3 });
+  // Pinned to the Seatbelt planner: on a Linux host without bwrap (CI, 2026-10-04) the plan is
+  // `none` and carries no deny set at all, so this only ever passed on a Mac. The deny list is
+  // shared by both drivers; what is under test is its content, not which host ran the suite.
+  const plan = planExecSandbox({
+    writableRoots: [home],
+    authLevel: 3,
+    platform: "darwin",
+    exists: () => true,
+  });
   const rendered = JSON.stringify(plan);
   for (const p of [
     ".prometheus",

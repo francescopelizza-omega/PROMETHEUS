@@ -140,6 +140,10 @@ security:
 verify:
   stage: verify
   script:
+    # ripgrep is a HARD prerequisite of the agent's glob/grep tools (CLAUDE.md §3), and the
+    # system-tools suite exercises them. The image has none, and a missing tool is fixed in the
+    # environment, never by changing the test.
+    - apt-get update -qq && apt-get install -y -qq --no-install-recommends ripgrep >/dev/null && rg --version | head -n 1
     # Both TypeScript projects. The desktop one is separate and is NOT covered by `tsc -b` —
     # a change can typecheck in the workspace and break the app.
     - pnpm run typecheck
