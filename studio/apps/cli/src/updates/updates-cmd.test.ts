@@ -646,3 +646,147 @@ test("/updates fix with no conflicts says so, and an unknown tool does not silen
     rmSync(home, { recursive: true, force: true });
   }
 });
+
+/* ── "Do you want to update everything right now? y/N" ── */
+
+/** One outdated formula and nothing else — the smallest report a y could act on. */
+function outdatedReport(): u.UpdateReport {
+  return {
+    clis: [],
+    models: { diff: { changed: [], added: [], removed: [] }, suggestions: [] },
+    self: {
+      prometheus: "0.1.0",
+      updateAvailable: false,
+      plan: u.buildSelfUpdatePlan({ method: "unknown" }),
+    },
+    checkedAt: "2026-10-02T00:00:00.000Z",
+    tools: [],
+    conflicts: [],
+    managers: [
+      {
+        manager: "brew",
+        label: "Homebrew",
+        checkable: true,
+        ok: true,
+        packages: [
+          {
+            manager: "brew",
+            name: "ripgrep",
+            kind: "formula",
+            installed: "15.1.0",
+            available: "15.2.0",
+          },
+        ],
+      },
+    ],
+  };
+}
+
+function dispatchFakes() {
+  const asked: string[] = [];
+  const ran: string[] = [];
+  const ac = new AbortController();
+  return {
+    asked,
+    ran,
+    actions: {
+      confirm: async () => false,
+      ask: async (p: string) => {
+        asked.push(p);
+        return "y";
+      },
+      getAuthLevel: () => 7,
+      signal: () => ac.signal,
+    },
+    dispatch: {
+      run: async (argv: readonly string[]) => {
+        ran.push(argv.join(" "));
+        return { code: 0, stdout: "", stderr: "", timedOut: false, aborted: false };
+      },
+      probes: {
+        casks: async () => new Map(),
+        formulae: async () => new Map(),
+        brewEnv: async () => [],
+        npmGlobal: async () => null,
+        venv: () => ({ pip: true, uvTool: false, project: false, requiredBy: [] }),
+        modelStoreHas: () => true,
+        modelStorePath: () => "/Users/u/.ollama/models",
+      },
+      pull: async () => ({ ok: true, error: "", aborted: false }),
+      audit: () => {},
+      freeDiskBytes: () => 100e9,
+      runtimeFormula: () => undefined,
+      getPermMode: () => undefined,
+      ctrlCIsAbort: () => true,
+      dryRun: () => false,
+      closed: () => false,
+      invalidateCache: () => {},
+      platform: "darwin" as const,
+      baseEnv: () => ({}),
+      settle: async () => {},
+    },
+  };
+}
+
+test("an interactive /updates asks to update everything AFTER the report, and y runs it", async () => {
+  const home = tmpHome();
+  try {
+    const lines: string[] = [];
+    const f = dispatchFakes();
+    await runUpdates("", {
+      home,
+      promVersion: "0.1.0",
+      write: (l) => lines.push(l),
+      check: async () => ({ report: outdatedReport(), fromCache: false }),
+      actions: f.actions,
+      dispatch: f.dispatch,
+    });
+    assert.deepEqual(f.asked, ["Do you want to update everything right now? y/N"]);
+    assert.deepEqual(f.ran, ["brew upgrade --formula --yes ripgrep"]);
+    const out = lines.join("\n");
+    assert.ok(out.indexOf("Packages") < out.indexOf("Update everything"), "report first");
+    // the propose-only footer would now contradict what just happened
+    assert.ok(!/never auto-update/i.test(out));
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("without the dispatch seam (the one-shot CLI) nothing is offered and the footer stays", async () => {
+  const home = tmpHome();
+  try {
+    const lines: string[] = [];
+    const f = dispatchFakes();
+    await runUpdates("", {
+      home,
+      promVersion: "0.1.0",
+      write: (l) => lines.push(l),
+      check: async () => ({ report: outdatedReport(), fromCache: false }),
+      actions: f.actions,
+    });
+    assert.deepEqual(f.asked, []);
+    assert.deepEqual(f.ran, []);
+    assert.match(lines.join("\n"), /never auto-update/i);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("/updates fix never offers to update everything — a repair is not an upgrade", async () => {
+  const home = tmpHome();
+  try {
+    const f = dispatchFakes();
+    await runUpdates("fix", {
+      home,
+      promVersion: "0.1.0",
+      write: () => {},
+      check: async () => ({ report: outdatedReport(), fromCache: false }),
+      actions: f.actions,
+      dispatch: f.dispatch,
+    });
+    assert.deepEqual(f.asked, []);
+    assert.deepEqual(f.ran, []);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});

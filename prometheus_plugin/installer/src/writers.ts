@@ -75,26 +75,39 @@ export function applyAgent(t: AgentTarget, pyPath: string, dryRun: boolean, laun
     case "toml-mcpServers": {
       // text-splice so user COMMENTS and unrelated tables are preserved (a full
       // @iarna/toml reparse+stringify would drop every comment). Replace just the
-      // [mcp_servers.prometheus] table if present, else append it.
+      // [mcp_servers.prometheus] table — with any [mcp_servers.prometheus.*] sub-table, which is
+      // how `codex mcp add` writes env — if present, else append it.
+      //
+      // Emitted key by key with TOML.stringify.value, NOT "[mcp_servers.prometheus]\n" +
+      // TOML.stringify({ ..., env }): @iarna/toml heads a nested object with its key relative to
+      // the ROOT, so env came out as a TOP-LEVEL [env] table. PROMETHEUS_PY never reached the
+      // server, and since the old replace stopped at the next "\n[", every re-run (a repair
+      // included) appended a second [env] — a duplicate table, invalid TOML, and Codex rejects its
+      // whole config.toml (found in a real ~/.codex/config.toml, 2026-10-03).
       const raw = readText(t.configPath);
+      const v = TOML.stringify.value;
       const block =
-        "[mcp_servers.prometheus]\n" +
-        TOML.stringify({
-          command: server.command,
-          args: server.args,
-          env: server.env,
-          startup_timeout_sec: 30,
-          tool_timeout_sec: 600,
-        }).trimEnd() +
-        "\n";
-      const sectionRx = /(^|\n)\[mcp_servers\.prometheus\][\s\S]*?(?=\n\[|\n*$)/;
-      if (sectionRx.test(raw)) {
+        [
+          "[mcp_servers.prometheus]",
+          `command = ${v(server.command)}`,
+          `args = ${v(server.args)}`,
+          ...(Object.keys(server.env).length > 0 ? [`env = ${v(server.env)}`] : []),
+          "startup_timeout_sec = 30",
+          "tool_timeout_sec = 600",
+        ].join("\n") + "\n";
+      const sectionRx =
+        /(^|\n)\[mcp_servers\.prometheus\][\s\S]*?(?=\n\[(?!mcp_servers\.prometheus[.\]])|\n*$)/;
+      // The orphan an earlier version of this writer left behind: a top-level [env] holding only
+      // PROMETHEUS_PY. Dropped so the file parses again; an [env] with anything else is left alone.
+      const orphanRx = /(^|\n)\[env\]\nPROMETHEUS_PY = "[^"\n]*"\n?(?=\n|\[|$)/g;
+      const cleaned = raw.replace(orphanRx, "$1");
+      if (sectionRx.test(cleaned)) {
         had = true;
-        merged = raw.replace(sectionRx, (m) => (m.startsWith("\n") ? "\n" : "") + block.trimEnd());
+        merged = cleaned.replace(sectionRx, (m) => (m.startsWith("\n") ? "\n" : "") + block.trimEnd());
         if (!merged.endsWith("\n")) merged += "\n";
       } else {
         had = false;
-        merged = (raw.trimEnd() ? raw.trimEnd() + "\n\n" : "") + block;
+        merged = (cleaned.trimEnd() ? cleaned.trimEnd() + "\n\n" : "") + block;
       }
       break;
     }

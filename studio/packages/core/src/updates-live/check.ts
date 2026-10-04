@@ -115,6 +115,19 @@ function saveState(home: string, state: UpdateState): void {
   }
 }
 
+/**
+ * Make the next throttled check recompute instead of serving the cached report.
+ *
+ * Called after "update everything" ran something: the cached report still lists what was just
+ * upgraded, so the startup notice and Studio's Updates page would advertise it again for up to
+ * six hours. The model-digest snapshot is kept — it is what the next check diffs against.
+ */
+export function markUpdateCacheStale(home: string): void {
+  const prev = loadState(home);
+  if (!prev) return;
+  saveState(home, { ...prev, checkedAt: new Date(0).toISOString() });
+}
+
 /** Check every known vendor CLI: installed? current vs latest? */
 async function checkClis(deps: CheckDeps): Promise<u.CliUpdateStatus[]> {
   const whichFn = deps.which ?? which;
@@ -276,14 +289,21 @@ function managerReports(sweeps: readonly ManagerSweep[]): u.ManagerReport[] {
  */
 function unreachableBinDirs(
   deps: CheckDeps,
-): { manager: string; dir: string; installCommand: string }[] {
+): { manager: string; managerId: "npm-global"; dir: string; installCommand: string }[] {
   if (deps.npmBinDir === null) return [];
   const dir = deps.npmBinDir ?? npmGlobalBinDir();
   if (!dir) return [];
   const onPath = deps.onPath ?? ((d: string) => onSearchPath(d));
   return onPath(dir)
     ? []
-    : [{ manager: "npm (global)", dir, installCommand: "npm install -g <package>" }];
+    : [
+        {
+          manager: "npm (global)",
+          managerId: "npm-global",
+          dir,
+          installCommand: "npm install -g <package>",
+        },
+      ];
 }
 
 export interface CheckResult {

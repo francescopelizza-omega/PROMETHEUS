@@ -4,10 +4,15 @@
  * updates/updates-cmd.ts — the `/updates` command + the throttled startup notice.
  *
  * `/updates` forces a fresh check + prints the full report (vendor CLIs, local models,
- * Prometheus self) with the exact COPYABLE commands — and never runs them (propose, the user
- * pastes; AUTO_INSTALL=false ethos). `updatesStartupNotice` runs a THROTTLED check (cheap,
- * fail-soft, cached) and returns a single one-liner pointing at /updates, or "" when nothing
- * is actionable — so the session boot stays fast + quiet when there's nothing to say.
+ * Prometheus self) with the exact COPYABLE commands. In an interactive session at authorisation
+ * A5 or above, outside plan mode and dry-run, it then asks "Do you want to update everything right
+ * now? y/N" and, on y, runs what can safely be run (`dispatch-cmd.ts`); below A5 (the default is
+ * A1) it shows what y would run and how to allow it. Everywhere else — the one-shot `prometheus
+ * updates [--json]`, the desktop — it only proposes, and nothing ever runs without that explicit y
+ * (AUTO_INSTALL=false ethos).
+ * `updatesStartupNotice` runs a THROTTLED check (cheap, fail-soft, cached) and returns a single
+ * one-liner pointing at /updates, or "" when nothing is actionable — so the session boot stays
+ * fast + quiet when there's nothing to say.
  */
 import { updates as u } from "@prometheus/core";
 import type { EngineClient } from "@prometheus/engine-bridge";
@@ -20,6 +25,7 @@ import {
 } from "@prometheus/core/updates-live";
 import { loadSettings } from "../home.js";
 import { c } from "../render.js";
+import { type DispatchDeps, offerAndDispatch } from "./dispatch-cmd.js";
 import {
   type ModelActionDeps,
   parseSubcommand,
@@ -48,13 +54,20 @@ export interface UpdatesDeps {
   /** package/repo overrides; `channel` is resolved from settings and always set. */
   selfConfig?: Partial<u.SelfUpdateConfig>;
   /**
-   * The seams the ACTION subcommands need — `/updates pull` and `/updates rm`.
+   * The seams the ACTIONS need — `/updates pull`, `/updates rm`, and the "update everything"
+   * question asked after the report.
    *
    * Optional, because a surface that cannot ask a question must not be able to run an
    * irreversible one either. When they are absent the subcommands refuse and say so, rather
    * than proceeding with an assumed "yes" or an assumed authorisation level.
    */
   actions?: Omit<ModelActionDeps, "write">;
+  /**
+   * What "update everything" runs with: the step runner, the model pull, the audit trail and the
+   * machine facts the plan needs. Supplied only by the interactive hosts; without it (or without
+   * `actions`) the report ends with the propose-only footer and nothing is offered.
+   */
+  dispatch?: DispatchDeps;
   /**
    * The catalogue seam — what to search and what this machine can run.
    *
@@ -164,18 +177,18 @@ function colorize(report: u.UpdateReport): string {
  *
  * ── WHY THIS PRINTS AND DOES NOT SPAWN ──────────────────────────────────────────────────────
  *
- * The obvious next step is to run the command. This deliberately does not, and the reason is not
- * timidity — it is that the two candidate executors are both worse than printing:
+ * The obvious next step is to run the command. This deliberately does not — not even after the
+ * "update everything" question, which runs UPGRADES and never a repair:
  *
- *   • `brew` evaluates Ruby from the tap, runs formula post-install scripts, and for a cask
- *     installs a `.pkg` whose pre/post-install scripts run under `sudo`. That is FETCHED CODE
- *     EXECUTING, started by Prometheus. CLAUDE.md §5: "`nemesis` is a fail-closed gate: fetched
- *     code is scanned before it is allowed to execute. Do not add a bypass, a 'dev mode' skip, or
- *     a default-allow branch." A dedicated spawn path inside `/updates fix` is precisely a
- *     default-allow branch, in the repo of a security tool.
- *   • Routing it through the host's own gated runner would be correct, and that runner already
- *     exists — it is what the agent uses for any `run_command`. Which means the user already has
- *     a way to run this under the gate, and `/updates fix` does not need a second one.
+ *   • A repair is an uninstall or a shell-init edit: `brew uninstall`, `npm uninstall -g`, an
+ *     append to `~/.zshenv` through `sh -c`. Removals sit on the DESTRUCTIVE rung, `brew
+ *     uninstall` has no `--dry-run` to preview with, and one plausible-looking variant (`--zap`)
+ *     deletes the very install being kept. Each one deserves its own reading, not a batch "y".
+ *   • There is no gated runner to hand it to. The agent's `run_command` sandbox confines writes to
+ *     the working set, forbids `sh` and `sudo`, and denies the network below A5 — so a package
+ *     change is unreachable from it at every level, by design (session/install-tools.ts header).
+ *     A dedicated spawn path for repairs would be exactly the kind of default-allow branch
+ *     CLAUDE.md §5 forbids.
  *
  * What was actually missing was never the execution. It was knowing WHICH command, because the
  * plausible ones are wrong in ways that are invisible until after: `brew upgrade --cask
@@ -248,10 +261,11 @@ function renderFix(report: u.UpdateReport, subject: string): string {
   return out.join("\n");
 }
 
-/** `/updates` — force a fresh check + print the full, copyable report. Returns the report so the
- *  CLI can emit a structured `--json` envelope (CLI-047), or `null` on a check FAILURE (distinct
- *  from a successful check with nothing to update, which returns a real report). Human output
- *  via `deps.write` is byte-identical either way. */
+/** `/updates` — force a fresh check + print the full, copyable report, then (interactive hosts
+ *  only) offer to update everything. Returns the report so the CLI can emit a structured `--json`
+ *  envelope (CLI-047), or `null` on a check FAILURE (distinct from a successful check with nothing
+ *  to update, which returns a real report). Without `actions` + `dispatch` — the one-shot path —
+ *  the human output is the report and the propose-only footer, byte-identical to before. */
 export async function runUpdates(rest: string, deps: UpdatesDeps): Promise<u.UpdateReport | null> {
   /**
    * The action subcommands come first, and they never fall through to the report.
@@ -333,6 +347,16 @@ export async function runUpdates(rest: string, deps: UpdatesDeps): Promise<u.Upd
     deps.write(
       c.dim("`/updates fix <tool>` shows just one repair, re-measured at the moment you ask."),
     );
+  }
+  if (deps.actions && deps.dispatch) {
+    // The next step the report used to leave to the user: ask once, run what can safely be run.
+    await offerAndDispatch(result.report, {
+      write: deps.write,
+      actions: deps.actions,
+      dispatch: deps.dispatch,
+      ...(deps.selfConfig ? { selfConfig: deps.selfConfig } : {}),
+    });
+    return result.report;
   }
   deps.write(
     c.dim("Prometheus proposes; it never auto-updates. Copy a command above + run it yourself."),

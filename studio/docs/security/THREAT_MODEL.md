@@ -52,7 +52,11 @@ The GOLDEN RULE is enforced in code, not just stated here: **JavaScript never
 decides "safe" — it renders a verdict the Python engine computed.** There is no
 severity scoring, no allowlist, no regex rule, no "looks fine" heuristic anywhere
 in the TypeScript codebase. The only spawner of `python3` / `nemesis` is
-`@prometheus/engine-bridge`.
+`@prometheus/engine-bridge`. One labelled exception: `/updates`' confirmed "update
+everything" (below) never asks nemesis for a verdict — TypeScript policy
+(`packages/core/src/updates/dispatch.ts`: official taps, checksums, holds, no root)
+decides what it runs, and `apps/cli/src/updates/run-step.ts` spawns the package
+managers, and a virtualenv's own `python -m pip`, directly.
 
 Any of the following collapses the verdict to **`error`**, which Studio treats as
 a **BLOCK** (fail-closed):
@@ -98,6 +102,21 @@ pentest tooling are gated by **recipe**, not by built artifact. Studio labels
 these installs **"recipe-scanned; built artifact not file-scannable"** — never
 green.
 
+**`/updates` → "update everything" trusts the package managers, not nemesis.**
+Answering `y` to *"Do you want to update everything right now? y/N"* runs official
+package-manager upgrades — Homebrew formulae and casks from the official taps, npm
+and pipx globals, a virtualenv's own pip — and pulls Ollama models that changed
+upstream (Ollama pulls are not nemesis-scanned on any path — `/setup`, `/updates pull`,
+`prometheus model pull <family:tag>` or this; only `prometheus model pull <org/repo> --staged`
+stages Hugging Face weights through the gate). The packages are **not** nemesis-scanned: the default gate blocks every
+archive that contains an executable (`HEUR-EXE`, measured on an official Homebrew
+bottle), so it cannot vet a binary package. They are trusted to each manager's own
+checksum, exactly as when you type the command yourself. This is an owner decision
+(2026-10-02) scoped to that one confirmed command: nothing runs without the explicit
+`y`; vendor self-updaters, anything needing `sudo`, third-party taps and casks that
+publish no checksum are never run; and every step is recorded in
+`~/.prometheus/config/exec-audit.jsonl`.
+
 ## Offline / degraded operation
 
 On a first run with no network, the signature and SCA feeds may be absent. The
@@ -126,5 +145,7 @@ transit; it does not tell you the machine wasn't already compromised.
 
 nemesis is the strongest pre-install gate of any local AI tool — every repo,
 package, model, plugin, skill, app, worldsim, and MCP server routes through it,
-fail-closed — but it is **defense in depth, not a guarantee.** Read every verdict
+fail-closed (the exceptions are labelled above: `/updates`' confirmed "update
+everything", Ollama model pulls, and the model-tooling installers `model install-runner`,
+`install-hf-cli` and `install-converter`) — but it is **defense in depth, not a guarantee.** Read every verdict
 as *"no known threats found,"* never as *"proven safe."*

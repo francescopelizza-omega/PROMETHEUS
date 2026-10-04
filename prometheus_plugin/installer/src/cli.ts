@@ -27,6 +27,8 @@ interface Opts {
   agent: string; // "all" or an id
   dryRun: boolean;
   py: string;
+  /** py came from --py or $PROMETHEUS_PY, not from auto-detection. */
+  pyExplicit: boolean;
   list: boolean;
   mode: LaunchMode;
   server: string; // explicit built server.js (local mode); "" = auto-resolve
@@ -34,15 +36,18 @@ interface Opts {
 
 function parseArgs(argv: string[]): Opts {
   const o: Opts = {
-    agent: "all", dryRun: false, py: resolveDefaultPy(), list: false,
-    mode: "local", server: "",
+    agent: "all", dryRun: false, py: resolveDefaultPy(), pyExplicit: !!process.env.PROMETHEUS_PY,
+    list: false, mode: "local", server: "",
   };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === "--agent") o.agent = argv[++i];
     else if (a === "--dry-run") o.dryRun = true;
     else if (a === "--list") o.list = true;
-    else if (a === "--py") o.py = argv[++i];
+    else if (a === "--py") {
+      o.py = argv[++i];
+      o.pyExplicit = true;
+    }
     else if (a === "--mode") {
       const m = argv[++i];
       if (m !== "local" && m !== "npx") {
@@ -236,10 +241,23 @@ function main(): void {
   }
 
   if (!existsSync(opts.py)) {
+    // mcp-server/src/bridge.ts: an explicit PROMETHEUS_PY that does not exist is a hard ERROR on
+    // every tool call, so persisting one ships a registration that is dead on arrival — measured:
+    // PROMETHEUS_PY="/tmp/missing.py" in Claude, Codex and Gemini at once (2026-10-03). An explicit
+    // path is refused; a defaulted one is left out, and the server's own lookup
+    // ($PROMETHEUS_HOME/engine, ~/.prometheus/engine, ...) finds the engine once it exists.
+    if (opts.pyExplicit && !opts.dryRun) {
+      process.stderr.write(
+        `ERROR: prometheus.py not found at ${opts.py} — refusing to register a path the MCP ` +
+          `server rejects on every call. Fix --py / PROMETHEUS_PY.\n`,
+      );
+      process.exit(2);
+    }
     process.stderr.write(
-      `WARNING: prometheus.py not found at ${opts.py}. ` +
-        `The manifests will still be written; set PROMETHEUS_PY or pass --py.\n`,
+      `WARNING: prometheus.py not found at ${opts.py}; registering WITHOUT PROMETHEUS_PY ` +
+        `(the server resolves the engine itself).\n`,
     );
+    opts.py = "";
   }
 
   // Resolve how the agents will launch the server, and fail loudly in local mode
@@ -277,7 +295,24 @@ function main(): void {
           process.stderr.write(`  (dry-run) ${reg.bin} ${reg.argv.join(" ")}\n`);
           results.push({ agent: t.id, path: `${reg.bin} mcp add`, action: "skipped", note: t.note });
         } else {
-          execFileSync(reg.bin, reg.argv, { stdio: "ignore" });
+          // `claude mcp add` refuses an existing name, so a re-run used to fail and leave the old
+          // (possibly dead) entry in place. Remove first; "not registered" is the normal case on a
+          // first install, so its failure is ignored.
+          const un = t.cliUnregister?.();
+          if (un) {
+            try {
+              execFileSync(un.bin, un.argv, { stdio: "ignore" });
+            } catch {
+              /* nothing registered yet */
+            }
+          }
+          try {
+            execFileSync(reg.bin, reg.argv, { stdio: "ignore" });
+          } catch (e) {
+            throw new Error(
+              `${(e as Error).message}\n    re-run it yourself: ${reg.bin} ${reg.argv.map((a) => JSON.stringify(a)).join(" ")}`,
+            );
+          }
           results.push({ agent: t.id, path: `${reg.bin} mcp add`, action: "written", note: t.note });
         }
         continue;
@@ -295,7 +330,7 @@ function main(): void {
     process.stdout.write(`  ${r.action.padEnd(8)} ${r.agent.padEnd(10)} ${r.path}\n`);
     process.stdout.write(`           next: ${r.note}\n`);
   }
-  process.stdout.write(`\nengine: ${opts.py}\n`);
+  process.stdout.write(`\nengine: ${opts.py || "(resolved by the server)"}\n`);
   process.stdout.write(`launch: [${opts.mode}] ${launch.command} ${launch.args.join(" ")}\n`);
 }
 

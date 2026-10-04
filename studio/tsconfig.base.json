@@ -1,5 +1,6 @@
 {
   "$schema": "https://json.schemastore.org/tsconfig",
+  "//typeRoots": "Deliberately UNSET. It used to list ./node_modules/.pnpm/@types+node@20.19.43/node_modules/@types: a pnpm-internal store path for one exact version, which the lockfile no longer contained. A long-lived checkout still had @types/node 20.19.43 under BOTH roots (node_modules/@types/node is a leftover real directory from an older, flat install layout), so every local build passed, while every clean clone (install.sh, CI) failed with TS2688 \"Cannot find type definition file for 'node'\" (external report, 2026-10-03). Setting typeRoots also switches off TypeScript's normal node_modules/@types lookup, so declaring the package was not enough while it stayed. Each project that lists \"node\" in `types` declares @types/node in its OWN package.json instead: the isolated linker only exposes what a package declares.",
   "compilerOptions": {
     "target": "ES2022",
     "module": "ESNext",
@@ -16,10 +17,6 @@
     "declaration": true,
     "declarationMap": true,
     "sourceMap": true,
-    "composite": true,
-    "typeRoots": [
-      "./node_modules/@types",
-      "./node_modules/.pnpm/@types+node@20.19.43/node_modules/@types"
-    ]
+    "composite": true
   }
 }

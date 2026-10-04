@@ -125,6 +125,15 @@ export interface OutdatedPackage {
   /** held back by the user; upgrading it needs an explicit unpin first. */
   pinned?: boolean;
   /**
+   * pipx only: the venv the package lives in, which is what `pipx upgrade` takes — present only
+   * when it DIFFERS from `name`.
+   *
+   * It differs for an install made with `--suffix`, where the venv is `<name><suffix>` and
+   * `pipx upgrade <name>` addresses nothing. Absent in the common case so every existing row keeps
+   * its shape.
+   */
+  environment?: string;
+  /**
    * Homebrew only: which of its two package kinds this row came from.
    *
    * `brew outdated --json` returns `{ formulae: [...], casks: [...] }` and the old parser threw
@@ -683,6 +692,9 @@ export function parsePipxOutdated(stdout: string): OutdatedPackage[] {
       ...(typeof p.version === "string" ? { installed: p.version } : {}),
       ...(typeof p.latest_version === "string" ? { available: p.latest_version } : {}),
       ...(p.pinned === true ? { pinned: true } : {}),
+      ...(typeof p.environment === "string" && p.environment !== "" && p.environment !== name
+        ? { environment: p.environment }
+        : {}),
     });
   }
   return rows;

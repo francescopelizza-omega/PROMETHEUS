@@ -50,7 +50,7 @@ import { openInvokeOverlay } from "./invoke-overlay.js";
 import { type KeyEvent, decodeKeys } from "./keys.js";
 import { type ListOverlayItem, openListOverlay } from "./list-overlay.js";
 import { createMarkdownRenderer } from "./markdown.js";
-import { type ColorCaps, detectColorCaps, paint, paintDuration } from "./palette.js";
+import { type ColorCaps, type Role, detectColorCaps, paint, paintDuration } from "./palette.js";
 import { workingLine } from "./quantum-verbs.js";
 import { BG_BLACK, BG_RESET, ENTER_TUI, RESTORE_TUI, Renderer, reflowSlack } from "./redraw.js";
 import {
@@ -64,7 +64,7 @@ import {
 import { createSessionBridge } from "./session-bridge.js";
 import { traitCells, traitRailFits } from "./status.js";
 import { SUDO_ACK_PROMPT, detectElevation, resolveSudoDecision, sudoWarningLines } from "./sudo.js";
-import { graphemeCount, stringWidth } from "./width.js";
+import { graphemeCount, stringWidth, wrapLine } from "./width.js";
 
 /** Injection seams (tests / non-default streams). */
 /**
@@ -251,6 +251,14 @@ export async function launchTui(parsed: ParsedArgs, deps: TuiDeps = {}): Promise
   // the live confirm/ask modal (CLI-064): a paint record (not just a boolean) so a SIGWINCH can
   // re-derive + repaint the prompt + typed buffer at the new width. null = no modal open.
   let modal: ModalView | null = null;
+  /**
+   * Settles the open modal as if dismissed. `finish()` calls it: a hang-up while a question is
+   * open would otherwise leave the turn waiting on keys that can no longer arrive, and the process
+   * alive forever.
+   */
+  let cancelModal: (() => void) | null = null;
+  /** the running turn's spinner, so `finish()` can stop it. */
+  let spinTimer: ReturnType<typeof setInterval> | null = null;
   let modalLines = 0; // physical lines the last modal paint occupied (for the repaint move-up).
   /**
    * WHERE the last paint left the cursor, 0-based from the modal's first line.
@@ -266,6 +274,12 @@ export async function launchTui(parsed: ParsedArgs, deps: TuiDeps = {}): Promise
   let modalCursorRow = 0;
   let entered = false;
   let resolveExit: ((code: number) => void) | null = null;
+  /**
+   * Set once `finish()` has handed the terminal back. A turn still in flight at that moment (a
+   * crash, a signal) must not keep drawing: its spinner frames and its closing elapsed-time line
+   * would land in the user's shell with the TUI's autowrap-off sequences attached.
+   */
+  let exited = false;
 
   // key routing: the main composer handler, or a modal's transient handler.
   type KeyHandler = (k: KeyEvent) => void;
@@ -346,8 +360,13 @@ export async function launchTui(parsed: ParsedArgs, deps: TuiDeps = {}): Promise
   const renderPaneText = (text: string): string => {
     const out: string[] = [];
     for (const line of text.split("\n")) {
-      if (isFramingLine(line)) out.push(paintByHeuristic(line, caps));
-      else out.push(...md.feedLine(line));
+      if (isFramingLine(line)) {
+        // Continuation rows take the FIRST row's colour: re-guessing each one paints a command's
+        // `--formula` row as a deleted diff line.
+        const rows = wrapFraming(line, Math.max(20, size.cols - 1));
+        const role = heuristicRole(rows[0] ?? "");
+        for (const row of rows) out.push(role && caps !== "none" ? paint(row, role, caps) : row);
+      } else out.push(...md.feedLine(line));
     }
     return out.join("\n");
   };
@@ -580,6 +599,11 @@ export async function launchTui(parsed: ParsedArgs, deps: TuiDeps = {}): Promise
   }
   function finish(code: number): void {
     if (resolveExit === null) return;
+    exited = true;
+    turnAbort?.abort();
+    cancelModal?.();
+    if (spinTimer) clearInterval(spinTimer);
+    spinTimer = null;
     renderer.clear();
     restore();
     stdout.write("\n");
@@ -728,10 +752,25 @@ export async function launchTui(parsed: ParsedArgs, deps: TuiDeps = {}): Promise
   let submitChain: Promise<void> = Promise.resolve();
   // per-turn abort handle — Ctrl-C during a running turn aborts THIS controller.
   let turnAbort: AbortController | null = null;
+  /** an exit (Ctrl-D) waiting for the update step in flight; its code once the line ends. */
+  let exitAfterTurn: number | null = null;
   function dispatch(effects: TuiEffect[]): void {
     for (const e of effects) {
       switch (e.type) {
         case "submit":
+          // A lone "y" typed while /updates works is someone answering early: queued, it would
+          // reach the agent as a prompt once /updates is done.
+          if (running && session.dropsEarlyYes?.(e.text)) {
+            renderer.printAbove(
+              paint(
+                '(ignored a "y" typed while /updates was running — it would have gone to the agent)',
+                "muted",
+                caps,
+              ),
+            );
+            scheduleRender();
+            break;
+          }
           // persist the submitted line for cross-restart ↑/↓ (CLI-062); secrets/empties skipped,
           // adjacent dups deduped on disk. Fire-and-forget, never blocks/breaks the submit.
           appendInputHistory(historyFile, e.text);
@@ -750,7 +789,20 @@ export async function launchTui(parsed: ParsedArgs, deps: TuiDeps = {}): Promise
             });
           break;
         case "exit":
-          finish(e.code);
+          // An "update everything" package step is never interrupted (dispatch-cmd.ts): leaving
+          // now would hand the shell a terminal while brew runs on headless, and a Ctrl-C there —
+          // a real SIGINT — would kill it mid-install. So the exit waits for that one step.
+          if (running && session.stopAfterStep?.()) {
+            exitAfterTurn = e.code;
+            renderer.printAbove(
+              paint(
+                "(an update step is finishing — Prometheus exits as soon as it ends; nothing after it will start)",
+                "warn",
+                caps,
+              ),
+            );
+            scheduleRender();
+          } else finish(e.code);
           break;
         case "interrupt":
           // actually cancel the in-flight turn (SSE stream + tool loop), not just print.
@@ -1067,9 +1119,10 @@ export async function launchTui(parsed: ParsedArgs, deps: TuiDeps = {}): Promise
             // permission prompt) paints ONCE; if the spinner keeps drawing it OVERWRITES the
             // prompt every 120ms so the user never sees it and the turn appears to hang while
             // silently waiting for input. Skip the spinner frame whenever a modal is open.
-            if (modal) return;
+            if (modal || exited) return;
             renderer.transient(workingLine(spinTick++, Date.now() - spinStart, caps, spinSeed));
           }, 120);
+    spinTimer = spin;
     try {
       await session.submit(text, { signal: turnAbort.signal });
     } catch (err) {
@@ -1078,6 +1131,7 @@ export async function launchTui(parsed: ParsedArgs, deps: TuiDeps = {}): Promise
       );
     } finally {
       if (spin) clearInterval(spin);
+      spinTimer = null;
       /**
        * Re-sync the reducer's posture from the bridge after EVERY submitted line.
        *
@@ -1088,6 +1142,12 @@ export async function launchTui(parsed: ParsedArgs, deps: TuiDeps = {}): Promise
        * had just typed.
        */
       state = { ...state, permMode: session.getPermMode() };
+    }
+    if (exited) {
+      // The session ended mid-turn: the terminal is the shell's now, and nothing more is drawn.
+      turnAbort = null;
+      running = false;
+      return;
     }
     // close an unterminated fence at turn end so the box always finishes.
     const tail = md.flush();
@@ -1101,6 +1161,7 @@ export async function launchTui(parsed: ParsedArgs, deps: TuiDeps = {}): Promise
     turnAbort = null;
     running = false;
     render();
+    if (exitAfterTurn !== null) finish(exitAfterTurn);
   }
 
   // ── in-TUI modals (a transient key handler over the same stdin) ──────────── //
@@ -1112,11 +1173,37 @@ export async function launchTui(parsed: ParsedArgs, deps: TuiDeps = {}): Promise
       /* broken sink — ignore */
     }
   }
+  /**
+   * One modal at a time. Each modal takes over `handler` and the single `cancelModal` slot, so a
+   * second one opened while the first is up — a /background agent's confirm during the "update
+   * everything" y/N — orphaned the first: the agent's confirm took the "y" meant for the y/N, and
+   * the y/N's promise never settled, leaving /updates hung with no key that could end it. A modal
+   * now waits for the one before it; once the session has exited, it is answered at once.
+   */
+  let modalQueue: Promise<unknown> = Promise.resolve();
+  function queueModal<T>(open: () => Promise<T>, onExit: T): Promise<T> {
+    const turn = modalQueue.then(
+      () => (exited ? onExit : open()),
+      () => (exited ? onExit : open()),
+    );
+    modalQueue = turn.catch(() => undefined);
+    return turn;
+  }
   function confirmModal(prompt: string): Promise<boolean> {
+    return queueModal(() => openConfirmModal(prompt), false);
+  }
+  function askModal(prompt: string): Promise<string> {
+    return queueModal(() => openAskModal(prompt), "");
+  }
+  function askPathModal(prompt: string, def: string): Promise<string> {
+    return queueModal(() => openAskPathModal(prompt, def), "");
+  }
+  function openConfirmModal(prompt: string): Promise<boolean> {
     return new Promise((resolve) => {
       // assign the handler + record BEFORE any I/O so a write failure can't strand the
       // modal with the chrome frozen (handler stays usable).
       const done = (yes: boolean): void => {
+        cancelModal = null;
         handler = mainHandler;
         modal = null;
         modalLines = 0;
@@ -1132,6 +1219,7 @@ export async function launchTui(parsed: ParsedArgs, deps: TuiDeps = {}): Promise
           done(yes);
         }
       };
+      cancelModal = () => done(false);
       modal = { kind: "confirm", prompt, buffer: "", caret: 0 };
       modalLines = 0;
       modalCursorRow = 0;
@@ -1146,9 +1234,10 @@ export async function launchTui(parsed: ParsedArgs, deps: TuiDeps = {}): Promise
   function confirmPhraseModal(prompt: string, phrase: string): Promise<boolean> {
     return askModal(prompt).then((a) => a.trim() === phrase);
   }
-  function askModal(prompt: string): Promise<string> {
+  function openAskModal(prompt: string): Promise<string> {
     return new Promise((resolve) => {
       const done = (value: string): void => {
+        cancelModal = null;
         handler = mainHandler;
         modal = null;
         modalLines = 0;
@@ -1171,6 +1260,7 @@ export async function launchTui(parsed: ParsedArgs, deps: TuiDeps = {}): Promise
           paintModal();
         }
       };
+      cancelModal = () => done("");
       modal = { kind: "ask", prompt, buffer: "", caret: 0 };
       modalLines = 0;
       modalCursorRow = 0;
@@ -1187,10 +1277,11 @@ export async function launchTui(parsed: ParsedArgs, deps: TuiDeps = {}): Promise
    * A folder-prompt modal (CLI-066): the ask modal + real Tab completion via the tested path
    * cycler (dirs-only, common-prefix-then-cycle) with a dim candidate hint row. Empty answer → def.
    */
-  function askPathModal(prompt: string, def: string): Promise<string> {
+  function openAskPathModal(prompt: string, def: string): Promise<string> {
     return new Promise((resolve) => {
       const cycler = createPathCycler(undefined, true); // real fs, directory-only
       const done = (value: string): void => {
+        cancelModal = null;
         handler = mainHandler;
         modal = null;
         modalLines = 0;
@@ -1239,6 +1330,7 @@ export async function launchTui(parsed: ParsedArgs, deps: TuiDeps = {}): Promise
       } catch {
         seed = "";
       }
+      cancelModal = () => done("");
       modal = {
         kind: "ask",
         prompt: `${prompt} (default ${def})`,
@@ -1337,20 +1429,42 @@ function isFramingLine(line: string): boolean {
   return /^[●⎿ℹ▸🛸↩⚒↻✎↑]/u.test(t) || t.startsWith("$ ") || t.startsWith("› ");
 }
 
-function paintByHeuristic(text: string, caps: ColorCaps): string {
-  if (caps === "none") return text;
-  return text
-    .split("\n")
-    .map((line) => {
-      const t = line.trimStart();
-      if (t.startsWith("$ ") || t.startsWith("● ")) return paint(line, "command", caps);
-      if (t.startsWith("+")) return paint(line, "codeAdd", caps);
-      if (t.startsWith("-")) return paint(line, "codeDel", caps);
-      if (/\b(error|failed|blocked|BLOCK)\b/i.test(t)) return paint(line, "danger", caps);
-      if (/\b(warn|warning|caution)\b/i.test(t)) return paint(line, "warn", caps);
-      if (t.startsWith("⎿") || t.startsWith("ℹ") || t.startsWith("▸"))
-        return paint(line, "info", caps);
-      return line;
-    })
-    .join("\n");
+/**
+ * A framing line, wrapped to `width` with a hanging indent under its glyph.
+ *
+ * The TUI prints with autowrap OFF (redraw.ts), so a framing line wider than the terminal was
+ * not wrapped — it was CLIPPED, silently, at the right margin. For tool output that loses the end
+ * of a path; for `/updates`' "update everything" preview it lost the end of the very command the
+ * user was consenting to. Rows after the first are indented to sit under the text, not the glyph.
+ */
+export function wrapFraming(line: string, width: number): string[] {
+  if (stringWidth(line) <= width) return [line];
+  const lead = /^\s*(?:\$ |› |[●⎿ℹ▸🛸↩⚒↻✎↑]\s*)?/u.exec(line)?.[0] ?? "";
+  const leadW = stringWidth(lead);
+  // A lead nearly as wide as the terminal leaves no room to indent under; wrap flush instead.
+  if (leadW >= width - 10) return wrapLine(line, width);
+  /**
+   * A shell command must survive being copied across rows. Rows are joined by hard newlines here
+   * (autowrap is off), so `brew upgrade --formula a b` split after `brew upgrade` pasted as a BARE
+   * `brew upgrade` — every outdated formula, held ones included. Every row but the last ends in
+   * ` \`: a paste is one command again, and a first row copied alone cannot run.
+   */
+  const command = lead.trimStart().startsWith("$ ");
+  const rows = wrapLine(line.slice(lead.length), width - leadW - (command ? 2 : 0));
+  const indent = " ".repeat(leadW);
+  return rows.map(
+    (r, i) => (i === 0 ? lead : indent) + r + (command && i < rows.length - 1 ? " \\" : ""),
+  );
+}
+
+/** The palette role a streamed line's shape suggests, or null for none. */
+function heuristicRole(line: string): Role | null {
+  const t = line.trimStart();
+  if (t.startsWith("$ ") || t.startsWith("● ")) return "command";
+  if (t.startsWith("+")) return "codeAdd";
+  if (t.startsWith("-")) return "codeDel";
+  if (/\b(error|failed|blocked|BLOCK)\b/i.test(t)) return "danger";
+  if (/\b(warn|warning|caution)\b/i.test(t)) return "warn";
+  if (t.startsWith("⎿") || t.startsWith("ℹ") || t.startsWith("▸")) return "info";
+  return null;
 }

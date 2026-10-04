@@ -6057,6 +6057,22 @@ def _normalize_repo_url(spec: str) -> tuple[str, str]:
     return spec, spec
 
 
+def _repo_spec_is_unambiguous(spec: str) -> bool:
+    """True when `spec` can only name a repository: forge shorthand, owner/repo, a .git URL,
+    a git/ssh transport, or https://<forge>/<owner>/<repo>. A single-file download of such a
+    spec is never the code — the forge answers it with its HTML web page."""
+    if _FORGE_SHORT_RX.match(spec) or _OWNER_REPO_RX.match(spec):
+        return True
+    if spec.endswith(".git") or spec.startswith(("git://", "ssh://", "git@")):
+        return True
+    try:
+        u = urllib.parse.urlparse(spec)
+    except ValueError:
+        return True
+    host = u.netloc.lower().split("@")[-1].split(":")[0]
+    return host in _FORGE_HOSTS.values() and len([p for p in u.path.split("/") if p]) == 2
+
+
 def _clone_repo(url: str, ref: Optional[str] = None) -> str:
     tmp = tempfile.mkdtemp(prefix="nemesis_clone_")
     cmd = ["git",
@@ -6169,6 +6185,12 @@ def _fetch_raw_url(url: str) -> str:
     return the file path. The bytes are scanned exactly like a local file —
     archive, script, or binary — and never executed."""
     blob = _http_fetch(url, {}, _RAW_FETCH_CAP)
+    # A forge answers a page URL (…/tree/main, …/blob/main/x) with HTML. Scanning that page and
+    # calling the verdict a verdict on the code is failing OPEN; the raw/download URL is the file.
+    host = (urllib.parse.urlsplit(url).hostname or "").lower()
+    if host in _FORGE_HOSTS.values() and blob[:1024].lstrip().lower().startswith(
+            (b"<!doctype html", b"<html")):
+        raise RuntimeError(f"{host} answered with an HTML page, not a file — use the raw/download URL")
     name = os.path.basename(urllib.parse.urlparse(url).path) or "download"
     name = re.sub(r"[^A-Za-z0-9._-]", "_", name)[:120] or "download"
     tmp = tempfile.mkdtemp(prefix="nemesis_fetch_")
@@ -6217,6 +6239,15 @@ def materialize_target(spec: str, ref: Optional[str] = None, keep: bool = False)
             except (urllib.error.URLError, RuntimeError, OSError,
                     tarfile.TarError, ValueError) as e:
                 errors.append(f"tarball: {e}")
+        if tmp is None and _repo_spec_is_unambiguous(spec):
+            # FAIL CLOSED. The raw download below would fetch https://<forge>/<owner>/<repo> as
+            # ONE file — the forge's HTML page — and the verdict (ALLOW, files_scanned 1) would be
+            # about that page while the installer went on to fetch the real code. Reached whenever
+            # clone and tarball both fail: no git, a rate-limited API, an outage (2026-10-03).
+            raise RuntimeError("could not fetch a snapshot of the repository — "
+                               + " | ".join(errors or ["no fetch method succeeded"])
+                               + ("" if shutil.which("git")
+                                  else " (git is not installed; only the forge tarball was tried)"))
     if tmp is None and url.lower().startswith("https://"):
         try:
             tmp = _fetch_raw_url(url)

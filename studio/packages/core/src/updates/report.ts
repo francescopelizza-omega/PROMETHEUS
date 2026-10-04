@@ -6,7 +6,9 @@
  * The CLI layer gathers the raw facts (installed CLI versions vs latest, local-model digest
  * diffs + suggestions, the self-update plan) into an UpdateReport; these functions turn it
  * into the human notices and the single startup one-liner. No IO, no color — the caller
- * applies its own palette. "Propose, never auto-apply" is enforced upstream (we only render).
+ * applies its own palette. These renderers never decide what may run: nothing is applied without
+ * the user's explicit y to "update everything", and what that y may run is `dispatch.ts`'s call,
+ * made from the structured report — never from these printed lines.
  */
 import type { Conflict } from "./conflicts.js";
 import type { InstallState, ToolCopy } from "./install-owner.js";

@@ -123,4 +123,4 @@ export type { ShellInitTarget, ShellInitDeps } from "./remedies-live.js";
 export { pathBlock, shellInitFor } from "./remedies-live.js";
 
 export type { CheckDeps, CheckResult } from "./check.js";
-export { checkUpdates } from "./check.js";
+export { checkUpdates, markUpdateCacheStale } from "./check.js";

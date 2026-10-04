@@ -24,10 +24,11 @@
  *
  * ── AND NOTHING IS EVER RUN ─────────────────────────────────────────────────────────────────
  *
- * The report carries copyable commands. Studio does not execute them, exactly as the CLI does
- * not (AUTO_INSTALL=false). An update is a change to the user's machine outside this app's
- * control, and the whole point of the conflict detection is that the obvious command is
- * sometimes the wrong one.
+ * The report carries copyable commands. Studio does not execute them (AUTO_INSTALL=false). The
+ * terminal's `/updates` can, but only after the user answers its "update everything" question
+ * with y, from a host-side plan (`packages/core/src/updates/dispatch.ts`) — never from a renderer.
+ * An update is a change to the user's machine outside this app's control, and the whole point of
+ * the conflict detection is that the obvious command is sometimes the wrong one.
  */
 import { updates as u } from "@prometheus/core";
 import { DEFAULT_CONTEXT_WINDOW } from "@prometheus/core";

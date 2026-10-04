@@ -124,6 +124,7 @@ export {
   NEVER_RUN,
   EDIT_GUARD,
   isNeverRun,
+  neverRunReason,
   remedyFor,
   remediesFor,
   runnable,
@@ -290,3 +291,23 @@ export {
   formatUpdateReport,
   toUpdatesJson,
 } from "./report.js";
+
+/**
+ * DISPATCH — what a "y" to "update everything" may run, and what it must leave to the user.
+ *
+ * Built from the structured report, never from its printed lines: the report prints commands
+ * under "DO NOT RUN" too, and a scraper cannot tell the two apart.
+ */
+export type {
+  DispatchKind,
+  DispatchItem,
+  ManualItem,
+  SkippedItem,
+  DispatchPlan,
+  DispatchContext,
+  CaskFacts,
+  FormulaFacts,
+  NpmGlobalFacts,
+  VenvFacts,
+} from "./dispatch.js";
+export { brewFormulaArgv, planUpdateDispatch, MODEL_DISK_FLOOR_BYTES } from "./dispatch.js";

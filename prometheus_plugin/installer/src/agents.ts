@@ -9,8 +9,8 @@
  * is registered into every detected agent.
  */
 import { homedir } from "node:os";
-import { join, dirname } from "node:path";
-import { existsSync } from "node:fs";
+import { delimiter, dirname, isAbsolute, join } from "node:path";
+import { existsSync, realpathSync } from "node:fs";
 import { execSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
@@ -38,6 +38,12 @@ export interface AgentTarget {
    * Returns argv after the binary name, or null to fall back to the file writer.
    */
   cliRegister?: (pyPath: string, launch: Launch) => { bin: string; argv: string[] } | null;
+  /**
+   * Undo `cliRegister` in the same scope. `claude mcp add` REFUSES a name that already exists
+   * ("MCP server already exists in user config"), so replacing an entry — a re-run, or the repair
+   * of a stale one — must remove it first, or the stale one silently stays.
+   */
+  cliUnregister?: () => { bin: string; argv: string[] };
 }
 
 /** How the agent's CLI is told to START the MCP server. */
@@ -63,11 +69,66 @@ export function resolveServerJs(): string {
   return cands[0];
 }
 
+/**
+ * A `node` path that survives the interpreter being upgraded.
+ *
+ * `process.execPath` is the REAL path (libuv realpath()s it on macOS; Linux reads /proc/self/exe):
+ * under Homebrew that is /opt/homebrew/Cellar/node/<version>/bin/node, a directory `brew upgrade`
+ * deletes. Registrations outlive it — measured 2026-10-03: Claude, Codex and Gemini all launching
+ * /opt/homebrew/Cellar/node/26.5.0/bin/node a week after node moved to 26.10.0_1, ENOENT on every
+ * start.
+ *
+ * So the SAME binary is named by a path its owner keeps current: a PATH entry, Homebrew's opt link,
+ * the installer's private toolchain link, the usual system roots — each accepted only when it
+ * resolves to the binary running now, so this changes the spelling, never the interpreter. Not a
+ * bare `node`: a GUI-launched agent gets launchd's PATH (/usr/bin:/bin:/usr/sbin:/sbin) and would
+ * not find one. fnm's per-shell `fnm_multishells` links vanish with their shell, so they are
+ * skipped; volta/asdf/mise shims resolve to the shim, not to node, so for them the real path is
+ * kept — no worse than before, and `verify` reports it once it is gone.
+ */
+export function stableNodePath(
+  execPath: string = process.execPath,
+  envPath: string = process.env.PATH ?? "",
+  home: string = homedir(),
+  promHome: string = process.env.PROMETHEUS_HOME || join(homedir(), ".prometheus"),
+): string {
+  if (process.platform === "win32") return execPath;
+  let real: string;
+  try {
+    real = realpathSync(execPath);
+  } catch {
+    return execPath;
+  }
+  const brew = /^(.*)\/Cellar\/([^/]+)\/[^/]+\/bin\/node$/.exec(real);
+  const candidates = [
+    ...envPath
+      .split(delimiter)
+      .filter((d) => isAbsolute(d))
+      .map((d) => join(d, "node")),
+    ...(brew ? [join(brew[1] ?? "", "opt", brew[2] ?? "", "bin", "node")] : []),
+    join(promHome, "toolchain", "node", "bin", "node"),
+    "/opt/homebrew/bin/node",
+    "/usr/local/bin/node",
+    "/home/linuxbrew/.linuxbrew/bin/node",
+    "/usr/bin/node",
+    join(home, ".local", "share", "fnm", "aliases", "default", "bin", "node"),
+  ];
+  for (const c of candidates) {
+    if (c.includes("/fnm_multishells/")) continue;
+    try {
+      if (realpathSync(c) === real) return c;
+    } catch {
+      /* absent: try the next one */
+    }
+  }
+  return execPath;
+}
+
 /** Build the launch command for the chosen mode. */
 export function buildLaunch(mode: LaunchMode, serverJs: string): Launch {
   return mode === "npx"
     ? { command: "npx", args: ["-y", "@prometheus-plugin/mcp"] }
-    : { command: process.execPath, args: [serverJs] }; // absolute `node` + built server.js
+    : { command: stableNodePath(), args: [serverJs] }; // absolute, upgrade-stable `node` + built server.js
 }
 
 const HOME = homedir();
@@ -90,12 +151,16 @@ export function present(t: AgentTarget): boolean {
   return t.markers.some((m) => existsSync(m));
 }
 
-/** Server entry shared by every JSON/TOML/YAML manifest. */
+/**
+ * Server entry shared by every JSON/TOML/YAML manifest. An empty `pyPath` leaves PROMETHEUS_PY out:
+ * the server then finds the engine itself ($PROMETHEUS_HOME/engine, ~/.prometheus/engine, ...),
+ * while an explicit path that does not exist is a hard error on every tool call (bridge.ts).
+ */
 export function serverEntry(pyPath: string, launch: Launch) {
   return {
     command: launch.command,
     args: launch.args,
-    env: { PROMETHEUS_PY: pyPath },
+    env: pyPath ? { PROMETHEUS_PY: pyPath } : ({} as Record<string, string>),
   };
 }
 
@@ -114,10 +179,11 @@ export const AGENTS: AgentTarget[] = [
       bin: "claude",
       argv: [
         "mcp", "add", "prometheus", "--scope", "user",
-        "--env", `PROMETHEUS_PY=${py}`,
+        ...(py ? ["--env", `PROMETHEUS_PY=${py}`] : []),
         "--", launch.command, ...launch.args,
       ],
     }),
+    cliUnregister: () => ({ bin: "claude", argv: ["mcp", "remove", "prometheus", "--scope", "user"] }),
   },
   {
     id: "cursor",

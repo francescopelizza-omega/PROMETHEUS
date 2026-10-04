@@ -879,6 +879,9 @@ export function reduce(state: TuiState, rawKey: KeyEvent, ctx: ReduceCtx): Reduc
         { type: "notice", text: "(Ctrl+C again to exit)" },
       ]);
     case "ctrl-d":
+      // Exits even while something runs — the way out of a wedged command. Whether it must first
+      // wait is the app's call (app.ts "exit"): an "update everything" package step is never cut
+      // short, so the exit then waits for that step alone.
       return state.input ? result(state) : result(state, [{ type: "exit", code: 0 }]);
     case "ctrl-t": {
       /**

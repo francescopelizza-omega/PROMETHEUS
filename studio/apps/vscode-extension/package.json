@@ -107,6 +107,7 @@
     "@prometheus/core": "workspace:*"
   },
   "devDependencies": {
+    "@types/node": "^22.20.1",
     "@types/vscode": "^1.95.0",
     "@vscode/test-electron": "^2.4.1",
     "@vscode/vsce": "^3.2.1",

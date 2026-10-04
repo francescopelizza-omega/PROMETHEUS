@@ -1,9 +1,10 @@
 /**
- * model-actions-cmd.test.ts — the two commands that change the machine, and the gates on them.
+ * model-actions-cmd.test.ts — the two single-model commands that change the machine, and the
+ * gates on them. ("Update everything" is the other actor; dispatch-cmd.test.ts covers it.)
  *
- * Everything else in `updates/` proposes; these act. So the assertions are mostly about ORDER
- * and REFUSAL: the authorisation gate fires before the user is asked anything, the removal needs
- * the tag typed out, and nothing irreversible happens on a surface that cannot ask a question.
+ * The assertions are mostly about ORDER and REFUSAL: the authorisation gate fires before the
+ * user is asked anything, the removal needs the tag typed out, and nothing irreversible happens
+ * on a surface that cannot ask a question.
  */
 import assert from "node:assert/strict";
 import { test } from "node:test";

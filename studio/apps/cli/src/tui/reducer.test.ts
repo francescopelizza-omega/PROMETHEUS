@@ -278,6 +278,13 @@ test("Ctrl-D exits on an empty line only", () => {
   assert.equal(reduce(withText, k("ctrl-d"), CTX).effects.length, 0);
 });
 
+test("Ctrl-D while a command runs still asks to exit — the way out of a wedged command", () => {
+  // Whether the exit must wait is the app's decision (an update package step is never cut short);
+  // a reducer that swallowed Ctrl-D left a hung /setup pull or an orphaned modal with no way out.
+  const r = reduce(initialTuiState(), k("ctrl-d"), { items: ITEMS, running: true });
+  assert.deepEqual(r.effects, [{ type: "exit", code: 0 }]);
+});
+
 test("sanitizePaste strips control bytes, keeps \\n/\\t, normalizes CRLF", () => {
   assert.equal(sanitizePaste("a\r\nb\tc\x1b[31m"), "a\nb\tc[31m");
   // a multi-line paste inserts literally and never submits

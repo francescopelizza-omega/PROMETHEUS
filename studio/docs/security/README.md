@@ -38,7 +38,8 @@ in the bridge and is rendered (never re-decided) by the UI:
   provenance, signed HMAC, policy, host) is the source for the security UI.
 - **GOLDEN RULE (C5):** JavaScript never decides "safe"; it renders a verdict the
   Python engine computed. No severity scoring, allowlist, regex, or heuristic in
-  the TypeScript codebase.
+  the TypeScript codebase — except the one labelled in `THREAT_MODEL.md`: `/updates`'
+  confirmed "update everything", whose TypeScript policy decides what it runs unscanned.
 - **Renderer fence:** the renderer is sandboxed (`contextIsolation: true`,
   `sandbox: true`, `nodeIntegration: false`) and imports only `window.prometheus.*`
   + types — never `node:*` / `electron` / `engine-bridge`. A malicious model card,

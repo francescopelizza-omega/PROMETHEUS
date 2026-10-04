@@ -19,5 +19,8 @@
     "lint": "biome check src",
     "typecheck": "tsc -b",
     "test": "node ../../scripts/run-tests.mjs packages/engine-bridge"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.1"
   }
 }

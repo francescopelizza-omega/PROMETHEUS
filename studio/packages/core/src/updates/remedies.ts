@@ -255,11 +255,23 @@ export const NEVER_RUN: readonly { argv: readonly string[]; because: string }[] 
   }),
 ]);
 
-/** True when `argv` is one of the known-bad commands. Exact match — never a substring test. */
-export function isNeverRun(argv: readonly string[]): boolean {
-  return NEVER_RUN.some(
+/**
+ * WHY `argv` is one of the known-bad commands, or null when it is not one. Exact match — never a
+ * substring test.
+ *
+ * The reason travels with the refusal: a dispatch that skips `brew upgrade --cask ollama-app`
+ * has to say why, and a boolean would have sent it back to scan the table a second time.
+ */
+export function neverRunReason(argv: readonly string[]): string | null {
+  const hit = NEVER_RUN.find(
     (n) => n.argv.length === argv.length && n.argv.every((a, i) => a === argv[i]),
   );
+  return hit ? hit.because : null;
+}
+
+/** True when `argv` is one of the known-bad commands. Exact match — never a substring test. */
+export function isNeverRun(argv: readonly string[]): boolean {
+  return neverRunReason(argv) !== null;
 }
 
 /**

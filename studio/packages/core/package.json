@@ -190,5 +190,8 @@
   },
   "dependencies": {
     "@prometheus/engine-bridge": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.1"
   }
 }

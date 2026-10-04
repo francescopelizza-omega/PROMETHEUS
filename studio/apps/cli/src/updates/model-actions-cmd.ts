@@ -2,7 +2,7 @@
 // Copyright 2026 Francesco Pelizza
 import { existsSync, readdirSync } from "node:fs";
 /**
- * updates/model-actions-cmd.ts — `/updates pull|rm`: the two actions that change the machine.
+ * updates/model-actions-cmd.ts — `/updates pull|rm`: the two single-model actions.
  *
  * ── WHY THESE LIVE ON `/updates` AND NOT ON A `/models` COMMAND ─────────────────────────────
  *
@@ -16,8 +16,9 @@ import { existsSync, readdirSync } from "node:fs";
  *
  * ── WHAT IS DIFFERENT ABOUT ACTUALLY RUNNING SOMETHING ──────────────────────────────────────
  *
- * Everything else in `updates/` proposes. These two act, so each carries three gates the report
- * does not need:
+ * These two act on ONE named model, so each carries three gates the report does not need (the
+ * other actor, "update everything" in `dispatch-cmd.ts`, runs the same pull through
+ * `pullWithProgress` behind the same A5 rung and its own single y/N):
  *
  *  1. **The authorisation ladder.** A pull is an INSTALL (network + tens of GB written); a
  *     removal is DESTRUCTIVE. Refused BEFORE the user is asked anything, so a low-authorisation
@@ -28,13 +29,14 @@ import { existsSync, readdirSync } from "node:fs";
  *  3. **A recomputation at the moment of acting.** The report may be up to six hours old; disk,
  *     residency and the upstream digest can all have moved since.
  *
- * Nothing is ever run from the startup notice or from the report itself. `AUTO_INSTALL=false`
- * is about Prometheus never swapping its OWN binary, but the ethos behind it — no change to the
- * user's machine that the user did not ask for, in that moment — applies here too.
+ * Nothing is ever run from the startup notice, and nothing from the report until the user answers
+ * its "update everything" question with y. `AUTO_INSTALL=false` is about Prometheus never
+ * swapping its OWN binary, but the ethos behind it — no change to the user's machine that the user
+ * did not ask for, in that moment — applies here too.
  */
 import { updates as u } from "@prometheus/core";
 
-import type { RepoFormats } from "@prometheus/core/updates-live";
+import type { PullResult, RepoFormats } from "@prometheus/core/updates-live";
 import {
   detectRepoFormats,
   fetchOllamaVersion,
@@ -55,6 +57,14 @@ export interface ModelActionDeps {
   ask: (prompt: string) => Promise<string>;
   /** the session's 0–7 authorisation level. */
   getAuthLevel: () => number;
+  /**
+   * The running slash command's cancellation — Ctrl-C in either host.
+   *
+   * Read lazily, because the host arms a fresh signal per submitted line. Without it a 22 GB pull
+   * started from here could not be cancelled at all: `pullModel` has always honoured a signal and
+   * was never given one.
+   */
+  signal?: () => AbortSignal | undefined;
   /** test seams. */
   pull?: typeof pullModel;
   remove?: typeof removeModel;
@@ -81,6 +91,51 @@ export function authRefusal(level: number, need: number, what: string): string {
 }
 
 /* ─────────────────────────────── pull ─────────────────────────────── */
+
+/**
+ * Pull one tag and report progress — the part `/updates pull` and "update everything" share.
+ *
+ * No gate and no question here: both callers settle those first, and asking again from inside a
+ * batch the user already confirmed would turn one decision into a dozen.
+ */
+export async function pullWithProgress(
+  tag: string,
+  opts: {
+    pull: typeof pullModel;
+    /** one progress line, already formatted by the caller's convention. */
+    show: (line: string) => void;
+    now?: () => number;
+    signal?: AbortSignal;
+  },
+): Promise<PullResult> {
+  const tracker = new u.PullProgressTracker();
+  let lastLine = "";
+  let lastAt = 0;
+  const now = opts.now ?? (() => Date.now());
+  return opts.pull(tag, {
+    onEvent: (e) => {
+      tracker.apply(e);
+      /**
+       * Throttled to ~4 Hz and deduplicated.
+       *
+       * ollama emits a progress line per layer per tick; forwarding every one floods a readline
+       * host with thousands of lines and makes the TUI repaint continuously for the length of a
+       * 22 GB download.
+       */
+      const t = now();
+      if (t - lastAt < 250) return;
+      const s = tracker.snapshot();
+      const pct = s.fraction !== undefined ? ` ${Math.round(s.fraction * 100)}%` : "";
+      const of = s.total !== undefined ? ` of ${gb(s.total)}` : "";
+      const line = `  ${s.phase}${pct}${s.completed > 0 ? `  (${gb(s.completed)}${of})` : ""}`;
+      if (line === lastLine) return;
+      lastLine = line;
+      lastAt = t;
+      opts.show(line);
+    },
+    ...(opts.signal ? { signal: opts.signal } : {}),
+  });
+}
 
 /** `/updates pull <tag>` — download the build a tag now points at, with live progress. */
 export async function runPull(tag: string, deps: ModelActionDeps): Promise<boolean> {
@@ -109,33 +164,12 @@ export async function runPull(tag: string, deps: ModelActionDeps): Promise<boole
     return false;
   }
 
-  const tracker = new u.PullProgressTracker();
-  let lastLine = "";
-  let lastAt = 0;
-  const now = deps.now ?? (() => Date.now());
-  const pull = deps.pull ?? pullModel;
-
-  const res = await pull(tag, {
-    onEvent: (e) => {
-      tracker.apply(e);
-      /**
-       * Throttled to ~4 Hz and deduplicated.
-       *
-       * ollama emits a progress line per layer per tick; forwarding every one floods a readline
-       * host with thousands of lines and makes the TUI repaint continuously for the length of a
-       * 22 GB download.
-       */
-      const t = now();
-      if (t - lastAt < 250) return;
-      const s = tracker.snapshot();
-      const pct = s.fraction !== undefined ? ` ${Math.round(s.fraction * 100)}%` : "";
-      const of = s.total !== undefined ? ` of ${gb(s.total)}` : "";
-      const line = `  ${s.phase}${pct}${s.completed > 0 ? `  (${gb(s.completed)}${of})` : ""}`;
-      if (line === lastLine) return;
-      lastLine = line;
-      lastAt = t;
-      write(c.dim(line));
-    },
+  const signal = deps.signal?.();
+  const res = await pullWithProgress(tag, {
+    pull: deps.pull ?? pullModel,
+    show: (line) => write(c.dim(line)),
+    ...(deps.now ? { now: deps.now } : {}),
+    ...(signal ? { signal } : {}),
   });
 
   if (res.aborted) {

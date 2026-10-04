@@ -4,13 +4,24 @@
  * agents, no monkeypatching after import.
  */
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import TOML from "@iarna/toml";
 
-import type { AgentTarget, Format } from "./agents.js";
+import { type AgentTarget, type Format, type Launch, stableNodePath } from "./agents.js";
 import {
+  type Finding,
   type VerifyDeps,
   classifyPath,
   entryServerPath,
@@ -19,6 +30,7 @@ import {
   runVerify,
   verifyAgent,
 } from "./verify.js";
+import { applyAgent } from "./writers.js";
 
 let TMP = "";
 function tmp(): string {
@@ -189,6 +201,157 @@ test("repair does nothing when there are no fixable findings (CLI-056)", async (
   const r = await runRepair([a], findings, d, async () => true);
   assert.deepEqual(r.rewritten, []);
   assert.equal(r.skipped, false);
+});
+
+/* ── the interpreter a registration names (2026-10-03: a dead Homebrew Cellar node) ── */
+
+test("stableNodePath names the running node by its upgrade-stable link, never a different binary", () => {
+  // realpath: macOS tmpdir is under /var -> /private/var, and the opt link is derived from the real path
+  const root = join(realpathSync(tmp()), "brew");
+  const real = join(root, "Cellar", "node", "9.9.9", "bin", "node");
+  mkdirSync(join(real, ".."), { recursive: true });
+  writeFileSync(real, "#!/bin/sh\n");
+  mkdirSync(join(root, "opt"), { recursive: true });
+  symlinkSync(join("..", "Cellar", "node", "9.9.9"), join(root, "opt", "node"));
+  mkdirSync(join(root, "bin"), { recursive: true });
+  symlinkSync(join("..", "Cellar", "node", "9.9.9", "bin", "node"), join(root, "bin", "node"));
+  const home = join(tmp(), "home");
+  const prom = join(tmp(), "prom");
+  // A PATH entry that resolves to the same binary wins: it is what the user's shell runs.
+  assert.equal(stableNodePath(real, join(root, "bin"), home, prom), join(root, "bin", "node"));
+  // No PATH help: Homebrew's opt link for the same formula.
+  assert.equal(stableNodePath(real, "", home, prom), join(root, "opt", "node", "bin", "node"));
+  // fnm's per-shell links die with the shell, so they are never persisted.
+  const multi = join(tmp(), "fnm_multishells", "123_456", "bin");
+  mkdirSync(multi, { recursive: true });
+  symlinkSync(real, join(multi, "node"));
+  assert.equal(stableNodePath(real, multi, home, prom), join(root, "opt", "node", "bin", "node"));
+  // A link to a DIFFERENT binary is never chosen: the spelling changes, the interpreter does not.
+  const other = join(tmp(), "other-node");
+  writeFileSync(other, "#!/bin/sh\n");
+  const decoy = join(tmp(), "decoy-bin");
+  mkdirSync(decoy, { recursive: true });
+  symlinkSync(other, join(decoy, "node"));
+  const lone = join(tmp(), "lone", "bin", "node");
+  mkdirSync(join(lone, ".."), { recursive: true });
+  writeFileSync(lone, "#!/bin/sh\n");
+  assert.equal(stableNodePath(lone, decoy, home, prom), lone);
+  // The installer's private toolchain: its versioned directory changes with the pin, the link does not.
+  const tc = join(prom, "toolchain");
+  const versioned = join(tc, "node-v22.0.0-test", "bin", "node");
+  mkdirSync(join(versioned, ".."), { recursive: true });
+  writeFileSync(versioned, "#!/bin/sh\n");
+  symlinkSync("node-v22.0.0-test", join(tc, "node"));
+  assert.equal(stableNodePath(versioned, "", home, prom), join(tc, "node", "bin", "node"));
+});
+
+test("classifyPath: an absolute interpreter that is gone is MISSING even when server.js exists", () => {
+  const server = writeFixture("interp/server.js", "// built\n");
+  const c = classifyPath(
+    { command: "/opt/homebrew/Cellar/node/0.0.0-gone/bin/node", args: [server] },
+    deps({ resolvedServerJs: server }),
+  );
+  assert.equal(c.path, "missing");
+  assert.match(c.reason ?? "", /interpreter is gone/);
+  // A bare command resolves on the client's PATH: not ours to judge.
+  assert.equal(classifyPath({ command: "node", args: [server] }, deps({ resolvedServerJs: server })).path, "ok");
+});
+
+test("claude: a registered entry with a dead interpreter is MISSING and fixable", () => {
+  const server = writeFixture("cl/server.js", "// built\n");
+  const cfg = writeFixture(
+    "cl/.claude.json",
+    JSON.stringify({ mcpServers: { prometheus: { type: "stdio", command: "/gone/node", args: [server] } } }),
+  );
+  const claude = agent("claude", "json-mcpServers", cfg, {
+    cliRegister: () => ({ bin: "claude", argv: ["mcp", "add"] }),
+  });
+  const f = verifyAgent(
+    claude,
+    deps({ commandExists: (b) => b === "claude", exec: () => "prometheus:\n  Command: /gone/node", resolvedServerJs: server }),
+  );
+  assert.equal(f.reg, "present");
+  assert.equal(f.path, "missing");
+  assert.equal(f.fixable, true);
+});
+
+test("repair re-registers claude by REMOVING the stale entry first (claude mcp add refuses an existing name)", async () => {
+  const calls: string[] = [];
+  const claude = agent("claude", "json-mcpServers", "/nope/.claude.json", {
+    cliRegister: () => ({ bin: "claude", argv: ["mcp", "add", "prometheus"] }),
+    cliUnregister: () => ({ bin: "claude", argv: ["mcp", "remove", "prometheus", "--scope", "user"] }),
+  });
+  const d = deps({
+    commandExists: (b) => b === "claude",
+    exec: (_b, a) => {
+      calls.push(a.slice(0, 2).join(" "));
+      return "ok";
+    },
+  });
+  const f: Finding = { agent: "claude", detected: true, reg: "present", path: "missing", boot: "skipped", detail: "", fixable: true };
+  const r = await runRepair([claude], [f], d, async () => true);
+  assert.deepEqual(r.rewritten, ["claude"]);
+  assert.deepEqual(calls, ["mcp remove", "mcp add"]);
+});
+
+test("a registration that fails to boot is fixable (it used to be 'nothing to repair')", async () => {
+  const server = writeFixture("boot/server.js", "// built\n");
+  const cfg = writeFixture("boot/mcp.json", JSON.stringify({ mcpServers: { prometheus: { command: "node", args: [server] } } }));
+  const res = await runVerify([agent("cursor", "json-mcpServers", cfg)], deps({ resolvedServerJs: server }), {
+    smoke: true,
+    boot: async () => false,
+  });
+  assert.equal(res.findings[0]?.boot, "fail");
+  assert.equal(res.findings[0]?.fixable, true);
+});
+
+test("repair never persists a PROMETHEUS_PY that does not exist", async () => {
+  const server = writeFixture("nopy/server.js", "// built\n");
+  const cfg = writeFixture("nopy/mcp.json", JSON.stringify({ mcpServers: { prometheus: { command: "node", args: ["/gone/server.js"] } } }));
+  const a = agent("cursor", "json-mcpServers", cfg);
+  const d = deps({ resolvedServerJs: server, resolvedPy: "/nowhere/prometheus.py" });
+  const findings = (await runVerify([a], d, { smoke: false })).findings;
+  await runRepair([a], findings, d, async () => true);
+  const after = JSON.parse(readFileSync(cfg, "utf8"));
+  assert.equal(after.mcpServers.prometheus.env.PROMETHEUS_PY, undefined);
+});
+
+/* ── the Codex TOML writer (2026-10-03: a top-level [env], duplicated by every re-run) ── */
+
+const LAUNCH: Launch = { command: "/opt/homebrew/bin/node", args: ["/x/server.js"] };
+
+test("codex writer keeps env INSIDE the server table, and a re-run stays valid TOML", () => {
+  const cfg = writeFixture("codex1/config.toml", '# my settings\nmodel = "o3"\n\n[other]\nx = 1\n');
+  const codex = agent("codex", "toml-mcpServers", cfg);
+  applyAgent(codex, "/x/prometheus.py", false, LAUNCH);
+  applyAgent(codex, "/x/prometheus.py", false, LAUNCH); // the repair/re-run that used to corrupt the file
+  const text = readFileSync(cfg, "utf8");
+  const parsed = TOML.parse(text) as Record<string, any>;
+  assert.equal(parsed.env, undefined, `no top-level [env]:\n${text}`);
+  assert.equal(parsed.mcp_servers.prometheus.env.PROMETHEUS_PY, "/x/prometheus.py");
+  assert.equal(parsed.mcp_servers.prometheus.command, "/opt/homebrew/bin/node");
+  assert.equal(parsed.other.x, 1);
+  assert.equal(text.match(/\[mcp_servers\.prometheus\]/g)?.length, 1);
+  assert.match(text, /# my settings/);
+});
+
+test("codex writer repairs the file the old writer left behind (orphan [env], sub-table)", () => {
+  const broken =
+    '[mcp_servers.prometheus]\ncommand = "/opt/homebrew/Cellar/node/26.5.0/bin/node"\nargs = [ "/x/server.js" ]\n' +
+    'startup_timeout_sec = 30\ntool_timeout_sec = 600\n\n[env]\nPROMETHEUS_PY = "/tmp/missing.py"\n';
+  const cfg = writeFixture("codex2/config.toml", broken);
+  applyAgent(agent("codex", "toml-mcpServers", cfg), "/x/prometheus.py", false, LAUNCH);
+  const parsed = TOML.parse(readFileSync(cfg, "utf8")) as Record<string, any>;
+  assert.equal(parsed.env, undefined);
+  assert.equal(parsed.mcp_servers.prometheus.env.PROMETHEUS_PY, "/x/prometheus.py");
+
+  // `codex mcp add` writes env as [mcp_servers.prometheus.env]: replaced with its parent, not duplicated.
+  const sub = '[mcp_servers.prometheus]\ncommand = "node"\n\n[mcp_servers.prometheus.env]\nPROMETHEUS_PY = "/old.py"\n\n[keep]\ny = 2\n';
+  const cfg2 = writeFixture("codex3/config.toml", sub);
+  applyAgent(agent("codex", "toml-mcpServers", cfg2), "", false, LAUNCH);
+  const p2 = TOML.parse(readFileSync(cfg2, "utf8")) as Record<string, any>;
+  assert.equal(p2.mcp_servers.prometheus.env, undefined, "no PROMETHEUS_PY when none is known");
+  assert.equal(p2.keep.y, 2);
 });
 
 test.after(() => {

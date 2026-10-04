@@ -63,7 +63,13 @@ import {
 import { defaultOpenEditor, loadEffectiveStartupProfileWithNotes } from "../profile-store.js";
 
 import type { updates as u } from "@prometheus/core";
-import { fetchOllamaTags, searchHuggingFace } from "@prometheus/core/updates-live";
+import {
+  fetchOllamaTags,
+  markUpdateCacheStale,
+  ollamaModelsDir,
+  pullModel,
+  searchHuggingFace,
+} from "@prometheus/core/updates-live";
 import { localMemorySnapshot } from "@prometheus/engine-bridge";
 import { PROM_VERSION } from "../commands/help.js";
 import { runInvoke } from "../commands/invoke.js";
@@ -74,6 +80,7 @@ import { fleetReport } from "../fleet/report.js";
 import type { FleetTicker } from "../fleet/ticker.js";
 import { startFleetTicker } from "../fleet/ticker.js";
 import {
+  diskInfo,
   ensureHomeTree,
   loadSettings,
   prometheusHome,
@@ -88,7 +95,11 @@ import { insideTmux } from "../tmux/tmux.js";
 import { fleetBarLine, fleetLegendLines } from "../tui/fleet-bar.js";
 import { type KeymapResolution, resolveKeymap } from "../tui/keys.js";
 import { detectColorCaps } from "../tui/palette.js";
+import { probeEnv, runtimeBrewFormula } from "../updates/dispatch-cmd.js";
+import { makeDispatchProbes } from "../updates/dispatch-probes.js";
+import { type StepRunner, makeStepRunner } from "../updates/run-step.js";
 import { runUpdates, updatesStartupNotice } from "../updates/updates-cmd.js";
+import { type QuestionLine, askCancellableOn } from "./ask-cancellable.js";
 import { loadContextWindowTokens, saveContextWindowTokens } from "./context-window-setting.js";
 import {
   type SessionRecord,
@@ -110,6 +121,7 @@ import { newSessionId } from "./session-id.js";
 import { turnSummaryOf } from "./turn-summary.js";
 
 import {
+  appendExecAudit,
   createHookRunner,
   expandHome,
   loadMemoryIndexBlock,
@@ -1089,6 +1101,19 @@ export async function launchSession(parsed: ParsedArgs, deps: SessionDeps = {}):
   let turnAbort: AbortController | null = null;
   let exitCode = 0;
   let closing = false;
+  /**
+   * Set the moment readline closes (Ctrl-D, stdin EOF). The close handler still lets the in-flight
+   * line finish, but a multi-step job — "update everything" — reads this to start nothing further.
+   */
+  let inputClosed = false;
+  /**
+   * "update everything" package steps in flight. Such a step is never interrupted by Ctrl-C (an
+   * interrupted cask swap is not rolled back), so what Ctrl-C and Ctrl-D SAY must change while
+   * one runs — the usual "cancelled — press Ctrl-D" leads straight to the one path that kills it.
+   */
+  let updateStepsRunning = 0;
+  /** True while /updates runs: a lone "y" typed then would otherwise reach the agent as a prompt. */
+  let earlyYesGuard = false;
   // The running conversation history threaded to the agent runtime across turns.
   let history: agent.ThreadMessage[] = [];
   // CLI-072: when a turn pauses at its step cap, its full non-system thread (incl. tool results)
@@ -1155,7 +1180,13 @@ export async function launchSession(parsed: ParsedArgs, deps: SessionDeps = {}):
   const onSigint = (): void => {
     if (turnAbort) {
       turnAbort.abort();
-      writeLine(c.dim("\n(cancelled — press Ctrl-D or type /quit to exit)"));
+      writeLine(
+        c.dim(
+          updateStepsRunning > 0
+            ? "\n(the update step in progress finishes first — nothing after it will start)"
+            : "\n(cancelled — press Ctrl-D or type /quit to exit)",
+        ),
+      );
     } else {
       writeLine(c.dim("\n(nothing running — Ctrl-D or /quit to exit)"));
       promptLine();
@@ -1163,16 +1194,49 @@ export async function launchSession(parsed: ParsedArgs, deps: SessionDeps = {}):
   };
   rl.on("SIGINT", onSigint);
 
+  /**
+   * One question at a time. readline holds ONE pending question: a second `rl.question` while one
+   * is open only redraws the first prompt and drops its own callback. So a /background agent's
+   * confirm arriving during the "update everything" y/N took the user's "y" as approval for ITS
+   * tool call, and the y/N waited for an answer that could never come. Every question below waits
+   * for the one before it instead.
+   */
+  let questionQueue: Promise<unknown> = Promise.resolve();
+  const oneQuestion = <T>(open: () => Promise<T>): Promise<T> => {
+    const turn = questionQueue.then(open, open);
+    // readline's close() fires no question callback, so a question open at Ctrl-D never settles.
+    // Its slot is released on close anyway: the questions queued behind it (the y/N among them)
+    // watch for close themselves and answer "" instead of waiting on it forever.
+    let onClose: (() => void) | undefined;
+    const released = new Promise<void>((resolve) => {
+      if (inputClosed) return resolve();
+      onClose = () => resolve();
+      rl.once("close", onClose);
+    });
+    const settled = turn.then(
+      () => undefined,
+      () => undefined,
+    );
+    void settled.then(() => {
+      if (onClose) rl.off("close", onClose);
+    });
+    questionQueue = Promise.race([settled, released]);
+    return turn;
+  };
+
   // The confirm seam: a yes/no over readline. Honors never-force — the host never
   // auto-approves; a human must answer. Defaults to deny on EOF/blank.
   const confirm = (prompt: string): Promise<boolean> => whileBlocked(() => askYesNo(prompt));
   const askYesNo = (prompt: string): Promise<boolean> =>
-    new Promise<boolean>((resolveConfirm) => {
-      rl.question(`${c.yellow("?")} ${prompt} ${c.dim("[y/N]")} `, (answer) => {
-        const a = answer.trim().toLowerCase();
-        resolveConfirm(a === "y" || a === "yes");
-      });
-    });
+    oneQuestion(
+      () =>
+        new Promise<boolean>((resolveConfirm) => {
+          rl.question(`${c.yellow("?")} ${prompt} ${c.dim("[y/N]")} `, (answer) => {
+            const a = answer.trim().toLowerCase();
+            resolveConfirm(a === "y" || a === "yes");
+          });
+        }),
+    );
 
   /**
    * LIFECYCLE HOOKS (`agent/hooks.ts`) — settings-configured shell run around the turn.
@@ -1239,18 +1303,21 @@ export async function launchSession(parsed: ParsedArgs, deps: SessionDeps = {}):
    * permanent answer.
    */
   const confirmTool = (prompt: string): Promise<ConfirmResult> =>
-    new Promise<ConfirmResult>((resolveConfirm) => {
-      rl.question(
-        `${c.yellow("?")} ${prompt} ${c.dim("[y/N/a=always here/A=always]")} `,
-        (answer) => {
-          const a = answer.trim();
-          if (a === "a") return resolveConfirm({ approved: true, remember: "project" });
-          if (a === "A") return resolveConfirm({ approved: true, remember: "user" });
-          const lower = a.toLowerCase();
-          resolveConfirm(lower === "y" || lower === "yes");
-        },
-      );
-    });
+    oneQuestion(
+      () =>
+        new Promise<ConfirmResult>((resolveConfirm) => {
+          rl.question(
+            `${c.yellow("?")} ${prompt} ${c.dim("[y/N/a=always here/A=always]")} `,
+            (answer) => {
+              const a = answer.trim();
+              if (a === "a") return resolveConfirm({ approved: true, remember: "project" });
+              if (a === "A") return resolveConfirm({ approved: true, remember: "user" });
+              const lower = a.toLowerCase();
+              resolveConfirm(lower === "y" || lower === "yes");
+            },
+          );
+        }),
+    );
 
   /**
    * Paint the "what will this actually change?" card for a destructive mutator.
@@ -1277,17 +1344,37 @@ export async function launchSession(parsed: ParsedArgs, deps: SessionDeps = {}):
 
   // A free-text question over readline (the /setup wizard's input seam).
   const ask = (prompt: string): Promise<string> =>
-    whileBlocked(
-      () =>
-        new Promise<string>((resolveAsk) => {
-          rl.question(`${c.cyan("›")} ${prompt} `, (answer) => resolveAsk(answer));
-        }),
+    whileBlocked(() =>
+      oneQuestion(
+        () =>
+          new Promise<string>((resolveAsk) => {
+            rl.question(`${c.cyan("›")} ${prompt} `, (answer) => resolveAsk(answer));
+          }),
+      ),
     );
+
+  /**
+   * `ask`, for a question the user may walk away from: Ctrl-C and Ctrl-D both answer "", and keys
+   * typed before it cannot pre-fill it (session/ask-cancellable.ts). Used by `/updates`, where the
+   * answer authorises installs and an accidental one must read as no.
+   */
+  const askCancellable = (prompt: string): Promise<string> => {
+    const signal = turnAbort?.signal;
+    return whileBlocked(() =>
+      oneQuestion(() =>
+        askCancellableOn(rl as unknown as QuestionLine, `${c.cyan("›")} ${prompt} `, {
+          ...(signal ? { signal } : {}),
+          closed: () => inputClosed,
+          note: (text) => writeLine(c.dim(text)),
+        }),
+      ),
+    );
+  };
 
   // A FOLDER picker with `tab` path-completion: flips the completer into path mode,
   // pre-fills the editable default, and returns the typed path (default on blank).
   const askPath = (prompt: string, def: string): Promise<string> =>
-    whileBlocked(() => askPathInner(prompt, def));
+    whileBlocked(() => oneQuestion(() => askPathInner(prompt, def)));
   const askPathInner = (prompt: string, def: string): Promise<string> =>
     new Promise<string>((resolveAsk) => {
       pathMode = true;
@@ -1518,11 +1605,14 @@ export async function launchSession(parsed: ParsedArgs, deps: SessionDeps = {}):
     // host's readline confirm asks the human to type that exact phrase; we resolve
     // true ONLY on an exact, case-sensitive match (never-force: deny by default).
     confirm: (prompt, phrase) =>
-      new Promise<boolean>((resolveConfirm) => {
-        rl.question(`${c.yellow("?")} ${prompt}: `, (answer) => {
-          resolveConfirm(answer.trim() === phrase);
-        });
-      }),
+      oneQuestion(
+        () =>
+          new Promise<boolean>((resolveConfirm) => {
+            rl.question(`${c.yellow("?")} ${prompt}: `, (answer) => {
+              resolveConfirm(answer.trim() === phrase);
+            });
+          }),
+      ),
     write,
   });
 
@@ -2494,42 +2584,88 @@ export async function launchSession(parsed: ParsedArgs, deps: SessionDeps = {}):
       }),
     runUpdates: async (rest) => {
       // the slash handler is void — CLI-047's widened return (report|null) is discarded here.
-      await runUpdates(rest, {
-        home,
-        promVersion: PROM_VERSION,
-        client,
-        write: writeLine,
-        env: process.env,
-        ...(process.argv[1] ? { scriptPath: process.argv[1] } : {}),
-        cwd: state.cwd,
-        /**
-         * The seams `/updates pull` and `/updates rm` need. Passing them is what ENABLES the
-         * action subcommands on this surface — without them the dispatcher refuses rather than
-         * assuming a confirmation, because one of the two is irreversible.
-         */
-        actions: {
-          confirm: (prompt) => slashCtx.confirm(prompt),
-          ask: (prompt) => slashCtx.ask(prompt),
-          getAuthLevel: () => slashCtx.getAuthLevel(),
-        },
-        /**
-         * The catalogue seam. READ-ONLY, so it is supplied even where the action seams are not:
-         * browsing shows a list and a command, and installs nothing.
-         *
-         * The budget is this machine's REAL memory, read the same way the admission gate reads
-         * it, so a model the browser says fits is one the gate will also admit. A browser using
-         * `totalmem()` would promise models that cannot load once the OS and the compositor are
-         * accounted for.
-         */
-        browse: {
-          search: async (q: string) => {
-            const r = await searchHuggingFace({ query: q, limit: 40 });
-            return { entries: r.entries, error: r.error };
+      const updateRunner = makeStepRunner();
+      /** the runner for "update everything" steps (not probes): counted, see `updateStepsRunning`. */
+      const stepRunner: StepRunner = async (argv, opts) => {
+        updateStepsRunning += 1;
+        try {
+          return await updateRunner(argv, opts);
+        } finally {
+          updateStepsRunning -= 1;
+        }
+      };
+      earlyYesGuard = true;
+      try {
+        await runUpdates(rest, {
+          home,
+          promVersion: PROM_VERSION,
+          client,
+          write: writeLine,
+          env: process.env,
+          ...(process.argv[1] ? { scriptPath: process.argv[1] } : {}),
+          cwd: state.cwd,
+          /**
+           * The seams `/updates pull`, `/updates rm` and the "update everything" question need.
+           * Passing them is what ENABLES the actions on this surface — without them the dispatcher
+           * refuses rather than assuming a confirmation, because one of the two is irreversible.
+           *
+           * `ask` is the cancellable one: Ctrl-C or Ctrl-D at the y/N must read as no, never hang.
+           * `signal` is this line's `turnAbort`, the one Ctrl-C trips — read lazily, because a new
+           * controller is armed per submitted line.
+           */
+          actions: {
+            confirm: (prompt) => slashCtx.confirm(prompt),
+            ask: (prompt) => askCancellable(prompt),
+            getAuthLevel: () => slashCtx.getAuthLevel(),
+            signal: () => turnAbort?.signal,
           },
-          budget: await catalogBudget(),
-          installed: await installedTags(),
-        },
-      });
+          /**
+           * What "update everything" runs with — see updates/dispatch-cmd.ts for what it will and
+           * will never run. The audit lands in the same `exec-audit.jsonl` as every `run_command`.
+           */
+          dispatch: {
+            run: stepRunner,
+            probes: makeDispatchProbes(
+              updateRunner,
+              (tool) => probeEnv(tool),
+              () => ({
+                cwd: state.cwd,
+                ...(process.env.VIRTUAL_ENV ? { activeVenv: process.env.VIRTUAL_ENV } : {}),
+              }),
+            ),
+            pull: pullModel,
+            audit: (entry) => appendExecAudit(home, entry),
+            freeDiskBytes: () => diskInfo(ollamaModelsDir())?.freeBytes,
+            runtimeFormula: () => runtimeBrewFormula(),
+            getPermMode: () => hostPermMode,
+            // Without a terminal on stdout readline runs cooked: Ctrl-C is a process SIGINT, and the
+            // child reaper — its only listener — would SIGTERM the package step mid-install.
+            ctrlCIsAbort: () => (rl as { terminal?: boolean }).terminal !== false,
+            dryRun: () => state.tuning.dryRun === true,
+            closed: () => inputClosed,
+            invalidateCache: () => markUpdateCacheStale(home),
+          },
+          /**
+           * The catalogue seam. READ-ONLY, so it is supplied even where the action seams are not:
+           * browsing shows a list and a command, and installs nothing.
+           *
+           * The budget is this machine's REAL memory, read the same way the admission gate reads
+           * it, so a model the browser says fits is one the gate will also admit. A browser using
+           * `totalmem()` would promise models that cannot load once the OS and the compositor are
+           * accounted for.
+           */
+          browse: {
+            search: async (q: string) => {
+              const r = await searchHuggingFace({ query: q, limit: 40 });
+              return { entries: r.entries, error: r.error };
+            },
+            budget: await catalogBudget(),
+            installed: await installedTags(),
+          },
+        });
+      } finally {
+        earlyYesGuard = false;
+      }
     },
     usage: () => {
       // model-aware cost (CLI-058): local via endpoint locality (a remote OpenAI-compatible
@@ -2954,6 +3090,16 @@ export async function launchSession(parsed: ParsedArgs, deps: SessionDeps = {}):
     };
 
     rl.on("line", (raw) => {
+      // A lone "y" typed while /updates works (before its question, or during the run) is someone
+      // answering early — queued, it would reach the agent as a prompt once /updates is done.
+      if (earlyYesGuard && /^\s*y(es)?\s*$/i.test(raw)) {
+        writeLine(
+          c.dim(
+            '(ignored a "y" typed while /updates was running — it would have gone to the agent)',
+          ),
+        );
+        return;
+      }
       chain = chain.then(async () => {
         if (closing) return;
         try {
@@ -3017,6 +3163,16 @@ export async function launchSession(parsed: ParsedArgs, deps: SessionDeps = {}):
     });
 
     rl.on("close", () => {
+      inputClosed = true;
+      // Closing readline also leaves raw mode: from here on Ctrl-C is a real SIGINT, which the
+      // child reaper answers by stopping the package step — say so before anyone presses it.
+      if (updateStepsRunning > 0) {
+        writeLine(
+          c.dim(
+            "\n(an update step is still running and finishes first — pressing Ctrl-C now would interrupt it and can leave it half-installed)",
+          ),
+        );
+      }
       /**
        * Ctrl-D / rl.close(): finish the in-flight chain, THEN tear down.
        *

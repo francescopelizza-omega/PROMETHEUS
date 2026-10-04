@@ -98,6 +98,9 @@ studio/**/.prometheus/
 
 # --- local-only (kept on disk, never in remote) ---
 /MDS/
+# a third-party bug report (names its reporter and their machine) — listed on its own so it
+# stays out even if the /MDS/ rule above is ever narrowed to exceptions
+/MDS/bugreport-PROMETHEUS.md
 /AI_SKILLS_WONDERLAND/
 .claude/
 .cursor/
@@ -150,3 +153,8 @@ studio/**/.prometheus/
 # Planning and audit notes generated while building (the `-PLAN`/`-REPORT` patterns above already
 # cover the common shapes). Moved to ~/ALPHA_local_only/PROMETHEUS/ on 2026-09-30.
 /*-SURVEY*.md
+
+# Written by install.sh into the checkout: where the launchers find the private toolchain
+# (machine-local paths, never published).
+/.prometheus-toolchain
+/.prometheus-source

@@ -8,7 +8,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import { agent } from "@prometheus/core";
-import { resolveStartAuthLevel } from "./app.js";
+import { resolveStartAuthLevel, wrapFraming } from "./app.js";
 import { type ModalView, applyModalKey, modalCursorCol, renderModal } from "./frame.js";
 import { stringWidth } from "./width.js";
 
@@ -357,4 +357,43 @@ test("SOURCE GUARD: onCrash takes the error Node hands it and threads it through
     "onCrash must take the error as a parameter, not silently drop it",
   );
   assert.match(src, /logCrash\(home, err\)/, "onCrash must persist the real error via logCrash");
+});
+
+test("a framing line wider than the terminal WRAPS under its glyph instead of being clipped", () => {
+  // the TUI prints with autowrap off: before this, everything past the margin was simply lost —
+  // including the end of the command an "update everything" preview asks consent for
+  const line =
+    "  $ /Users/u/.hf-cli/venv/bin/python -I -m pip install --upgrade huggingface-hub==2.1.1";
+  const rows = wrapFraming(line, 40);
+  assert.ok(rows.length > 1);
+  for (const r of rows) assert.ok(stringWidth(r) <= 40, r);
+  assert.ok(rows[0]?.startsWith("  $ /Users/u/.hf-cli"));
+  for (const r of rows.slice(1)) assert.match(r, /^ {4}\S/, "hangs under the text, not the glyph");
+  assert.equal(
+    rows.map((r) => r.trim().replace(/ \\$/, "")).join(" "),
+    line.trim(),
+    "nothing is lost",
+  );
+  assert.deepEqual(wrapFraming("  ⎿ short", 40), ["  ⎿ short"]);
+  // prose wraps plainly; only a command gets line continuations
+  for (const r of wrapFraming(`  ⎿ ${"word ".repeat(20).trim()}`, 30)) assert.ok(!r.endsWith("\\"));
+});
+
+test("a wrapped COMMAND pastes as one command: every row but the last ends in a line continuation", () => {
+  // split after `brew upgrade`, the copied rows ran a BARE `brew upgrade` — every outdated
+  // formula, the held ollama and the node Prometheus runs on included
+  const line = "  $ brew upgrade --formula hdrhistogram_c libuv";
+  for (const width of [24, 30, 40]) {
+    const rows = wrapFraming(line, width);
+    assert.ok(rows.length > 1, String(width));
+    for (const r of rows) assert.ok(stringWidth(r) <= width, `${width}: ${r}`);
+    for (const r of rows.slice(0, -1)) assert.ok(r.endsWith(" \\"), `${width}: ${r}`);
+    assert.ok(!rows.at(-1)?.endsWith("\\"));
+    // what a shell does with the pasted rows: `\` + newline joins them into one line
+    const pasted = rows
+      .join("\n")
+      .replace(/^\s*\$ /, "")
+      .replace(/\\\n\s*/g, "");
+    assert.equal(pasted.replace(/\s+/g, " "), "brew upgrade --formula hdrhistogram_c libuv");
+  }
 });

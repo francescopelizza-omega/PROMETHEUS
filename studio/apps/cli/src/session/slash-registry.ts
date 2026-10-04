@@ -2533,7 +2533,7 @@ export const SLASH_REGISTRY: readonly SlashCmd[] = Object.freeze([
     aliases: ["update", "upgrade"],
     group: "config",
     summary:
-      "Check for updates: vendor CLIs (claude/codex/gemini/…), local models, + Prometheus itself. `fix` shows how to clear an install conflict for good.",
+      "Check for updates: vendor CLIs (claude/codex/gemini/…), local models, + Prometheus itself — then, at A5+, asks whether to update everything now (y/N). `fix` shows how to clear an install conflict for good.",
     /**
      * The ACTION subcommands live here rather than on a `/models` command because `models`
      * is an engine verb and `/model` already means "switch the active one" — see the note on

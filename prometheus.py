@@ -13466,10 +13466,15 @@ def _auto_schedule_present(osi: "OSInfo", name: str = "prometheus-auto") -> bool
     if osi.family == "macos":
         return _auto_sched_plist(name).exists()
     try:
-        out = _run_timed(["crontab", "-l"], capture_output=True, text=True, timeout=15).stdout
+        cp = _run_timed(["crontab", "-l"], capture_output=True, text=True, timeout=15)
     except (OSError, subprocess.SubprocessError):
         return False
-    return f"{os.path.abspath(__file__)} --json auto" in out
+    # An unreadable crontab (timeout = rc 124 from _run_timed, a lock, permissions) is NOT "absent":
+    # answering False sent the every-command self-heal into _install_auto_schedule, which then
+    # rewrote the crontab from "" — keeping only this line. Treat it as present: don't act.
+    if cp.returncode != 0 and "no crontab" not in (cp.stderr or "").lower():
+        return True
+    return f"{os.path.abspath(__file__)} --json auto" in (cp.stdout or "")
 
 
 def _install_auto_schedule(osi: "OSInfo", *, interval: int = 86400, defang: bool = False,
@@ -13502,7 +13507,13 @@ def _install_auto_schedule(osi: "OSInfo", *, interval: int = 86400, defang: bool
             return {"ok": rc.returncode == 0, "where": str(plist)}
         line = (f"{cron} cd {shlex.quote(str(HOME))} && {cmdline} "
                 f">> {shlex.quote(f'{HOME}/{name}.log')} 2>&1")
-        existing = _run_timed(["crontab", "-l"], capture_output=True, text=True, timeout=15).stdout
+        cp = _run_timed(["crontab", "-l"], capture_output=True, text=True, timeout=15)
+        # Same rule as _remove_auto_schedule: only "no crontab for …" is a genuine empty. A timeout
+        # or a lock/permission error read as "" would install a crontab holding ONLY this line,
+        # wiping the user's other jobs from a routine self-heal (audit, 2026-10-03).
+        if cp.returncode != 0 and "no crontab" not in (cp.stderr or "").lower():
+            return {"ok": False, "where": "could not read the crontab — left untouched"}
+        existing = cp.stdout if cp.returncode == 0 else ""
         if f"{os.path.abspath(__file__)} --json auto" in existing:
             return {"ok": True, "where": "crontab (already present)"}
         new = (existing.rstrip("\n") + "\n" + line + "\n") if existing.strip() else line + "\n"

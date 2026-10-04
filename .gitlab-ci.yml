@@ -50,9 +50,31 @@ default:
     # so an older runner fails every suite with ERR_UNKNOWN_MODULE_FORMAT before running one
     # test. `.nvmrc` said 20 until this file was written. It is also not NEWER than 22 on
     # purpose: electron's install.js extracts an incomplete app under Node 26.
-    - . "$NVM_DIR/nvm.sh" && nvm install 22 && nvm use 22
-    - node --version
-    - corepack enable
+    #
+    # It is INSTALLED here, from nodejs.org, checked against the release's own SHASUMS256.txt.
+    # This used to be `. "$NVM_DIR/nvm.sh" && nvm install 22 && nvm use 22`, and this image has no
+    # nvm: the source failed ("/nvm.sh: No such file or directory"), the `&&` chain stopped, and
+    # every job carried on with the image's own Node 20.18. Its bundled corepack predates npm's
+    # signing-key rotation, so `pnpm install` then died with "Cannot find matching keyid" before a
+    # single check ran — in every job log since this file was written. No pipeline on main had
+    # ever passed (found 2026-10-03, after an external report that clean installs fail).
+    - |
+      (
+        cd /tmp
+        dist=https://nodejs.org/dist/latest-v22.x
+        curl -fsSLo SHASUMS256.txt "$dist/SHASUMS256.txt"
+        tgz=$(grep -o 'node-v22\.[0-9.]*-linux-x64\.tar\.gz' SHASUMS256.txt | head -n 1)
+        curl -fsSLO "$dist/$tgz"
+        grep " $tgz\$" SHASUMS256.txt | sha256sum -c -
+        tar -xzf "$tgz" -C /usr/local --strip-components=1
+        rm -f "$tgz" SHASUMS256.txt
+      )
+    - hash -r && node --version
+    # pnpm from npm, at the version the manifest pins — never `corepack enable`. corepack is not
+    # bundled with Node 25+, and the releases that still ship inside older Node 22s cannot verify
+    # current pnpm signatures (the failure above). install.sh stopped relying on it for the same
+    # reasons.
+    - npm install -g --no-audit --no-fund "pnpm@$(node -p "require('./studio/package.json').packageManager.split('@')[1]")"
     # The lockfile is the contract: --frozen-lockfile fails rather than silently resolving a
     # different tree than the one that was tested.
     - cd studio && pnpm install --frozen-lockfile
@@ -156,6 +178,60 @@ verify:
       - studio/apps/desktop/e2e/.artifacts
       - studio/apps/desktop/playwright-report
     expire_in: 1 week
+
+# ── the new-user path: install.sh on a clean machine ───────────────────────────
+# Every job above installs the WHOLE workspace and typechecks it. A new user never does that:
+# install.sh runs a FILTERED install of the CLI, then `prepack`. From 2026-09-16 that graph could
+# not build at all (TS2688) while every check here was red for an unrelated reason — an external
+# tester found it on the first public day (2026-10-03).
+#
+# So these jobs ARE that user, the documented way: the script piped into plain `sh` on stdin,
+# nothing cached (`cache: []` — the bug lived in leftover dependency state), and:
+#   - node:22 / node:26 as a NORMAL user: node's bin dir and npm's prefix belong to root there,
+#     exactly as on a distro or NodeSource install, so anything writing there fails as it did for
+#     that tester; Node 26 has no corepack;
+#   - buildpack-deps:bookworm-curl as a normal user: curl and nothing else — no node, no python,
+#     no git — so Node, CPython and ripgrep are all provisioned from the pins in install.sh, and
+#     the source path without git is the one exercised;
+#   - alpine as root with --system-deps: musl, busybox ash, no bash, no curl (busybox wget), and
+#     libstdc++ for Node's musl build comes from apk.
+installer:
+  stage: verify
+  image: $IMAGE
+  parallel:
+    matrix:
+      - IMAGE: ["node:22-bookworm", "node:26-bookworm", "buildpack-deps:bookworm-curl"]
+        AS: user
+      - IMAGE: ["alpine:3.20"]
+        AS: root
+  cache: []
+  before_script: []
+  script:
+    # The pipeline-wide pnpm store variables describe the CI cache, not a stranger's machine.
+    - unset PNPM_HOME npm_config_store_dir
+    - |
+      if [ "$AS" = root ]; then
+        t=$(mktemp -d)
+        cat install.sh | PROMETHEUS_ALLOW_ROOT=1 PROMETHEUS_HOME=$t/home PROMETHEUS_PREFIX=$t/bin \
+          sh -s -- --from-local "$CI_PROJECT_DIR" --no-modify-path --system-deps -y
+        "$t/bin/prometheus" --version
+        "$t/bin/prometheus" doctor
+        "$t/bin/nemesis" selftest
+      else
+        id -u node >/dev/null 2>&1 || useradd -m node
+        chown -R node:node "$CI_PROJECT_DIR"
+        su node -s /bin/sh -c '
+          set -eu
+          cd "$CI_PROJECT_DIR"
+          t=$(mktemp -d)
+          cat install.sh | PROMETHEUS_HOME=$t/home PROMETHEUS_PREFIX=$t/bin \
+            sh -s -- --from-local . --no-modify-path --no-system-deps -y
+          test -s studio/apps/cli/dist/bin.js
+          "$t/bin/prometheus" --version
+          "$t/bin/prometheus" doctor
+          "$t/bin/nemesis" selftest
+        '
+      fi
 
 # ── Windows smoke (best-effort, informational until proven) ──────────────────
 # There was previously NO Windows coverage anywhere: four GitHub Actions workflows under

@@ -14,6 +14,7 @@
  */
 import { execFileSync, spawn } from "node:child_process";
 import { existsSync, readFileSync, realpathSync } from "node:fs";
+import { isAbsolute } from "node:path";
 import TOML from "@iarna/toml";
 import { parse as parseYaml } from "yaml";
 
@@ -157,21 +158,34 @@ function samePath(a: string, b: string, deps: VerifyDeps): boolean {
 export function classifyPath(
   entry: RegEntry | undefined,
   deps: VerifyDeps,
-): { path: PathState; serverPath?: string; pyPath?: string } {
+): { path: PathState; serverPath?: string; pyPath?: string; reason?: string } {
   const serverPath = entryServerPath(entry);
   const pyPath = entry?.env?.PROMETHEUS_PY;
-  if (!serverPath) return { path: "unknown", ...(pyPath ? { pyPath } : {}) }; // npx / no local entry
-
-  if (!deps.existsSync(serverPath)) return { path: "missing", serverPath, ...(pyPath ? { pyPath } : {}) };
-  if (!samePath(serverPath, deps.resolvedServerJs, deps)) {
-    return { path: "drifted", serverPath, ...(pyPath ? { pyPath } : {}) };
+  const sp = serverPath ? { serverPath } : {};
+  const pp = pyPath ? { pyPath } : {};
+  // The interpreter is part of the registration. A versioned node (Homebrew Cellar, nvm, fnm,
+  // volta, asdf, mise) dies with the version that owned it while server.js beside it survives, so
+  // a registration that ENOENTs on every launch used to classify "ok" (2026-10-03:
+  // /opt/homebrew/Cellar/node/26.5.0/bin/node after brew moved node to 26.10.0_1). Only an
+  // ABSOLUTE command is checkable: a bare `node` / `npx` resolves on the CLIENT's PATH, not ours.
+  const command = entry?.command;
+  if (command && isAbsolute(command) && !deps.existsSync(command)) {
+    return { path: "missing", ...sp, ...pp, reason: `registered interpreter is gone: ${command}` };
   }
+  if (!serverPath) return { path: "unknown", ...pp }; // npx / no local entry
+
+  if (!deps.existsSync(serverPath)) {
+    return { path: "missing", ...sp, ...pp, reason: `registered server path is gone: ${serverPath}` };
+  }
+  if (!samePath(serverPath, deps.resolvedServerJs, deps)) return { path: "drifted", ...sp, ...pp };
   // secondary: a stale prometheus.py env also counts as drift/missing.
   if (pyPath) {
-    if (!deps.existsSync(pyPath)) return { path: "missing", serverPath, pyPath };
-    if (!samePath(pyPath, deps.resolvedPy, deps)) return { path: "drifted", serverPath, pyPath };
+    if (!deps.existsSync(pyPath)) {
+      return { path: "missing", ...sp, ...pp, reason: `PROMETHEUS_PY is gone: ${pyPath}` };
+    }
+    if (!samePath(pyPath, deps.resolvedPy, deps)) return { path: "drifted", ...sp, ...pp };
   }
-  return { path: "ok", serverPath, ...(pyPath ? { pyPath } : {}) };
+  return { path: "ok", ...sp, ...pp };
 }
 
 /* --------------------------- per-agent verify --------------------------- */
@@ -200,14 +214,49 @@ export function verifyAgent(agent: AgentTarget, deps: VerifyDeps): Finding {
     }
     const out = deps.exec("claude", ["mcp", "get", "prometheus"]);
     const present = out !== null && /prometheus/i.test(out);
+    if (!present) {
+      return {
+        agent: agent.id,
+        detected,
+        reg: "absent",
+        path: "unknown",
+        boot: "skipped",
+        detail: "not in the claude mcp store",
+        fixable: detected,
+      };
+    }
+    // `--scope user` lands in ~/.claude.json's top-level mcpServers — the same entry runVerify's
+    // boot smoke reads. Presence alone said "registered" for an entry whose interpreter brew had
+    // deleted (ENOENT on every launch), so it is classified like every other agent's.
+    const text = deps.existsSync(agent.configPath) ? deps.readFileSync(agent.configPath) : "";
+    const { entry } = readRegistration("json-mcpServers", text, agent.configPath);
+    if (!entry) {
+      return {
+        agent: agent.id,
+        detected,
+        reg: "present",
+        path: "unknown", // registered in another scope: nothing local to inspect
+        boot: "skipped",
+        detail: "registered (claude mcp store)",
+        fixable: false,
+      };
+    }
+    const c = classifyPath(entry, deps);
     return {
       agent: agent.id,
       detected,
-      reg: present ? "present" : "absent",
-      path: "unknown", // claude manages its own path; drift not inspectable via the CLI text
+      reg: "present",
+      path: c.path,
       boot: "skipped",
-      detail: present ? "registered (claude mcp store)" : "not in the claude mcp store",
-      fixable: !present && detected,
+      ...(c.serverPath ? { serverPath: c.serverPath } : {}),
+      ...(c.pyPath ? { pyPath: c.pyPath } : {}),
+      detail:
+        c.path === "missing"
+          ? (c.reason ?? "registered path is gone")
+          : c.path === "drifted"
+            ? "registered path drifted from the current build"
+            : "registered (claude mcp store)",
+      fixable: c.path === "missing" || c.path === "drifted",
     };
   }
 
@@ -248,7 +297,7 @@ export function verifyAgent(agent: AgentTarget, deps: VerifyDeps): Finding {
     };
   }
 
-  const { path, serverPath, pyPath } = classifyPath(entry, deps);
+  const { path, serverPath, pyPath, reason } = classifyPath(entry, deps);
   const fixable = path === "missing" || path === "drifted";
   return {
     agent: agent.id,
@@ -260,7 +309,7 @@ export function verifyAgent(agent: AgentTarget, deps: VerifyDeps): Finding {
     ...(pyPath ? { pyPath } : {}),
     detail:
       path === "missing"
-        ? `registered server path is gone: ${serverPath}`
+        ? (reason ?? `registered server path is gone: ${serverPath}`)
         : path === "drifted"
           ? `registered path drifted from the current build`
           : path === "unknown"
@@ -378,6 +427,9 @@ export async function runVerify(
       const text = deps.existsSync(agent.configPath) ? deps.readFileSync(agent.configPath) : "";
       const { entry } = readRegistration(agent.format, text, agent.configPath);
       if (entry) f.boot = (await opts.boot(entry)) ? "ok" : "fail";
+      // A registration that does not start is worth rewriting to the current build: it used to be
+      // reported (exit 1) and then declared "nothing to repair".
+      if (f.boot === "fail") f.fixable = true;
     }
     findings.push(f);
   }
@@ -419,21 +471,30 @@ export async function runRepair(
   if (!(await confirm(plan))) return { rewritten: [], skipped: true };
 
   const launch = buildLaunch("local", deps.resolvedServerJs);
+  // deps.resolvedPy can be the DOCUMENTED default (~/.prometheus/engine/prometheus.py) rather than a
+  // file that exists; registering a missing PROMETHEUS_PY makes every tool call fail, so it is left
+  // out and the server finds the engine itself.
+  const py = deps.resolvedPy && deps.existsSync(deps.resolvedPy) ? deps.resolvedPy : "";
   const rewritten: string[] = [];
   for (const f of fixable) {
     const agent = agents.find((a) => a.id === f.agent);
     if (!agent) continue;
     // claude: re-register via its own CLI (its store is authoritative); others: the file writer.
     if (agent.id === "claude" && agent.cliRegister && deps.commandExists("claude")) {
-      const reg = agent.cliRegister(deps.resolvedPy, launch);
+      const reg = agent.cliRegister(py, launch);
       if (reg) {
+        // `claude mcp add` refuses an existing name: without the removal a stale entry was never
+        // replaced and repair reported success. Unconditional, because `claude mcp get` may fail
+        // for a registered server that cannot connect, so "absent" does not prove absence.
+        const un = agent.cliUnregister?.();
+        if (un) deps.exec(un.bin, un.argv);
         const out = deps.exec(reg.bin, reg.argv);
         if (out !== null) rewritten.push(agent.id);
       }
       continue;
     }
     try {
-      applyAgent(agent, deps.resolvedPy, false, launch);
+      applyAgent(agent, py, false, launch);
       rewritten.push(agent.id);
     } catch {
       /* a malformed file we refused to clobber — skipped */

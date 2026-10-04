@@ -29,7 +29,10 @@ set -eu
 # Only THIS launch's own log may ever be erased — never act on a value inherited from a parent.
 unset PROMETHEUS_LAUNCH_ERASE_ROWS
 
-MIN_NODE_MAJOR=20
+# The CLI declares engines.node ">=22.6" (apps/cli/package.json) and install.sh enforces the same;
+# this used to accept 20, so a launcher could start a node the build itself refused.
+MIN_NODE_MAJOR=22
+MIN_NODE_MINOR=6
 
 # ── resolve this script's real directory ──────────────────────────────────────
 # POSIX only: macOS `readlink` has no -f, and `realpath` is not guaranteed present.
@@ -52,12 +55,34 @@ done
 BIN_DIR=$(CDPATH= cd -- "$(dirname -- "$self")" && pwd -P)
 ROOT=$(CDPATH= cd -- "$BIN_DIR/.." && pwd -P)
 
+# ── the private toolchain install.sh may have provisioned ─────────────────────
+# install.sh writes <checkout>/.prometheus-toolchain (toolchain=, python=, node= lines); it is read
+# line by line here, never sourced. Without it, the default Prometheus home. This replaces a guess
+# at "$ROOT/../toolchain" — a directory outside both the checkout and the Prometheus home, so for
+# a checkout under ~/src it executed whatever ~/src/toolchain/pnpm/bin/pnpm happened to be.
+TC=${PROMETHEUS_TOOLCHAIN:-}
+INST_PY=""
+if [ -f "$ROOT/.prometheus-toolchain" ]; then
+  while IFS= read -r line || [ -n "$line" ]; do
+    case $line in
+    toolchain=/*) [ -n "$TC" ] || TC=${line#toolchain=} ;;
+    python=/*) INST_PY=${line#python=} ;;
+    esac
+  done <"$ROOT/.prometheus-toolchain"
+fi
+[ -n "$TC" ] || TC=${PROMETHEUS_HOME:-$HOME/.prometheus}/toolchain
+
 # ── locate node ───────────────────────────────────────────────────────────────
-# A Finder/Dock-launched terminal (and some CI shells) get a minimal PATH that omits
-# Homebrew and the version managers, so fall back to the usual install roots rather
-# than failing with a bare "node: not found".
-node_major() {
-  "$1" --version 2>/dev/null | sed -n 's/^v\([0-9][0-9]*\)\..*/\1/p'
+# The FIRST node that meets the floor, not the first node found: a too-old node on PATH used to
+# end the launch even when the private toolchain (or Homebrew) had a good one. A Finder/Dock-
+# launched terminal gets a minimal PATH, hence the well-known roots after PATH.
+node_ok() {
+  v=$("$1" --version 2>/dev/null </dev/null) || return 1
+  v=${v#v}
+  major=${v%%.*} rest=${v#*.}
+  minor=${rest%%.*}
+  case $major$minor in '' | *[!0-9]*) return 1 ;; esac
+  [ "$major" -gt "$MIN_NODE_MAJOR" ] || { [ "$major" -eq "$MIN_NODE_MAJOR" ] && [ "$minor" -ge "$MIN_NODE_MINOR" ]; }
 }
 
 find_node() {
@@ -65,18 +90,19 @@ find_node() {
     printf '%s\n' "$PROMETHEUS_NODE"
     return 0
   fi
-  if command -v node >/dev/null 2>&1; then
-    command -v node
-    return 0
-  fi
+  path_node=$(command -v node 2>/dev/null || true)
   for candidate in \
+    "$path_node" \
+    "$TC/node/bin/node" \
     /opt/homebrew/bin/node \
+    /opt/homebrew/opt/node@22/bin/node \
     /usr/local/bin/node \
     /usr/bin/node \
     "$HOME/.volta/bin/node" \
     "$HOME/.local/share/fnm/aliases/default/bin/node" \
-    "$HOME/.nvm/versions/node"/*/bin/node; do
-    [ -x "$candidate" ] || continue
+    "${NVM_DIR:-$HOME/.nvm}/versions/node"/*/bin/node; do
+    [ -n "$candidate" ] && [ -x "$candidate" ] || continue
+    node_ok "$candidate" || continue
     printf '%s\n' "$candidate"
     return 0
   done
@@ -85,20 +111,25 @@ find_node() {
 
 NODE=$(find_node) || {
   cat >&2 <<EOF
-prometheus: Node.js >= $MIN_NODE_MAJOR is required but no \`node\` was found.
+prometheus: Node.js >= $MIN_NODE_MAJOR.$MIN_NODE_MINOR is required and none was found.
 
-  install it        https://nodejs.org  (or: brew install node / apt install nodejs)
+  install it        re-run install.sh — it downloads a private Node.js when none fits
   or point at one   PROMETHEUS_NODE=/path/to/node prometheus ...
 EOF
   exit 127
 }
 
-MAJOR=$(node_major "$NODE")
-if [ -z "$MAJOR" ] || [ "$MAJOR" -lt "$MIN_NODE_MAJOR" ]; then
-  echo "prometheus: Node.js >= $MIN_NODE_MAJOR required, but $NODE is $("$NODE" --version 2>/dev/null || echo unknown)" >&2
-  echo "            set PROMETHEUS_NODE to a newer node to override." >&2
-  exit 127
-fi
+# Give the CLI the toolchain install.sh provisioned. APPENDED, so it only fills gaps: anything the
+# user installed still wins (the agent's grep/glob spawn `rg` by bare name; the engine and nemesis
+# run `python3` through PATH). Two exceptions go in FRONT, because the system copy they replaced
+# was missing or unusable when install.sh chose them: the private python, and a private node.
+for dir in "$TC/rg" "$TC/node/bin" "$TC/python/bin"; do
+  [ -d "$dir" ] || continue
+  case :$PATH: in *":$dir:"*) ;; *) PATH=$PATH:$dir ;; esac
+done
+case $INST_PY in "$TC"/*) [ -x "$INST_PY" ] && PATH=${INST_PY%/*}:$PATH ;; esac
+case $NODE in "$TC"/*) PATH=${NODE%/*}:$PATH ;; esac
+export PATH
 
 # ── locate the CLI bundle, rebuilding it first if the sources moved on ────────
 # dist/bin.js is a bundled build artifact (git-ignored, not the TS source), produced
@@ -122,12 +153,35 @@ bundle_is_stale() {
   return 1
 }
 
+# The pnpm for a rebuild: the private copy install.sh keeps in the toolchain when no installed pnpm
+# fitted, else the one on PATH. Never `corepack enable` — this used to run it, silently, on every stale launch:
+# corepack writes its shims next to the node binary, which is /usr/bin on a distro or NodeSource
+# node (EACCES for a normal user), and wherever it CAN write it replaces the global pnpm and yarn.
+find_pnpm() {
+  if [ -x "$TC/pnpm/bin/pnpm" ]; then
+    printf '%s\n' "$TC/pnpm/bin/pnpm"
+    return 0
+  fi
+  command -v pnpm 2>/dev/null
+}
+
+# Dependencies are refreshed when they are missing OR older than the lockfile — after a `git pull`
+# that changed it. Rebuilding against the old node_modules fails, then falls back to the stale
+# bundle: exactly what happened when @types/node became a declared dependency (2026-10-03), where
+# the old tree compiled only because of a leftover directory a clean clone never has. Filtered and
+# frozen, like install.sh: the CLI's packages only, and never a different tree than the lockfile.
 rebuild_cli() {
   (
+    # The node chosen above runs the build too (pnpm, tsc and esbuild are `#!/usr/bin/env node`
+    # scripts), not whichever node is first on PATH; and prepack calls `pnpm run bundle` itself.
+    PATH=${NODE%/*}:$PATH
+    case $PNPM in "$TC"/*) PATH=${PNPM%/*}:$PATH ;; esac
+    export PATH
     cd "$ROOT/studio" \
-      && { [ -d node_modules ] || pnpm install; } \
-      && pnpm --filter @prometheus/cli run prepack
-  )
+      && { { [ -f node_modules/.modules.yaml ] && ! [ pnpm-lock.yaml -nt node_modules/.modules.yaml ]; } \
+        || "$PNPM" install --filter "@prometheus/cli..." --frozen-lockfile; } \
+      && "$PNPM" --filter @prometheus/cli run prepack
+  ) </dev/null
 }
 
 # Passes the rebuild log through UNCHANGED while counting the terminal rows it occupies (long
@@ -186,9 +240,9 @@ JS
 # at all (a published npm install ships dist/bin.js with no src/ next to it).
 if [ -z "${PROMETHEUS_CLI_JS:-}" ] && [ -z "${PROMETHEUS_SKIP_BUILD:-}" ] \
   && [ -d "$ROOT/studio/apps/cli/src" ] && bundle_is_stale; then
-  if ! { command -v pnpm >/dev/null 2>&1 || corepack enable >/dev/null 2>&1; }; then
+  if ! PNPM=$(find_pnpm); then
     echo "prometheus: source changed since the last build — rebuilding…" >&2
-    echo "prometheus: pnpm not found — skipping rebuild (run \`corepack enable\`)." >&2
+    echo "prometheus: pnpm not found — skipping rebuild (re-run \"$ROOT/install.sh\" --from-local \"$ROOT\", which installs it)." >&2
   elif [ -t 2 ] && tidy=$(mktemp -d "${TMPDIR:-/tmp}/prometheus-launch.XXXXXX" 2>/dev/null); then
     # On a terminal: show the log live AND count its rows, so the CLI can wipe exactly those
     # rows once it is up — above a running session the log is only noise. Only a SUCCESSFUL
@@ -199,7 +253,7 @@ if [ -z "${PROMETHEUS_CLI_JS:-}" ] && [ -z "${PROMETHEUS_SKIP_BUILD:-}" ] \
         echo "prometheus: rebuild done."
         : >"$tidy/ok"
       else
-        echo "prometheus: rebuild failed — launching the existing build instead."
+        if [ -f "$CLI_JS" ]; then echo "prometheus: rebuild failed — launching the existing build instead."; else echo "prometheus: rebuild failed, and there is no earlier build to fall back to."; fi
       fi
     } | "$NODE" -e "$ROW_COUNTER" "$tidy/rows" >&2 || true
     if [ -f "$tidy/ok" ] && [ -s "$tidy/rows" ]; then
@@ -213,7 +267,11 @@ if [ -z "${PROMETHEUS_CLI_JS:-}" ] && [ -z "${PROMETHEUS_SKIP_BUILD:-}" ] \
     if rebuild_cli >&2; then
       echo "prometheus: rebuild done." >&2
     else
-      echo "prometheus: rebuild failed — launching the existing build instead." >&2
+      if [ -f "$CLI_JS" ]; then
+        echo "prometheus: rebuild failed — launching the existing build instead." >&2
+      else
+        echo "prometheus: rebuild failed, and there is no earlier build to fall back to." >&2
+      fi
     fi
   fi
 fi
@@ -224,8 +282,8 @@ prometheus: the CLI bundle is missing.
 
   expected  $CLI_JS
 
-  build it  cd "$ROOT/studio" && corepack enable && pnpm install && pnpm --filter @prometheus/cli run prepack
-  or        "$ROOT/install.sh" --from-local "$ROOT"
+  build it  "$ROOT/install.sh" --from-local "$ROOT"
+  or        cd "$ROOT/studio" && pnpm install --filter "@prometheus/cli..." --frozen-lockfile && pnpm --filter @prometheus/cli run prepack
 EOF
   exit 1
 fi

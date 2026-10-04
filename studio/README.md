@@ -38,7 +38,8 @@ studio/
 ## Golden rule
 
 **JS never reimplements security.** Every scan / install / lifecycle action routes through
-`nemesis` and `prometheus.py` via `packages/engine-bridge`.
+`nemesis` and `prometheus.py` via `packages/engine-bridge` — the labelled exceptions are listed in
+`docs/security/THREAT_MODEL.md` (`/updates`' confirmed "update everything" among them).
 
 ## Getting started (once implemented)
 

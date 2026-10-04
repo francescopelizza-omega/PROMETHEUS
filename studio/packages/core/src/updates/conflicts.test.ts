@@ -330,3 +330,35 @@ test("a rebuild is not reported as a downgrade — `3.6.4 -> 3.6.4_1` is a repac
   });
   assert.equal(found.filter((c) => c.kind === "downgrade-offer").length, 0);
 });
+
+test("an npm row never 'owns' a pnpm global winner — its upgrade is flagged as the shadowed one", () => {
+  /**
+   * `viaForOwner` maps a pnpm global to "npm", and `ownsCopy` used to accept that — so the npm
+   * row for a tool installed through pnpm AND npm matched the pnpm WINNER, no conflict fired, and
+   * "update everything" would have upgraded the npm copy nobody runs while reporting ✓.
+   */
+  const res = resolveTool("gemini", [
+    copy({
+      pathEntry: `${HOME}/Library/pnpm/gemini`,
+      realPath: `${HOME}/Library/pnpm/global/5/node_modules/@google/gemini-cli/bundle/gemini.js`,
+      owner: "pnpm-global",
+      name: "@google/gemini-cli",
+      version: "0.45.0",
+    }),
+    copy({
+      pathEntry: "/opt/homebrew/bin/gemini",
+      realPath: "/opt/homebrew/lib/node_modules/@google/gemini-cli/bundle/gemini.js",
+      owner: "npm-global",
+      name: "@google/gemini-cli",
+      version: "0.44.0",
+    }),
+  ]);
+  const outdated: OutdatedPackage[] = [
+    { manager: "npm-global", name: "@google/gemini-cli", installed: "0.44.0", available: "0.46.0" },
+  ];
+  const found = findConflicts({ resolutions: [res], outdated });
+  const flagged = found.find((c) => c.kind === "shadowed-upgrade");
+  assert.ok(flagged, "the npm upgrade targets the shadowed npm copy");
+  assert.equal(flagged.avoid, "npm install -g @google/gemini-cli@latest");
+  assert.deepEqual(plainUpgrades(outdated, found), []);
+});

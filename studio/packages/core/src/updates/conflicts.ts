@@ -40,7 +40,7 @@ import {
   ownerLabel,
   viaForOwner,
 } from "./install-owner.js";
-import type { OutdatedPackage } from "./package-managers.js";
+import type { ManagerId, OutdatedPackage } from "./package-managers.js";
 import { compareVersions, withoutRevision } from "./semver.js";
 
 /** What kind of trouble this is. Ordered roughly by how badly it misleads. */
@@ -77,10 +77,42 @@ export interface Conflict {
    */
   avoid?: string;
   severity: "high" | "medium" | "low";
+  /**
+   * The manager an `unreachable-bin-dir` finding is about, as an id.
+   *
+   * `subject` carries the manager's display LABEL ("npm (global)"), which matched
+   * `ManagerReport.label` only because two separate literals happened to agree. Anything that has
+   * to act on the finding — the `/updates` dispatch refuses npm upgrades that would land where no
+   * shell looks — matches on this instead of on prose.
+   */
+  manager?: ManagerId;
 }
 
-/** Does this package row plausibly describe this copy? */
-function ownsCopy(pkg: OutdatedPackage, copy: ToolCopy): boolean {
+/**
+ * The command line a conflict names in `avoid` for one package row.
+ *
+ * One builder, because three call sites had to agree on it byte for byte: `findConflicts` writes
+ * it, `plainUpgrades` filters on it, and the `/updates` dispatch maps a dropped row back to the
+ * finding that dropped it. Two inline copies of this ternary already existed; a third would have
+ * been the one that drifted.
+ */
+export function avoidLineFor(pkg: OutdatedPackage): string {
+  return pkg.manager === "brew" && pkg.kind === "cask"
+    ? `brew upgrade --cask ${pkg.name}`
+    : pkg.manager === "brew"
+      ? `brew upgrade ${pkg.name}`
+      : pkg.manager === "npm-global"
+        ? `npm install -g ${pkg.name}@latest`
+        : `${pkg.manager} upgrade ${pkg.name}`;
+}
+
+/**
+ * Does this package row plausibly describe this copy?
+ *
+ * Exported for the `/updates` dispatch, which must know whether a manager's row is the copy a
+ * tool resolves to on PATH before it may act on it — the same question `findConflicts` asks.
+ */
+export function ownsCopy(pkg: OutdatedPackage, copy: ToolCopy): boolean {
   const via = viaForOwner(copy.owner);
   if (pkg.manager === "brew") {
     if (copy.owner !== "brew-formula" && copy.owner !== "brew-cask") return false;
@@ -89,7 +121,10 @@ function ownsCopy(pkg: OutdatedPackage, copy: ToolCopy): boolean {
     if (pkg.kind === "cask" && copy.owner !== "brew-cask") return false;
     return pkg.name === copy.name;
   }
-  if (pkg.manager === "npm-global") return via === "npm" && pkg.name === copy.name;
+  // npm's row is about npm's copy only. `viaForOwner` maps a pnpm global to "npm" too, and
+  // matching it here made an npm row look like it owned a pnpm winner — so the upgrade of the
+  // shadowed npm copy was neither flagged as one nor kept from running.
+  if (pkg.manager === "npm-global") return copy.owner === "npm-global" && pkg.name === copy.name;
   if (pkg.manager === "pipx") return via === "pipx" && pkg.name === copy.name;
   return false;
 }
@@ -111,7 +146,13 @@ export interface ConflictInput {
   /** everything the package managers reported as upgradable. */
   outdated: readonly OutdatedPackage[];
   /** manager bin directories that are NOT reachable from PATH, keyed by manager label. */
-  unreachableBinDirs?: readonly { manager: string; dir: string; installCommand: string }[];
+  unreachableBinDirs?: readonly {
+    manager: string;
+    /** the same manager as an id — carried onto the finding as `Conflict.manager`. */
+    managerId?: ManagerId;
+    dir: string;
+    installCommand: string;
+  }[];
   /** a running server's version, when a tool is a client/server pair. */
   serverVersions?: Readonly<Record<string, string>>;
 }
@@ -136,14 +177,7 @@ export function findConflicts(input: ConflictInput): Conflict[] {
       const target = res.copies.find((c) => ownsCopy(pkg, c));
       if (!target || target === winner) continue;
       const cmp = offeredVs(winner.version, pkg.available);
-      const line =
-        pkg.manager === "brew" && pkg.kind === "cask"
-          ? `brew upgrade --cask ${pkg.name}`
-          : pkg.manager === "brew"
-            ? `brew upgrade ${pkg.name}`
-            : pkg.manager === "npm-global"
-              ? `npm install -g ${pkg.name}@latest`
-              : `${pkg.manager} upgrade ${pkg.name}`;
+      const line = avoidLineFor(pkg);
 
       if (cmp !== null && cmp < 0) {
         out.push({
@@ -235,6 +269,7 @@ export function findConflicts(input: ConflictInput): Conflict[] {
       consequence: `\`${d.installCommand}\` will report success and place a launcher there that no shell will ever find — so the tool stays at its old version, or appears not to be installed at all.`,
       remedy: `Add ${d.dir} to PATH, or install that tool through a manager whose bin directory is already on it.`,
       severity: "high",
+      ...(d.managerId ? { manager: d.managerId } : {}),
     });
   }
 
@@ -254,17 +289,7 @@ export function plainUpgrades(
   conflicts: readonly Conflict[],
 ): OutdatedPackage[] {
   const flagged = new Set(conflicts.flatMap((c) => (c.avoid ? [c.avoid] : [])));
-  return outdated.filter((p) => {
-    const line =
-      p.manager === "brew" && p.kind === "cask"
-        ? `brew upgrade --cask ${p.name}`
-        : p.manager === "brew"
-          ? `brew upgrade ${p.name}`
-          : p.manager === "npm-global"
-            ? `npm install -g ${p.name}@latest`
-            : `${p.manager} upgrade ${p.name}`;
-    return !flagged.has(line);
-  });
+  return outdated.filter((p) => !flagged.has(avoidLineFor(p)));
 }
 
 /** Owners a conflict report treats as "a package manager owns this". */

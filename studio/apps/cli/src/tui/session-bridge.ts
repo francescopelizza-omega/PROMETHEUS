@@ -49,7 +49,13 @@ import { mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { isAbsolute, join, resolve } from "node:path";
 
 import { updates as u } from "@prometheus/core";
-import { fetchOllamaTags, searchHuggingFace } from "@prometheus/core/updates-live";
+import {
+  fetchOllamaTags,
+  markUpdateCacheStale,
+  ollamaModelsDir,
+  pullModel,
+  searchHuggingFace,
+} from "@prometheus/core/updates-live";
 import { localMemorySnapshot } from "@prometheus/engine-bridge";
 import { PROM_VERSION } from "../commands/help.js";
 import {
@@ -66,6 +72,7 @@ import { fleetReport } from "../fleet/report.js";
 import type { FleetTicker } from "../fleet/ticker.js";
 import { startFleetTicker } from "../fleet/ticker.js";
 import {
+  diskInfo,
   ensureHomeTree,
   loadSettings,
   prometheusHome,
@@ -176,7 +183,10 @@ import { execVarsFromEnv } from "../session/system-tools.js";
 import { turnSummaryOf } from "../session/turn-summary.js";
 import { createWorkingSet, isPathAllowed } from "../session/working-set.js";
 import { insideTmux } from "../tmux/tmux.js";
+import { probeEnv, runtimeBrewFormula } from "../updates/dispatch-cmd.js";
+import { makeDispatchProbes } from "../updates/dispatch-probes.js";
 import { type BrowseRow, browseRows, installTag } from "../updates/model-actions-cmd.js";
+import { type StepRunner, makeStepRunner } from "../updates/run-step.js";
 import { runUpdates, updatesStartupNotice } from "../updates/updates-cmd.js";
 import { copyReplyStatus, lastAssistantReply, osc52Sequence } from "./clipboard.js";
 import { fleetLegendLines } from "./fleet-bar.js";
@@ -394,6 +404,14 @@ export interface SessionBridge {
   readonly slashCtx: SlashCtx;
   /** route one submitted line (slash / verb / agent message). Optional `signal` aborts the turn (Ctrl-C). */
   submit: (input: string, opts?: { signal?: AbortSignal }) => Promise<void>;
+  /**
+   * Asked on Ctrl-D while a line runs. True when an "update everything" package step is in
+   * flight: nothing further will start, and the app must wait for the step before leaving (it is
+   * never interrupted — dispatch-cmd.ts). False when there is no such step to wait for.
+   */
+  stopAfterStep?: () => boolean;
+  /** a submitted line that must be dropped: a lone "y" while /updates runs, which would reach the agent. */
+  dropsEarlyYes?: (text: string) => boolean;
   /** the live status model (tuning + permission mode). */
   statusModel: () => StatusModel;
   /** the active permission mode (the app keeps the reducer + this in sync). */
@@ -823,6 +841,31 @@ export async function createSessionBridge(deps: BridgeDeps): Promise<SessionBrid
   const loadMemory = (): string | null => loadMemoryIndexBlock(home, state.cwd);
 
   const write = deps.write;
+
+  /**
+   * The running slash command's AbortSignal — the one Ctrl-C trips (app.ts aborts `turnAbort`).
+   *
+   * `submit` has always been handed it and passed it only to agent turns, so Ctrl-C during a slash
+   * command was cosmetic. Commands that run real work (`/updates`'s "update everything", a model
+   * pull) read it through this variable. One variable is enough: submits are serialised on the
+   * app's `submitChain`.
+   */
+  let slashSignal: AbortSignal | undefined;
+  /**
+   * True once `dispose()` has run. After that the terminal belongs to the shell again — a write
+   * would re-send the TUI's escape sequences into it — and a multi-step job starts nothing more.
+   */
+  let disposed = false;
+  /**
+   * "update everything" package steps in flight, and whether an exit is waiting for them. A step
+   * is never interrupted (an interrupted cask swap is not rolled back), so Ctrl-D during one
+   * leaves once it ends — `stopAfterStep` — instead of handing the shell a terminal while brew
+   * runs on headless, where the next Ctrl-C would be a real SIGINT that kills it mid-install.
+   */
+  let updateStepsRunning = 0;
+  let stopRequested = false;
+  /** True while /updates runs: a lone "y" submitted then would otherwise reach the agent. */
+  let updatesRunning = false;
 
   /**
    * LIFECYCLE HOOKS — the TUI's half of the readline host's wiring, deliberately identical.
@@ -2220,46 +2263,95 @@ export async function createSessionBridge(deps: BridgeDeps): Promise<SessionBrid
       }),
     runUpdates: async (rest) => {
       // the slash handler is void — CLI-047's widened return (report|null) is discarded here.
-      await runUpdates(rest, {
-        home,
-        promVersion: PROM_VERSION,
-        client,
-        write,
-        env: process.env,
-        ...(process.argv[1] ? { scriptPath: process.argv[1] } : {}),
-        cwd: state.cwd,
-        /**
-         * The seams `/updates pull` and `/updates rm` need. Passing them is what ENABLES the
-         * action subcommands on this surface — without them the dispatcher refuses rather than
-         * assuming a confirmation, because one of the two is irreversible.
-         *
-         * Read off `slashCtx` lazily: this arrow runs long after the literal is constructed, and
-         * routing through the same object the rest of the TUI uses means the overlay-backed
-         * confirm is the one the user actually sees.
-         */
-        actions: {
-          confirm: (prompt) => slashCtx.confirm(prompt),
-          ask: (prompt) => slashCtx.ask(prompt),
-          getAuthLevel: () => slashCtx.getAuthLevel(),
-        },
-        /**
-         * The catalogue seam. READ-ONLY, so it is supplied even where the action seams are not:
-         * browsing shows a list and a command, and installs nothing.
-         *
-         * The budget is this machine's REAL memory, read the same way the admission gate reads
-         * it, so a model the browser says fits is one the gate will also admit. A browser using
-         * `totalmem()` would promise models that cannot load once the OS and the compositor are
-         * accounted for.
-         */
-        browse: {
-          search: async (q: string) => {
-            const r = await searchHuggingFace({ query: q, limit: 40 });
-            return { entries: r.entries, error: r.error };
+      const updateRunner = makeStepRunner();
+      /** the runner for "update everything" steps (not probes): counted, see `updateStepsRunning`. */
+      const stepRunner: StepRunner = async (argv, opts) => {
+        updateStepsRunning += 1;
+        try {
+          return await updateRunner(argv, opts);
+        } finally {
+          updateStepsRunning -= 1;
+        }
+      };
+      stopRequested = false;
+      updatesRunning = true;
+      try {
+        await runUpdates(rest, {
+          home,
+          promVersion: PROM_VERSION,
+          client,
+          // "update everything" can outlive the TUI — a hang-up, SIGTERM/SIGHUP or a crash ends it
+          // through finish() while a step runs on; once disposed, its output must not reach the
+          // shell the terminal was handed back to.
+          write: (line) => {
+            if (!disposed) write(line);
           },
-          budget: await catalogBudget(),
-          installed: await installedTags(),
-        },
-      });
+          env: process.env,
+          ...(process.argv[1] ? { scriptPath: process.argv[1] } : {}),
+          cwd: state.cwd,
+          /**
+           * The seams `/updates pull`, `/updates rm` and the "update everything" question need.
+           * Passing them is what ENABLES the actions on this surface — without them the dispatcher
+           * refuses rather than assuming a confirmation, because one of the two is irreversible.
+           *
+           * Read off `slashCtx` lazily: this arrow runs long after the literal is constructed, and
+           * routing through the same object the rest of the TUI uses means the overlay-backed
+           * modal is the one the user actually sees. Its `ask` is line-based (Enter answers, Esc
+           * and Ctrl-C answer ""), which is what the y/N needs.
+           */
+          actions: {
+            confirm: (prompt) => slashCtx.confirm(prompt),
+            ask: (prompt) => slashCtx.ask(prompt),
+            getAuthLevel: () => slashCtx.getAuthLevel(),
+            signal: () => slashSignal,
+          },
+          /**
+           * What "update everything" runs with — see updates/dispatch-cmd.ts for what it will and
+           * will never run. The audit lands in the same `exec-audit.jsonl` as every `run_command`.
+           */
+          dispatch: {
+            run: stepRunner,
+            probes: makeDispatchProbes(
+              updateRunner,
+              (tool) => probeEnv(tool),
+              () => ({
+                cwd: state.cwd,
+                ...(process.env.VIRTUAL_ENV ? { activeVenv: process.env.VIRTUAL_ENV } : {}),
+              }),
+            ),
+            pull: pullModel,
+            audit: (entry) => appendExecAudit(home, entry),
+            freeDiskBytes: () => diskInfo(ollamaModelsDir())?.freeBytes,
+            runtimeFormula: () => runtimeBrewFormula(),
+            // the bridge's own posture, not an optional SlashCtx member a fixture may leave out
+            getPermMode: () => permMode,
+            // raw mode: Ctrl-C is a byte the reducer turns into the turn's abort, never a SIGINT
+            ctrlCIsAbort: () => true,
+            dryRun: () => state.tuning.dryRun === true,
+            closed: () => disposed || stopRequested,
+            invalidateCache: () => markUpdateCacheStale(home),
+          },
+          /**
+           * The catalogue seam. READ-ONLY, so it is supplied even where the action seams are not:
+           * browsing shows a list and a command, and installs nothing.
+           *
+           * The budget is this machine's REAL memory, read the same way the admission gate reads
+           * it, so a model the browser says fits is one the gate will also admit. A browser using
+           * `totalmem()` would promise models that cannot load once the OS and the compositor are
+           * accounted for.
+           */
+          browse: {
+            search: async (q: string) => {
+              const r = await searchHuggingFace({ query: q, limit: 40 });
+              return { entries: r.entries, error: r.error };
+            },
+            budget: await catalogBudget(),
+            installed: await installedTags(),
+          },
+        });
+      } finally {
+        updatesRunning = false;
+      }
     },
     usage: () => {
       // local via endpoint locality (a remote OpenAI-compatible endpoint also sets `endpoint`),
@@ -2659,7 +2751,12 @@ export async function createSessionBridge(deps: BridgeDeps): Promise<SessionBrid
     if (parsedInput.kind === "slash") {
       const cmd = findSlash(parsedInput.name);
       if (cmd) {
-        await cmd.run(parsedInput.rest, slashCtx);
+        slashSignal = opts?.signal;
+        try {
+          await cmd.run(parsedInput.rest, slashCtx);
+        } finally {
+          slashSignal = undefined;
+        }
         return;
       }
       // A user-defined command file — consulted ONLY after the built-in registry, so a file
@@ -2995,7 +3092,14 @@ export async function createSessionBridge(deps: BridgeDeps): Promise<SessionBrid
       }
       await dispatchInvoke(row, invokeDeps, args);
     },
+    stopAfterStep: (): boolean => {
+      if (updateStepsRunning === 0) return false;
+      stopRequested = true;
+      return true;
+    },
+    dropsEarlyYes: (text: string): boolean => updatesRunning && /^\s*y(es)?\s*$/i.test(text),
     dispose: async (): Promise<void> => {
+      disposed = true;
       // The one path EVERY exit takes — see `teardownFleet` for why the heartbeat removal cannot
       // live in `doQuit` alone.
       await teardownFleet();
