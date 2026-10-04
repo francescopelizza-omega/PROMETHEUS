@@ -7,12 +7,18 @@
  * validate.
  */
 import assert from "node:assert/strict";
-import { test } from "node:test";
+import { after, test } from "node:test";
 
 import { parseCommand } from "@prometheus/core/agent-exec";
 
 import { runParsedCommand } from "@prometheus/core/agent-system-host";
 import { runSystemTool } from "./system-tools.js";
+
+// The code under test unref()s its timers (a pending timeout must never keep the CLI alive), so
+// while a test awaits one nothing else holds the event loop open, and Node 22's runner cancels it:
+// "Promise resolution is still pending but the event loop has already resolved" (CI, 2026-10-04).
+const keepAlive = setInterval(() => {}, 1 << 30);
+after(() => clearInterval(keepAlive));
 
 /** A fake `spawn`: records argv, replays a scripted result per program. */
 function fakeSpawn(script: Record<string, { code?: number; out?: string; err?: string }> = {}) {

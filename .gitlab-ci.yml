@@ -149,6 +149,11 @@ verify:
     - pnpm run typecheck
     # biome, plus the two custom guards: no raw hex outside tokens/, and the §9 layout rules.
     - pnpm run lint
+    # Everything below runs as an UNPRIVILEGED user, the way Prometheus is used (install.sh refuses
+    # root). As uid 0 the container defeated the suites' permission checks — a chmod-000 store is
+    # readable by root, detectElevation sees uid 0 and clamps the authorisation level — so nine
+    # suites failed for the runner's identity, not for the code (first full run, 2026-10-04).
+    - useradd -m ci && chown -R ci "$CI_PROJECT_DIR"
     # ── the suites, SCOPED per package ────────────────────────────────────────
     #
     # This was one bare `node scripts/run-tests.mjs`, and it could not pass. The runner's
@@ -162,20 +167,20 @@ verify:
     # the same 601 suites (verified: 214+160+152+47+17+10+1), each well under the runner's
     # 260-file ceiling, and a failure now names the package it came from. `apps/jetbrains-…`
     # is omitted deliberately — it is a scaffold with no suites.
-    - node scripts/run-tests.mjs packages/core
-    - node scripts/run-tests.mjs packages/engine-bridge
-    - node scripts/run-tests.mjs packages/ui
-    - node scripts/run-tests.mjs apps/cli
-    - node scripts/run-tests.mjs apps/desktop
-    - node scripts/run-tests.mjs apps/vscode-extension
-    - node scripts/run-tests.mjs apps/mcp-server
+    - su ci -s /bin/sh -c "export PATH='$PATH' HOME=/home/ci; cd '$PWD' && node scripts/run-tests.mjs packages/core"
+    - su ci -s /bin/sh -c "export PATH='$PATH' HOME=/home/ci; cd '$PWD' && node scripts/run-tests.mjs packages/engine-bridge"
+    - su ci -s /bin/sh -c "export PATH='$PATH' HOME=/home/ci; cd '$PWD' && node scripts/run-tests.mjs packages/ui"
+    - su ci -s /bin/sh -c "export PATH='$PATH' HOME=/home/ci; cd '$PWD' && node scripts/run-tests.mjs apps/cli"
+    - su ci -s /bin/sh -c "export PATH='$PATH' HOME=/home/ci; cd '$PWD' && node scripts/run-tests.mjs apps/desktop"
+    - su ci -s /bin/sh -c "export PATH='$PATH' HOME=/home/ci; cd '$PWD' && node scripts/run-tests.mjs apps/vscode-extension"
+    - su ci -s /bin/sh -c "export PATH='$PATH' HOME=/home/ci; cd '$PWD' && node scripts/run-tests.mjs apps/mcp-server"
     # The vite build is its own gate: the CORE_SUBPATHS alias map lives only here, so a new
     # core subpath can pass tsc and every test and still fail the bundle.
-    - pnpm --filter @prometheus/desktop exec electron-vite build
+    - su ci -s /bin/sh -c "export PATH='$PATH' HOME=/home/ci; cd '$PWD' && pnpm --filter @prometheus/desktop exec electron-vite build"
     # A real Electron launch under a virtual display. Zero pixel comparisons — this asserts the
     # app starts, mounts and renders every route, which is what a headless runner can honestly
     # check without platform baselines.
-    - xvfb-run -a pnpm --filter @prometheus/desktop exec playwright test shots.spec.ts
+    - su ci -s /bin/sh -c "export PATH='$PATH' HOME=/home/ci; cd '$PWD' && xvfb-run -a pnpm --filter @prometheus/desktop exec playwright test shots.spec.ts"
   artifacts:
     when: on_failure
     paths:

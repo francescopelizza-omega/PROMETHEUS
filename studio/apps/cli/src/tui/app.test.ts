@@ -5,12 +5,18 @@
  * through, so testing them proves the resize + editing behavior.
  */
 import assert from "node:assert/strict";
-import { test } from "node:test";
+import { after, test } from "node:test";
 
 import { agent } from "@prometheus/core";
 import { resolveStartAuthLevel, wrapFraming } from "./app.js";
 import { type ModalView, applyModalKey, modalCursorCol, renderModal } from "./frame.js";
 import { stringWidth } from "./width.js";
+
+// The code under test unref()s its timers (a pending timeout must never keep the CLI alive), so
+// while a test awaits one nothing else holds the event loop open, and Node 22's runner cancels it:
+// "Promise resolution is still pending but the event loop has already resolved" (CI, 2026-10-04).
+const keepAlive = setInterval(() => {}, 1 << 30);
+after(() => clearInterval(keepAlive));
 
 const strip = (s: string): string => s.replace(/\x1b\[[0-9;]*m/g, "");
 const WIDTHS = [40, 80, 120] as const;
