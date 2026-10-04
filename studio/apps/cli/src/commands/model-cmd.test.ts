@@ -224,7 +224,13 @@ test("model pull --json --yes: folds the feasibility verdict into the envelope",
     if (argv[0] === "hw.scan") return { ok: true, ram_gb: 16, gpus: [] };
     return { ok: true, command: "pull", installed: true };
   }) as unknown as SidecarDeps["runSidecar"];
-  const deps: SidecarDeps = { runSidecar, launchGuard: async () => ({ cpuPct: 5, ramPct: 20 }) };
+  const deps: SidecarDeps = {
+    runSidecar,
+    launchGuard: async () => ({ cpuPct: 5, ramPct: 20 }),
+    // the runner is present (as in fake()): without this the REAL host was probed, and on a CI
+    // runner with no ollama the pull took the install-offer path instead (2026-10-04)
+    probeRunner: async () => true,
+  };
   const out = await runModelCommand(ctxFor(["model", "pull", "big:70b", "--json", "--yes"]), deps);
   const env = out.json as { feasibility?: { tier: string; ramGb: number } };
   assert.ok(env.feasibility, "envelope carries a feasibility block in --json mode");

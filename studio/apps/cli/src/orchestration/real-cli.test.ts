@@ -46,6 +46,11 @@ process.stdout.write(reply());
 const fakeEngine = (): EngineClient =>
   ({ runPrometheus: async () => ({ ok: true }) }) as unknown as EngineClient;
 
+// The launch guard samples the REAL machine's CPU/RAM and refuses past 90%. On a busy CI runner it
+// did ("mockcli: temporarily unavailable — CPU at 100% ≥ 90% ceiling", 2026-10-04): a verdict
+// about the runner, not the orchestration under test. Same seam and value as backends.test.ts.
+const IDLE_LAUNCH_GUARD = { launchGuardFn: async () => ({ cpuPct: 10, ramPct: 10 }) };
+
 test("FULL mechanics over real subprocess CLIs: fan-out + spawn + hierarchy + synthesis", async () => {
   const dir = mkdtempSync(join(tmpdir(), "prom-realcli-"));
   const mockPath = join(dir, "mockcli");
@@ -84,7 +89,7 @@ test("FULL mechanics over real subprocess CLIs: fan-out + spawn + hierarchy + sy
     });
 
     // the REAL invoker: real spawn-capture, real PATH check on the abs path, recipe override.
-    const invoke = makeInvoker({ client: fakeEngine(), recipes });
+    const invoke = makeInvoker({ client: fakeEngine(), recipes, ...IDLE_LAUNCH_GUARD });
     const events: orch.RunEvent[] = [];
     const result = await new orch.Coordinator({
       topology,

@@ -7,7 +7,15 @@
  * malicious `suggestedName` or an oversized payload tries.
  */
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -240,8 +248,9 @@ test("importPersonaMarkdown: a path-traversal suggestedName is refused, nothing 
     );
     assert.equal(result.ok, false);
     assert.equal(existsSync(join(home, "agents")), false);
-    // definitely did not escape upward
-    assert.equal(existsSync(join(home, "..", "..", "etc", "passwd")), false);
+    // Nothing was written anywhere under home. (This used to check that home/../../etc/passwd did
+    // not exist — under Linux's shallow /tmp that path IS the real /etc/passwd, so it always did.)
+    assert.deepEqual(readdirSync(home), []);
   } finally {
     rmSync(home, { recursive: true, force: true });
   }
