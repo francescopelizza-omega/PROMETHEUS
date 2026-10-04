@@ -13,6 +13,8 @@
  * allowed. The message said only "not approved", which reads as a problem with the FILE.
  */
 import assert from "node:assert/strict";
+import { realpathSync } from "node:fs";
+import { join } from "node:path";
 import { test } from "node:test";
 
 import {
@@ -30,7 +32,8 @@ test("a save blocked by another project's scope says WHY, not just 'not approved
   assert.equal(out.accepted, 0);
   assert.deepEqual(out.refused.length, 1, "the refusal must still be reported to the caller");
   // the documented fallback: the guard stays pinned to what the human DID open
-  assert.deepEqual([...getWorkingSetRoots()], ["/private/tmp/pg-a"]);
+  // canonicalised: /tmp is /private/tmp on macOS and itself on Linux (this hardcoded the Mac form)
+  assert.deepEqual([...getWorkingSetRoots()], [join(realpathSync("/tmp"), "pg-a")]);
 
   assert.throws(
     () => assertInsideWorkingSet("/tmp/pg-b/file.txt"),
