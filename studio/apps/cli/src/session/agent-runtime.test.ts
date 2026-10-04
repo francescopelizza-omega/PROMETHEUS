@@ -3783,8 +3783,11 @@ test("makeLlmClient: chunks delivered before going silent are kept, and idleMs r
    * late). A from-turn-start clock would report essentially the whole elapsed time; an
    * activity-based one cannot, however loaded the machine is.
    */
+  // One REAL millisecond of slack below the window too: Date.now() is integer-ms and a timer can
+  // land a tick early by it, which the 1000x clock turns into 29_000 (CI, 2026-10-04). Early by a
+  // full real ms or more is still a failure.
   assert.ok(
-    paused.idleMs >= 30_000,
+    paused.idleMs >= 30_000 - 1_000,
     `idleMs (${paused.idleMs}) is below the idle window — the watchdog fired early`,
   );
   assert.ok(
