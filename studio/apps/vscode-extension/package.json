@@ -2,7 +2,7 @@
   "name": "prometheus-vscode",
   "displayName": "Prometheus",
   "description": "Prometheus's agent as a sidebar chat panel, driving the real @prometheus/core agent loop over your open VS Code workspace.",
-  "version": "0.1.0",
+  "version": "0.2.5",
   "private": true,
   "publisher": "prometheus-studio",
   "license": "Apache-2.0",

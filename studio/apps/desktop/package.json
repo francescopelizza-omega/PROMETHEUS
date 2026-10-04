@@ -1,6 +1,6 @@
 {
   "name": "@prometheus/desktop",
-  "version": "0.1.0",
+  "version": "0.2.5",
   "private": true,
   "type": "module",
   "description": "Prometheus Studio — Electron 44 desktop IDE (hardened main process + sandboxed renderer + typed contextBridge IPC).",

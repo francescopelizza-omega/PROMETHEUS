@@ -67,7 +67,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { agent, mcpServer } from "@prometheus/core";
 import { z } from "zod";
 
-const VERSION = "0.1.0";
+const VERSION = "0.2.5";
 
 function log(...a: unknown[]): void {
   // stderr only — stdout is reserved for JSON-RPC.

@@ -1,6 +1,6 @@
 {
   "name": "@prometheus/mcp-server",
-  "version": "0.1.0",
+  "version": "0.2.5",
   "private": true,
   "type": "module",
   "description": "Real @modelcontextprotocol/sdk stdio MCP server over @prometheus/core's studio agent tool catalog — read-only surface only (see src/server.ts).",

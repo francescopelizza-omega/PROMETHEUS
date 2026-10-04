@@ -1,7 +1,7 @@
 {
   "name": "prometheus-studio-workspace",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.2.5",
   "description": "Prometheus Studio — security-first AI-everything IDE. Monorepo root (pnpm + turbo).",
   "license": "Apache-2.0",
   "author": "Francesco Pelizza <red-beard-phoenix@users.noreply.gitlab.com>",

@@ -1,6 +1,6 @@
 {
   "name": "@prometheus/cli",
-  "version": "0.1.0",
+  "version": "0.2.5",
   "private": false,
   "type": "module",
   "description": "prometheus — Prometheus Studio terminal CLI / interactive TUI (Node). Full GUI feature parity over engine-bridge.",
