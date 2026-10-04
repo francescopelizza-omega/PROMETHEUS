@@ -64,13 +64,13 @@ reimplemented per host.
 ## Install in one command
 
 ```bash
-curl -fsSL https://gitlab.com/red-beard-phoenix/PROMETHEUS/-/raw/main/install.sh | bash
+curl -fsSL https://gitlab.com/red-beard-phoenix/PROMETHEUS/-/raw/main/install.sh | sh
 ```
 
 No `curl`? Use `wget`:
 
 ```bash
-wget -qO- https://gitlab.com/red-beard-phoenix/PROMETHEUS/-/raw/main/install.sh | bash
+wget -qO- https://gitlab.com/red-beard-phoenix/PROMETHEUS/-/raw/main/install.sh | sh
 ```
 
 Linux and macOS. No `sudo`, nothing written outside `~/.prometheus`, `~/.local/bin` and one
@@ -80,28 +80,32 @@ marked block in your shell rc. Then:
 prometheus              # the interactive TUI
 prometheus doctor       # check the environment end to end
 prometheus-app          # launch Prometheus Studio (the desktop app)
+nemesis update          # seed the security feeds once — until then the hash/IOC/CVE layers are off
 ```
 
 **This pipes a script from the internet into a shell.** That is a real trade, so the script is
-built to let you refuse it. Read it first — [`install.sh`](install.sh) is 400 lines and says what
+built to let you refuse it. Read it first — [`install.sh`](install.sh) is one file and says what
 every step does — or see exactly what it would run, changing nothing:
 
 ```bash
 curl -fsSL https://gitlab.com/red-beard-phoenix/PROMETHEUS/-/raw/main/install.sh -o install.sh
-bash install.sh --dry-run          # prints every command; touches nothing
-bash install.sh                    # run it once you are satisfied
+sh install.sh --dry-run            # prints every command; touches nothing
+sh install.sh                      # run it once you are satisfied
 ```
 
-Prefer this two-step form in scripts and CI: in `curl … | bash` the pipeline's exit status is
+Prefer this two-step form in scripts and CI: in `curl … | sh` the pipeline's exit status is
 *bash's*, so a failed download still reports success.
 
 Useful flags: `--ref <tag>` pins a reviewed revision instead of tracking `main`, `--prefix DIR`,
 `--home DIR`, `--with-app` also builds the desktop app, `--no-modify-path`, and `--uninstall`
 reverses every step including the PATH block. `install.sh --help` lists them all.
 
-**Requirements** — Linux or macOS (Windows: use WSL); **`python3` 3.9+** (the engine and `nemesis`
-are standard-library only, *zero* pip dependencies); **Node ≥ 22.6** and `git` for the CLI build.
-The installer checks all three and refuses to guess. `pnpm` is installed for you if it is missing.
+**Requirements** — just `curl` or `wget`, on Linux or macOS (the BSDs best-effort; Windows: use
+WSL). Whatever else is missing — **Node.js ≥ 22.6**, **Python ≥ 3.9**, **ripgrep**, **pnpm** — is
+installed for you, privately under `~/.prometheus/toolchain`, from official releases whose SHA-256
+is pinned in `install.sh` (a mismatch is refused). Nothing goes system-wide; your package manager is
+used only where no such build exists (git anywhere; Node/Python on the BSDs), and only after you say
+yes or pass `--system-deps`.
 
 ---
 
@@ -120,10 +124,12 @@ nemesis scan owner/repo          # fetches read-only, hooks neutralised, never e
 prometheus install <name>        # every catalog install routes through the gate first
 ```
 
-The gate is fail-closed: `0` allow, `10` warn, `20` block, and **anything it cannot classify is
-not allowed**. It detects pipe-to-shell droppers, reverse shells, miners, obfuscated and
-dynamic-exec payloads, persistence hooks, and credential exfiltration. Remediation is dry-run by
-default and reversible.
+`nemesis scan` exits `0` clean · `1` warn-tier findings · `3` blocking threats · `2` error; the
+machine form, `nemesis gate`, prints one JSON verdict and exits `0` allow · `10` warn · `20` block
+· `2` error — and **anything it cannot classify is not allowed**. It detects pipe-to-shell
+droppers, reverse shells, miners, obfuscated and dynamic-exec payloads, persistence hooks, and
+credential exfiltration. Remediation is dry-run by default; `--fix` edits files in place (see
+[Use it standalone](#use-it-standalone-any-time) before running it).
 
 ### 2. Run a full coding agent with no cloud account, no API key, no data leaving the machine
 
@@ -219,6 +225,13 @@ so `brew upgrade` succeeds, reports success, and changes nothing you run. `/upda
 names the one command that actually resolves it, and the commands that look right and are
 destructive.
 
+Inside a session at authorisation **A5** or above (the default is A1 — `/authorisation 5`), outside
+plan mode and dry-run, `/updates` then asks **"Do you want to update everything right now? y/N"**.
+On `y` it runs the official package-manager upgrades and changed model pulls one at a time, with
+their output streamed; vendor self-updaters, anything needing `sudo`, and Prometheus itself are
+listed for you to run instead. Below A5 it shows what `y` would run and how to allow it. See
+*Honest limits* for what that trusts.
+
 ---
 
 ## Everything it does
@@ -257,16 +270,18 @@ the full list of what is *not* finished.
 | **Reasoning-effort dial** | `off · low · medium · high · xhigh · ultra · max`, applied per provider including an Ollama `/v1` shim. `/think` |
 | **Background + scheduled runs** | Detach a prompt so it survives the prompt returning (`/background`), or scaffold cron/launchd headless runs (`prometheus tasks`) |
 
-### 🧰 The agent's toolbox — 49 tools
+### 🧰 The agent's toolbox — 52 tools
+
+49 on every surface, plus 3 `browser_*` tools that only the Studio desktop app offers (the CLI has no browser to drive).
 
 | | |
 |---|---|
 | **Read (16)** | `read_file` `list_dir` `glob` `grep` `semantic_search` `stat_path` `git_status` `git_diff` `git_log` `git_show` `system_info` `gpu_info` `process_list` `which` … |
-| **Write** | `propose_edit` (exact-match hunks, human-approved), `write_file`, `apply_patch`, `delete_file` (captures contents first, so it is undoable), `move_file` |
-| **Execute** | `run_command` under the OS sandbox, with `job_status` / `job_output` / `job_kill` for long jobs — plus `propose_elevated`, because the agent never escalates itself |
-| **Web** | `web_fetch` through a fail-closed SSRF/nemesis proxy, returning web content as **untrusted data, never instructions**; `web_search`; sandboxed `browser_*` tools ⚠ in the agent's *own* isolated tab, never your session |
-| **Memory + tasks** | `memory_write` / `memory_read` for durable cross-session facts; `todowrite` / `todoread` for the run's task list |
-| **Delegation** | `spawn_agent` returns only a sub-agent's final answer, so its intermediate work never enters the parent's context; `question` asks you one thing and waits |
+| **Write (6)** | `propose_edit` (exact-match hunks, human-approved), `write_file`, `apply_patch`, `delete_file` (captures contents first, so it is undoable), `move_file`, `mkdir` |
+| **Execute (5)** | `run_command` under the OS sandbox, with `job_status` / `job_output` / `job_kill` for long jobs — plus `propose_elevated`, because the agent never escalates itself |
+| **Web (2 + 3)** | `web_fetch` through a fail-closed SSRF/nemesis proxy, returning web content as **untrusted data, never instructions**; `web_search`; desktop-only: `browser_navigate` / `browser_screenshot` / `browser_extract_text` ⚠ in the agent's *own* isolated tab, never your session |
+| **Memory + tasks (4)** | `memory_write` / `memory_read` for durable cross-session facts; `todowrite` / `todoread` for the run's task list |
+| **Delegation (2)** | `spawn_agent` returns only a sub-agent's final answer, so its intermediate work never enters the parent's context; `question` asks you one thing and waits |
 | **Engine verbs (14)** | `prometheus_scan` `prometheus_superscan` `prometheus_list` `prometheus_info` `prometheus_audit` `prometheus_matrix` … |
 | **External programs** | Detect and gate-install `imagemagick`, `ffmpeg`, `yt-dlp` and friends, then use them. `/deps` |
 
@@ -277,7 +292,7 @@ the full list of what is *not* finished.
 | **Local-first, three tiers** | **A** local/free is the default and the only tier ever promoted; **B** subscription-included is bounded; **C** metered is allowed, never promoted, and needs explicit one-time consent |
 | **Providers** | Local (Model Hub) and any OpenAI-compatible endpoint · Claude · ChatGPT · Gemini · GitHub Copilot · plus native wire formats with real tool calling for each |
 | **Local runtimes** | Ollama and LM Studio as first-class runners with live endpoint discovery; llama.cpp and vLLM as conversion/serve targets |
-| **Model Hub** | Probe your hardware, score models against it, pull through the gate, build a serve profile, start/stop a supervisor. `prometheus model …` |
+| **Model Hub** | Probe your hardware, score models against it, pull Hugging Face weights through the gate (`model pull <org/repo> --staged`), build a serve profile, start/stop a supervisor. `prometheus model …` |
 | **Hugging Face import** | `/hug org/repo` — convert and install for Ollama / llama.cpp / vLLM / LM Studio, with one copy on disk |
 | **RAM admission** | Refuses a model that cannot fit, using real KV-cache arithmetic — and `/ram` tells you *why* |
 | **Model health ledger** | What we learned per endpoint: native vs text protocol, the context window actually served, observed failures. `/model-health` |
@@ -381,7 +396,7 @@ the full list of what is *not* finished.
 | **One file, zero dependencies** | `prometheus.py` is a single ~868 KB standard-library-only Python file that every surface routes through |
 | **38 subcommands** | `scan` `superscan` `matrix` `where` `purge` `inventory` `doctor` `install` `status` `vault` `wizard` … |
 | **A machine contract** | Every command prints exactly **one** JSON object on stdout; human logs go to stderr. That contract is what the MCP bridge, the CLI and Studio all speak |
-| **One gateway** | `engine-bridge` is the only package allowed to spawn `python3` or `nemesis` — security logic is never reimplemented in JavaScript |
+| **One gateway** | `engine-bridge` is the only package allowed to spawn `python3` or `nemesis` — security logic is never reimplemented in JavaScript. The labelled exception: `/updates`' confirmed "update everything" (see *Honest limits*) |
 
 ---
 
@@ -499,7 +514,8 @@ python3 prometheus.py status caveman   # confirm + inspect components
 
 `nemesis` is a separate, **stdlib-only, zero-dep** malware / supply-chain scanner
 that ships next to `prometheus.py`. **Every install path runs the fetched code
-through nemesis before any of it can execute.**
+through nemesis before any of it can execute** — except the ones labelled under *Honest limits*:
+`/updates`' confirmed "update everything", Ollama model pulls, and the model-tooling installers.
 
 ### The automatic workflow (runs on every install)
 
@@ -566,13 +582,23 @@ hits.
 ### Use it standalone, any time
 
 ```bash
-nemesis scan <dir|owner/repo|git-url>   # scan a tree or remote repo (never runs it)
+nemesis scan <dir|owner/repo|git-url>   # scan a tree or remote repo (never runs it) · exit 0/1/3/2
 nemesis gate <target>                   # one JSON verdict + exit 0/10/20/2
 nemesis ui  [dir]                       # interactive browse + remediate
 nemesis update                          # refresh signature / CVE / KEV feeds
 nemesis verify <verdict.json>           # check a signed verdict
 nemesis selftest                        # offline self-check (must stay green)
 ```
+
+**`--fix` edits files in place — never run it blind on a repository that keeps attack samples.** It
+acts on every finding the report lists, not only the ones that decide the verdict: deliberate
+malicious test fixtures (`tests/`, `fixtures/`, `samples/`, signature test cases), `curl … | sh`
+examples in a README, binaries a build left in `node_modules`. *Neutralize* replaces the whole
+flagged line with a `NEMESIS-NEUTRALIZED` comment (which can leave code that no longer parses);
+*quarantine* moves the file into `<target>/__nemesis_quarantine__`. The originals survive
+(`<file>.nemesis.bak`; `nemesis restore`), but there is no one-step undo. Scan without `--fix`
+first, decide file by file with `--interactive`, or keep sample directories out with `--exclude`.
+`scan --fix` exits on what it **found**, before remediation — scan again to see what is left.
 
 ---
 
@@ -821,19 +847,21 @@ prompt.
 > a source checkout (see `prometheus_plugin/README.md`).
 >
 > The `curl … install.sh` route is the supported one. `studio/scripts/release-preflight.mjs`
-> verifies it end to end — including an **unauthenticated** fetch of the raw URL, so "works for
-> the maintainer" can never again be mistaken for "works for everyone" — and fails loudly if any
-> documented route would break for a new user.
+> checks the routes are coherent — including an **unauthenticated** fetch of the raw URL, so
+> "works for the maintainer" can never again be mistaken for "works for everyone" — and the CI
+> `installer` job runs `install.sh` itself, as a normal user on a clean Debian image with nothing
+> cached, on Node 22 and Node 26. A checkout that builds only because of leftover local state
+> (exactly how the 2026-09 install break stayed hidden) cannot pass it.
 
 ### Linux
 
 ```bash
-curl -fsSL https://gitlab.com/red-beard-phoenix/PROMETHEUS/-/raw/main/install.sh | bash
+curl -fsSL https://gitlab.com/red-beard-phoenix/PROMETHEUS/-/raw/main/install.sh | sh
 # or, without curl:
-wget -qO-  https://gitlab.com/red-beard-phoenix/PROMETHEUS/-/raw/main/install.sh | bash
+wget -qO-  https://gitlab.com/red-beard-phoenix/PROMETHEUS/-/raw/main/install.sh | sh
 ```
 
-Installs to `~/.prometheus`, links **`prometheus`** (CLI/TUI) and **`prometheus-app`** (the Studio
+Installs to `~/.prometheus`, links **`prometheus`** (CLI/TUI), **`nemesis`** (the scanner) and **`prometheus-app`** (the Studio
 desktop app) into `~/.local/bin`, and patches that onto `PATH` in your shell profile (bash/zsh/fish
 — open a new terminal, or re-source your profile, to pick it up). No `sudo`, nothing written
 outside your home directory.
@@ -851,9 +879,9 @@ sudo pacman -S bubblewrap        # Arch
 ### macOS
 
 ```bash
-curl -fsSL https://gitlab.com/red-beard-phoenix/PROMETHEUS/-/raw/main/install.sh | bash
+curl -fsSL https://gitlab.com/red-beard-phoenix/PROMETHEUS/-/raw/main/install.sh | sh
 # or, without curl:
-wget -qO-  https://gitlab.com/red-beard-phoenix/PROMETHEUS/-/raw/main/install.sh | bash
+wget -qO-  https://gitlab.com/red-beard-phoenix/PROMETHEUS/-/raw/main/install.sh | sh
 ```
 
 Same script, same destination — `~/.local/bin` on your `PATH`, nothing outside your home directory.
@@ -871,6 +899,7 @@ prometheus              # the interactive TUI
 prometheus scan         # detect the AI agents on this machine
 prometheus doctor       # check the environment end to end
 prometheus-app          # launch Prometheus Studio
+nemesis update          # seed the security feeds once (abuse.ch feeds: `nemesis auth --key <key>` first)
 ```
 
 This runs a script from the internet. Before you do that, you may want to read it —
@@ -878,7 +907,7 @@ This runs a script from the internet. Before you do that, you may want to read i
 
 ```bash
 curl -fsSL https://gitlab.com/red-beard-phoenix/PROMETHEUS/-/raw/main/install.sh -o install.sh
-bash install.sh --dry-run
+sh install.sh --dry-run
 ```
 
 Useful flags: `--ref <tag>` (pin a revision instead of tracking `main`), `--prefix DIR`,
@@ -890,13 +919,22 @@ cloning anything.
 
 ### Requirements
 
-- **Linux or macOS** (Windows: use WSL) — a stock **`python3`** (3.9+); the engine and nemesis
-  are standard-library only, **zero pip dependencies**.
-- **Node ≥ 22.6** and **git** — the installer builds the CLI bundle from source. The workspace
-  sets `engines.node ">=22.6"` with `engineStrict`, so an older Node is refused up front rather
-  than after the clone. `pnpm` is installed for you if it is missing — **corepack is no longer
-  bundled with Node**, so the installer falls back to `npm install -g pnpm@<pinned>`.
-- `git` on `PATH` (installs stage via git clone).
+- **To start:** `curl` or `wget`, and a POSIX `sh` (`install.sh` runs under dash, busybox ash,
+  FreeBSD sh and macOS's bash 3.2 — no bash needed).
+- **Provisioned when missing**, into `~/.prometheus/toolchain`, from checksum-pinned official
+  releases (macOS x64/arm64; Linux x64, arm64, armv7l, ppc64le, s390x, glibc or musl):
+  - **Node.js ≥ 22.6** with npm — Node 22 LTS from nodejs.org (the workspace sets
+    `engines.node ">=22.6"` with `engineStrict`);
+  - **Python ≥ 3.9** with `ssl`, `zlib`, `bz2`, `lzma` — CPython from python-build-standalone (the
+    engine and nemesis are standard-library only, **zero pip dependencies**);
+  - **ripgrep** — the agent's glob/grep tools need it;
+  - **pnpm** at the pinned version — installed with `npm install --global --prefix`, never
+    `npm install -g` or `corepack enable`, which write next to the node binary and fail without
+    root (corepack is not bundled with Node 25+ anyway).
+- **From your package manager, only with consent** (a prompt on the terminal, or `--system-deps`):
+  `git` (plugin installs stage through git clone; the install itself fetches a source archive when
+  git is missing), Alpine's `libstdc++` for Node's musl build, and on the BSDs Node/Python/ripgrep.
+- Optional: `bubblewrap` (`bwrap`) confines the agent's commands on Linux.
 
 ### From source (both Linux and macOS)
 
@@ -910,9 +948,9 @@ python3 prometheus.py install caveman   # gated install into every supported age
 # 2) register into your AI agent (MCP)
 npx -y @prometheus-plugin/installer --py "$PWD/prometheus.py"
 
-# 3) Studio desktop
+# 3) Studio desktop — needs pnpm >= 10.4 (the workspace pins 10.34.3; newer pnpm switches to it)
 cd studio
-corepack enable && pnpm install
+pnpm install
 pnpm dev                 # run the desktop app (electron-vite dev)
 pnpm package             # build a distributable (staged engine + pyruntime + electron-builder)
 
@@ -955,8 +993,24 @@ pre-scan; the deep gate still runs), `--no-gate` (disable the gate this run),
 | `~/.nemesis/gate-audit.jsonl` | Append-only, signed gate decisions. |
 
 **Exit codes:** `0` success / nothing to do · `1` one or more installs failed ·
-`2` bad usage / unsupported OS / missing prerequisite / gate **BLOCK**. (Standalone
-`nemesis gate` uses `0` allow / `10` warn / `20` block / `2` error.)
+`2` bad usage / unsupported OS / missing prerequisite / gate **BLOCK**.
+
+**`nemesis` exit codes.** `scan` (the human report) and `gate` (one JSON verdict on stdout) use
+different numbers; script against the one you call:
+
+| Outcome | `nemesis scan` | `nemesis gate` · `scan --gate` |
+|---|---|---|
+| Clean: no findings, only `INFO` ones, or all on your ignore list | `0` | `0` allow |
+| Findings in the warn tier | `1` | `10` warn |
+| Blocking threats | `3` | `20` block |
+| Error before scanning: path not found, fetch/network failure, `--offline` with a remote target | `2` | `2`, JSON verdict `error` |
+| The scan crashed or hit `--timeout` | `2` | `20` under the default policy (`on_error: block`), otherwise `2`; the JSON verdict says `error` either way |
+| Bad usage, or interrupted with Ctrl-C | `2` | `2` |
+
+`scan --fix` exits on what it **found**, before remediation. `nemesis update` exits `0` when every
+feed was fetched or is fresh, `1` when any feed failed or was skipped (without an abuse.ch key the
+two abuse.ch feeds are skipped, so a keyless update exits `1` by design), `2` for an unknown
+`--feed`.
 
 ---
 
@@ -1027,6 +1081,22 @@ thresholds, or a native/compiled blob's behaviour. Use it as strong
 defense-in-depth: run untrusted sources `--strict`, `nemesis update` first, pin
 commit SHAs, install as a non-privileged user / in a container, and human-review the
 diff for anything you're about to grant credentials to.
+
+Install paths that do **not** go through `nemesis`:
+
+- `/updates`' confirmed "update everything": after an explicit `y`, Homebrew, npm, pipx and a
+  virtualenv's pip upgrade from their official channels, trusted to each manager's own checksum
+  (as when you type the command), spawned directly rather than through `engine-bridge`. nemesis's
+  default gate blocks every binary package, so it cannot vet these; the exception is scoped to that
+  one command, never runs `sudo`, third-party taps or vendor self-updaters, and every step lands in
+  `~/.prometheus/config/exec-audit.jsonl`.
+- The model-tooling installers: `prometheus model install-runner` (`brew install ollama`; on Linux
+  the official `curl … | sh`), `install-hf-cli` (`pip install -U huggingface_hub[cli]`) and
+  `install-converter` (a shallow clone of llama.cpp's conversion tooling).
+- Model weights pulled through Ollama — `/setup`, `/updates pull`, "update everything",
+  `prometheus model pull <family:tag>` — and `/hug`'s raw Hugging Face download. Only
+  `prometheus model pull <org/repo> --staged <dir>` stages Hugging Face weights and runs them
+  through the gate, which treats pickle formats (`.bin`, `.pt`, `.ckpt`) as code that runs on load.
 
 Separately, the agent's own shell/command execution (not `nemesis` — a different layer) *does*
 run under a real OS-level sandbox on macOS (Seatbelt, live-verified: real writes outside the
