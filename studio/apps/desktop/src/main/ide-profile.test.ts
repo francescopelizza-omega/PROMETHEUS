@@ -37,8 +37,13 @@ function makeFakeIpcMain() {
  * test's fake. node:test also refuses a second `mock.module` of the same specifier in one file.
  */
 const fakeIpcMain = makeFakeIpcMain();
+// mock.module's option is `namedExports` up to Node 25 and `exports` from Node 26 (which deprecates
+// namedExports and rejects the two together). CI and .nvmrc run Node 22, where `exports` is
+// silently ignored: the mock then exports nothing and the import below fails to link.
+const MOCK_EXPORTS = Number(process.versions.node.split(".")[0]) >= 26 ? "exports" : "namedExports";
+
 mock.module("electron", {
-  exports: {
+  [MOCK_EXPORTS]: {
     ipcMain: fakeIpcMain,
     BrowserWindow: class FakeBrowserWindow {},
     session: { fromPartition: () => ({}) },

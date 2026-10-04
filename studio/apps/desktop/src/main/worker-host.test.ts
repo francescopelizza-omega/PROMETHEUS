@@ -10,10 +10,17 @@
 
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import { test } from "node:test";
+import { after, test } from "node:test";
 
 import type { TaskRequest, TaskResponse } from "../worker/tasks.js";
 import { type WorkerHandle, WorkerHost } from "./worker-host.js";
+
+// The hosts unref() their request timers (a pending timeout must never keep Studio alive), so
+// while a test awaits one of them nothing else holds the event loop open. Node 22's runner then
+// cancels it — "Promise resolution is still pending but the event loop has already resolved" —
+// where newer runners kept going (found when CI first reached these suites, 2026-10-04).
+const keepAlive = setInterval(() => {}, 1 << 30);
+after(() => clearInterval(keepAlive));
 
 /**
  * A controllable fake worker. `mode` decides how it reacts to a posted task:

@@ -48,6 +48,11 @@ import type { GitHost } from "./ide/git-host.js";
 import type { LspHost } from "./ide/lsp-host.js";
 import type { PtyHost } from "./ide/pty-host.js";
 
+// mock.module's option is `namedExports` up to Node 25 and `exports` from Node 26 (which deprecates
+// namedExports and rejects the two together). CI and .nvmrc run Node 22, where `exports` is
+// silently ignored: the mock then exports nothing and the import below fails to link.
+const MOCK_EXPORTS = Number(process.versions.node.split(".")[0]) >= 26 ? "exports" : "namedExports";
+
 const SOURCE_PATH = fileURLToPath(new URL("./ide-ipc.ts", import.meta.url));
 const SOURCE = readFileSync(SOURCE_PATH, "utf8");
 
@@ -173,7 +178,7 @@ test("registerIdeIpcHandlers: register -> dispose -> register again never throws
   const fakeIpcMain = makeFakeIpcMain();
   electronIpcMain = fakeIpcMain;
   mock.module("electron", {
-    exports: {
+    [MOCK_EXPORTS]: {
       ipcMain: fakeIpcMain,
       // browser-tool-host.ts (imported transitively) touches these two at load time
       // only as type/identity references — getWindow()/session.fromPartition() are

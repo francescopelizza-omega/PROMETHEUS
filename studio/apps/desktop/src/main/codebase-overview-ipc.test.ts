@@ -55,7 +55,12 @@ function tmp(): string {
 let openRoot: string | undefined;
 
 const fakeIpcMain = makeFakeIpcMain();
-mock.module("electron", { exports: { ipcMain: fakeIpcMain } });
+// mock.module's option is `namedExports` up to Node 25 and `exports` from Node 26 (which deprecates
+// namedExports and rejects the two together). CI and .nvmrc run Node 22, where `exports` is
+// silently ignored: the mock then exports nothing and the import below fails to link.
+const MOCK_EXPORTS = Number(process.versions.node.split(".")[0]) >= 26 ? "exports" : "namedExports";
+
+mock.module("electron", { [MOCK_EXPORTS]: { ipcMain: fakeIpcMain } });
 const { registerCodebaseOverviewIpcHandlers } = await import("./codebase-overview-ipc.js");
 const dispose = registerCodebaseOverviewIpcHandlers(() => openRoot);
 

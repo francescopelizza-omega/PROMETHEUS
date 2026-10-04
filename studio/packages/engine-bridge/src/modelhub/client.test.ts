@@ -82,14 +82,19 @@ test("fit() LIVE returns a recommended quant + ranked + reasons (Cookbook scorer
     return;
   }
   const client = createModelHubClient({ sidecarDir: REAL_SIDECAR_DIR, timeoutMs: 60_000 });
-  const fit = await client.fit("qwen3-8b");
+  // An explicit 32 GB budget, like the OVERFLOW test below: probing the real machine made this
+  // pass on a 36 GB Mac and fail on a small CI runner (2026-10-04). The scorer is under test here,
+  // not the host it happens to run on.
+  const fit = await client.fit("qwen3-8b", {
+    hw: { accel: "cpu", usable_gb: 32, caps: { accel: "cpu" } },
+  });
 
   assert.equal(typeof fit.paramsB, "number");
   assert.ok(fit.paramsB > 0, "8B model has params");
   assert.ok(["cuda", "rocm", "metal", "cpu"].includes(fit.accel));
   assert.ok(Array.isArray(fit.ranked) && fit.ranked.length >= 1, "ranked quants present");
   assert.ok(Array.isArray(fit.reasons) && fit.reasons.length >= 1, "reasons explain the pick");
-  // an 8B model fits a 36GB-unified mac → a recommendation exists.
+  // an 8B model fits a 32 GB budget → a recommendation exists.
   assert.ok(fit.recommended, "a quant is recommended for an 8B model on this hardware");
   assert.equal(typeof fit.recommended?.label, "string");
   assert.ok(

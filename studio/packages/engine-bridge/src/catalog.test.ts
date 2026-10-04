@@ -133,12 +133,19 @@ test("appsList()/worldsimList()/modelsList()/inventory() LIVE return DISPLAY lin
    * have caught it: real row COUNT, and no row that is itself an envelope.
    */
   const client = liveClient();
-  for (const res of [
-    await client.appsList(),
-    await client.worldsimList(),
-    await client.modelsList(),
-    await client.inventory(),
-  ]) {
+  const reads = [await client.appsList(), await client.worldsimList(), await client.modelsList()];
+  // `inventory` lists what is installed INTO the agents on this machine, and the engine exits 2
+  // with "no target AI agents detected" where there are none — a clean CI runner (2026-10-04).
+  // That honest refusal is asserted as such; wherever an agent exists, the rows are checked below.
+  const inventory = await client.inventory();
+  const detected = (await client.list()).detected_agents;
+  const noAgents = Array.isArray(detected) && detected.length === 0;
+  if (!inventory.ok && /exit 2/.test(String(inventory.error ?? "")) && noAgents) {
+    t.diagnostic("inventory: no AI agents on this machine — its rows are checked where one exists");
+  } else {
+    reads.push(inventory);
+  }
+  for (const res of reads) {
     assert.equal(res.ok, true, `the engine ran (${res.command}): ${res.error ?? ""}`);
     assert.ok(res.engine, "the engine path that ran is reported");
     assert.ok(

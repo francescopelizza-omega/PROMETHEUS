@@ -21,8 +21,13 @@ let listenersQueue: Listeners[] = [];
 const signalCalls: { pid: number; signal: string }[] = [];
 const execCalls: { command: string; args: string[] }[] = [];
 
+// mock.module's option is `namedExports` up to Node 25 and `exports` from Node 26 (which deprecates
+// namedExports and rejects the two together). CI and .nvmrc run Node 22, where `exports` is
+// silently ignored: the mock then exports nothing and the import below fails to link.
+const MOCK_EXPORTS = Number(process.versions.node.split(".")[0]) >= 26 ? "exports" : "namedExports";
+
 mock.module("./model-server.js", {
-  exports: {
+  [MOCK_EXPORTS]: {
     listenersOnPort: async (_port: number): Promise<Listeners> =>
       listenersQueue.shift() ?? { processes: [] },
     signalPid: (pid: number, signal: "SIGTERM" | "SIGKILL") => {
@@ -33,7 +38,7 @@ mock.module("./model-server.js", {
 });
 
 mock.module("./system-probe.js", {
-  exports: {
+  [MOCK_EXPORTS]: {
     execCapture: async (command: string, args: string[] = []) => {
       execCalls.push({ command, args });
       return { code: 0, stdout: "", stderr: "" };
