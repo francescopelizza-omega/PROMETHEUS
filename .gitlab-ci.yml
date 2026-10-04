@@ -262,10 +262,16 @@ verify:windows:
   allow_failure: true
   before_script:
     # Override the Linux `before_script` (nvm/apt-oriented) — this is a Windows shell VM.
-    - choco install -y nodejs --version=22.11.0
-    - refreshenv
+    # nodejs-lts, not a pinned 22.11: electron 44 declares node >= 22.12 and the workspace is
+    # engineStrict, so 22.11 could never complete `pnpm install`.
+    - choco install -y nodejs-lts
+    # `refreshenv` is a function from Chocolatey's PowerShell profile, absent in a runner session:
+    # without importing it the job failed right here, on every run (2026-10-04).
+    - Import-Module "$env:ChocolateyInstall\helpers\chocolateyProfile.psm1"; refreshenv
     - node --version
-    - corepack enable
+    # pnpm from npm at the pinned version — not corepack, whose older releases cannot verify current
+    # pnpm signatures (the Linux jobs' original failure).
+    - $pin = (Get-Content studio/package.json -Raw | ConvertFrom-Json).packageManager.Split('@')[1]; npm install -g "pnpm@$pin"
     - cd studio
     - pnpm install --frozen-lockfile
   script:
