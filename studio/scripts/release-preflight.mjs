@@ -229,6 +229,29 @@ for (const { ref, path } of rawRefs) {
   seenRaw.add(key);
   // `git cat-file` against the REMOTE-TRACKING ref: no network, and it answers the only
   // question that matters — will the file be there when a stranger asks for it?
+  //
+  // The ref has to EXIST locally first. A tag pipeline checks out only the tag, so there is no
+  // origin/main at all, and every v0.2.5 pipeline failed here claiming install.sh was "not on
+  // origin/main" while the live raw URL answered 200 in the same job (2026-10-04). Fetch it then.
+  if (
+    run("git", ["rev-parse", "--verify", "--quiet", `refs/remotes/origin/${ref}`], { cwd: REPO })
+      .code !== 0
+  ) {
+    run(
+      "git",
+      [
+        "fetch",
+        "--quiet",
+        "--depth",
+        "1",
+        "origin",
+        `+refs/heads/${ref}:refs/remotes/origin/${ref}`,
+      ],
+      {
+        cwd: REPO,
+      },
+    );
+  }
   const probe = run("git", ["cat-file", "-e", `origin/${ref}:${path}`], { cwd: REPO });
   if (probe.code !== 0) {
     fail(
