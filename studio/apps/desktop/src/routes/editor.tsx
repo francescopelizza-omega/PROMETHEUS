@@ -856,6 +856,9 @@ export function EditorRoute({
         case "panel.metadata":
           onOpenShellPanel?.("metadata");
           break;
+        case "panel.disk":
+          onOpenShellPanel?.("disk");
+          break;
         // Pickers are later program files — scope here is routing to the REAL owning
         // surface (APP-004): the Environments route lists interpreters (EnvPicker),
         // the Model Hub owns endpoints/serving. Navigation, not silence.

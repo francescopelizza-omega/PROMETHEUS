@@ -190,7 +190,9 @@ export function runSidecar<T extends SidecarEnvelope = SidecarEnvelope>(
     // MDS parity 39: the tree-sitter/stdlib repo-map for @codebase grounding (APP-053).
     | "repomap.py"
     // JetBrains parity 03/28: the ruff/flake8/mypy/pylint fan-in for Problems (APP-062).
-    | "linters.py",
+    | "linters.py"
+    // disk space: map/levels/largest files/mounts/delete plan over python/tools/disk_space.py.
+    | "disk_map.py",
   argv: string[],
   opts: SidecarOptions = {},
 ): Promise<T> {

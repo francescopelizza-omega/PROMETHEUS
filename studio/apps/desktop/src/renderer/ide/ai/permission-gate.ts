@@ -18,7 +18,12 @@
 
 import { authDecision, scopedWriteDecision } from "@prometheus/core/agent-authorization";
 import type { AuthToolEffect } from "@prometheus/core/agent-authorization";
-import { classifyCommand, execAuthDecision, parseCommand } from "@prometheus/core/agent-exec";
+import {
+  classifyCommand,
+  classifyPrivileged,
+  execAuthDecision,
+  parseCommand,
+} from "@prometheus/core/agent-exec";
 import type { ToolCall } from "@prometheus/core/agent-loop";
 
 import { useAuthorisationStore } from "../../stores/authorisation.js";
@@ -149,4 +154,23 @@ export function autoApprovesToolCall(call: ToolCall, annotations?: AuthToolEffec
     return execAuthDecision(level, cls.tier) === "allow";
   }
   return authDecision(level, call.name, annotations) === "allow";
+}
+
+/**
+ * May a task card offer "▶ always" for this call?
+ *
+ * Never for a privileged one. Root is approved by a human, for that exact command, every time:
+ * the privileged gate's dialog is the approval, and "always" would be a second door around it.
+ * Core refuses to store such a grant anyway (`withRememberedGrants`); not offering the button is
+ * what keeps the card honest about it.
+ */
+export function mayOfferAlways(tool: string, args: Record<string, unknown> | undefined): boolean {
+  if (tool === "propose_elevated") return false;
+  const command = args?.command;
+  if (typeof command === "string" && classifyPrivileged(command).privileged) return false;
+  const argv = args?.argv;
+  if (Array.isArray(argv) && argv.every((a) => typeof a === "string") && argv.length > 0) {
+    return !classifyPrivileged(argv as string[]).privileged;
+  }
+  return true;
 }

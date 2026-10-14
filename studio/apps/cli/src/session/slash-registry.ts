@@ -417,6 +417,12 @@ export interface SlashCtx {
   runDemos: (rest: string) => Promise<void>;
   /** run the /updates command (check vendor CLIs · local models · Prometheus self-update). */
   runUpdates: (rest: string) => Promise<void>;
+  /**
+   * `/disk-space` — the host's own implementation: the TUI shows disk_space.py's curses TUI as
+   * an overlay (Ctrl+] minimise/resume, Ctrl+D quit) and wires the privileged gate for
+   * `--sudo`/`cleanup`; `--plain` hands the terminal over. Optional: absent ⇒ the one-shot verb.
+   */
+  runDiskSpace?: (rest: string) => Promise<void>;
   /** session usage for /stats (CLI-058): in/out token split (estimated? ) + model-aware cost. */
   usage: () => UsageStats;
   /** open the /recall past-session history picker. */
@@ -705,6 +711,9 @@ const toks = (rest: string): string[] => {
   }
   return out;
 };
+
+/** The same quote-aware split, for hosts that hand a slash command's `rest` to a native command. */
+export const slashTokens = toks;
 
 /** Deterministic comma-grouping (NOT toLocaleString — its separator is locale-dependent and would
  *  break goldens: on a European locale 1000000 → "1.000.000"). CLI-057/058. */
@@ -2527,6 +2536,15 @@ export const SLASH_REGISTRY: readonly SlashCmd[] = Object.freeze([
       "Show what Prometheus has learned about each model endpoint: transport (native/text), " +
       "circuit-breaker state, and whether its context window was measured or just assumed.",
     run: (_r, ctx) => runModelHealthCommand({ home: ctx.home, write: ctx.write }),
+  },
+  {
+    name: "disk-space",
+    group: "info",
+    summary:
+      "Disk space: the full explorer over this session (Ctrl+] minimise/resume · Ctrl+D quit), or `map`/`levels`/`files`/`mounts`, `delete` (plan first), `cleanup`, `--sudo` (you approve the exact root command).",
+    args: "[PATH] | map|levels|files [PATH] | mounts | delete PATH… | cleanup | --sudo [PATH]",
+    run: (rest, ctx) =>
+      ctx.runDiskSpace ? ctx.runDiskSpace(rest) : ctx.runVerb(["disk-space", ...toks(rest)]),
   },
   {
     name: "updates",

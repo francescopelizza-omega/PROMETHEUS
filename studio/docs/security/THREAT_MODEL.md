@@ -54,7 +54,7 @@ severity scoring, no allowlist, no regex rule, no "looks fine" heuristic anywher
 in the TypeScript codebase. The only spawner of `python3` / `nemesis` is
 `@prometheus/engine-bridge`. One labelled exception: `/updates`' confirmed "update
 everything" (below) never asks nemesis for a verdict — TypeScript policy
-(`packages/core/src/updates/dispatch.ts`: official taps, checksums, holds, no root)
+(`packages/core/src/updates/dispatch.ts`: official taps, checksums, holds, never itself running anything as root)
 decides what it runs, and `apps/cli/src/updates/run-step.ts` spawns the package
 managers, and a virtualenv's own `python -m pip`, directly.
 
@@ -114,8 +114,23 @@ bottle), so it cannot vet a binary package. They are trusted to each manager's o
 checksum, exactly as when you type the command yourself. This is an owner decision
 (2026-10-02) scoped to that one confirmed command: nothing runs without the explicit
 `y`; vendor self-updaters, anything needing `sudo`, third-party taps and casks that
-publish no checksum are never run; and every step is recorded in
+publish no checksum are never run by it; and every step is recorded in
 `~/.prometheus/config/exec-audit.jsonl`.
+
+**Privileged commands (sudo).** Prometheus may run sudo, but never on its own authority:
+every privileged command is shown to the human verbatim and runs only after that human
+approves that exact command, every time. One module is the only path to root
+(`packages/core/src/agent/system/host/privileged-gate.ts`); `run_command` refuses anything
+privileged, and where a kernel sandbox runs (Seatbelt, bubblewrap) it blocks setuid binaries
+too — on Linux without bubblewrap the classification is the only barrier. The
+approval (Approve once / Deny, Deny by default, a timeout denies, a catastrophic command also
+needs its target typed) is bound to the argv, folder and script hash and re-checked just
+before spawn. No authorization level (A7 included), `--yes`, grant, MCP client or headless run
+can approve; with no human attached the command is returned instead. The password goes from
+the TTY or a native askpass dialog straight to sudo, never through Prometheus. The elevator is
+resolved only from root-owned system paths. Every request is logged to
+`~/.prometheus/audit/sudo.log`. Residual risk: a script is re-hashed microseconds before it
+runs, not executed from a root-owned copy.
 
 ## Offline / degraded operation
 

@@ -80,6 +80,8 @@ const ENGINE_SURFACE: readonly PrometheusSubcommand[] = [
   "chat",
   "secure",
   "auto",
+  // disk space — the disk_map sidecar behind `prometheus.py disk-space`.
+  "disk-space",
 ];
 
 /** A FAKE EngineClient: records calls, never spawns. Every method resolves ok. */
@@ -265,4 +267,52 @@ test("PARITY: every spec declares at least one surface and a stable engineSubcom
   }
   // engineTargets() is the serialisable audit key list
   assert.equal(engineTargets().length, COMMAND_SPECS.length);
+});
+
+/* ------------------------------------------------------------------ */
+/* disk space                                                         */
+/* ------------------------------------------------------------------ */
+
+test("disk-space: each spec runs `prometheus.py disk-space <verb>`, paths after `--`", async () => {
+  const argvOf = async (
+    id: string,
+    pos: string[],
+    flags: Record<string, string | boolean> = {},
+  ): Promise<string> => {
+    const { client, calls } = makeFakeClient();
+    const res = await invoke(id, ctx(client), rawArgs(pos, flags));
+    assert.equal(res.ok, true, `${id}: ${JSON.stringify(res)}`);
+    return calls[0] ?? "";
+  };
+  assert.equal(await argvOf("disk-mounts", []), "runPrometheus:disk-space mounts");
+  assert.equal(
+    await argvOf("disk-map", ["/data"], { "max-nodes": "500" }),
+    "runPrometheus:disk-space map --max-nodes 500 -- /data",
+  );
+  assert.equal(await argvOf("disk-map", []), "runPrometheus:disk-space map -- ~");
+  assert.equal(
+    await argvOf("disk-levels", ["/data"], { depth: "3" }),
+    "runPrometheus:disk-space levels --depth 3 -- /data",
+  );
+  assert.equal(
+    await argvOf("disk-files", ["/data"]),
+    "runPrometheus:disk-space largest-files -- /data",
+  );
+});
+
+test("disk-delete is a mutation, plans by default, and deletes only with --confirm", async () => {
+  assert.equal(getCommand("disk-delete")?.mutates, true);
+  const argvOf = async (
+    pos: string[],
+    flags: Record<string, string | boolean> = {},
+  ): Promise<string> => {
+    const { client, calls } = makeFakeClient();
+    await invoke("disk-delete", ctx(client), rawArgs(pos, flags));
+    return calls[0] ?? "";
+  };
+  assert.equal(await argvOf(["/tmp/x"]), "runPrometheus:disk-space delete --trash -- /tmp/x");
+  assert.equal(
+    await argvOf(["/tmp/x"], { permanent: true, confirm: true }),
+    "runPrometheus:disk-space delete --permanent --confirm -- /tmp/x",
+  );
 });

@@ -70,8 +70,8 @@ export const VSCODE_SYSTEM_PROMPT = [
  * `destructive` is its last category, so levels 6 ("trusted") and 7 ("run all") do auto-approve
  * a delete. That is the explicit global opt-in those two rungs mean, it is what the same setting
  * already does in the terminal, and nemesis still hard-stops danger underneath it.
- * (`NEVER_AUTO_TOOLS` — `propose_elevated` — is not reachable here at all: it is absent from
- * `VSCODE_TOOL_ALLOW`, so the loop never offers it. Core's own suite covers that rule.)
+ * (`NEVER_AUTO_TOOLS` — `propose_elevated` — is never auto-approved at any level, and its real
+ * prompt is the privileged gate's native modal, asked for that exact command every time.)
  */
 export function vscodeTuning(
   model: string,

@@ -355,3 +355,45 @@ test("a headless run under sudo announces the elevation and takes the safe branc
     "an unattended elevated run must say it fell back to the safe posture",
   );
 });
+
+test("headless: no privileged gate is wired, and propose_elevated reaches its PROPOSAL (nothing can run)", async () => {
+  // No human is attached to a -p run, so nothing may run as root. The tool itself, with no
+  // gate, spawns nothing and hands back the exact command marked needsHumanApproval — letting
+  // the confirm through is what returns that command instead of an opaque refusal.
+  let gateWired: unknown = "unset";
+  let elevated: unknown;
+  let sudoLine: unknown;
+  const res = await runOneShot(parseArgs(["-p", "--allow-commands", "fix nginx"]), "fix nginx", {
+    detect: async () => FAKE_BACKENDS as never,
+    mcp: {
+      tools: () => [],
+      callTool: async () => ({ ok: true, summary: "" }),
+      close: async () => {},
+    } as never,
+    runTurn: (async (
+      _s: unknown,
+      _m: unknown,
+      d: { ctx: { privilegedGate?: unknown; confirm: (c: unknown) => unknown } },
+    ) => {
+      gateWired = d.ctx.privilegedGate;
+      elevated = await d.ctx.confirm({
+        name: "propose_elevated",
+        args: { argv: ["systemctl", "restart", "nginx"], why: "the unit is root-owned" },
+      });
+      sudoLine = await d.ctx.confirm({
+        name: "run_command",
+        args: { command: "sudo systemctl restart nginx" },
+      });
+      return { session: {}, events: [], reply: "done", jsonl: "", capped: false, thread: [] };
+    }) as never,
+  });
+  assert.equal(res.ok, true, res.error);
+  assert.equal(gateWired, undefined, "a headless run must never carry a privileged gate");
+  assert.equal(elevated, true);
+  assert.equal(
+    typeof sudoLine === "object" &&
+      sudoLine !== null &&
+      (sudoLine as { approved: boolean }).approved,
+    false,
+  );
+});

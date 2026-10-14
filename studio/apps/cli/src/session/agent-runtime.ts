@@ -116,6 +116,8 @@ import {
 import { touchModelActivity } from "./model-activity-store.js";
 import { recordEndpointHealth } from "./model-health-store.js";
 import {
+  type PrivilegedGate,
+  type Surface,
   type SystemToolDeps,
   appendCanaryAudit,
   execVarsFromEnv,
@@ -605,6 +607,14 @@ export interface SessionCtx {
     tool: string,
     args: Record<string, unknown>,
   ) => Promise<{ ok: boolean; summary: string; data?: unknown }>;
+  /**
+   * The privileged gate — ONLY on a host with a human at the keyboard (the TUI, the readline
+   * host). `propose_elevated` asks that human through it and runs the exact command on
+   * approval. Absent (headless `-p`, scheduled tasks) ⇒ the command comes back as a proposal.
+   */
+  privilegedGate?: PrivilegedGate;
+  /** the surface name recorded in the privileged audit line. */
+  surface?: Surface;
   /** base permission rules from config; scoped grants merge AROUND these, never into them. */
   permissionRules?: readonly PermissionRule[];
   /** a grant was stored — the host persists it and can say so in the transcript. */
@@ -3612,6 +3622,9 @@ export function makeToolRunner(
     ) => Promise<{ ok: boolean; summary: string; data?: unknown }>;
     /** the authorization level in force, recorded in the audit. */
     authLevel?: number;
+    /** the privileged gate (human-attached hosts only) and the surface name for its audit. */
+    privilegedGate?: PrivilegedGate;
+    surface?: Surface;
     /** live output sink for `run_command` mode:"stream" — the host's terminal writer. */
     onProgress?: SystemToolDeps["onProgress"];
     /**
@@ -3684,6 +3697,8 @@ export function makeToolRunner(
         ...(opts.gateMode ? { gateMode: opts.gateMode } : {}),
         ...(opts.home ? { home: opts.home } : {}),
         ...(opts.authLevel !== undefined ? { authLevel: opts.authLevel } : {}),
+        ...(opts.privilegedGate ? { privilegedGate: opts.privilegedGate } : {}),
+        ...(opts.surface ? { surface: opts.surface } : {}),
         ...(roots && roots.length > 0 ? { roots } : {}),
         ...(opts.onProgress ? { onProgress: opts.onProgress } : {}),
         // ESC / Ctrl-C reaches the child process, not just the model stream.
@@ -4417,6 +4432,8 @@ export async function runMessageTurn(
       ...(deps.signal ? { signal: deps.signal } : {}),
       ...(ctx.home ? { home: ctx.home } : {}),
       ...(ctx.authLevel !== undefined ? { authLevel: ctx.authLevel } : {}),
+      ...(ctx.privilegedGate ? { privilegedGate: ctx.privilegedGate } : {}),
+      ...(ctx.surface ? { surface: ctx.surface } : {}),
       ...(ctx.workingSet ? { roots: ctx.workingSet } : {}),
       ...(ctx.cwd ? { cwd: ctx.cwd } : {}),
       ...(ctx.editHistory ? { editHistory: ctx.editHistory } : {}),

@@ -539,6 +539,27 @@ test(
   },
 );
 
+test(
+  "LIVE: sudo inside a sandboxed command still fails — the privileged gate is the only path to root",
+  { skip: !live || !existsSync("/usr/bin/sudo") },
+  async () => {
+    // `-n` never prompts, so this cannot hang or ask for anything. Under Seatbelt the setuid
+    // exec is denied, which is what makes `privileged-gate.ts` (which runs OUTSIDE the
+    // sandbox, after a human approves) the only way a command reaches root.
+    const f = liveFixture();
+    try {
+      const r = await runParsedCommand(parsed("/usr/bin/sudo -n /usr/bin/id -u"), {
+        cwd: f.inside,
+        sandbox: f.plan,
+      });
+      assert.notEqual(r.exitCode, 0, `sudo must fail inside the sandbox, got: ${r.stdout}`);
+      assert.notEqual(r.stdout.trim(), "0", "and must never have run as root");
+    } finally {
+      f.cleanup();
+    }
+  },
+);
+
 test("LIVE: a write INSIDE the working set still succeeds", { skip: !live }, async () => {
   const f = liveFixture();
   try {

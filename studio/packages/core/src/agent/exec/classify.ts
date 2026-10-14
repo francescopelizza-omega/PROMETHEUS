@@ -9,7 +9,12 @@
  *
  * Three rules, in order of how much they matter:
  *
- *  1. A FORBIDDEN program (`sudo`, `sh`, `dd`, `nc`…) refuses the whole command outright. Not
+ *  0. A PRIVILEGED command (`sudo`, `doas`, `pkexec`, `run0`, … however reached — see
+ *     `privileged.ts`) is refused here at every level, with a redirect to `propose_elevated`.
+ *     `run_command` never runs one: privileged work has exactly one path, the privileged gate,
+ *     where a human approves that exact command. Before this check, `pkexec` and `run0` were
+ *     simply unknown programs — tier `destructive`, which A6/A7 auto-approve.
+ *  1. A FORBIDDEN program (`sh`, `dd`, `nc`…) refuses the whole command outright. Not
  *     a tier, not a prompt — a refusal, at every authorization level including A7. There is
  *     no level at which the agent may run a shell, because a shell is precisely the thing
  *     every layer above is trying to be.
@@ -29,6 +34,7 @@ import type { AuthCategory } from "../authorization.js";
 import { authLevelMeta } from "../authorization.js";
 import type { ParsedCommand, Stage } from "./parse.js";
 import { allStages, formatCommand } from "./parse.js";
+import { classifyPrivileged } from "./privileged.js";
 import { type ExecTier, basename, forbiddenReason, programSpec } from "./registry.js";
 
 /** Ascending risk — the same order `CATEGORY_ORDER` uses in authorization.ts. */
@@ -50,7 +56,22 @@ export interface StageClass {
 
 export type ClassifyResult =
   | { ok: true; tier: ExecTier; stages: StageClass[]; unknownPrograms: string[] }
-  | { ok: false; error: string; program?: string };
+  | { ok: false; error: string; program?: string; privileged?: true };
+
+/** The refusal `run_command` gives a privileged stage — written for the model. */
+function privilegedRefusal(argv: readonly string[]): { error: string; program: string } | null {
+  const p = classifyPrivileged(argv);
+  if (!p.privileged) return null;
+  const program = p.elevator ?? basename(argv[0] ?? "");
+  const lead = `\`${program}\` is privileged: run_command never runs privileged commands.`;
+  if (p.canonical) {
+    return {
+      program,
+      error: `${lead} Call propose_elevated with argv ${JSON.stringify(p.canonical.argv)} and a \`why\`; the human approves that exact command before it runs.`,
+    };
+  }
+  return { program, error: `${lead} ${p.refusal ?? "Use propose_elevated."}` };
+}
 
 /**
  * The first `max` POSITIONAL arguments — skipping options and their values.
@@ -146,6 +167,10 @@ export function classifyCommand(cmd: ParsedCommand): ClassifyResult {
 
   const classes: StageClass[] = [];
   const unknown: string[] = [];
+  for (const st of stages) {
+    const priv = privilegedRefusal(st.argv);
+    if (priv) return { ok: false, error: priv.error, program: priv.program, privileged: true };
+  }
   for (const st of stages) {
     const c = classifyStage(st);
     if ("error" in c) return { ok: false, error: c.error, program: c.program };

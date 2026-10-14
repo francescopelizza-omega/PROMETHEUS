@@ -179,3 +179,43 @@ test("clearSession drops session grants but keeps project and user", async () =>
   await confirm(call("git_status"));
   assert.equal(h.asked.length, 2, "a session grant survived the session");
 });
+
+/* ── privileged calls: no grant answers for them, none is learned from them ──*/
+
+test("a privileged call is ALWAYS asked — a matching grant, even a `bash:` one, never answers for it", async () => {
+  // A grant learned on `run_command` is stored as `bash:<argv>`, and `bash:` rules match any
+  // call carrying that argv — so "always allow `systemctl restart nginx`" would otherwise
+  // approve `propose_elevated` with the same words. Root is never remembered.
+  const store = new ScopedPermissionStore();
+  const h = host("user");
+  const confirm = withRememberedGrants(h.fn, store, { workspaceRoot: ROOT });
+  await confirm(call("run_command", { command: "systemctl restart nginx" }));
+  await confirm(call("run_command", { command: "systemctl restart nginx" }));
+  assert.equal(h.asked.length, 1, "precondition: the unprivileged grant was learned");
+
+  const elevated = call("propose_elevated", {
+    argv: ["systemctl", "restart", "nginx"],
+    why: "the unit is root-owned",
+  });
+  await confirm(elevated);
+  await confirm(elevated);
+  assert.equal(h.asked.filter((n) => n === "propose_elevated").length, 2);
+});
+
+test("approving a privileged call with `remember` stores nothing", async () => {
+  const store = new ScopedPermissionStore();
+  const h = host("user");
+  const confirm = withRememberedGrants(h.fn, store, { workspaceRoot: ROOT });
+  const before = JSON.stringify(store);
+  const r = await confirm(
+    call("propose_elevated", { argv: ["apt-get", "update"], why: "refresh the index" }),
+  );
+  assert.equal(typeof r === "object" ? r.approved : r, true);
+  assert.equal(JSON.stringify(store), before);
+  await confirm(call("run_command", { command: "pkexec id" }));
+  assert.equal(
+    JSON.stringify(store),
+    before,
+    "a privileged run_command line is not learned either",
+  );
+});

@@ -15,6 +15,9 @@
 #                     falling back to ~/.local/bin when that is not writable)
 #   LOCALAI_FORCE     set to 1 to reinstall even if the same build is present
 #   LOCALAI_NO_SUDO   set to 1 to never escalate, use ~/.local/bin instead
+#
+# When /usr/local/bin needs root, every sudo step shows its exact command and asks first
+# (on the terminal, default no) — nothing runs as root on its own.
 #   GITHUB_TOKEN      optional, only used to avoid GitHub API rate limits
 
 set -eu
@@ -145,6 +148,42 @@ sha256_of() {
 	fi
 }
 
+# --- administrator steps ----------------------------------------------------
+
+# A word quoted so a POSIX shell reproduces it exactly (what you read is what runs).
+quote() {
+	case $1 in
+	*[!A-Za-z0-9_./:=@%+,-]* | "") printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")" ;;
+	*) printf '%s' "$1" ;;
+	esac
+}
+
+# Run one step that needs administrator rights ONLY after you have seen the exact command and
+# said yes — every time, on the terminal; Enter, anything but y, or no terminal at all means no.
+# Without $SUDO the step simply runs as you.
+admin() {
+	if [ -z "$SUDO" ]; then
+		"$@"
+		return
+	fi
+	_line="sudo"
+	for _a in "$@"; do _line="$_line $(quote "$_a")"; done
+	if ! (: </dev/tty) 2>/dev/null; then
+		say "  needs administrator rights and there is nobody to ask, so it was not run:"
+		say "      ${_line}"
+		return 1
+	fi
+	printf '\n  needs administrator rights:\n      %s\n  run it? [y/N] ' "$_line" >/dev/tty
+	read -r _ans </dev/tty || return 1
+	case $_ans in
+	[yY]*) sudo "$@" ;;
+	*)
+		say "  not run"
+		return 1
+		;;
+	esac
+}
+
 # --- install target ---------------------------------------------------------
 
 # Sets TARGET_DIR and SUDO ("" or "sudo").
@@ -199,7 +238,7 @@ ASSET="${BIN}-${VERSION}-${OS}-${ARCH}"
 SUMS="LocalAI-${VERSION}-checksums.txt"
 
 choose_target
-step "install to    ${TARGET_DIR}${SUDO:+ (via sudo)}"
+step "install to    ${TARGET_DIR}${SUDO:+ (via sudo, each step asked first)}"
 
 TMPDIR_LOCALAI="$(mktemp -d 2>/dev/null || mktemp -d -t localai)" ||
 	die "could not create a temporary directory"
@@ -250,12 +289,14 @@ chmod 0755 "${TMPDIR_LOCALAI}/${BIN}"
 
 # Write to a sibling name and rename, so a running local-ai is never replaced
 # underneath itself and a failed copy cannot leave a half-written binary.
-if ! $SUDO cp "${TMPDIR_LOCALAI}/${BIN}" "${TARGET_DIR}/${BIN}.new"; then
+if ! admin cp "${TMPDIR_LOCALAI}/${BIN}" "${TARGET_DIR}/${BIN}.new"; then
 	die "could not write to ${TARGET_DIR}" \
 		"Re-run with INSTALL_DIR set to somewhere you can write, for example: INSTALL_DIR=\$HOME/.local/bin sh install.sh"
 fi
-$SUDO chmod 0755 "${TARGET_DIR}/${BIN}.new"
-$SUDO mv "${TARGET_DIR}/${BIN}.new" "${TARGET_DIR}/${BIN}"
+admin chmod 0755 "${TARGET_DIR}/${BIN}.new" || die "the new binary was left at ${TARGET_DIR}/${BIN}.new" \
+	"Nothing replaced the installed one. Remove it, or run this again and allow the steps."
+admin mv "${TARGET_DIR}/${BIN}.new" "${TARGET_DIR}/${BIN}" || die "the new binary was left at ${TARGET_DIR}/${BIN}.new" \
+	"Nothing replaced the installed one. Remove it, or run this again and allow the steps."
 
 step "installed     ${TARGET_DIR}/${BIN}"
 

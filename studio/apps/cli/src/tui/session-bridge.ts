@@ -28,6 +28,7 @@ import {
 
 import {
   createHookRunner,
+  createPrivilegedGate,
   expandHome,
   loadMemoryIndexBlock,
   loadPermissionRules,
@@ -46,6 +47,7 @@ import { type HooksSource, loadHooksDetailed } from "../session/hooks-config.js"
 import { createKeyResolver, keychainProviders } from "../session/key-resolver.js";
 
 import { mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
 
 import { updates as u } from "@prometheus/core";
@@ -57,6 +59,7 @@ import {
   searchHuggingFace,
 } from "@prometheus/core/updates-live";
 import { localMemorySnapshot } from "@prometheus/engine-bridge";
+import { defaultDiskSpaceDeps, runDiskSpace } from "../commands/disk-space-cmd.js";
 import { PROM_VERSION } from "../commands/help.js";
 import {
   type InvokeDeps,
@@ -161,6 +164,9 @@ import {
   spawnCapFor,
   startDetachedRun,
 } from "../session/orchestrator.js";
+import { makeTerminalApprover } from "../session/privileged-prompt.js";
+import type { OverlayLaunch } from "./overlay-session.js";
+export type { OverlayLaunch } from "./overlay-session.js";
 import { loadRemoteHosts } from "../session/remote-hosts-store.js";
 import { applyRepoMapVerb, makeRepoMapState, repoMapStats } from "../session/repo-map-state.js";
 import { maybeStopServicesOnExit } from "../session/service-shutdown.js";
@@ -177,6 +183,7 @@ import {
   type SlashCtx,
   allSlashNames,
   findSlash,
+  slashTokens,
 } from "../session/slash-registry.js";
 import { createSteeringController } from "../session/steering.js";
 import { execVarsFromEnv } from "../session/system-tools.js";
@@ -188,7 +195,7 @@ import { makeDispatchProbes } from "../updates/dispatch-probes.js";
 import { type BrowseRow, browseRows, installTag } from "../updates/model-actions-cmd.js";
 import { type StepRunner, makeStepRunner } from "../updates/run-step.js";
 import { runUpdates, updatesStartupNotice } from "../updates/updates-cmd.js";
-import { copyReplyStatus, lastAssistantReply, osc52Sequence } from "./clipboard.js";
+import { copyReplyStatus, lastAssistantReply } from "./clipboard.js";
 import { fleetLegendLines } from "./fleet-bar.js";
 import { CODE_STATE, detectLanguage, highlightLine, isHighlightable } from "./highlight.js";
 import type { InvokeItem } from "./invoke-overlay.js";
@@ -368,6 +375,19 @@ export interface BridgeDeps {
   ask: (prompt: string) => Promise<string>;
   /** in-TUI folder prompt. */
   askPath: (prompt: string, def: string) => Promise<string>;
+  /**
+   * Hand the real terminal to a child and take it back (`suspendTui`/`resumeTui` in app.ts).
+   * The privileged gate suspends around sudo so sudo reads its password from the TTY itself —
+   * never through this process. Absent (tests, non-TTY) ⇒ the gate runs without suspending.
+   */
+  suspend?: () => void;
+  resume?: () => void;
+  /**
+   * Show a full-screen program OVER the TUI (`/disk-space`): Ctrl+] minimises it without
+   * stopping it, Ctrl+] at the prompt shows it again, Ctrl+D inside it ends it. "resumed" when
+   * one was already running minimised; "busy" when the screen is otherwise taken.
+   */
+  openOverlay?: (o: OverlayLaunch) => "started" | "resumed" | "busy";
   /** `/traits` — focus the composer's trait rail (the ⌃T mode). Absent ⇒ the command says so. */
   focusTraitRail?: () => boolean;
   /** end the session (control:quit). */
@@ -599,6 +619,28 @@ export async function createSessionBridge(deps: BridgeDeps): Promise<SessionBrid
   const askText = (prompt: string): Promise<string> => whileBlocked(() => deps.ask(prompt));
   const askFolder = (prompt: string, def: string): Promise<string> =>
     whileBlocked(() => deps.askPath(prompt, def));
+  /**
+   * The privileged gate for this session — the only way anything here runs as root. Its
+   * approver is THIS terminal's human: the full view printed, then a y/N whose default is no
+   * (or the typed target, for a catastrophic command). The TUI is suspended while sudo runs,
+   * so sudo reads the password from the TTY and this process never sees it.
+   */
+  const privilegedGate = createPrivilegedGate({
+    passwordVia: "tty",
+    approver: makeTerminalApprover({ write: deps.write, confirm: askConfirm, ask: askText }),
+    home: prometheusHome(),
+    userHome: homedir(),
+    scan: async (line) => {
+      const mode = state.tuning.gateMode ?? "enforce";
+      if (mode === "off") return { blocked: false };
+      const v = await scanCommand(line);
+      return verdictBlocks(v, mode)
+        ? { blocked: true, reason: verdictReasons(v).join("; ") || v.verdict }
+        : { blocked: false };
+    },
+    ...(deps.suspend ? { suspendTerminal: deps.suspend } : {}),
+    ...(deps.resume ? { resumeTerminal: deps.resume } : {}),
+  });
   // /context window: the user-chosen ceiling auto-compact budgets against (mirrors the host).
   let contextWindowSetting = loadContextWindowTokens(home);
   // (A) `/timeout` — the inactivity-pause threshold this session's turns use (default 10 min).
@@ -1224,17 +1266,14 @@ export async function createSessionBridge(deps: BridgeDeps): Promise<SessionBrid
   };
 
   /**
-   * `propose_elevated` — render the block, then Copy or Dismiss (§7 step 2/3).
+   * `propose_elevated` — the privileged gate IS the prompt.
    *
-   * The generic path would have asked *"run tool propose_elevated?"*, which tells a human
-   * nothing they need in order to decide about root. §7 is explicit that the human must see
-   * the exact argv, the cwd, the reason and the nemesis verdict BEFORE answering, so this
-   * renders all four and then asks the only question that matters.
-   *
-   * "Approve" here means COPY, not RUN — nothing in this process will execute the command,
-   * at any answer. The clipboard write is the whole action, and it is deliberately the most
-   * this product will ever do toward elevation: the sudo prompt is answered in the human's
-   * own terminal, by the human, with no password passing through us.
+   * The gate shows the exact command, its folder, the reason (and a script's hash and first
+   * lines) and runs it only on "approve once". Asking here as well — "run tool
+   * propose_elevated?" — would put a second, less informative question in front of the real
+   * one, and a human learns to click through the first of two prompts. So this seam only
+   * refuses a malformed proposal; it never approves anything on its own, because approving
+   * here only lets the call reach the gate. Never remembered (`isPrivilegedCall`).
    */
   const confirmProposeElevated = async (call: ToolCall): Promise<agent.ConfirmResult> => {
     const check = agent.checkElevated(
@@ -1246,62 +1285,7 @@ export async function createSessionBridge(deps: BridgeDeps): Promise<SessionBrid
       write(`  ⎿ propose_elevated refused: ${check.error}`);
       return { approved: false, reason: check.error };
     }
-    const proposal = {
-      ...check.proposal,
-      cwd: typeof call.args.cwd === "string" && call.args.cwd ? call.args.cwd : state.cwd,
-    };
-    const line = agent.elevatedCommandLine(proposal);
-
-    const gateMode = state.tuning.gateMode ?? "enforce";
-    const verdict = gateMode === "off" ? null : await scanCommand(line);
-    if (verdict && verdictBlocks(verdict, gateMode)) {
-      const why = verdictReasons(verdict).join("; ") || verdict.verdict;
-      write(`  ⎿ propose_elevated REFUSED by the nemesis gate (${verdict.verdict}): ${why}`);
-      appendExecAudit(
-        prometheusHome(),
-        execAuditEntry({
-          command: line,
-          tier: "destructive",
-          verdict: verdict.verdict,
-          decision: "blocked",
-          authLevel,
-          reason: why,
-        }),
-      );
-      return { approved: false, reason: `nemesis ${verdict.verdict}: ${why}` };
-    }
-
-    // The human reads the block, THEN answers. Never the other way round.
-    for (const l of agent
-      .renderElevated(proposal, verdict ? { verdict: verdict.verdict } : undefined)
-      .split("\n")) {
-      write(`  ⎿ ${l}`);
-    }
-    const approved = await askConfirm("copy this command to your clipboard?");
-    if (approved) {
-      // OSC 52 rather than pbcopy/xclip: it is the terminal that owns the clipboard, so this
-      // also works over SSH and tmux, which is where "just run it yourself" most often lands.
-      const osc = osc52Sequence(line, { tmux: Boolean(process.env.TMUX) });
-      if (osc.sequence) process.stdout.write(osc.sequence);
-      write(
-        osc.sequence
-          ? "  ⎿ copied — run it in your own terminal, where the sudo prompt is yours to answer"
-          : `  ⎿ could not copy (${osc.reason}) — the command is printed above`,
-      );
-    }
-    appendExecAudit(
-      prometheusHome(),
-      execAuditEntry({
-        command: line,
-        tier: "destructive",
-        verdict: verdict?.verdict ?? "-",
-        decision: approved ? "proposed" : "declined",
-        authLevel,
-        argv: [[...proposal.argv]],
-        reason: proposal.why,
-      }),
-    );
-    return approved;
+    return true;
   };
 
   /**
@@ -1502,6 +1486,8 @@ export async function createSessionBridge(deps: BridgeDeps): Promise<SessionBrid
       // runner-side audit line was silently dropped. See the readline host's twin.
       home,
       authLevel,
+      privilegedGate,
+      surface: "tui",
       /**
        * The endpoint's learned tool capability, owned HERE so it outlives the per-message client.
        *
@@ -2261,6 +2247,19 @@ export async function createSessionBridge(deps: BridgeDeps): Promise<SessionBrid
         confirm: askConfirm,
         localModels: async () => (endpoint?.model ? [endpoint.model] : []),
       }),
+    runDiskSpace: async (rest) => {
+      await runDiskSpace(
+        slashTokens(rest),
+        {
+          cwd: state.cwd,
+          write,
+          confirm: askConfirm,
+          ask: askText,
+          ...(deps.openOverlay ? { openOverlay: deps.openOverlay } : {}),
+        },
+        defaultDiskSpaceDeps("tui", privilegedGate),
+      );
+    },
     runUpdates: async (rest) => {
       // the slash handler is void — CLI-047's widened return (report|null) is discarded here.
       const updateRunner = makeStepRunner();

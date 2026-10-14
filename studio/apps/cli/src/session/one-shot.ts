@@ -322,6 +322,15 @@ export async function runOneShot(
      *
      * Fail-closed: an unparseable or unclassifiable command is never auto-approved.
      */
+    /**
+     * `propose_elevated` — let it reach its PROPOSAL.
+     *
+     * No human is attached to a headless run, so no privileged gate is wired into this turn
+     * (`ctx.privilegedGate` stays unset), and without one the tool cannot spawn anything: it
+     * returns the exact command marked `needsHumanApproval`. Refusing it here instead would
+     * hand the caller an opaque "needs a human" with the command stripped out.
+     */
+    if (call.name === "propose_elevated") return true;
     if (call.name === "run_command") {
       const line = typeof call.args?.command === "string" ? call.args.command : "";
       const parsedCmd = line ? agent.parseCommand(line, { vars: execVarsFromEnv() }) : null;

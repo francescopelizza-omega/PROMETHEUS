@@ -61,6 +61,7 @@ import { type SandboxMode, describeSandbox, planExecSandbox, sandboxHint } from 
 import { type FsPreImage, runFsMutateTool } from "./fs-mutate-host.js";
 import { prometheusHome } from "./home.js";
 import { runMemoryTool } from "./memory-store.js";
+import type { PrivilegedGate, Surface } from "./privileged-gate.js";
 import { type EmbedFn, semanticSearchTool } from "./semantic-index.js";
 import { isPathAllowed, pathArgsOf, scopedAbsolute } from "./working-set.js";
 
@@ -78,6 +79,15 @@ const PROBE_TIMEOUT_MS = 10_000;
 export interface SystemToolDeps {
   /** the working directory a `cwd`-less call defaults to. */
   cwd: string;
+  /**
+   * The privileged gate (`privileged-gate.ts`) — present ONLY on a surface with a human
+   * attached to approve (TUI, Studio, VS Code). With it, `propose_elevated` asks that human
+   * and runs the exact command on approval. Without it (MCP, `-p`/`--json`, CI), the call
+   * spawns nothing and returns the command for a human to run.
+   */
+  privilegedGate?: PrivilegedGate;
+  /** which surface is asking, recorded in the privileged audit line. */
+  surface?: Surface;
   /**
    * The variables `$VAR` may expand to inside a `run_command` line.
    *
@@ -1506,6 +1516,78 @@ async function proposeElevatedTool(
     }
   }
 
+  // ── a human is attached: the privileged gate asks them, and runs it only on approval ──
+  if (deps.privilegedGate) {
+    const r = await deps.privilegedGate.requestAndRun(
+      {
+        argv: [...proposal.argv],
+        cwd: resolve(cwd, proposal.cwd ?? cwd),
+        why: proposal.why,
+        surface: deps.surface ?? "cli",
+        requester: "agent",
+      },
+      {
+        ...(deps.onProgress ? { onOutput: (chunk: string) => deps.onProgress?.(chunk) } : {}),
+        ...(deps.signal ? { signal: deps.signal } : {}),
+      },
+    );
+    if (deps.home) {
+      appendExecAudit(
+        deps.home,
+        execAuditEntry({
+          command: line,
+          tier: "destructive",
+          verdict: verdict?.verdict ?? "-",
+          decision:
+            r.decision === "approved"
+              ? "approved"
+              : r.decision === "blocked"
+                ? "blocked"
+                : r.decision === "no-human"
+                  ? "proposed"
+                  : r.decision === "refused"
+                    ? "refused"
+                    : "declined",
+          authLevel: deps.authLevel ?? -1,
+          argv: [[...proposal.argv]],
+          ...(r.exitCode !== undefined ? { exitCode: r.exitCode } : {}),
+          reason: r.reason ?? proposal.why,
+        }),
+      );
+    }
+    const tail = (t?: string): string => (t ? t.slice(-4000).trimEnd() : "");
+    const summary =
+      r.decision === "approved"
+        ? [
+            `ran as root (exit ${r.exitCode ?? "?"}${r.timedOut ? ", timed out" : ""}): ${r.commandLine}`,
+            tail(r.stdout),
+            tail(r.stderr),
+            r.reason ?? "",
+          ]
+            .filter(Boolean)
+            .join("\n")
+        : r.decision === "no-human"
+          ? (r.proposal ?? renderElevated(proposal))
+          : r.decision === "denied"
+            ? `the human denied: ${r.commandLine}. Do NOT retry it unless they ask.`
+            : r.decision === "timeout"
+              ? `no answer from the human before the prompt timed out — denied: ${r.commandLine}`
+              : `refused (${r.decision}): ${r.reason ?? r.commandLine}`;
+    return {
+      ok: r.decision === "no-human" ? true : r.ok,
+      summary,
+      data: {
+        elevated: true,
+        command: line,
+        argv: [...proposal.argv],
+        why: proposal.why,
+        decision: r.decision,
+        ...(r.exitCode !== undefined ? { exitCode: r.exitCode } : {}),
+        ...(r.decision === "no-human" ? { needsHumanApproval: true } : {}),
+      },
+    };
+  }
+
   // The proposal is a real event even though nothing ran — "the agent asked for root, here is
   // the exact command and why" is precisely what an audit should be able to answer later.
   if (deps.home) {
@@ -1526,7 +1608,13 @@ async function proposeElevatedTool(
   return {
     ok: true,
     summary: renderElevated(proposal, verdict ? { verdict: verdict.verdict } : undefined),
-    data: { elevated: true, command: line, argv: [...proposal.argv], why: proposal.why },
+    data: {
+      elevated: true,
+      command: line,
+      argv: [...proposal.argv],
+      why: proposal.why,
+      needsHumanApproval: true,
+    },
   };
 }
 

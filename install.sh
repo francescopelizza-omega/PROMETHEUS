@@ -20,7 +20,8 @@
 #   7. adds $PREFIX to PATH in your shell rc — inside removable sentinel markers;
 #   8. verifies the result the way a new terminal will see it.
 #
-# It never uses sudo unless you allow it for a package manager, never writes outside
+# It never uses sudo unless you allow it for a package manager (and then shows you the exact
+# command first), never writes outside
 # $PROMETHEUS_HOME / $PREFIX / your shell rc (download caches aside), and `--uninstall` reverses
 # every step including the PATH block.
 #
@@ -180,7 +181,7 @@ Options:
   --repo URL           source repository                 (default: $REPO_DEFAULT)
   --from-local DIR     install from an existing checkout instead of fetching
   --with-app           also build + install Prometheus Studio (Electron; slow)
-  --system-deps        allow the system package manager (sudo/doas) without asking
+  --system-deps        your consent in advance: run the package-manager commands shown (sudo/doas) without asking
   --no-system-deps     never use the system package manager
   --no-modify-path     do not touch any shell rc file
   --uninstall          remove everything this script installed
@@ -326,7 +327,10 @@ provision() {
 
 # ── consent, root, package managers ───────────────────────────────────────────
 # Piped into sh, stdin is this script, so a question goes to the terminal itself (/dev/tty), the
-# way sudo asks for its password. No terminal and no --system-deps means no.
+# way sudo asks for its password. The question shows the exact command that will run. No terminal
+# and no --system-deps means no. --system-deps is YOUR consent, typed at your own shell before the
+# run — the installer is not Prometheus's runtime, where no flag can pre-approve a privileged
+# command.
 can_prompt() { [ -r /dev/tty ] && [ -w /dev/tty ] && (: </dev/tty) 2>/dev/null; }
 allow_system() { # <what it is for> <the command> → 0 if the user agrees
   case $SYSTEM_DEPS in
@@ -339,10 +343,13 @@ allow_system() { # <what it is for> <the command> → 0 if the user agrees
   case $_ans in [yY]*) return 0 ;; *) return 1 ;; esac
 }
 
-as_root() {
-  if [ "$(id -u)" = 0 ]; then "$@"
-  elif _s=$(find_cmd sudo); then "$_s" "$@"
-  elif _s=$(find_cmd doas); then "$_s" "$@"
+# The elevator for a system package manager: nothing when already root, else sudo, else doas.
+# ONE decision, used both for the line the human is shown and for the command that runs — so
+# what they approve is exactly what executes (Prometheus's rule for every privileged command).
+root_prefix() {
+  if [ "$(id -u)" = 0 ]; then echo ""
+  elif _s=$(find_cmd sudo); then echo "$_s"
+  elif _s=$(find_cmd doas); then echo "$_s"
   else return 1; fi
 }
 
@@ -372,18 +379,19 @@ pkg_name() { # <manager> <git|python|node|rg|libstdcxx> → package name(s), or 
   esac
 }
 
-pkg_cmd() { # <manager> <names> → the command line to show
+pkg_cmd() { # <manager> <names> <elevator> → the EXACT command line pkg_install runs
+  _r=${3:+$3 }
   case $1 in
   brew) echo "brew install $2" ;;
-  apt-get) echo "sudo apt-get update && sudo apt-get install -y --no-install-recommends $2" ;;
-  dnf | yum) echo "sudo $1 install -y $2" ;;
-  zypper) echo "sudo zypper --non-interactive install $2" ;;
-  pacman) echo "sudo pacman -S --needed --noconfirm $2" ;;
-  apk) echo "sudo apk add --no-cache $2" ;;
-  pkg) echo "sudo pkg install -y $2" ;;
-  pkg_add) echo "doas pkg_add $2" ;;
-  pkgin) echo "sudo pkgin -y install $2" ;;
-  xbps-install) echo "sudo xbps-install -Sy $2" ;;
+  apt-get) echo "${_r}env DEBIAN_FRONTEND=noninteractive apt-get update && ${_r}env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends $2" ;;
+  dnf | yum) echo "${_r}$1 install -y $2" ;;
+  zypper) echo "${_r}zypper --non-interactive install $2" ;;
+  pacman) echo "${_r}pacman -S --needed --noconfirm $2" ;;
+  apk) echo "${_r}apk add --no-cache $2" ;;
+  pkg) echo "${_r}pkg install -y $2" ;;
+  pkg_add) echo "${_r}pkg_add $2" ;;
+  pkgin) echo "${_r}pkgin -y install $2" ;;
+  xbps-install) echo "${_r}xbps-install -Sy $2" ;;
   esac
 }
 
@@ -392,21 +400,29 @@ pkg_install() {
   _pm=$(detect_pm) || return 1
   _names=$(pkg_name "$_pm" "$2")
   [ -n "$_names" ] || return 1
-  allow_system "$1" "$(pkg_cmd "$_pm" "$_names")" || return 1
+  _el=""
+  if [ "$_pm" != brew ]; then
+    _el=$(root_prefix) || {
+      warn "$_pm needs root and there is no sudo or doas here"
+      return 1
+    }
+  fi
+  allow_system "$1" "$(pkg_cmd "$_pm" "$_names" "$_el")" || return 1
   step "installing $_names with $_pm"
-  # word splitting of $_names (a package list) is intended
+  # word splitting of $_names (a package list) and of an empty $_el (already root) is intended;
+  # every line below is the one pkg_cmd showed
   case $_pm in
   brew) run brew install $_names </dev/null ;;
-  apt-get) run as_root env DEBIAN_FRONTEND=noninteractive apt-get update </dev/null &&
-    run as_root env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends $_names </dev/null ;;
-  dnf | yum) run as_root "$_pm" install -y $_names </dev/null ;;
-  zypper) run as_root zypper --non-interactive install $_names </dev/null ;;
-  pacman) run as_root pacman -S --needed --noconfirm $_names </dev/null ;;
-  apk) run as_root apk add --no-cache $_names </dev/null ;;
-  pkg) run as_root pkg install -y $_names </dev/null ;;
-  pkg_add) run as_root pkg_add $_names </dev/null ;;
-  pkgin) run as_root pkgin -y install $_names </dev/null ;;
-  xbps-install) run as_root xbps-install -Sy $_names </dev/null ;;
+  apt-get) run $_el env DEBIAN_FRONTEND=noninteractive apt-get update </dev/null &&
+    run $_el env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends $_names </dev/null ;;
+  dnf | yum) run $_el "$_pm" install -y $_names </dev/null ;;
+  zypper) run $_el zypper --non-interactive install $_names </dev/null ;;
+  pacman) run $_el pacman -S --needed --noconfirm $_names </dev/null ;;
+  apk) run $_el apk add --no-cache $_names </dev/null ;;
+  pkg) run $_el pkg install -y $_names </dev/null ;;
+  pkg_add) run $_el pkg_add $_names </dev/null ;;
+  pkgin) run $_el pkgin -y install $_names </dev/null ;;
+  xbps-install) run $_el xbps-install -Sy $_names </dev/null ;;
   esac || {
     warn "$_pm could not install $_names"
     return 1

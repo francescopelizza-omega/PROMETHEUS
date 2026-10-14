@@ -330,8 +330,9 @@ export const JOB_KILL_TOOL: ToolDef = {
  * attacker probes. An array has no operators, no quoting, no substitution and no pipeline;
  * one proposal is one program with its arguments, and there is nothing to misparse.
  *
- * `sudo` is not written by the agent and must not appear in `argv` — the prefix is added at
- * render time. The description says so plainly because the model reads it, and a model that
+ * `sudo` is not written by the agent and must not appear in `argv` — the privileged gate adds
+ * the elevator itself (`host/privileged-gate.ts`), and runs the command only after a human
+ * approves that exact argv. The description says so plainly because the model reads it, and a model that
  * writes `["sudo", …]` gets a refusal explaining the rule rather than a silent rewrite.
  *
  * No `destructiveHint`: the annotation ladder tops out at A6/A7 auto-approving `destructive`,
@@ -340,13 +341,17 @@ export const JOB_KILL_TOOL: ToolDef = {
  */
 export const PROPOSE_ELEVATED_TOOL: ToolDef = {
   name: "propose_elevated",
-  title: "Propose a command for the human to run with sudo",
+  title: "Run a command with sudo — after the human approves that exact command",
   description:
-    "Ask the HUMAN to run a command with elevated privileges. You cannot run sudo yourself " +
-    "and must never put `sudo` in a command — this tool is how you ask. It does not execute " +
-    "anything: it prints the command for the human to copy into their own terminal, where " +
-    "they answer their own sudo prompt. Use it when a task genuinely needs root (a system " +
-    "service, a root-owned config, a system package manager) and say clearly why.",
+    "Run a command with elevated privileges (sudo). This is the ONLY way to run anything as " +
+    "root: run_command refuses every privileged command, and you must never put `sudo` in a " +
+    "command. Pass the program and its arguments WITHOUT sudo. The human is shown this exact " +
+    "command, its folder and your reason, and it runs only if they approve it — every call is " +
+    "asked, at every authorization level; nothing can pre-approve it. If no human is attached " +
+    "here (headless, MCP), nothing runs and the command is returned for them to run. Use it " +
+    "only when a task genuinely needs root (a system service, a root-owned config, a system " +
+    "package manager) and say clearly why. One program per call: no shell strings, no pipes, " +
+    "no launchers like env or sh -c.",
   schema: {
     // Declared as an ARRAY, which is what the description has always demanded. It was typed
     // `string` only because FieldSpec had no array type, so the schema said one thing and the

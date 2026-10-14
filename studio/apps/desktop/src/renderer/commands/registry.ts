@@ -128,6 +128,12 @@ export const SHELL_COMMANDS: readonly Command[] = [
     run: (c) => c.openBottomPanel("security"),
   },
   {
+    id: "panel.disk",
+    title: "Disk space: Open Panel",
+    category: "View",
+    run: (c) => c.openBottomPanel("disk"),
+  },
+  {
     id: "panel.metadata",
     title: "Metadata: Open Panel",
     category: "Privacy",

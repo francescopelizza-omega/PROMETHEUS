@@ -9,6 +9,7 @@
 - **HMAC-signed verdicts** — Tamper-evident security decisions stored in append-only audit log.
 - **Reversible remediation** — Dry-run by default, undo any action with one command.
 - **Machine posture audit** — Read-only security assessment of firewall, SSH, disk encryption, and open ports.
+- **Privileged commands, one approval at a time** — Prometheus may run sudo, but never on its own authority: each privileged command is shown verbatim and runs only after you approve that exact command, every time, at every level (A7 included). Audited to `~/.prometheus/audit/sudo.log`.
 - **Secret scanning** — Full-history gitleaks integration with allowlisting, personal-data detection, and orphan-file scanning.
 
 ---
@@ -36,7 +37,7 @@
 **Execution & Sandboxing**
 - Run shell commands under OS-level confinement (Seatbelt on macOS, bubblewrap on Linux)
 - Job management: status, output, kill long-running tasks
-- Propose elevated commands (agent never escalates itself)
+- Privileged commands (sudo) through one gate: shown verbatim, run only after you approve that exact command — never auto-approved, never remembered
 
 **Web & Network**
 - Web fetch through SSRF-proof fail-closed proxy
@@ -77,8 +78,8 @@ All powered by the same agent loop in `studio/packages/core`:
 
 **`prometheus` CLI / TUI** (Terminal-first)
 - Interactive full-screen TUI with autocomplete and markdown rendering
-- 140+ slash commands: `/scan`, `/model`, `/budget`, `/sessions`, `/orchestrate`, etc.
-- 67 CLI subcommands for headless automation
+- 141 slash commands: `/scan`, `/model`, `/budget`, `/sessions`, `/orchestrate`, `/disk-space`, etc.
+- 73 CLI subcommands for headless automation
 - Shell completion for bash/zsh/fish
 - Man page generation
 - Headless mode: `prometheus -p "<prompt>"` for one-shot operations
@@ -116,6 +117,7 @@ All powered by the same agent loop in `studio/packages/core`:
 - **Hugging Face import** — Convert and install models with one command
 - **Remote compute** — SSH or LAN GPU boxes with feasibility assessment for offloading
 - **Model health ledger** — Tracks native vs. text-protocol, context window served, failures
+- **Disk space** — `/disk-space` opens the full disk explorer over the TUI (Ctrl+] minimise/resume, Ctrl+D quit); `map` / `levels` / `files` / `mounts` views, plan-first delete with every protection, Linux cleanup, and a root rescan you approve (`--sudo`). Studio: a Disk space panel with treemap, pie and levels. MCP: read-only `prometheus_disk_space`
 
 ---
 

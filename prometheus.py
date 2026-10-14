@@ -14672,6 +14672,47 @@ _EFFORT_EMULATION = {
 _EFFORT_OWN_PROMPT = ("system-prompt-line", "prompt-soft-switch")
 
 
+def cmd_disk_space(args, osi: OSInfo) -> int:
+    """`disk-space <verb> …` — a thin passthrough to the disk_map sidecar.
+
+    The sidecar (`studio/python/sidecar/disk_map.py`) owns the whole contract (its CONTRACT.md
+    section): mounts, map, levels, largest-files, delete (a PLAN unless --confirm),
+    cleanup-plan and privileged-rescan. It refuses to run as root and never elevates — root
+    work comes back as an exact command for the privileged gate, which asks a human first.
+
+    This verb exists because the MCP plugin and the core command registry only ever speak to
+    this file. It adds nothing: the sidecar's one JSON object is relayed as-is, its progress
+    lines pass through on stderr, and its exit code is ours. The sidecar is found next to this
+    file in the checkout (`install.sh` links engine/prometheus.py into app/); an engine staged
+    without the Python tree — the packaged Studio app today — says so instead of guessing.
+    """
+    rest = list(getattr(args, "rest", None) or [])
+    if rest[:1] == ["--"]:
+        rest = rest[1:]
+    side = Path(__file__).resolve().parent / "studio" / "python" / "sidecar" / "disk_map.py"
+    if not side.is_file():
+        return emit_json({"command": "disk-space", "ok": False, "_exit": 2,
+                          "error": f"the disk tool is not shipped with this engine (no {side})"})
+    try:
+        proc = subprocess.run([sys.executable, str(side), *rest], stdout=subprocess.PIPE,
+                              stderr=None, text=True, timeout=60 * 60, check=False)
+    except subprocess.TimeoutExpired:
+        return emit_json({"command": "disk-space", "ok": False, "_exit": 2,
+                          "error": "the disk scan did not finish within an hour"})
+    for line in reversed((proc.stdout or "").strip().splitlines()):
+        line = line.strip()
+        if line.startswith("{"):
+            try:
+                obj = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(obj, dict):
+                obj.setdefault("_exit", proc.returncode)
+                return emit_json(obj)
+    return emit_json({"command": "disk-space", "ok": False, "_exit": 2,
+                      "error": f"the disk sidecar produced no JSON (exit {proc.returncode})"})
+
+
 def _effort_read_rules(path: Path) -> tuple[list[dict], list[str]]:
     """Parse one layer. Returns (rules, notes). A missing file is not a problem.
 
@@ -15986,6 +16027,10 @@ def build_parser() -> argparse.ArgumentParser:
     # Defensive self-audit — "build your vault" (localhost-only, read-only, advisory)
     sub.add_parser("harden", help="defensive self-audit of THIS machine (firewall/ports/ssh/encryption/secret perms) + hardening steps; points to `pentest` for authorized deeper testing")
 
+    # Disk space — map / levels / largest files / mounts / delete plan, via the disk_map sidecar
+    p_ds = sub.add_parser("disk-space", help="disk space: mounts | map PATH | levels PATH | largest-files PATH | delete PATH... (a plan unless --confirm) | cleanup-plan | privileged-rescan PATH — via the disk_map sidecar; never runs as root")
+    p_ds.add_argument("rest", nargs=argparse.REMAINDER, help="the sidecar verb and its arguments")
+
     # 5th functionality — pentest armory (sandboxed offensive security, AUTHORIZED ONLY)
     p_pt = sub.add_parser("pentest", help="5th functionality: AUTHORIZED pentest tools + AIs, each run inside a strongly-armored sandbox (airgapped, ROE-gated)")
     p_pt.add_argument("action", nargs="?",
@@ -16254,6 +16299,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         "tutorial": cmd_tutorial,
         "methods": cmd_methods,
         "harden": cmd_harden,
+        "disk-space": cmd_disk_space,
         "pentest": cmd_pentest,
         "vault": cmd_vault,
     }

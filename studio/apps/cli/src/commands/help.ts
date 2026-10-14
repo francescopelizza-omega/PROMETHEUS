@@ -128,6 +128,15 @@ const CLI_NATIVE_HELP: Record<string, { synopsis: string; examples: readonly str
     synopsis: "prometheus metadata <inspect | scrub | edit | timestomp> <file>",
     examples: ["prometheus metadata inspect photo.jpg"],
   },
+  "disk-space": {
+    synopsis:
+      "prometheus disk-space [map | levels | files | mounts | delete | cleanup] [PATH] [--sudo]",
+    examples: [
+      "prometheus disk-space map ~/Downloads",
+      "prometheus disk-space levels / --depth 2",
+      "prometheus disk-space delete ~/old-builds   (a plan; delete inside the TUI: /disk-space delete)",
+    ],
+  },
   provider: {
     synopsis: "prometheus provider <list | show | connect | status | disconnect | enable-metered>",
     examples: ["prometheus provider list", "prometheus provider connect openai"],
@@ -356,6 +365,7 @@ ${c.bold("ENVIRONMENTS · MODELS · REPOS · PRIVACY")}
   ${c.cyan("models")} <…> --set-root DIR    Local model-running tools (AirLLM/FA/…)
   ${c.cyan("repo")} <add|list|status|update|pin|branch|rescan|remove|vault>
   ${c.cyan("metadata")} <inspect|scrub|edit|timestomp> <file>   file-metadata privacy
+  ${c.cyan("disk-space")} [map|levels|files|mounts|delete|cleanup] [PATH]   disk usage (TUI: full explorer)
   ${c.cyan("provider list")}        Inference providers (Tier-A free/local first)
 
 ${c.dim("Mutating verbs PREVIEW first; re-run with")} ${c.bold("--yes")} ${c.dim("to execute (--force overrides a BLOCK).")}

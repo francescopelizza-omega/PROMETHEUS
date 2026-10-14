@@ -1,30 +1,30 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Francesco Pelizza
 /**
- * agent/system/elevated.ts — the elevated-proposal flow (full_wrapper_compose §7 / Phase 5).
+ * agent/system/elevated.ts — the shape of a privileged request (`propose_elevated`).
  *
- * The brief asked for *"eventual sudo use of manually user's authorised commands"*. This is
- * the answer, and the answer is deliberately unsatisfying: **the agent never runs sudo.**
+ * The principle (2026-10): **Prometheus may run sudo, but never on its own authority.** Every
+ * privileged command is shown to the human verbatim and runs only after that human approves
+ * that exact command, every time. No authorization level, flag, setting, agent or tool can
+ * pre-approve, remember or skip this approval.
  *
- * `sudo` in an agent-composed argv is a refusal at the parser, not a confirm. The reasoning
- * is about the failure mode rather than the happy path — a dialog reading *"run `sudo rm -rf
- * /var`?"* is one mis-click from an unrecoverable machine, and prompt injection makes
- * mis-clicks cheap to manufacture at scale. A yes/no button is the wrong instrument when the
- * cost of the wrong answer is that high.
+ * This module is the PURE half: it validates what the agent asked for and renders the text a
+ * human reads. It still has no spawn seam. Execution lives in exactly one place,
+ * `host/privileged-gate.ts`, which is reached only through `propose_elevated` and only runs
+ * after a host-wired approver (TUI modal, Studio dialog, VS Code modal) says yes. A surface
+ * with no human attached (MCP, `-p`/`--json`, CI) gets this module's proposal block back
+ * instead — the same text the old copy-and-paste flow printed.
  *
- * So the agent gets a way to ASK, not a way to DO: `propose_elevated({argv, why})` renders a
- * block the human reads and copies into their own shell, under their own TTY, answering their
- * own sudo prompt. Nothing in this module executes anything — there is no spawn seam here at
- * all, which is the property worth checking when reviewing it.
+ * `run_command` never runs a privileged command at all (`exec/classify.ts` rule 0): privileged
+ * work has one path, so there is one place to review.
  *
  * ## The one genuinely dangerous thing this module does
  *
- * It emits a string destined for a **real shell** — the human's, by paste. Everywhere else in
- * the exec stack we avoid shell syntax precisely so quoting can never bite; here it is the
- * deliverable, so quoting is load-bearing. `shellQuote` is POSIX single-quoting, which has no
- * escape processing inside it at all, so `$(…)`, backticks, `\` and `|` are inert. Rendering
- * with double quotes — as a nearby display helper does — would leave `$(…)` live, and the
- * pasted command would do something the human never read.
+ * It emits a string destined for a **real shell** — the human's, by paste, when no human is
+ * attached to approve it here. `shellQuote` is POSIX single-quoting, which has no escape
+ * processing inside it at all, so `$(…)`, backticks, `\` and `|` are inert. Rendering with
+ * double quotes would leave `$(…)` live, and the pasted command would do something the human
+ * never read.
  *
  * Newlines are refused for the same reason at a coarser grain: a newline inside a "single"
  * proposed command is a second command the reviewer's eye skips.
@@ -80,7 +80,18 @@ const UNREVIEWABLE = new Set([
 ]);
 
 /** Elevation prefixes. The agent writing one of these is the case §7 exists to prevent. */
-const ELEVATORS = new Set(["sudo", "doas", "su", "pkexec", "runas", "gosu", "please"]);
+const ELEVATORS = new Set([
+  "sudo",
+  "doas",
+  "su",
+  "pkexec",
+  "run0",
+  "sudoedit",
+  "machinectl",
+  "runas",
+  "gosu",
+  "please",
+]);
 
 /** The program name without its directory — `/usr/bin/sudo` must not slip past `ELEVATORS`. */
 function baseName(p: string): string {
@@ -162,8 +173,8 @@ export function checkElevated(
  * what their shell will run. This is the string that matters; everything else in the rendered
  * block is context around it.
  */
-export function elevatedCommandLine(p: ElevatedProposal): string {
-  return `sudo ${p.argv.map(shellQuote).join(" ")}`;
+export function elevatedCommandLine(p: ElevatedProposal, elevator = "sudo"): string {
+  return `${elevator} ${p.argv.map(shellQuote).join(" ")}`;
 }
 
 /**
@@ -172,11 +183,15 @@ export function elevatedCommandLine(p: ElevatedProposal): string {
  * Deliberately plain text: this goes to a terminal, a GUI panel and an audit line, and the
  * one thing all three must agree on is the command itself.
  */
-export function renderElevated(p: ElevatedProposal, extra?: { verdict?: string }): string {
+export function renderElevated(
+  p: ElevatedProposal,
+  extra?: { verdict?: string },
+  elevator = "sudo",
+): string {
   const lines = [
-    "ELEVATED COMMAND PROPOSAL — Prometheus will NOT run this.",
+    "PRIVILEGED COMMAND — needs a human. Nobody here can approve it, so Prometheus has NOT run it.",
     "",
-    `  ${elevatedCommandLine(p)}`,
+    `  ${elevatedCommandLine(p, elevator)}`,
     "",
     `why: ${p.why}`,
   ];
@@ -184,8 +199,9 @@ export function renderElevated(p: ElevatedProposal, extra?: { verdict?: string }
   if (extra?.verdict) lines.push(`nemesis: ${extra.verdict}`);
   lines.push(
     "",
-    "Copy it and run it yourself, so the sudo prompt is answered by you in your own",
-    "terminal. Prometheus never stores, caches or forwards an elevation password.",
+    "Ask for it in a Prometheus window (TUI, Studio or VS Code), which shows you this exact",
+    "command and runs it only if you approve — or copy it into your own terminal. Prometheus",
+    "never stores, caches or forwards an elevation password.",
   );
   return lines.join("\n");
 }

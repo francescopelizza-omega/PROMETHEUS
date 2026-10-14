@@ -88,6 +88,7 @@ import { initBudgetGate, setBudgetSettings } from "./budget-gate.js";
 import { registerBudgetIpcHandlers } from "./budget-ipc.js";
 import { registerCatalogIpcHandlers } from "./catalog-ipc.js";
 import { registerCodebaseOverviewIpcHandlers } from "./codebase-overview-ipc.js";
+import { registerDiskSpaceIpcHandlers } from "./disk-space-ipc.js";
 import { registerEffortIpcHandlers } from "./effort-ipc.js";
 import { registerEnvIpcHandlers } from "./env-ipc.js";
 import { registerExtIpcHandlers } from "./ext-ipc.js";
@@ -127,6 +128,7 @@ import { registerModelIpcHandlers } from "./model-ipc.js";
 import { registerOllamaIpc } from "./ollama-ipc.js";
 import { registerPathCompletionIpcHandlers } from "./path-completion-ipc.js";
 import { registerPersonaIpcHandlers } from "./persona-ipc.js";
+import { registerPrivilegedIpcHandlers, studioPrivilegedGate } from "./privileged-ipc.js";
 import { registerRepoIpcHandlers } from "./repo-ipc.js";
 import { repairPath } from "./resolve-path.js";
 import { registerScheduleIpcHandlers } from "./schedule-ipc.js";
@@ -350,6 +352,8 @@ let disposeRepoIpc: (() => void) | null = null;
 /** Removes the registered `metadata:*` + `file:open` ipcMain handlers (file 0C). */
 let disposeMetadataIpc: (() => void) | null = null;
 let disposeSpectacularIpc: (() => void) | null = null;
+let disposePrivilegedIpc: (() => void) | null = null;
+let disposeDiskSpaceIpc: (() => void) | null = null;
 
 /** Removes the registered `ide:*` ipcMain handlers + host listeners (file 07 §3.2). */
 let disposeIdeIpc: (() => void) | null = null;
@@ -862,6 +866,10 @@ async function runHeadlessSmoke(): Promise<void> {
   // SPECTACULAR power-up: catalog cards (describe/tutorial/methods) + chat
   // (agentic-local reply + terminal preview) + models folder + harden self-audit.
   disposeSpectacularIpc = registerSpectacularIpcHandlers();
+  // The privileged gate (sudo): the ONLY path to root — a human approves each exact command.
+  disposePrivilegedIpc = registerPrivilegedIpcHandlers();
+  // Disk space: the disk_map sidecar's views + delete plan/confirm; "Rescan as root" via the gate.
+  disposeDiskSpaceIpc = registerDiskSpaceIpcHandlers({ gate: studioPrivilegedGate });
   // The Code-Editor / IDE surface (file 07 §3.2/§4/§5/§6/§9) — LSP/DAP/PTY/git/fs
   // hosts + the REAL engine-bridge run-gate. The renderer drives them over IPC (C5).
   disposeIdeIpc = registerIdeIpcHandlers({
@@ -1020,6 +1028,10 @@ async function runHeadlessSmoke(): Promise<void> {
     disposeMetadataIpc = null;
     disposeSpectacularIpc?.();
     disposeSpectacularIpc = null;
+    disposePrivilegedIpc?.();
+    disposePrivilegedIpc = null;
+    disposeDiskSpaceIpc?.();
+    disposeDiskSpaceIpc = null;
     disposeIdeIpc?.();
     disposeIdeIpc = null;
     disposeMcpIpc?.();
@@ -1224,6 +1236,10 @@ async function bootstrap(): Promise<void> {
   // SPECTACULAR power-up: catalog cards (describe/tutorial/methods) + chat
   // (agentic-local reply + terminal preview) + models folder + harden self-audit.
   disposeSpectacularIpc = registerSpectacularIpcHandlers();
+  // The privileged gate (sudo): the ONLY path to root — a human approves each exact command.
+  disposePrivilegedIpc = registerPrivilegedIpcHandlers();
+  // Disk space: the disk_map sidecar's views + delete plan/confirm; "Rescan as root" via the gate.
+  disposeDiskSpaceIpc = registerDiskSpaceIpcHandlers({ gate: studioPrivilegedGate });
   // The Code-Editor / IDE surface (file 07 §3.2/§4/§5/§6/§9) — registered alongside
   // the main ipc so the editor's hosts (LSP/DAP/PTY/git/fs + run-gate) are live from
   // boot. The renderer never spawns a child; it drives these hosts over IPC (C5).
@@ -1516,6 +1532,10 @@ app.on("before-quit", (event) => {
       disposeMetadataIpc = null;
       disposeSpectacularIpc?.();
       disposeSpectacularIpc = null;
+      disposePrivilegedIpc?.();
+      disposePrivilegedIpc = null;
+      disposeDiskSpaceIpc?.();
+      disposeDiskSpaceIpc = null;
       disposeIdeIpc?.();
       disposeIdeIpc = null;
       disposeMcpIpc?.();
@@ -1565,6 +1585,10 @@ app.on("before-quit", (event) => {
     disposeMetadataIpc = null;
     disposeSpectacularIpc?.();
     disposeSpectacularIpc = null;
+    disposePrivilegedIpc?.();
+    disposePrivilegedIpc = null;
+    disposeDiskSpaceIpc?.();
+    disposeDiskSpaceIpc = null;
     disposeIdeIpc?.();
     disposeIdeIpc = null;
     disposeMcpIpc?.();

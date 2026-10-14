@@ -45,6 +45,7 @@ import {
   executeCommandId,
   handleChord,
 } from "./commands/registry.js";
+import { DiskSpacePanel } from "./ide/DiskSpacePanel.js";
 import { HardenPanel } from "./ide/HardenPanel.js";
 import { Problems } from "./ide/Problems.js";
 import { TokenEconomyPanel } from "./ide/TokenEconomyPanel.js";
@@ -82,6 +83,7 @@ import {
 import { AuthPicker } from "./shell/AuthPill.js";
 import { EngineGate } from "./shell/EngineGate.js";
 import { ErrorBoundary } from "./shell/ErrorBoundary.js";
+import { PrivilegedApprovalDialog } from "./shell/PrivilegedApprovalDialog.js";
 import { UpdateBanner } from "./shell/UpdateBanner.js";
 import { nextRegion, useFocusTrap } from "./shell/a11y.js";
 import {
@@ -138,6 +140,7 @@ const SHELL_BOTTOM_TABS: readonly { id: BottomTab; label: string }[] = [
   { id: "security", label: "Security" },
   { id: "health", label: "Health" },
   { id: "metadata", label: "Metadata" },
+  { id: "disk", label: "Disk space" },
   { id: "tokens", label: "Save tokens" },
   { id: "system", label: "System" },
 ];
@@ -1175,6 +1178,8 @@ function App(): ReactElement {
                 />
               ) : bottomTab === "metadata" ? (
                 <MetadataPanel />
+              ) : bottomTab === "disk" ? (
+                <DiskSpacePanel />
               ) : bottomTab === "security" ? (
                 <HardenPanel />
               ) : bottomTab === "tokens" ? (
@@ -1259,6 +1264,9 @@ function App(): ReactElement {
           onCommandPalette={openPalette}
         />
       </div>
+
+      {/* The privileged gate's approval (sudo): one exact command, Approve once / Deny. */}
+      <PrivilegedApprovalDialog />
 
       <CommandPalette
         open={paletteOpen}

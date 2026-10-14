@@ -104,6 +104,7 @@ export const PALETTE_COMMANDS: readonly PaletteCommand[] = [
   { id: "panel.tokens", title: "Save tokens: Open toolkit", category: "View" },
   { id: "panel.health", title: "Health: Open panel", category: "View" },
   { id: "panel.metadata", title: "Metadata: Open panel", category: "View" },
+  { id: "panel.disk", title: "Disk space: Open panel", category: "View" },
   // PyCharm-signature editor-core actions (plan 01) — routed to the focused Monaco editor
   // via `ide:editor-action`. Pure + tested list in state/editor-commands.ts.
   ...EDITOR_ACTION_COMMANDS,
@@ -164,6 +165,7 @@ export const EDITOR_DISPATCHED_IDS: ReadonlySet<string> = new Set([
   "panel.tokens",
   "panel.health",
   "panel.metadata",
+  "panel.disk",
   "python.selectInterpreter",
   "models.selectEndpoint",
 ]);

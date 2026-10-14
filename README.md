@@ -73,8 +73,9 @@ No `curl`? Use `wget`:
 wget -qO- https://gitlab.com/red-beard-phoenix/PROMETHEUS/-/raw/main/install.sh | sh
 ```
 
-Linux and macOS. No `sudo`, nothing written outside `~/.prometheus`, `~/.local/bin` and one
-marked block in your shell rc. Then:
+Linux and macOS. The installer needs no root — it only offers your package manager where no
+pinned build exists, showing you the exact command first — and writes nothing outside
+`~/.prometheus`, `~/.local/bin` and one marked block in your shell rc. Then:
 
 ```bash
 prometheus              # the interactive TUI
@@ -184,6 +185,7 @@ prometheus superscan             # every agent, plugin and forgotten install
 prometheus harden                # firewall, ports, ssh, disk encryption — read-only
 prometheus audit <name>          # deep-scan one installed plugin's artifacts
 prometheus purge <agent>         # back up and remove a forgotten agent's config
+prometheus disk-space map /      # where the disk went (in the TUI: /disk-space, the full explorer)
 ```
 
 ### 7. Run a model that does not fit in your RAM
@@ -252,6 +254,7 @@ the full list of what is *not* finished.
 | **Reversible remediation** | Dry-run by default; `--fix` applies three conservative, undoable actions (neutralize / quarantine / restore) |
 | **Trust ledger + vault** | Records what was accepted and when, with revoke and quarantine-restore. `/trust` |
 | **Machine posture audit** | Read-only, this-machine-only: firewall, open ports, ssh, disk encryption, plus proposed fixes. `prometheus harden` |
+| **Privileged commands (sudo)** | Prometheus may run sudo, but never on its own authority: each privileged command is shown to you verbatim and runs only after you approve that exact command — every time, at every level including A7. Audited to `~/.prometheus/audit/sudo.log` |
 | **Repo hygiene** | Full-history secret scanning (gitleaks, allowlisted *by value*), personal-data and orphan scanners, and a third-party-notices generator — all wired into CI and a pre-push hook |
 
 ### 🤖 The agent loop
@@ -278,7 +281,7 @@ the full list of what is *not* finished.
 |---|---|
 | **Read (16)** | `read_file` `list_dir` `glob` `grep` `semantic_search` `stat_path` `git_status` `git_diff` `git_log` `git_show` `system_info` `gpu_info` `process_list` `which` … |
 | **Write (6)** | `propose_edit` (exact-match hunks, human-approved), `write_file`, `apply_patch`, `delete_file` (captures contents first, so it is undoable), `move_file`, `mkdir` |
-| **Execute (5)** | `run_command` under the OS sandbox, with `job_status` / `job_output` / `job_kill` for long jobs — plus `propose_elevated`, because the agent never escalates itself |
+| **Execute (5)** | `run_command` under the OS sandbox, with `job_status` / `job_output` / `job_kill` for long jobs — plus `propose_elevated` — sudo, run only after you approve that exact command, every time |
 | **Web (2 + 3)** | `web_fetch` through a fail-closed SSRF/nemesis proxy, returning web content as **untrusted data, never instructions**; `web_search`; desktop-only: `browser_navigate` / `browser_screenshot` / `browser_extract_text` ⚠ in the agent's *own* isolated tab, never your session |
 | **Memory + tasks (4)** | `memory_write` / `memory_read` for durable cross-session facts; `todowrite` / `todoread` for the run's task list |
 | **Delegation (2)** | `spawn_agent` returns only a sub-agent's final answer, so its intermediate work never enters the parent's context; `question` asks you one thing and waits |
@@ -375,15 +378,16 @@ the full list of what is *not* finished.
 | **VS Code extension** | A sidebar chat panel driving the real core agent loop against your open workspace |
 | **JetBrains plugin** ⚠ | A scaffold only — never compiled or run. Treat it as unverified |
 | **MCP host** | Manage connectors: list, add by command or URL, remove, test. Every server definition carries a gate verdict |
-| **MCP server** | Prometheus exposes *itself* over stdio MCP — 25 tools — to Claude Code, Cursor, Codex CLI, Gemini CLI, Windsurf, Zed, Continue and Cline |
+| **MCP server** | Prometheus exposes *itself* over stdio MCP — 26 tools — to Claude Code, Cursor, Codex CLI, Gemini CLI, Windsurf, Zed, Continue and Cline |
 
 ### ⌨️ Terminal UX
 
 | | |
 |---|---|
 | **Full-screen TUI** | Bare `prometheus` — history, autocomplete, markdown and syntax-highlighted rendering, a status strip |
-| **140 slash commands** | One registry drives every `/command`, and the same registry drives the CLI verbs and the GUI. `/commands` lists them |
-| **67 CLI subcommands** | `scan` `doctor` `model` `repo` `env` `budget` `updates` `sessions` `test` `harden` `pentest` … |
+| **141 slash commands** | One registry drives every `/command`, and the same registry drives the CLI verbs and the GUI. `/commands` lists them |
+| **73 CLI subcommands** | `scan` `doctor` `model` `repo` `env` `budget` `updates` `sessions` `test` `harden` `pentest` `disk-space` … |
+| **Disk space** | `/disk-space` opens the full disk explorer over your session — Ctrl+] minimises it without stopping it, Ctrl+] again brings it back, Ctrl+D ends it — plus `map` / `levels` / `files` / `mounts`, a plan-first `delete`, Linux `cleanup`, and `--sudo` for a root rescan you approve. Studio has a Disk space panel (treemap, pie, levels) |
 | **Headless** | `prometheus -p "<prompt>"` for one shot; `prometheus chat` for terminal chat |
 | **tmux** | `prometheus session --tmux N` with auto-scaled sub-agent fan-out and a swarm board |
 | **Shell completion + man page** | bash/zsh/fish completions and a roff man page, both generated from the one command registry |
@@ -703,7 +707,7 @@ The model is never handed a shell directly — it calls typed tools, each indepe
 |---|---|
 | **Read / inspect** | `read_file`, `list_dir`, `stat_path`, `grep`, `glob`, `semantic_search`, `git_status`, `git_diff`, `git_log`, `git_show`, `system_info`, `gpu_info`, `process_list`, `which`, `package_list`, `env_get`, `job_status`, `job_output` |
 | **Write / edit** | `propose_edit` (deterministic patching, below), `write_file`, `delete_file`, `move_file`, `mkdir` |
-| **Execute** | `run_command` (parsed argv, never a shell string), `job_kill`, `propose_elevated` (drafts a privileged command for a *human* to run themselves — the agent never executes it) |
+| **Execute** | `run_command` (parsed argv, never a shell string), `job_kill`, `propose_elevated` (a privileged command shown to you verbatim; it runs only after you approve that exact command — every call, at every level; with no human attached it is returned for you to run) |
 | **Network** | `web_fetch`, `web_search` |
 | **Memory** | `memory_write`, `memory_read` |
 | **Delegation** | `spawn_agent`, `question` (ask the human mid-turn) |
@@ -726,7 +730,8 @@ category: read < write < config < command < install < destructive.
 | A6 | trusted | everything the engine allows |
 | A7 | runall | + runs to completion with no per-turn pauses |
 
-Two things never move with the ladder: `propose_elevated` is never auto-approved at any level, and
+Two things never move with the ladder: a privileged (sudo) command always waits for you to approve
+that exact command, at every level including A7 — no flag, grant or setting can pre-approve it — and
 the **nemesis** security check can still hard-block a dangerous action regardless of level —
 autonomy is not the same as safety. A separate **permission-mode** layer sits alongside the ladder
 and can only *narrow* it further, never widen it: `default` (ask before each change), `acceptEdits`
@@ -863,8 +868,8 @@ wget -qO-  https://gitlab.com/red-beard-phoenix/PROMETHEUS/-/raw/main/install.sh
 
 Installs to `~/.prometheus`, links **`prometheus`** (CLI/TUI), **`nemesis`** (the scanner) and **`prometheus-app`** (the Studio
 desktop app) into `~/.local/bin`, and patches that onto `PATH` in your shell profile (bash/zsh/fish
-— open a new terminal, or re-source your profile, to pick it up). No `sudo`, nothing written
-outside your home directory.
+— open a new terminal, or re-source your profile, to pick it up). The installer needs no root, and
+writes nothing outside your home directory.
 
 Studio's per-command OS sandbox uses **bubblewrap** (`bwrap`) on Linux. It's optional — its
 absence is handled as an honest, logged "ran unconfined," never a silent downgrade — but install it
@@ -931,7 +936,9 @@ cloning anything.
   - **pnpm** at the pinned version — installed with `npm install --global --prefix`, never
     `npm install -g` or `corepack enable`, which write next to the node binary and fail without
     root (corepack is not bundled with Node 25+ anyway).
-- **From your package manager, only with consent** (a prompt on the terminal, or `--system-deps`):
+- **From your package manager, only with consent** (a prompt on the terminal that shows the exact
+  command it will run, sudo or doas included — or `--system-deps`, the same consent given in
+  advance at your own shell):
   `git` (plugin installs stage through git clone; the install itself fetches a source archive when
   git is missing), Alpine's `libstdc++` for Node's musl build, and on the BSDs Node/Python/ripgrep.
 - Optional: `bubblewrap` (`bwrap`) confines the agent's commands on Linux.
@@ -991,6 +998,7 @@ pre-scan; the deep gate still runs), `--no-gate` (disable the gate this run),
 | `~/.config/prometheus/trust.json` | Approved (plugin + source commit) verdicts. |
 | `~/.config/prometheus/nemesis-policy-<tier>.json` | Per-tier gate policy. |
 | `~/.nemesis/gate-audit.jsonl` | Append-only, signed gate decisions. |
+| `~/.prometheus/audit/sudo.log` | One JSON line per privileged request: who asked, the exact argv, folder, reason, a script's hash, your decision, exit code. Never the environment, the output or a password. |
 
 **Exit codes:** `0` success / nothing to do · `1` one or more installs failed ·
 `2` bad usage / unsupported OS / missing prerequisite / gate **BLOCK**.
@@ -1028,6 +1036,24 @@ two abuse.ch feeds are skipped, so a keyless update exits `1` by design), `2` fo
 - **Least privilege.** Studio's renderer is sandboxed; only one bridge process
   spawns `python3` / `nemesis`, with a curated child environment that strips
   loader/interpreter-hijack variables (`LD_PRELOAD`, `DYLD_*`, `PYTHONPATH`, …).
+- **Privileged commands: Prometheus may run sudo, but never on its own authority.** Every
+  privileged command is shown to you verbatim and runs only after you approve that exact
+  command, every time. No authorization level, flag, setting, agent or tool can pre-approve,
+  remember or skip this approval. In code: one module (`privileged-gate.ts`) is the only path to
+  root; `run_command` refuses anything privileged (sudo, doas, pkexec, su, run0 — also behind
+  `env`/`nice`/`xargs`, inside `sh -c`, in a chain), and where a kernel sandbox runs (Seatbelt on
+  macOS, bubblewrap on Linux) it blocks setuid as well — on Linux without bubblewrap that
+  classification is the only barrier. The
+  prompt shows the argv, folder, who asked and why, and a script's path, size, SHA-256 and first
+  lines; it offers **Approve once** or **Deny** (the default — and what no answer becomes); a
+  catastrophic command (`rm -rf /`, `dd of=/dev/…`, `mkfs`, sudoers) also needs its target typed.
+  The approval is bound to that argv, folder and script hash and re-checked just before it runs.
+  `--yes`, A7, grants, MCP and headless runs cannot approve — with no human attached the command
+  comes back for you to run. The password never passes through Prometheus: sudo reads it from
+  your terminal, or a native dialog hands it straight to sudo (`sudo -A`); sudoers is never
+  touched. The elevator itself is taken only from root-owned system paths, never from `PATH`.
+  Every request is logged to `~/.prometheus/audit/sudo.log`. The installer is not part of this
+  runtime: it asks before using your package manager and shows the exact command it will run.
 
 ### Defending the agent loop against prompt injection
 
@@ -1107,6 +1133,26 @@ still applies there, it's just not backed by a kernel sandbox. Neither sandbox r
 *reads*, CPU/memory/disk, or the temp/toolchain-cache directories a sandboxed command needs
 to be writable to actually run — see `studio/packages/core/src/agent/system/host/exec-sandbox.ts`'s
 own header comment for the precise, current list of what is and isn't confined.
+
+The privileged gate (sudo) has its own limits:
+
+- What is verified is the discipline, not yet every live path: the classifier, the gate's
+  approve/deny/timeout/re-check/audit logic, every surface's wiring and the sandbox's refusal of
+  setuid are covered by tests (the last one live, on macOS). A real sudo password round-trip —
+  the TTY prompt in the TUI, the `osascript` dialog in Studio and VS Code, and the Linux helpers
+  (zenity, kdialog, ssh-askpass) — has not been exercised by the test suite. A GUI surface with
+  no desktop session has no helper at all; it refuses and points you to a terminal. A sudoers
+  policy with `requiretty` breaks the GUI path.
+- A script is re-hashed immediately before it runs, which leaves a window of microseconds in
+  which something already running as you could swap it. If that matters, keep scripts you run
+  as root where only root can write them. The same goes for the interpreter: a root rescan runs
+  the `python3` the sidecar ran under (isolated with `-I`, so the tool's own folder cannot shadow
+  the standard library) — if that interpreter lives somewhere you can write, so could anything
+  running as you.
+- `/disk-space` in the packaged Studio app: the Python sidecars are not staged into the app
+  bundle yet (true of every sidecar today), so the panel works from an installed checkout and
+  says "not shipped" in the DMG. CI runs no Python tests; the disk-space and gate suites are run
+  locally.
 
 ---
 

@@ -163,6 +163,7 @@ const TWO_WORD: Record<string, Set<string>> = {
     "vault",
   ]),
   metadata: new Set(["inspect", "scrub", "edit", "timestomp"]),
+  "disk-space": new Set(["map", "levels", "files", "mounts", "delete", "cleanup", "help"]),
   app: new Set([
     "list",
     "installed",
@@ -220,6 +221,7 @@ const TWO_WORD: Record<string, Set<string>> = {
 
 /** Single-word top-level commands (§2 tree). */
 const ONE_WORD = new Set([
+  "disk-space",
   "scan",
   "superscan",
   "doctor",
@@ -334,6 +336,10 @@ const isFlag = (t: string): boolean => t.startsWith("-");
 const VALUE_FLAGS = new Set<string>(["args"]);
 
 const BOOLEAN_FLAGS = new Set<string>([
+  // `disk-space --sudo [PATH]` / `delete --permanent|--trash PATH`: switches, never value-takers
+  "sudo",
+  "permanent",
+  "trash",
   // `--force-effort` is a boolean; `--effort <tier>` is NOT (it must stay greedy so the tier
   // is read as its value rather than as the next positional).
   "force-effort",

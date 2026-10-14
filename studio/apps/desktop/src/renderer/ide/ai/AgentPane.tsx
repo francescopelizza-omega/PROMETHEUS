@@ -164,6 +164,7 @@ import {
   replaceMention,
   sliceSymbolRegion,
 } from "./mention.js";
+import { mayOfferAlways } from "./permission-gate.js";
 import { type RevertStepResult, revertOutcome } from "./revert-outcome.js";
 import { agentRuns } from "./run-controller.js";
 import { isSafeSessionId, liveToSession, sessionToLive } from "./session-map.js";
@@ -2676,25 +2677,27 @@ export function AgentPane({
                       )
                     }
                   >
-                    ▶ Run (gated)
+                    {card.tool === "propose_elevated" ? "▶ Review as root…" : "▶ Run (gated)"}
                   </Button>
-                  <Button
-                    size="sm"
-                    variant="ghost"
-                    title="run it, and stop asking for this exact command in this workspace"
-                    onClick={() =>
-                      void runCard(
-                        card.id,
-                        card.command,
-                        card.cwd,
-                        card.tool ?? "run_command",
-                        card.args ?? { command: card.command },
-                        "project",
-                      )
-                    }
-                  >
-                    ▶ always
-                  </Button>
+                  {mayOfferAlways(card.tool ?? "run_command", card.args) ? (
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      title="run it, and stop asking for this exact command in this workspace"
+                      onClick={() =>
+                        void runCard(
+                          card.id,
+                          card.command,
+                          card.cwd,
+                          card.tool ?? "run_command",
+                          card.args ?? { command: card.command },
+                          "project",
+                        )
+                      }
+                    >
+                      ▶ always
+                    </Button>
+                  ) : null}
                   <Button size="sm" variant="ghost" onClick={() => copyText(card.command)}>
                     ⧉ copy
                   </Button>

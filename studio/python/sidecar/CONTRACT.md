@@ -397,3 +397,42 @@ budget-trimmed (~4 chars/token, default 8000) keeping the highest-rank symbols g
 
 `kind` ∈ class/method/function/interface/enum/type; `line` is 1-based; `rank` ∈ [0,1]
 (normalized). `parser` = "tree-sitter" when the binding is importable, else "ast+regex".
+
+## disk_map.py — disk space: the JSON face on `python/tools/disk_space.py`
+
+Reuses the vendored tool (`studio/python/tools/disk_space.py`, loaded by path under its own
+module name) for every measurement and every delete — its CLI entry point is never called,
+because `main()` re-executes itself through sudo unless told not to. The tool's log is sent to
+`/dev/null`: a sidecar run writes nothing of its own.
+
+**Never root.** Every verb refuses euid 0 (`_exit:2`). Root work is RETURNED as an exact argv
+(`privileged-rescan`, `cleanup-plan`) for the privileged gate to show a human and run on that
+human's approval; this sidecar never executes it.
+
+**Paths.** Output paths are display paths (macOS firmlinks folded). A name that is not valid
+UTF-8 carries a lossy `path` plus an exact `rawPath` (`hex:<bytes>`), which every verb accepts
+back. Positionals after `--` are always paths, so a folder named `-rf` is never an option.
+
+| verb | args | success output shape (one object) |
+| --- | --- | --- |
+| `mounts` | — | `{ok, command:"disk.mounts", mounts:[{source, target, fstype, total, used, free, usePct, disk, onOsDisk}]}` |
+| `map` | `PATH [--depth-cap N=12] [--min-size S=0] [--min-node S=256K] [--max-nodes N=20000] [--engine auto\|du\|walk]` | `{ok, command:"disk.map", summary:{root, size, engine, survey_dirs, survey_files, max_depth, errors, unreadable, seconds, skipped, …}, tree:{name, path, rawPath?, size, dir, items?, mount?, frontier?, unreadable?, more?, children?}, nodes, truncated}` |
+| `levels` | `PATH [--depth N=10] [--top K=20]` | `{ok, command:"disk.levels", root, levels:[{depth, rows:[{path, rawPath?, size}]}], summary}` |
+| `largest-files` | `PATH [--top K=100]` | `{ok, command:"disk.files", root, files:[{path, rawPath?, size, mtime}]}` |
+| `delete` | `PATH… [--trash\|--permanent] [--confirm] [--ack-high-risk]` | plan: `{ok, command:"disk.delete", planned:true, mode, items:[{path, size, sizeAtLeast?, risk, reason, protected, mode, trashDir?}], worstRisk, total, requiresPhrase, note}` · run: `{ok, command:"disk.delete", executed:true, mode, results:[{path, ok, msg}], deleted}` |
+| `privileged-rescan` | `PATH [--depth-cap N=12] [--min-size S=1M]` | `{ok, command:"disk.privileged-rescan", argv:[python, disk_space.py, "--no-sudo", "--log", "/dev/null", "--map-json", PATH, …], script:{path, size, sha256}, cwd:"/", why}` |
+| `cleanup-plan` | — | `{ok, command:"disk.cleanup-plan", findings:[{id, title, category, size, reclaimable, mountpoint, risk, summary, actions:[{id, title, risk, needsRoot, needsInput, preview, requiresReboot, recommended, command}]}], errors}` (Linux; elsewhere `findings:[]` + `note`) |
+
+- **Tree payload.** Breadth-first, biggest first, capped at `--max-nodes`: the cap drops the
+  smallest detail, a cut folder carries `more:<n>`, and the envelope says `truncated:true`.
+  The runner's 64 MiB stdout ceiling is never the thing that stops a map.
+- **Delete** keeps every protection of the tool's own TUI. `path_protected` refuses system
+  folders, home folders, mount points and anything containing a mount. It runs at PLAN time and
+  again, per item, at `--confirm` time — never trusted from the plan. Nested selections collapse
+  to the outermost. Permanent delete is the tool's fd-relative, one-filesystem `rmtree`, and a
+  symlink is removed as a link. A plan with a HIGH-risk item, or a permanent delete of 10 GiB or
+  more, has `requiresPhrase:true`, and `--confirm` then also needs `--ack-high-risk` (which a UI
+  passes only after the human typed the confirmation). A protected path is never measured, and
+  plan sizing stops after 15 s, marking the result `sizeAtLeast`.
+- **Long scans** stream `progress: <phase> <folder>` lines on stderr every 2 s. A whole-disk
+  `map` takes minutes; callers give it a long timeout.

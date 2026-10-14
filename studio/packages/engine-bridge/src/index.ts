@@ -610,6 +610,37 @@ export type {
   MetadataTools,
 } from "./metadata.js";
 export { MetadataClient, createMetadataClient } from "./metadata.js";
+// disk space (`disk_map.py`): mounts, the size map, du levels, largest files, delete plans and
+// the root-rescan / cleanup commands handed to the privileged gate — never run as root here.
+export type {
+  DiskCleanupAction,
+  DiskCleanupFinding,
+  DiskCleanupPlanResult,
+  DiskDeleteItem,
+  DiskDeleteMode,
+  DiskDeleteResult,
+  DiskFile,
+  DiskFilesResult,
+  DiskLevelRow,
+  DiskLevelsResult,
+  DiskMapResult,
+  DiskMapSummary,
+  DiskMount,
+  DiskMountsResult,
+  DiskPathRef,
+  DiskPrivilegedRescanResult,
+  DiskRisk,
+  DiskSidecarRunner,
+  DiskSpaceClient,
+  DiskTreeNode,
+} from "./disk-space.js";
+export {
+  DISK_SCAN_TIMEOUT_MS,
+  createDiskSpaceClient,
+  diskSpaceToolPaths,
+  diskSpaceTuiArgv,
+} from "./disk-space.js";
+export type { DiskToolPaths } from "./disk-space.js";
 
 // the curated child-process env (strips linker/loader/interpreter hijack vars) — reused
 // by the IDE's gated command-exec host so it spawns with the same hardening as nemesis.

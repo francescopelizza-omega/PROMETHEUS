@@ -54,6 +54,7 @@ import {
   type CudaInfoResult,
   type CudaInstallRequest,
   type CudaTorchRequest,
+  type DiskSpaceApi,
   type EffortPrefResult,
   type EnvApi,
   type EnvCloneRequest,
@@ -92,8 +93,6 @@ import {
   type IdeDapLaunchResult,
   type IdeDapRequestResult,
   type IdeEvent,
-  type IdeExecRequest,
-  type IdeExecResult,
   type IdeFloatingTerminalCreateRequest,
   type IdeFloatingTerminalResult,
   type IdeFsReadResult,
@@ -229,6 +228,10 @@ import {
   type PkgInstallRequest,
   type PkgListResult,
   type PkgUpgradeRequest,
+  type PrivilegedApi,
+  type PrivilegedDecideResult,
+  type PrivilegedDecisionArg,
+  type PrivilegedPromptView,
   type ProgressFeedEvent,
   type PrometheusApi,
   type ProvidersResult,
@@ -1092,7 +1095,6 @@ function createIdeApi(): IdeApi {
     // ── the RUN-GATE (§5.2/§9) ──────────────────────────────────────────────
     gate: (req: IdeGateRequest): Promise<IdeGateResult> => ipcRenderer.invoke(IPC.ideGate, req),
     // ── gated command exec (§7.3): user-approved, screened in main ──────────
-    exec: (req: IdeExecRequest): Promise<IdeExecResult> => ipcRenderer.invoke(IPC.ideExec, req),
     // ── Phase 6: core's shared system tools — the same six-layer path the CLI runs ──
     // Lifecycle hooks: the renderer never spawns — it lists and proxies, MAIN runs.
     hookRun: (req: AgentHookRunRequest): Promise<AgentHookRunResult> =>
@@ -1347,8 +1349,49 @@ export function createPrometheusApi(): PrometheusApi {
     revealPath: (path: string): Promise<OpenPathResult> =>
       ipcRenderer.invoke(IPC.revealPath, { path }),
     spectacular: createSpectacularApi(),
+    privileged: createPrivilegedApi(),
+    diskSpace: createDiskSpaceApi(),
   };
   return Object.freeze(api);
+}
+
+/** Disk space — thin invokes; main validates every path and owns every decision. */
+function createDiskSpaceApi(): DiskSpaceApi {
+  return {
+    mounts: () => ipcRenderer.invoke(IPC.diskMounts),
+    map: (req) => ipcRenderer.invoke(IPC.diskMap, req),
+    levels: (req) => ipcRenderer.invoke(IPC.diskLevels, req),
+    files: (req) => ipcRenderer.invoke(IPC.diskFiles, req),
+    deletePlan: (req) => ipcRenderer.invoke(IPC.diskDeletePlan, req),
+    delete: (req) => ipcRenderer.invoke(IPC.diskDelete, req),
+    rescanAsRoot: (req) => ipcRenderer.invoke(IPC.diskRescanAsRoot, req),
+  };
+}
+
+/**
+ * The privileged gate's approval dialog. Main sends a request (one exact command) and, if it
+ * gives up, a close; the renderer answers ONE request id with approve/deny (+ a typed phrase
+ * for a catastrophic command). There is no "always" to send — the type has no such value.
+ */
+function createPrivilegedApi(): PrivilegedApi {
+  return {
+    onRequest: (cb: (view: PrivilegedPromptView) => void): (() => void) => {
+      const wrapped = (_e: unknown, view: PrivilegedPromptView): void => cb(view);
+      ipcRenderer.on(IPC.privilegedRequest, wrapped);
+      return () => {
+        ipcRenderer.removeListener(IPC.privilegedRequest, wrapped);
+      };
+    },
+    onClose: (cb: (msg: { id: string }) => void): (() => void) => {
+      const wrapped = (_e: unknown, msg: { id: string }): void => cb(msg);
+      ipcRenderer.on(IPC.privilegedClose, wrapped);
+      return () => {
+        ipcRenderer.removeListener(IPC.privilegedClose, wrapped);
+      };
+    },
+    decide: (arg: PrivilegedDecisionArg): Promise<PrivilegedDecideResult> =>
+      ipcRenderer.invoke(IPC.privilegedDecide, arg),
+  };
 }
 
 /**

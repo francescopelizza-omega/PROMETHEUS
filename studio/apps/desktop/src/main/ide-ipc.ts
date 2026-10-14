@@ -66,6 +66,8 @@ import {
 } from "@prometheus/core/agent-system-host";
 
 import { browserToolHostDeps } from "./browser-tool-host.js";
+import { privilegedGrantRefusal } from "./privileged-approver.js";
+import { studioPrivilegedGate } from "./privileged-ipc.js";
 
 import {
   IPC,
@@ -80,7 +82,6 @@ import {
   type IdeDapLaunchResult,
   type IdeDapRequestResult,
   type IdeEvent,
-  type IdeExecResult,
   type IdeFloatingTerminalResult,
   type IdeFsReadResult,
   type IdeFsWalkResult,
@@ -173,7 +174,6 @@ import {
   validateDapLaunch,
   validateDapRequest,
   validateDapTerminate,
-  validateExec,
   validateFloatingTerminalClose,
   validateFloatingTerminalCreate,
   validateFsPath,
@@ -237,9 +237,7 @@ import {
 import { loadAgentFiles } from "./ide/agent-files-host.js";
 import { loadCommandFiles } from "./ide/command-files-host.js";
 import type { DapHost, DapLaunchOptions, DapLaunchPlan } from "./ide/dap-host.js";
-import { type ExecRunner, defaultExecRunner } from "./ide/exec-host.js";
 
-import { screenCommand } from "./ide/exec-screen.js";
 import { assertExecuteAllowed } from "./ide/execute-guards.js";
 import {
   type FsWatchHost,
@@ -286,7 +284,6 @@ import { runSidecar } from "./sidecar.js";
 import { readTelemetry } from "./telemetry.js";
 
 /** Hard ceiling for one `ide:exec` command before SIGKILL (120s). */
-const EXEC_TIMEOUT_MS = 120_000;
 
 /** Coerce an unknown caught value to a short error string. */
 // `errString` was a LOCAL copy here, one of twenty across main/*.ts, and every copy returned
@@ -373,8 +370,6 @@ export interface IdeIpcWiring {
   localHistory?: LocalHistoryManager;
   /** engine config threaded into the RUN-GATE's engine-bridge gate (C2). */
   engineConfig?: EngineConfig;
-  /** injectable command runner for `ide:exec` (default = the real shell capture runner). */
-  execRunner?: ExecRunner;
   /**
    * broadcast an IdeEvent to EVERY live renderer (the host feeds are global, like
    * the model serve feed). Injected so this module stays window-agnostic; main/
@@ -607,7 +602,6 @@ export function registerIdeIpcHandlers(wiring: IdeIpcWiring): () => void {
   const history = wiring.localHistory; // APP-063: Local History (optional; fail-soft)
   const config = wiring.engineConfig ?? {};
   const broadcast = wiring.broadcast ?? (() => {});
-  const execRunner = wiring.execRunner ?? defaultExecRunner;
   const testSpawn = wiring.testSpawn;
   const broadcastTest = wiring.broadcastTest ?? (() => {});
   // live testmgr children register a killer here; the disposer reaps them on
@@ -1631,42 +1625,6 @@ export function registerIdeIpcHandlers(wiring: IdeIpcWiring): () => void {
     }
   });
 
-  /* ── gated command exec (§7.3) — user-approved + screened, fail-closed ─────*/
-  ipcMain.handle(IPC.ideExec, async (_e, arg: unknown): Promise<IdeExecResult> => {
-    const v = validateExec(arg);
-    if (!v.ok) {
-      return {
-        ok: false,
-        exitCode: 1,
-        stdout: "",
-        stderr: "",
-        blocked: true,
-        reason: v.error.message,
-        error: v.error.message,
-      };
-    }
-    // defense in depth: the destructive-command screen BLOCKS catastrophic commands
-    // outright, even though the user already approved this run (§7.3 task card).
-    const screen = screenCommand(v.value.command);
-    if (screen.blocked) {
-      return {
-        ok: false,
-        exitCode: 126,
-        stdout: "",
-        stderr: "",
-        blocked: true,
-        reason: screen.reason,
-      };
-    }
-    try {
-      // normalize + refuse a sensitive cwd (same guard as fs writes).
-      const cwd = assertNotSensitivePath(v.value.cwd);
-      return await execRunner(v.value.command, cwd, EXEC_TIMEOUT_MS);
-    } catch (e) {
-      return { ok: false, exitCode: 1, stdout: "", stderr: "", error: errString(e) };
-    }
-  });
-
   /* ── the shared system tools (Phase 6) — the SAME path the CLI runs ───────*/
   /**
    * `agent:systemTool` — Studio's replacement for its own executor.
@@ -1761,10 +1719,14 @@ export function registerIdeIpcHandlers(wiring: IdeIpcWiring): () => void {
           }
         }
       }
+      const privilegedGate = studioPrivilegedGate();
       const out = await runSystemTool(req.name, req.args ?? {}, {
         cwd,
         roots: [cwd],
         home: prometheusHome(),
+        // `propose_elevated`: the window's human approves the exact command in the privileged
+        // dialog, and only then does it run (askpass for the password). No gate ⇒ a proposal.
+        ...(privilegedGate ? { privilegedGate, surface: "studio" as const } : {}),
         // The gate posture is passed EXPLICITLY rather than left to core's default, and it is
         // resolved through the security profile's floor: `gateStrict` means "never weaker than
         // enforce". Relying on the default happened to be correct, which is a different thing
@@ -1826,6 +1788,10 @@ export function registerIdeIpcHandlers(wiring: IdeIpcWiring): () => void {
     if (!g || typeof g.subject !== "string" || (g.scope !== "project" && g.scope !== "user")) {
       return { ok: false, grants: [], error: "agent:grants.add: malformed grant" };
     }
+    // Root is never remembered. Core never asks to store one (`withRememberedGrants`), so a
+    // privileged subject arriving here was forged or hand-built — refuse it either way.
+    const refusal = privilegedGrantRefusal(g.subject);
+    if (refusal) return { ok: false, grants: readGrants() as AgentGrant[], error: refusal };
     try {
       // Read → add → save, rather than appending to the file: `add()` is the door that refuses
       // an over-broad subject, and a live grant and a rehydrated one must pass the same one.
@@ -2771,7 +2737,6 @@ export function registerIdeIpcHandlers(wiring: IdeIpcWiring): () => void {
       IPC.ideAgentFilesList,
       IPC.ideCommandFilesList,
       IPC.ideGate,
-      IPC.ideExec,
       IPC.agentSystemTool,
       IPC.agentGrantsList,
       IPC.agentGrantsAdd,

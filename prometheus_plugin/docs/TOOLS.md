@@ -2,7 +2,7 @@
 
 > Generated from `src/tools.ts` by `npm run docs` — do not edit by hand.
 
-**25** tools exposed to MCP clients.
+**26** tools exposed to MCP clients.
 
 ## `prometheus_scan`
 
@@ -211,3 +211,14 @@ Replicate an installed SKILL.md into OTHER agents (cross-CLI portability). This 
   - `skill` — skill folder name in ~/.claude/skills/
   - `to` — target agents (comma-sep) or 'all' (default: all with a skills dir)
   - `confirm` — REQUIRED — sync writes into other agents; set true only with the user's OK
+
+## `prometheus_disk_space`
+
+Where the disk went on THIS machine, measured with du via Prometheus's disk_map sidecar (never as root): `mounts` (filesystems: size/used/free), `map` (a folder's size tree, biggest first), `levels` (du --max-depth=N | sort -rh for N=1..depth), `files` (the largest files). Read-only: deleting and root rescans are not available over MCP — they need a human approving them in a Prometheus window.
+
+- **destructive:** no
+- **params:**
+  - `action` — which view
+  - `path` — folder to measure (absolute or ~; default ~)
+  - `depth` — levels: how many levels (default 10)
+  - `top` — levels/files: rows per level / files

@@ -20,6 +20,7 @@
  * No raw hex is allowed anywhere in app code (08 §6) — it lives here only.
  */
 
+import { CHART_SLOTS_DARK, CHART_SLOTS_LIGHT } from "./tokens/chart-palette.js";
 import { FILL_ROLES, onFill } from "./tokens/contrast.js";
 // The 20 famous community schemes + the operator's "Pelly" scheme (pure data; the
 // module type-imports our shapes, so this adds no runtime cycle / no React dep).
@@ -271,6 +272,21 @@ export interface SemanticColors {
   "on-warn": string;
   "on-danger": string;
   "on-info": string;
+  /* ── categorical chart slots, in FIXED order (Disk Space panel, any later chart) ────────
+   *
+   * The dataviz reference palette, validated per theme with its palette validator against
+   * that theme's `bg-surface`: lightness band, chroma floor, adjacent-pair CVD separation
+   * (ΔE ≥ 8), normal-vision floor (ΔE ≥ 15), contrast. A ninth series is never a generated
+   * hue — it folds into `chart-other`. Text never wears these; labels stay in text tokens. */
+  "chart-1": string;
+  "chart-2": string;
+  "chart-3": string;
+  "chart-4": string;
+  "chart-5": string;
+  "chart-6": string;
+  "chart-7": string;
+  "chart-8": string;
+  "chart-other": string;
 }
 
 /** Dark theme — the default (08 §2.1, restyled to the handoff §1 navy ground).
@@ -332,6 +348,7 @@ export const darkSemantic: SemanticColors = {
   "on-warn": "#070d18", // on #f5c944 = 12.34:1
   "on-danger": "#070d18", // on #ff5566 = 6.24:1
   "on-info": "#070d18", // on #35c7ee = 9.78:1
+  ...CHART_SLOTS_DARK,
 };
 
 /** Light theme — the same identity inverted (08 §2.1 light override). */
@@ -389,6 +406,7 @@ export const lightSemantic: SemanticColors = {
   "on-warn": "#f7f8fa", // on #a35c08 = 4.83:1
   "on-danger": "#f7f8fa", // on #cf2727 = 4.97:1
   "on-info": "#000000", // on #0894ad = 5.85:1
+  ...CHART_SLOTS_LIGHT,
 };
 
 /** High-contrast theme — AAA targets, pure black/white + saturated cues (08 §7). */
@@ -435,6 +453,7 @@ export const highContrastSemantic: SemanticColors = {
   "on-warn": "#000000", // on #fbbf4a = 12.65:1
   "on-danger": "#000000", // on #fa6b6b = 7.38:1
   "on-info": "#000000", // on #5cdff5 = 13.33:1
+  ...CHART_SLOTS_DARK,
 };
 
 /* ────────────────────────────────────────────────────────────────────────────

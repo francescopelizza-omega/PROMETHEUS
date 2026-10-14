@@ -169,3 +169,34 @@ test("the exported predicate matches this mirror at every level", async () => {
     (store as unknown as { getState: typeof original }).getState = original;
   }
 });
+
+/* ── privileged calls: never auto, never "always" ─────────────────────────── */
+
+test("A0–A7: no level auto-approves a privileged call — propose_elevated, sudo, pkexec, run0", () => {
+  // pkexec and run0 classified as UNKNOWN programs before the privileged classifier — tier
+  // `destructive`, which A6/A7 auto-approve here. Now they are refused at classification.
+  for (let level = 0; level <= 7; level += 1) {
+    assert.equal(
+      decide(level, { name: "propose_elevated", args: { argv: ["id"], why: "x" } }),
+      false,
+    );
+    for (const command of ["sudo id", "pkexec id", "run0 id", "nice -n 5 sudo id"]) {
+      assert.equal(
+        decide(level, { name: "run_command", args: { command } }),
+        false,
+        `A${level} ${command}`,
+      );
+    }
+  }
+});
+
+test('a privileged card never offers "always"; an ordinary one still does', async () => {
+  const { mayOfferAlways } = await import("./permission-gate.js");
+  assert.equal(
+    mayOfferAlways("propose_elevated", { argv: ["systemctl", "restart", "nginx"] }),
+    false,
+  );
+  assert.equal(mayOfferAlways("run_command", { command: "sudo systemctl restart nginx" }), false);
+  assert.equal(mayOfferAlways("run_command", { command: "pkexec id" }), false);
+  assert.equal(mayOfferAlways("run_command", { command: "ls -la" }), true);
+});

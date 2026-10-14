@@ -126,7 +126,9 @@ export type PrometheusSubcommand =
   // URL-injection safeguard: scan ANY file/folder/repo for threats.
   | "secure"
   // one-command full safe maintenance (feeds + audit + integrate green skills).
-  | "auto";
+  | "auto"
+  // disk space: the disk_map sidecar (mounts/map/levels/largest files/delete plan).
+  | "disk-space";
 
 /** The canonical nemesis verb set (probed `nemesis --help`, 1.12.x). */
 export type NemesisVerb =
@@ -583,6 +585,123 @@ function managerSpec(
  *   vault models apps worldsim localai pentest wizard  +  nemesis gate
  * plus the sidecar (env-list / model-hw) and the core provider router.
  * ------------------------------------------------------------------------- */
+
+/**
+ * The disk-space specs. Each runs `prometheus.py disk-space <verb> [flags] -- PATH`: the path
+ * always follows `--`, so a folder named `-rf` stays a path. A missing PATH means your home
+ * folder (`~`, expanded by the sidecar). `disk-delete` plans by default and changes nothing
+ * unless `--confirm` is given; the sidecar re-checks every protection at that moment.
+ */
+function diskSpaceSpecs(): CommandSpec[] {
+  const binding: EngineBinding = { kind: "prometheus", subcommand: "disk-space" };
+  const PATH_ARG: ArgSpec = { name: "path", kind: "positional", type: "string", required: false };
+  const forward = (args: ParsedArgs, names: readonly string[]): string[] =>
+    names.flatMap((n) => (args.flags[n] === undefined ? [] : [`--${n}`, String(args.flags[n])]));
+  const read = (
+    id: string,
+    title: string,
+    verb: string,
+    description: string,
+    flagNames: readonly string[],
+  ): CommandSpec =>
+    spec({
+      id,
+      title,
+      group: "system",
+      description,
+      binding,
+      argsSchema: {
+        positionals: [PATH_ARG],
+        flags: flagNames.map((name) => ({ name, kind: "flag" as const, type: "number" as const })),
+      },
+      run: async (ctx, args) => {
+        const argv = [
+          "disk-space",
+          verb,
+          ...forward(args, flagNames),
+          "--",
+          args.positionals[0] || "~",
+        ];
+        return envResult(id, await ctx.client.runPrometheus(argv, ctx.opts));
+      },
+    });
+  return [
+    spec({
+      id: "disk-mounts",
+      title: "Disk space: filesystems",
+      group: "system",
+      description:
+        "Every mounted filesystem with size, used, free and percent (prometheus.py disk-space mounts).",
+      binding,
+      run: async (ctx) =>
+        envResult(
+          "disk-mounts",
+          await ctx.client.runPrometheus(["disk-space", "mounts"], ctx.opts),
+        ),
+    }),
+    read(
+      "disk-map",
+      "Disk space: map a folder",
+      "map",
+      "The size tree of a folder (default: home), biggest first, measured with du (prometheus.py disk-space map).",
+      ["depth-cap", "max-nodes"],
+    ),
+    read(
+      "disk-levels",
+      "Disk space: levels",
+      "levels",
+      "`du --max-depth=N | sort -rh` for N = 1..depth under a folder (prometheus.py disk-space levels).",
+      ["depth", "top"],
+    ),
+    read(
+      "disk-files",
+      "Disk space: largest files",
+      "largest-files",
+      "The biggest files under a folder (prometheus.py disk-space largest-files).",
+      ["top"],
+    ),
+    spec({
+      id: "disk-delete",
+      title: "Disk space: delete",
+      group: "system",
+      description:
+        "Plan moving a path to the Trash (or --permanent) with every disk-space protection; " +
+        "changes nothing unless --confirm (prometheus.py disk-space delete).",
+      binding,
+      mutates: true,
+      argsSchema: {
+        positionals: [{ name: "path", kind: "positional", type: "string", required: true }],
+        flags: [
+          {
+            name: "permanent",
+            kind: "flag",
+            type: "boolean",
+            description: "delete instead of Trash",
+          },
+          { name: "confirm", kind: "flag", type: "boolean", description: "actually delete" },
+          {
+            name: "ack-high-risk",
+            kind: "flag",
+            type: "boolean",
+            description: "the human typed the confirmation a high-risk delete needs",
+          },
+        ],
+      },
+      run: async (ctx, args) => {
+        const argv = [
+          "disk-space",
+          "delete",
+          args.flags.permanent === true ? "--permanent" : "--trash",
+          ...(args.flags.confirm === true ? ["--confirm"] : []),
+          ...(args.flags["ack-high-risk"] === true ? ["--ack-high-risk"] : []),
+          "--",
+          ...args.positionals,
+        ];
+        return envResult("disk-delete", await ctx.client.runPrometheus(argv, ctx.opts));
+      },
+    }),
+  ];
+}
 
 export const COMMAND_SPECS: readonly CommandSpec[] = Object.freeze([
   /* ---- inventory / read-only ([[06]]) ---------------------------------- */
@@ -1152,6 +1271,9 @@ export const COMMAND_SPECS: readonly CommandSpec[] = Object.freeze([
       "secret-perms) + concrete fixes. Authorized-by-design; points to `pentest` for deeper testing.",
     subcommand: "harden",
   }),
+
+  /* ---- disk space (`prometheus.py disk-space` → the disk_map sidecar) ------ */
+  ...diskSpaceSpecs(),
 
   /* ---- scheduled watchers ([[10]]) ------------------------------------- */
   nameSpec({

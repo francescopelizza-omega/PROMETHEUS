@@ -53,6 +53,7 @@ export type {
   ArgvOf,
 } from "./remembered-confirm.js";
 export { withRememberedGrants } from "./remembered-confirm.js";
+export { PRIVILEGED_TOOLS, isPrivilegedCall } from "./privileged-call.js";
 // CLI-011: the web_fetch tool (dispatched locally via the safeFetch L6 proxy).
 export { WEB_FETCH_TOOL } from "./web.js";
 export type { GateVerdictTier, AgentEvent } from "./events.js";

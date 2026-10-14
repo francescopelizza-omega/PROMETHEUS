@@ -35,6 +35,8 @@
  * scripted fake driver (see host.test.ts) — no real TTY, engine, or model needed.
  */
 import { mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { createRequire } from "node:module";
+import { homedir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
 import { type Interface as ReadlineInterface, createInterface } from "node:readline";
 
@@ -59,8 +61,14 @@ import {
   createEngineClient,
   execCapture,
   gate,
+  verdictReasons,
 } from "@prometheus/engine-bridge";
+import { defaultDiskSpaceDeps, runDiskSpace } from "../commands/disk-space-cmd.js";
 import { defaultOpenEditor, loadEffectiveStartupProfileWithNotes } from "../profile-store.js";
+import { createHandover } from "../tui/terminal-handover.js";
+import { scanCommand, verdictBlocks } from "./exec-gate.js";
+import { makeTerminalApprover } from "./privileged-prompt.js";
+import { createPrivilegedGate } from "./system-tools.js";
 
 import type { updates as u } from "@prometheus/core";
 import {
@@ -205,10 +213,20 @@ import {
   type SlashCtx,
   allSlashNames,
   findSlash,
+  slashTokens,
 } from "./slash-registry.js";
 import { createSteeringController } from "./steering.js";
 import { execVarsFromEnv } from "./system-tools.js";
 import { createWorkingSet, isPathAllowed } from "./working-set.js";
+
+// `node:child_process` only through a runtime require (C5), like the CLI's other spawns.
+const nodeRequire = createRequire(import.meta.url);
+/** The slice of `child_process.spawn` the `/disk-space` terminal handover uses. */
+type SpawnInherit = (
+  cmd: string,
+  args: string[],
+  opts: { cwd: string; stdio: "inherit" },
+) => { on(event: "close" | "error", cb: (code?: unknown) => void): unknown };
 
 /** The live AgentTuning type (re-exported by core under the `agent` namespace). */
 type AgentTuning = agent.AgentTuning;
@@ -1354,6 +1372,44 @@ export async function launchSession(parsed: ParsedArgs, deps: SessionDeps = {}):
     );
 
   /**
+   * The privileged gate for this session — the only way anything here runs as root. Its
+   * approver is this terminal's human (the full view printed, then y/N, default no; a typed
+   * target for a catastrophic command). Readline is paused and the TTY put back in cooked mode
+   * while sudo runs, so sudo reads the password from the terminal itself.
+   */
+  // Lend the terminal to sudo and take it back — never back into a session whose input has
+  // closed meanwhile (Ctrl+C / Ctrl+D during a root command; see tui/terminal-handover.ts).
+  const terminalHandover = createHandover({
+    isLive: () => !inputClosed,
+    giveAway: () => {
+      rl.pause();
+      if (process.stdin.isTTY) process.stdin.setRawMode?.(false);
+    },
+    takeBack: () => {
+      if (process.stdin.isTTY && (rl as { terminal?: boolean }).terminal) {
+        process.stdin.setRawMode?.(true);
+      }
+      rl.resume();
+    },
+  });
+  const privilegedGate = createPrivilegedGate({
+    passwordVia: "tty",
+    approver: makeTerminalApprover({ write, confirm, ask }),
+    home,
+    userHome: homedir(),
+    scan: async (line) => {
+      const mode = state.tuning.gateMode ?? "enforce";
+      if (mode === "off") return { blocked: false };
+      const v = await scanCommand(line);
+      return verdictBlocks(v, mode)
+        ? { blocked: true, reason: verdictReasons(v).join("; ") || v.verdict }
+        : { blocked: false };
+    },
+    suspendTerminal: () => terminalHandover.suspend(),
+    resumeTerminal: () => terminalHandover.resume(),
+  });
+
+  /**
    * `ask`, for a question the user may walk away from: Ctrl-C and Ctrl-D both answer "", and keys
    * typed before it cannot pre-fill it (session/ask-cancellable.ts). Used by `/updates`, where the
    * answer authorises installs and an accidental one must read as no.
@@ -1688,6 +1744,8 @@ export async function launchSession(parsed: ParsedArgs, deps: SessionDeps = {}):
      */
     home,
     authLevel: hostAuthLevel,
+    privilegedGate,
+    surface: "cli",
     /**
      * The endpoint's learned tool capability, owned HERE so it outlives the per-message client.
      *
@@ -1734,6 +1792,16 @@ export async function launchSession(parsed: ParsedArgs, deps: SessionDeps = {}):
      * autonomy without ever trading away an informed decision.
      */
     confirm: (call) => {
+      // Privileged calls: the gate is the prompt (`propose_elevated`), and `run_command`
+      // refuses them outright — so never "[y/N/a=always]" here. Root is never remembered.
+      if (call.name === "propose_elevated") return Promise.resolve(true as ConfirmResult);
+      if (agent.isPrivilegedCall(call)) {
+        return Promise.resolve({
+          approved: false,
+          reason:
+            "privileged command: run_command never runs one. Call propose_elevated with the program and its arguments (no sudo); the human approves that exact command.",
+        } as ConfirmResult);
+      }
       const tool = agent.exposedTools(tuning.tools).find((t) => t.name === call.name);
       if (hostAutoApproves(call, tool?.annotations)) {
         return Promise.resolve(true as ConfirmResult);
@@ -2582,6 +2650,35 @@ export async function launchSession(parsed: ParsedArgs, deps: SessionDeps = {}):
         confirm,
         localModels: async () => (endpoint?.model ? [endpoint.model] : []),
       }),
+    runDiskSpace: async (rest) => {
+      await runDiskSpace(
+        slashTokens(rest),
+        {
+          cwd: state.cwd,
+          write: writeLine,
+          confirm,
+          ask,
+          // no overlay in the line host: the tool gets the real terminal until it exits
+          handOver: (argv, cwd) =>
+            new Promise<number | null>((done) => {
+              rl.pause();
+              if (process.stdin.isTTY) process.stdin.setRawMode?.(false);
+              const finish = (code: number | null): void => {
+                if (process.stdin.isTTY && (rl as { terminal?: boolean }).terminal) {
+                  process.stdin.setRawMode?.(true);
+                }
+                rl.resume();
+                done(code);
+              };
+              const { spawn } = nodeRequire("node:child_process") as { spawn: SpawnInherit };
+              const child = spawn(argv[0] as string, argv.slice(1), { cwd, stdio: "inherit" });
+              child.on("close", (code) => finish(typeof code === "number" ? code : null));
+              child.on("error", () => finish(null));
+            }),
+        },
+        defaultDiskSpaceDeps("cli", privilegedGate),
+      );
+    },
     runUpdates: async (rest) => {
       // the slash handler is void — CLI-047's widened return (report|null) is discarded here.
       const updateRunner = makeStepRunner();

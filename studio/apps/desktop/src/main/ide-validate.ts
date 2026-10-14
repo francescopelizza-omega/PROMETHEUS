@@ -73,17 +73,6 @@ const RUN_ID = z
   .max(128, "runId is too long")
   .regex(/^[A-Za-z0-9._:-]+$/, "runId has invalid characters");
 
-/** A shell command line for `ide:exec`. Bounded; control-char free EXCEPT tab/newline/CR
- *  (a real command line may be multi-line). Dangerous PATTERNS are screened separately
- *  (exec-screen.ts) + the command is user-approved; this is the charset/bounds guard. */
-const COMMAND = z
-  .string()
-  .trim()
-  .min(1, "command must not be empty")
-  .max(8192, "command is too long")
-  // eslint-disable-next-line no-control-regex
-  .regex(/^[^\u0000-\u0008\u000b\u000c\u000e-\u001f]*$/, "command contains control characters");
-
 /** A git HEAD sha (hex, abbreviated or full). */
 const SHA = z
   .string()
@@ -707,8 +696,6 @@ export const gateSchema = z.object({
   head: SHA.optional(),
   runId: RUN_ID.optional(),
 });
-
-export const execSchema = z.object({ command: COMMAND, cwd: PATH });
 
 /** A non-empty search needle (control-char free, bounded). */
 const SEARCH_QUERY = z
@@ -1346,10 +1333,6 @@ export function validateGate(a: unknown): GuardResult<GateArgs> {
   if (r.value.head !== undefined) v.head = r.value.head;
   if (r.value.runId !== undefined) v.runId = r.value.runId;
   return { ok: true, value: v };
-}
-
-export function validateExec(a: unknown): GuardResult<{ command: string; cwd: string }> {
-  return runSchema(execSchema, asObject(a));
 }
 
 export interface SearchArgs {

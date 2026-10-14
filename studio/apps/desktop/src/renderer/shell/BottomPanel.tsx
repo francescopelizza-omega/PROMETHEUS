@@ -37,6 +37,7 @@ export type BottomTab =
   | "tasks"
   | "health"
   | "metadata"
+  | "disk"
   | "tokens"
   | "system"
   // APP-072: the editor workbench also hosts the DB console + profiler in the bottom panel.
@@ -54,6 +55,7 @@ export const BOTTOM_TABS: readonly { id: BottomTab; label: string }[] = [
   { id: "tasks", label: "Tasks" },
   { id: "health", label: "Health" },
   { id: "metadata", label: "Metadata" },
+  { id: "disk", label: "Disk space" },
   { id: "tokens", label: "Save tokens" },
   { id: "system", label: "System" },
 ];

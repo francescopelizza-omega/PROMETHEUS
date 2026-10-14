@@ -31,16 +31,47 @@ project — please be patient beyond that; a lack of an immediate reply is not a
   "the model said something silly").
 - Credential or secret exposure — a way the CLI/Studio/engine could leak an API key, a stored
   grant, or a keychain entry it shouldn't.
+- Anything that runs a privileged command without a fresh approval of that exact command: a
+  bypass of the privileged gate, a way to replay or reuse an approval, a difference between the
+  command shown and the command that runs, or a password reaching Prometheus's own process,
+  logs or transcripts.
 - A genuine sandbox limitation being presented as stronger protection than it is — though many
   of these are already **documented on purpose** (see `packages/core/src/agent/system/host/exec-sandbox.ts`'s
   own header comment, and `studio/docs/security/THREAT_MODEL.md`, shown verbatim in the app's
   security pane) — check there first; an honestly-documented limitation isn't a new finding.
 
+## Privileged commands (sudo)
+
+Prometheus may run sudo, but never on its own authority. Every privileged command is shown to
+the human verbatim and runs only after that human approves that exact command, every time. No
+authorization level, flag, setting, agent or tool can pre-approve, remember or skip this
+approval.
+
+- One module is the only path to root (`studio/packages/core/src/agent/system/host/privileged-gate.ts`).
+  `run_command` refuses every privileged command (sudo, doas, pkexec, su, run0, `machinectl
+  shell` — also behind launchers, inside `sh -c`, in pipelines and chains). Where a kernel
+  sandbox runs (Seatbelt on macOS, bubblewrap on Linux) it blocks setuid binaries as well; on
+  Linux without bubblewrap that classification is the only barrier.
+- The approval prompt shows the exact argv, the folder, who asked and why, and for a script its
+  path, size, SHA-256 and first lines. **Approve once** or **Deny** — Deny is the default, and
+  no answer in time is a deny. There is no "always". A catastrophic command also needs its
+  target typed.
+- The approval is bound to that argv, folder and script hash, and all three are re-checked
+  immediately before the command runs.
+- `--yes`, every authorization level up to A7, remembered grants, MCP clients and headless runs
+  cannot approve; with no human attached the command is returned for a person to run.
+- The password never passes through Prometheus: sudo reads it from the terminal, or a fixed
+  askpass helper shows a native dialog and hands it straight to sudo. Sudoers is never touched.
+- Every request is appended to `~/.prometheus/audit/sudo.log` (0600): requester, argv, folder,
+  reason, script hash, decision, exit code — never the environment, output or password.
+
 ## What's out of scope
 
 - Vulnerabilities that require the user to have already granted the agent a permission level
   that, by design, allows the behavior in question (e.g. reporting that A7 "run all" lets a
-  command run — that's the documented contract of that level).
+  command run — that's the documented contract of that level). **Privileged commands are the
+  exception: no level covers them**, so a privileged command running without a fresh, specific
+  human approval is in scope at any level.
 - Denial-of-service against your own local instance.
 - Issues purely in third-party dependencies — report those upstream; we'll pull in the fix once
   it's available (see [`THIRD-PARTY-NOTICES.md`](./THIRD-PARTY-NOTICES.md) for what's bundled).

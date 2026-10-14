@@ -127,6 +127,7 @@ Aliases: `--print` and `--prompt` are the same flag.
 | **models** | `model <hw\|list\|search\|fit\|pull\|remove\|serve\|endpoints\|repoint>` (over `modelhub.py`) · `models <…> --set-root DIR` (model-running tools) |
 | **repos** | `repo <add\|list\|status\|update\|pin\|branch\|rescan\|remove\|vault>` (over `repo.py`, the only arbitrary-URL clone path — nemesis-gated) |
 | **privacy** | `metadata <inspect\|scrub\|edit\|timestomp> <file>` (over `metadata.py`) |
+| **disk space** | `disk-space [map\|levels\|files\|mounts\|delete\|cleanup] [PATH] [--sudo]` (over `disk_map.py`; in the TUI `/disk-space` opens the full explorer — Ctrl+] minimise/resume, Ctrl+D quit) |
 | **providers / system** | `provider list` (C11 Tier-A first) · `doctor [--bridge]` · `pentest <action>` · `version` · `help` |
 
 ### Mutating verbs: preview → execute

@@ -50,6 +50,7 @@ import { openInvokeOverlay } from "./invoke-overlay.js";
 import { type KeyEvent, decodeKeys } from "./keys.js";
 import { type ListOverlayItem, openListOverlay } from "./list-overlay.js";
 import { createMarkdownRenderer } from "./markdown.js";
+import { OverlaySession } from "./overlay-session.js";
 import { type ColorCaps, type Role, detectColorCaps, paint, paintDuration } from "./palette.js";
 import { workingLine } from "./quantum-verbs.js";
 import { BG_BLACK, BG_RESET, ENTER_TUI, RESTORE_TUI, Renderer, reflowSlack } from "./redraw.js";
@@ -61,9 +62,10 @@ import {
   moveCaretTo,
   reduce,
 } from "./reducer.js";
-import { createSessionBridge } from "./session-bridge.js";
+import { type OverlayLaunch, createSessionBridge } from "./session-bridge.js";
 import { traitCells, traitRailFits } from "./status.js";
 import { SUDO_ACK_PROMPT, detectElevation, resolveSudoDecision, sudoWarningLines } from "./sudo.js";
+import { createHandover } from "./terminal-handover.js";
 import { graphemeCount, stringWidth, wrapLine } from "./width.js";
 
 /** Injection seams (tests / non-default streams). */
@@ -273,6 +275,48 @@ export async function launchTui(parsed: ParsedArgs, deps: TuiDeps = {}): Promise
    */
   let modalCursorRow = 0;
   let entered = false;
+  /**
+   * Lending the terminal to a child (the privileged gate's sudo). Declared early: `write` reads
+   * `suspended` during bridge setup. `isLive` is what makes Ctrl+C during a root command safe —
+   * a session that finished while the terminal was away is never re-entered (terminal-handover.ts).
+   */
+  const handover = createHandover({
+    isLive: () => entered && !exited,
+    giveAway: () => {
+      if (escTimer) {
+        clearTimeout(escTimer);
+        escTimer = null;
+      }
+      restBuf = "";
+      try {
+        renderer.clear();
+        if (caps !== "none") safeWrite(BG_RESET);
+        safeWrite(RESTORE_TUI);
+        stdin.off("data", onData);
+        if (typeof stdin.setRawMode === "function") stdin.setRawMode(false);
+        stdin.pause();
+      } catch {
+        /* best effort — takeBack re-asserts everything */
+      }
+    },
+    takeBack: () => {
+      try {
+        if (typeof stdin.setRawMode === "function") stdin.setRawMode(true);
+        stdin.on("data", onData);
+        stdin.resume();
+        safeWrite(ENTER_TUI);
+        if (caps !== "none") safeWrite(BG_BLACK);
+        renderer.reset();
+        render();
+      } catch {
+        /* a broken terminal is reported by the next write */
+      }
+    },
+  });
+  /** a full-screen program shown over the TUI (`/disk-space`); see `openOverlay` */
+  let overlay: OverlaySession | null = null;
+  /** bridge output that arrived while the overlay owned the screen — printed when it steps aside */
+  let overlayHeld: string[] = [];
   let resolveExit: ((code: number) => void) | null = null;
   /**
    * Set once `finish()` has handed the terminal back. A turn still in flight at that moment (a
@@ -288,7 +332,7 @@ export async function launchTui(parsed: ParsedArgs, deps: TuiDeps = {}): Promise
   let lastFrame: ReturnType<typeof renderFrame> | null = null;
   /** `slack` = extra rows to climb before erasing; only `onResize` passes it (see `reflowSlack`). */
   function render(slack = 0): void {
-    if (modal || !entered) return;
+    if (modal || !entered || handover.suspended || overlay?.state === "attached") return;
     lastFrame = renderFrame({
       state,
       status: session.statusModel(),
@@ -341,7 +385,7 @@ export async function launchTui(parsed: ParsedArgs, deps: TuiDeps = {}): Promise
   }
   let dirty = false;
   function scheduleRender(): void {
-    if (dirty || running) return; // during a turn we only print above; no chrome flicker
+    if (dirty || running || handover.suspended) return; // during a turn we only print above; no chrome flicker
     dirty = true;
     queueMicrotask(() => {
       dirty = false;
@@ -375,9 +419,22 @@ export async function launchTui(parsed: ParsedArgs, deps: TuiDeps = {}): Promise
     parsed,
     ...(deps.configHome !== undefined ? { configHome: deps.configHome } : {}),
     write: (text) => {
+      // while a child owns the terminal, plain lines — there is no chrome to print above
+      if (handover.suspended) {
+        safeWrite(`${text}\n`);
+        return;
+      }
+      // never paint over a program the human is looking at — print it when the overlay steps aside
+      if (overlay?.state === "attached") {
+        overlayHeld.push(text);
+        return;
+      }
       renderer.printAbove(renderPaneText(text));
       if (!running) scheduleRender();
     },
+    suspend: suspendTui,
+    resume: resumeTui,
+    openOverlay: (o) => openOverlay(o),
     confirm: confirmModal,
     confirmPhrase: confirmPhraseModal,
     ask: askModal,
@@ -535,6 +592,11 @@ export async function launchTui(parsed: ParsedArgs, deps: TuiDeps = {}): Promise
   function restore(): void {
     if (!entered) return;
     entered = false;
+    // a program left running over (or behind) the TUI ends with the session
+    if (overlay && overlay.state !== "exited") {
+      overlay.terminate();
+      safeWrite("\x1b[?1049l\x1b[?1000l\x1b[?1006l\x1b[?25h");
+    }
     try {
       if (escTimer) {
         clearTimeout(escTimer);
@@ -621,6 +683,16 @@ export async function launchTui(parsed: ParsedArgs, deps: TuiDeps = {}): Promise
   let restBuf = "";
   let escTimer: ReturnType<typeof setTimeout> | null = null;
   function onData(chunk: Buffer): void {
+    // A program shown over the TUI gets every byte raw — its keys are not ours to decode.
+    if (overlay?.state === "attached") {
+      overlay.input(chunk);
+      return;
+    }
+    // Ctrl+] at the prompt shows a minimised program again.
+    if (overlay?.state === "minimized" && !modal && chunk.length === 1 && chunk[0] === 0x1d) {
+      resumeOverlay();
+      return;
+    }
     const data = restBuf + decoder.write(chunk);
     const { events, rest } = decodeKeys(data);
     restBuf = rest;
@@ -642,6 +714,10 @@ export async function launchTui(parsed: ParsedArgs, deps: TuiDeps = {}): Promise
   }
   function onResize(): void {
     size = { cols: stdout.columns ?? 80, rows: stdout.rows ?? 24 };
+    if (overlay?.state === "attached") {
+      overlay.resize();
+      return;
+    }
     // CLI-064: a resize while a modal is open must repaint the MODAL region (the chrome stays
     // frozen), not no-op through render() — otherwise the prompt is lost mid-decision.
     if (modal) {
@@ -1172,6 +1248,86 @@ export async function launchTui(parsed: ParsedArgs, deps: TuiDeps = {}): Promise
     } catch {
       /* broken sink — ignore */
     }
+  }
+
+  // ── hand the REAL terminal to a child, then take it back ─────────────────── //
+  /**
+   * Suspend the TUI so a child owns the terminal: the privileged gate's sudo, which reads its
+   * password from the TTY (never through this process), or anything else that must talk to the
+   * human directly. Erase the chrome, leave raw mode, and stop reading stdin — a paused stdin is
+   * what keeps this process from swallowing the keystrokes typed into the child's prompt.
+   * `write` keeps working while suspended, as plain lines (the chrome is gone).
+   */
+  function suspendTui(): void {
+    handover.suspend();
+  }
+  // ── a full-screen program OVER the TUI, minimisable without stopping it ──── //
+  /**
+   * `/disk-space` opens disk_space.py's own curses TUI here (see `overlay-session.ts`). The TUI
+   * stays raw and keeps reading stdin, but every byte goes to the program; Ctrl+] minimises it
+   * (it keeps running), Ctrl+] at the prompt brings it back, Ctrl+D inside it ends it.
+   */
+  function hideChromeForOverlay(): void {
+    try {
+      renderer.clear();
+      if (caps !== "none") safeWrite(BG_RESET);
+      // the program sets its own modes; ours (bracketed paste, no autowrap, hidden cursor) go
+      safeWrite("\x1b[?2004l\x1b[?7h\x1b[?25h");
+    } catch {
+      /* best effort */
+    }
+  }
+  function showChromeAfterOverlay(note: string): void {
+    try {
+      safeWrite(ENTER_TUI);
+      if (caps !== "none") safeWrite(BG_BLACK);
+      renderer.reset();
+      const held = overlayHeld;
+      overlayHeld = [];
+      for (const t of held) renderer.printAbove(renderPaneText(t));
+      renderer.printAbove(paint(note, "info", caps));
+      render();
+    } catch {
+      /* the next write reports a broken terminal */
+    }
+  }
+  function openOverlay(o: OverlayLaunch): "started" | "resumed" | "busy" {
+    if (overlay?.state === "minimized") {
+      resumeOverlay();
+      return "resumed";
+    }
+    if (overlay?.state === "attached" || handover.suspended || modal || !entered) return "busy";
+    hideChromeForOverlay();
+    const label = o.label;
+    overlay = new OverlaySession({
+      ...o,
+      term: { write: safeWrite, size: () => ({ cols: size.cols, rows: size.rows }) },
+      onDetach: () =>
+        showChromeAfterOverlay(
+          `  ⎿ ${label} minimized — it keeps running · Ctrl+] shows it again · Ctrl+D inside it ends it`,
+        ),
+      onExit: (code, attached) => {
+        overlay = null;
+        const note = `  ⎿ ${label} closed${code !== null && code !== 0 ? ` (exit ${code})` : ""}`;
+        if (attached) showChromeAfterOverlay(note);
+        else {
+          renderer.printAbove(paint(note, "info", caps));
+          scheduleRender();
+        }
+      },
+    });
+    overlay.start();
+    return "started";
+  }
+  function resumeOverlay(): void {
+    if (overlay?.state !== "minimized") return;
+    hideChromeForOverlay();
+    overlay.resume();
+  }
+
+  /** Take the terminal back — unless the session finished while it was away (see handover). */
+  function resumeTui(): void {
+    handover.resume();
   }
   /**
    * One modal at a time. Each modal takes over `handler` and the single `cancelModal` slot, so a

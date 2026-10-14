@@ -41,6 +41,7 @@
  * Pure and dependency-free apart from the §7 contrast math. Raw hex is legal under `tokens/`.
  */
 import type { SchemeBase, SemanticColors } from "../tokens.js";
+import { CHART_SLOTS_DARK, CHART_SLOTS_LIGHT } from "./chart-palette.js";
 import { blend, contrastRatio, onFill } from "./contrast.js";
 
 /** A compact palette → a full SemanticColors map (the §2 roles). */
@@ -277,5 +278,9 @@ export function derivePalette(p: Palette, base: SchemeBase): SemanticColors {
     "on-warn": onFill(warn, p.bg),
     "on-danger": onFill(danger, p.bg),
     "on-info": onFill(info, p.bg),
+    // chart slots: the validated set for this scheme's surface lightness (chart-palette.ts)
+    ...(contrastRatio(p.surface, "#000000") > contrastRatio(p.surface, "#ffffff")
+      ? CHART_SLOTS_LIGHT
+      : CHART_SLOTS_DARK),
   };
 }

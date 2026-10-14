@@ -402,4 +402,35 @@ export const TOOLS: ToolDef[] = [
       return ["sync", ...pos(a.skill), ...(a.to ? ["--to", a.to] : [])];
     },
   },
+  // ---- disk space: read-only views (no delete, no root — ever, over MCP) ---- //
+  {
+    name: "prometheus_disk_space",
+    title: "Disk space (read-only)",
+    description:
+      "Where the disk went on THIS machine, measured with du via Prometheus's disk_map sidecar " +
+      "(never as root): `mounts` (filesystems: size/used/free), `map` (a folder's size tree, " +
+      "biggest first), `levels` (du --max-depth=N | sort -rh for N=1..depth), `files` (the " +
+      "largest files). Read-only: deleting and root rescans are not available over MCP — they " +
+      "need a human approving them in a Prometheus window.",
+    schema: {
+      action: z.enum(["mounts", "map", "levels", "files"]).describe("which view"),
+      path: z.string().optional().describe("folder to measure (absolute or ~; default ~)"),
+      depth: z.number().int().min(1).max(12).optional().describe("levels: how many levels (default 10)"),
+      top: z.number().int().min(1).max(1000).optional().describe("levels/files: rows per level / files"),
+    },
+    annotations: RO,
+    toArgv: (a) => {
+      const verb = { mounts: "mounts", map: "map", levels: "levels", files: "largest-files" }[
+        a.action as string
+      ];
+      // defense-in-depth: the schema only admits the four read views
+      if (!verb) throw new Error(`unsupported disk-space action: ${String(a.action)}`);
+      if (verb === "mounts") return ["disk-space", "mounts"];
+      const flags = [
+        ...(verb === "levels" && a.depth !== undefined ? ["--depth", String(a.depth)] : []),
+        ...(verb !== "map" && a.top !== undefined ? ["--top", String(a.top)] : []),
+      ];
+      return ["disk-space", verb, ...flags, ...pos(a.path ?? "~")];
+    },
+  },
 ];

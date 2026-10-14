@@ -39,6 +39,8 @@ const NEW_TOOLS = [
   "prometheus_secure",
   "prometheus_harden",
   "prometheus_sync",
+  // disk space — read-only views over `prometheus.py disk-space` (never delete, never root)
+  "prometheus_disk_space",
 ];
 
 const byName = (n: string) => TOOLS.find((t) => t.name === n);
@@ -48,10 +50,10 @@ test("original 14 tools are present, in order, unchanged (pinned)", () => {
 });
 
 test("tools/list parity: count == JSON-capable inventory (deferred verbs excluded)", () => {
-  // 14 original + 11 new = 25. vault-mutation / uninstall-extension / purge are DEFERRED
+  // 14 original + 12 new = 26. vault-mutation / uninstall-extension / purge are DEFERRED
   // (land after S048/S081) — deliberately NOT counted here.
   assert.equal(TOOLS.length, ORIGINAL_14.length + NEW_TOOLS.length);
-  assert.equal(TOOLS.length, 25);
+  assert.equal(TOOLS.length, 26);
   for (const n of NEW_TOOLS) assert.ok(byName(n), `missing new tool ${n}`);
   // no duplicate names.
   assert.equal(new Set(TOOLS.map((t) => t.name)).size, TOOLS.length);
@@ -117,4 +119,42 @@ test("renderToolsDoc is deterministic + lists every tool (CLI-035 docs)", () => 
   assert.equal(a, b, "same input → byte-identical output (no hand drift)");
   for (const t of TOOLS) assert.ok(a.includes(`\`${t.name}\``), `doc missing ${t.name}`);
   assert.match(a, /destructive:\*\* yes/); // the sync tool is flagged destructive
+});
+
+test("prometheus_disk_space is read-only: map / levels / files / mounts, paths after --", () => {
+  const t = byName("prometheus_disk_space");
+  assert.ok(t);
+  assert.equal(t?.annotations.readOnlyHint, true);
+  assert.equal(t?.annotations.destructiveHint, undefined);
+  assert.deepEqual(t?.toArgv({ action: "mounts" }), ["disk-space", "mounts"]);
+  assert.deepEqual(t?.toArgv({ action: "map", path: "/data" }), ["disk-space", "map", "--", "/data"]);
+  assert.deepEqual(t?.toArgv({ action: "levels", path: "-rf", depth: 3, top: 5 }), [
+    "disk-space",
+    "levels",
+    "--depth",
+    "3",
+    "--top",
+    "5",
+    "--",
+    "-rf",
+  ]);
+  assert.deepEqual(t?.toArgv({ action: "files", path: "/x", top: 7 }), [
+    "disk-space",
+    "largest-files",
+    "--top",
+    "7",
+    "--",
+    "/x",
+  ]);
+});
+
+test("prometheus_disk_space can never delete or run anything as root over MCP", () => {
+  const t = byName("prometheus_disk_space");
+  const keys = Object.keys(t?.schema ?? {});
+  for (const forbidden of ["confirm", "force", "sudo", "permanent", "command"]) {
+    assert.ok(!keys.includes(forbidden), forbidden);
+  }
+  for (const action of ["delete", "cleanup-plan", "privileged-rescan", "cleanup"]) {
+    assert.throws(() => t?.toArgv({ action, path: "/" }), action);
+  }
 });

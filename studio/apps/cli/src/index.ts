@@ -6,6 +6,7 @@ import { runAgentsCommand } from "./commands/agents-cmd.js";
 import { runBudgetCommandFromCtx } from "./commands/budget-cmd.js";
 import { runCompletion } from "./commands/completion.js";
 import { runDiagram } from "./commands/diagram-cmd.js";
+import { runDiskSpaceCommand } from "./commands/disk-space-cmd.js";
 /**
  * index.ts — the prometheus command dispatcher. Maps a parsed command path to a
  * command runner and returns a CommandOutcome. Pure-ish: it builds the context
@@ -222,6 +223,7 @@ async function runByKey(path: string[], ctx: CliContext): Promise<CommandOutcome
   if (head === "env") return runEnvCommand(ctx);
   if (head === "model") return runModelCommand(ctx);
   if (head === "metadata") return runMetadataCommand(ctx);
+  if (head === "disk-space") return runDiskSpaceCommand(ctx);
   if (head === "secure") return runSecureCommand(ctx);
   if (head === "repo") {
     if (path[1] === "vault") return runGeneric(path, ctx);

@@ -150,7 +150,8 @@ verify:
     # biome, plus the two custom guards: no raw hex outside tokens/, and the §9 layout rules.
     - pnpm run lint
     # Everything below runs as an UNPRIVILEGED user, the way Prometheus is used (install.sh refuses
-    # root). As uid 0 the container defeated the suites' permission checks — a chmod-000 store is
+    # root, and at runtime a privileged command runs only through the privileged gate after a
+    # human approves that exact command — CI has no human attached, so it never runs one). As uid 0 the container defeated the suites' permission checks — a chmod-000 store is
     # readable by root, detectElevation sees uid 0 and clamps the authorisation level — so nine
     # suites failed for the runner's identity, not for the code (first full run, 2026-10-04).
     - useradd -m ci && chown -R ci "$CI_PROJECT_DIR"

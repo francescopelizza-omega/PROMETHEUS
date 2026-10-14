@@ -14,18 +14,27 @@
  * `@prometheus/core` and driven in session.ts.
  */
 
+import { homedir } from "node:os";
 import * as vscode from "vscode";
 
 import type { AiEndpoint } from "@prometheus/core";
 import { ai } from "@prometheus/core";
 import { authLevelToMode } from "@prometheus/core/agent-authorization";
 import type { ConfirmResult, LLMClient, ToolCall } from "@prometheus/core/agent-loop";
+import {
+  createPrivilegedGate,
+  prepareAskpass,
+  prometheusHome,
+  scanCommand,
+  verdictBlocks,
+} from "@prometheus/core/agent-system-host";
 
 import { resolveAuthLevel } from "./auth-level.js";
 import { CHAT_VIEW_ID, ChatViewProvider, confirmToolCall } from "./chat-view.js";
 import { resolveEffortTier } from "./effort-pref.js";
 import { createEndpointLlmClient } from "./llm.js";
 import { touchModelActivity } from "./model-activity-store.js";
+import { makeVsCodeApprover } from "./privileged-modal.js";
 import { ChatSession, vscodeTuning } from "./session.js";
 import { createVsCodeToolRunner } from "./tool-runner.js";
 import { createVsCodeWorkspaceIo, normalizeWorkspaceRelPath } from "./workspace-io.js";
@@ -186,8 +195,31 @@ export function activate(context: vscode.ExtensionContext): PrometheusApi {
       runTool: createVsCodeToolRunner({
         io,
         onToolNote: (note) => provider.post({ type: "tool", note }),
+        /**
+         * The privileged gate: a native "Approve once" modal for each exact command, the
+         * password via `sudo -A` + the askpass helper (straight to sudo, never through here).
+         */
+        privilegedGate: createPrivilegedGate({
+          approver: makeVsCodeApprover(vscode.window),
+          passwordVia: "askpass",
+          askpass: () => prepareAskpass(),
+          home: prometheusHome(),
+          userHome: homedir(),
+          scan: async (line) => {
+            const v = await scanCommand(line);
+            return verdictBlocks(v, "enforce")
+              ? { blocked: true, reason: v.verdict }
+              : { blocked: false };
+          },
+        }),
       }),
-      confirm: (call) => (confirmOverride ?? confirmToolCall)(call),
+      // `propose_elevated` skips the generic Allow/Deny: the gate's own modal IS its prompt,
+      // with the exact command, folder and reason. Two modals in a row is how the first one
+      // gets clicked through.
+      confirm: (call) =>
+        call.name === "propose_elevated"
+          ? Promise.resolve({ approved: true } as ConfirmResult)
+          : (confirmOverride ?? confirmToolCall)(call),
       // the SAME resolved id the endpoint got — keying the tuning to a different (phantom)
       // model was half of what made the old default so confusing to diagnose.
       // The autonomy level AND the reasoning-effort tier, both resolved from the same

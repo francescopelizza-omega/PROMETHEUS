@@ -17,6 +17,8 @@ import { listCommandSpecs } from "@prometheus/core";
  * `index.ts` builds its `RECOGNIZED` Set from this — keep it the ground truth of direct routing.
  */
 export const RECOGNIZED_VERBS: readonly string[] = [
+  // disk space (`commands/disk-space-cmd.ts`) — native: views, delete plans, the root rescan.
+  "disk-space",
   // Directly routed in `index.ts` but absent from this list until now, so neither the shell
   // completion nor the router's "did you mean" could offer them even though all three run:
   // `prometheus completion bash`, `prometheus man`, `prometheus ls`. This list's own docstring

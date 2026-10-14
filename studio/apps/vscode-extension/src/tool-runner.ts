@@ -24,13 +24,20 @@ import {
   LIST_DIR_TOOL,
   MKDIR_TOOL,
   MOVE_FILE_TOOL,
+  PROPOSE_ELEVATED_TOOL,
   READ_FILE_TOOL,
   isSecretPath,
   redactSecrets,
   secretPathReason,
   secretRefusal,
 } from "@prometheus/core/agent-system";
-import { FILE_CONTENT_TOOLS, frameFileContent } from "@prometheus/core/agent-system-host";
+import {
+  FILE_CONTENT_TOOLS,
+  type PrivilegedGate,
+  frameFileContent,
+  prometheusHome,
+  runSystemTool,
+} from "@prometheus/core/agent-system-host";
 import { TODO_TOOLS, TodoStore, runTodoTool } from "@prometheus/core/agent-todo";
 import type { ToolDef } from "@prometheus/core/agent-tools";
 
@@ -61,6 +68,9 @@ export const VSCODE_EXTRA_TOOLS: readonly ToolDef[] = [
   MOVE_FILE_TOOL,
   MKDIR_TOOL,
   ...TODO_TOOLS,
+  // Privileged commands: the privileged gate asks the human in a native modal, for this exact
+  // command, every time, and runs it only on "Approve once" (password via askpass).
+  PROPOSE_ELEVATED_TOOL,
 ];
 
 /** The allow-list (a WHITELIST — a tool absent from here is never shown to the model). */
@@ -81,6 +91,11 @@ export interface VsCodeToolDeps {
   todos?: TodoStore;
   /** Test seam for `grep`'s bounded matcher — a real worker thread in production. */
   makeGrepWorker?: MakeGrepWorker;
+  /**
+   * The privileged gate (approver = a native modal). Absent ⇒ `propose_elevated` spawns
+   * nothing and returns the command for the human to run themselves.
+   */
+  privilegedGate?: PrivilegedGate;
 }
 
 const MAX_READ_LINES = 2000;
@@ -210,7 +225,10 @@ export function createVsCodeToolRunner(
   return async (tool, args) => {
     deps.onToolNote(toolNote(tool.name, args));
     try {
-      const outcome = await dispatch(tool.name, args, deps.io, todos, deps.makeGrepWorker);
+      const outcome =
+        tool.name === "propose_elevated"
+          ? await proposeElevated(args, deps)
+          : await dispatch(tool.name, args, deps.io, todos, deps.makeGrepWorker);
       /**
        * File/repo CONTENT is untrusted input and is framed as such, exactly as the other hosts
        * do it.
@@ -234,6 +252,27 @@ export function createVsCodeToolRunner(
       return { ok: false, summary: errText(e) };
     }
   };
+}
+
+/**
+ * `propose_elevated` — through core's ONE implementation (`runSystemTool`), which hands it to
+ * the privileged gate. The folder the user opened is the cwd; with none open there is no
+ * honest place to run it, so it is refused before anyone is asked.
+ */
+async function proposeElevated(
+  args: Record<string, unknown>,
+  deps: VsCodeToolDeps,
+): Promise<ToolOutcome> {
+  const root = deps.io.rootPath();
+  if (!root) return bad("open a folder first — a privileged command needs a folder to run in");
+  const out = await runSystemTool("propose_elevated", args, {
+    cwd: root,
+    home: prometheusHome(),
+    gateMode: "enforce",
+    surface: "vscode",
+    ...(deps.privilegedGate ? { privilegedGate: deps.privilegedGate } : {}),
+  });
+  return out ?? bad("propose_elevated is unavailable");
 }
 
 async function dispatch(
@@ -602,6 +641,8 @@ export function toolNote(name: string, args: Record<string, unknown>): string {
       return `move ${String(args.from ?? "")} → ${String(args.to ?? "")}`;
     case "mkdir":
       return `mkdir${a("path")}`;
+    case "propose_elevated":
+      return "ask to run a command as administrator";
     default:
       return name;
   }

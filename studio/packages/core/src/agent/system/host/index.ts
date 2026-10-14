@@ -119,6 +119,29 @@ export { bootOrphanGuard, stopSentinel } from "./reaper/orphan-guard-boot.js";
 
 /** The home root both hosts write the exec audit under. */
 export { prometheusHome } from "./home.js";
+// The privileged gate — the ONLY code that may start a privileged process (sudo et al.),
+// after a host-wired human approver says yes to that exact command.
+export {
+  createPrivilegedGate,
+  formatApprovalView,
+  sudoAuditPath,
+  trustedBinary,
+  DEFAULT_APPROVAL_TIMEOUT_MS,
+  SUDO_PROMPT,
+} from "./privileged-gate.js";
+export type {
+  ApprovalAnswer,
+  ApprovalView,
+  Approver,
+  GateDecision,
+  GateDeps,
+  PrivilegedGate,
+  PrivilegedRequest,
+  PrivilegedResult,
+  ScriptInfo,
+  Surface,
+} from "./privileged-gate.js";
+export { askpassScript, prepareAskpass } from "./askpass.js";
 
 // `semantic_search` — real local-embedding search with an explicitly-labeled lexical fallback
 // (see the file header for exactly what "real" and "fallback" mean here). Exported so a host

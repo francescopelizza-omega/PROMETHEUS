@@ -221,6 +221,20 @@ export const IPC = {
   folderOpen: "folder:open",
   openPath: "path:open",
   revealPath: "path:reveal",
+  // ── the privileged gate (sudo) — a human approves each exact command, every time ──
+  // main → renderer: show the approval dialog / close it (timed out). renderer → main: the
+  // human's decision for ONE request id. Nothing else can approve; no "always" exists.
+  privilegedRequest: "privileged:request",
+  privilegedClose: "privileged:close",
+  privilegedDecide: "privileged:decide",
+  // ── disk space (the disk_map sidecar) — read views, a delete plan/confirm, a root rescan ──
+  diskMounts: "disk:mounts",
+  diskMap: "disk:map",
+  diskLevels: "disk:levels",
+  diskFiles: "disk:files",
+  diskDeletePlan: "disk:deletePlan",
+  diskDelete: "disk:delete",
+  diskRescanAsRoot: "disk:rescanAsRoot",
   // ── SPECTACULAR power-up: catalog cards + chat + models folder + harden ────
   // Read-only/preview engine commands over a PrometheusEngine facade in MAIN.
   // chat is PREVIEW-only here (the engine assembles an injection-safe argv); the
@@ -328,7 +342,6 @@ export const IPC = {
   // `@prometheus/core/command-loader`/`command-gate` the CLI's `/command` loader uses.
   ideCommandFilesList: "ide:commandFiles.list",
   ideGate: "ide:gate",
-  ideExec: "ide:exec",
   agentSystemTool: "agent:systemTool",
   agentEngineTool: "agent:engineTool",
   /** run ONE user-configured lifecycle hook (PreToolUse/PostToolUse/SessionStart) in MAIN. */
@@ -1867,6 +1880,15 @@ export interface PrometheusApi {
    * inspect verb that is safe on a file the whole point of which is that it never executes.
    */
   revealPath(path: string): Promise<OpenPathResult>;
+
+  /**
+   * The privileged gate's approval dialog. Main asks (`onRequest`), the human answers
+   * (`decide`) for that one request id; a request main has given up on is closed (`onClose`).
+   */
+  privileged: PrivilegedApi;
+
+  /** Disk space: map / levels / files / mounts, Trash or delete (plan first), rescan as root. */
+  diskSpace: DiskSpaceApi;
 
   /** SPECTACULAR power-up: catalog cards + chat + local-models folder + harden. */
   spectacular: SpectacularApi;
@@ -3686,17 +3708,6 @@ export interface IdeGateRequest {
 }
 
 /**
- * A request to `ide:exec` — run ONE user-approved shell command in the workspace and
- * capture its output. The agentic tool-loop proposes the command; the user approves it
- * (§7.3 task card); main screens it (fail-closed blocklist) + spawns with a hardened env.
- */
-export interface IdeExecRequest {
-  command: string;
-  /** the working directory (the workspace root); validated + non-sensitive in main. */
-  cwd: string;
-}
-
-/**
  * A request to `agent:systemTool` — run ONE of core's shared system tools (Phase 6).
  *
  * This is the channel that ended the CLI/GUI split. `ide:exec` runs `shell -c <command>`
@@ -3864,21 +3875,6 @@ export interface AgentGrantsResult {
 export interface AgentEngineToolRequest {
   name: string;
   args: Record<string, unknown>;
-}
-
-/** The captured result of `ide:exec`. `blocked` ⇒ the screen/validator refused it. */
-export interface IdeExecResult {
-  ok: boolean;
-  exitCode: number;
-  stdout: string;
-  stderr: string;
-  /** true when the destructive-command screen or the validator refused to run it. */
-  blocked?: boolean;
-  /** true when the command was SIGKILLed for exceeding the timeout. */
-  timedOut?: boolean;
-  /** human-readable reason for a block / failure. */
-  reason?: string;
-  error?: string;
 }
 
 /**
@@ -4787,8 +4783,6 @@ export interface IdeApi {
   gitPrSetToken(root: string, token: string): Promise<IdePrOpResult>;
   // ── the RUN-GATE (§5.2/§9): trusted → skip; else REAL engine gate; fail-closed
   gate(req: IdeGateRequest): Promise<IdeGateResult>;
-  /** run ONE user-approved, screened shell command in the workspace; capture output. */
-  exec(req: IdeExecRequest): Promise<IdeExecResult>;
   /** Phase 6: run one of core's shared system tools — the same path the CLI runs. */
   systemTool(req: AgentSystemToolRequest): Promise<AgentSystemToolResult>;
   /** list, or run, one of the user's configured lifecycle hooks (main owns the spawn). */
@@ -5567,3 +5561,163 @@ export interface UpdatesApi {
 
 /** The global key the API is exposed under in the renderer. */
 export const BRIDGE_KEY = "prometheus" as const;
+
+/* ── the privileged gate (sudo) ─────────────────────────────────────────────── */
+
+/**
+ * What the approval dialog shows — a copy of core's `ApprovalView` plus the pre-formatted
+ * `lines` every host prints. Declared here, not imported, because the renderer may not import
+ * core's host module (C5 boundary).
+ */
+export interface PrivilegedPromptView {
+  id: string;
+  /** what a person would type: `sudo apt-get install -y ripgrep` */
+  commandLine: string;
+  /** the exact spawn argv, elevator options included */
+  execArgv: string[];
+  cwd: string;
+  surface: string;
+  requester: string;
+  why: string;
+  script?: { path: string; size: number; sha256: string; head: string[] };
+  /** when set, the human must type exactly this to approve */
+  phrase?: string;
+  timeoutMs: number;
+  passwordVia: "tty" | "askpass";
+  /** `formatApprovalView` — the same facts, in the same order, as every other host */
+  lines: string[];
+}
+
+export interface PrivilegedDecisionArg {
+  id: string;
+  decision: "approve" | "deny";
+  phrase?: string;
+}
+
+export interface PrivilegedDecideResult {
+  ok: boolean;
+  error?: string;
+}
+
+export interface PrivilegedApi {
+  onRequest(cb: (view: PrivilegedPromptView) => void): () => void;
+  onClose(cb: (msg: { id: string }) => void): () => void;
+  decide(arg: PrivilegedDecisionArg): Promise<PrivilegedDecideResult>;
+}
+
+/* ── disk space ────────────────────────────────────────────────────────────── */
+// Re-declared (not imported from engine-bridge): the renderer may not import it (C5 boundary).
+
+export interface DiskNodeView {
+  name: string;
+  path: string;
+  /** `hex:<bytes>` — the exact path when it is not valid UTF-8 */
+  rawPath?: string;
+  size: number;
+  dir: boolean;
+  items?: number;
+  mount?: boolean;
+  frontier?: boolean;
+  /** (root rescan output) measured no deeper than this */
+  truncated?: boolean;
+  unreadable?: boolean;
+  more?: number;
+  children?: DiskNodeView[];
+}
+
+export interface DiskScanSummaryView {
+  size?: number;
+  survey_dirs?: number;
+  seconds?: number;
+  engine?: string;
+  unreadable?: number;
+  errors?: number;
+}
+
+export interface DiskMapView {
+  ok: boolean;
+  error?: string;
+  tree?: DiskNodeView;
+  summary?: DiskScanSummaryView;
+  truncated?: boolean;
+  /** the tree came from an approved root rescan */
+  asRoot?: boolean;
+  /** for a root rescan: the privileged gate's decision */
+  decision?: string;
+}
+
+export interface DiskMountView {
+  source: string;
+  target: string;
+  fstype: string;
+  total: number;
+  used: number;
+  free: number;
+  usePct: number;
+}
+
+export interface DiskMountsView {
+  ok: boolean;
+  error?: string;
+  mounts?: DiskMountView[];
+}
+
+export interface DiskLevelsView {
+  ok: boolean;
+  error?: string;
+  levels?: { depth: number; rows: { path: string; size: number }[] }[];
+}
+
+export interface DiskFilesView {
+  ok: boolean;
+  error?: string;
+  files?: { path: string; rawPath?: string; size: number; mtime: number }[];
+}
+
+export type DiskDeleteModeView = "trash" | "permanent";
+
+export interface DiskDeleteItemView {
+  path: string;
+  rawPath?: string;
+  size: number;
+  sizeAtLeast?: boolean;
+  risk: string | null;
+  reason: string;
+  protected: string | null;
+  trashDir?: string | null;
+}
+
+export interface DiskDeletePlanView {
+  ok: boolean;
+  error?: string;
+  mode?: DiskDeleteModeView;
+  items?: DiskDeleteItemView[];
+  worstRisk?: string | null;
+  total?: number;
+  /** the human must type "yes" before `delete(…, ackHighRisk: true)` */
+  requiresPhrase?: boolean;
+}
+
+export interface DiskDeleteRunView {
+  ok: boolean;
+  error?: string;
+  results?: { path: string; ok: boolean; msg: string }[];
+}
+
+export interface DiskSpaceApi {
+  mounts(): Promise<DiskMountsView>;
+  map(req: { path: string; maxNodes?: number }): Promise<DiskMapView>;
+  levels(req: { path: string; depth?: number; top?: number }): Promise<DiskLevelsView>;
+  files(req: { path: string; top?: number }): Promise<DiskFilesView>;
+  /** a PLAN: nothing changes */
+  deletePlan(req: { paths: string[]; mode: DiskDeleteModeView }): Promise<DiskDeletePlanView>;
+  /** runs only with `confirm: true`; every protection is re-checked at that moment */
+  delete(req: {
+    paths: string[];
+    mode: DiskDeleteModeView;
+    confirm: true;
+    ackHighRisk?: boolean;
+  }): Promise<DiskDeleteRunView>;
+  /** through the privileged gate: the human approves the exact root command first */
+  rescanAsRoot(req: { path: string }): Promise<DiskMapView>;
+}

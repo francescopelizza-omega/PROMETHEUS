@@ -32,6 +32,9 @@ export {
 } from "./classify.js";
 export type { ClassifyResult, StageClass } from "./classify.js";
 
+export { GATE_ELEVATORS, catastrophicTarget, classifyPrivileged } from "./privileged.js";
+export type { Elevator, GateElevator, PrivilegedClass } from "./privileged.js";
+
 export { PROGRAMS, FORBIDDEN, basename, forbiddenReason, programSpec } from "./registry.js";
 export { shellQuote } from "./parse.js";
 export type { DeniedFlag, ExecTier, ProgramSpec } from "./registry.js";

@@ -48,7 +48,10 @@ const DANGEROUS: { re: RegExp; reason: string }[] = [
     re: /\b(?:curl|wget|fetch)\b[^\n|]*\|\s*(?:sudo\s+)?(?:sh|bash|zsh|dash|python3?|node|perl|ruby)\b/i,
     reason: "pipe remote content into an interpreter (remote code execution)",
   },
-  { re: /(?:^|[\s;&|])sudo(?:\s|$)/i, reason: "privilege escalation (sudo)" },
+  {
+    re: /(?:^|[\s;&|])(?:sudo|doas|pkexec|run0)(?:\s|$)/i,
+    reason: "privilege escalation — only the privileged gate (propose_elevated) runs it",
+  },
   { re: /\b(?:shutdown|reboot|halt|poweroff|init\s+0)\b/i, reason: "power / shutdown command" },
   {
     re: /\b(?:diskutil|fdisk|parted|gdisk)\b[^\n]*\b(?:erase|delete|destroy|rm)\b/i,

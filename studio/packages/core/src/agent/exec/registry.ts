@@ -530,9 +530,17 @@ export const PROGRAMS: Readonly<Record<string, ProgramSpec>> = Object.freeze({
 
 /** Programs that must NEVER run, at any level, however they are reached. */
 export const FORBIDDEN: Readonly<Record<string, string>> = Object.freeze({
-  sudo: "privilege escalation — the agent may never elevate (use propose_elevated)",
-  doas: "privilege escalation — the agent may never elevate",
-  su: "privilege escalation — the agent may never elevate",
+  // Elevators are caught BEFORE this table (classify.ts rule 0, privileged.ts) and redirected
+  // to propose_elevated; these entries keep `forbiddenReason` honest for any other caller.
+  sudo: "privilege escalation — only the privileged gate runs it (use propose_elevated)",
+  doas: "privilege escalation — only the privileged gate runs it (use propose_elevated)",
+  su: "privilege escalation — opens a root shell",
+  pkexec: "privilege escalation — only the privileged gate runs it (use propose_elevated)",
+  run0: "privilege escalation — only the privileged gate runs it (use propose_elevated)",
+  sudoedit: "privilege escalation — an interactive editor as root",
+  gosu: "privilege escalation",
+  runas: "privilege escalation",
+  please: "privilege escalation",
   sh: "a shell would bypass every per-command check",
   bash: "a shell would bypass every per-command check",
   zsh: "a shell would bypass every per-command check",

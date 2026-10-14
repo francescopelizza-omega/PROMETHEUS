@@ -30,6 +30,7 @@
 import type { ConfirmResult, ToolCall } from "./loop.js";
 import { evaluatePermission } from "./permission-engine.js";
 import type { PermissionRule } from "./permission-engine.js";
+import { isPrivilegedCall } from "./privileged-call.js";
 import type { GrantScope, ScopedPermissionStore } from "./scoped-permission.js";
 import { deriveSubject } from "./scoped-permission.js";
 
@@ -99,6 +100,16 @@ export function withRememberedGrants(
   const base = opts.baseRules ?? [];
 
   return async (call: ToolCall): Promise<ConfirmResult> => {
+    // Root is never answered from memory and never remembered. A `bash:<argv>` grant learned
+    // on `run_command` would otherwise approve `propose_elevated` with the same words, and an
+    // "always" on a privileged prompt would store one. The human is asked, every time.
+    if (isPrivilegedCall(call)) {
+      const answer = hostConfirm ? await hostConfirm(call) : false;
+      if (typeof answer === "boolean") return { approved: answer };
+      return answer.reason
+        ? { approved: answer.approved, reason: answer.reason }
+        : { approved: answer.approved };
+    }
     const ref = refOf(call);
     const paths = pathsOf(call);
     const argv = argvOf(call);

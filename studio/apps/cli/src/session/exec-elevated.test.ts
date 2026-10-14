@@ -1,10 +1,14 @@
 /**
- * exec-elevated.test.ts — the elevated-proposal flow (Phase 5 / §7).
+ * exec-elevated.test.ts — privileged commands (sudo) under the 2026-10 principle:
  *
- * The phase's acceptance criterion is a pair: **the agent can never itself run sudo; the
- * human always can.** Both halves are pinned here, and the first half is pinned the only way
- * that means anything — by asserting that no spawn seam is ever reached, across every route
- * an agent could try.
+ *   Prometheus may run sudo, but never on its own authority. Every privileged command is
+ *   shown to the human verbatim and runs only after that human approves that exact command,
+ *   every time. No authorization level, flag, setting, agent or tool can pre-approve,
+ *   remember or skip this approval.
+ *
+ * Pinned here from the agent's side: `run_command` never runs one; `propose_elevated` with no
+ * human attached spawns nothing and hands back the exact command; with a human attached the
+ * privileged gate asks on every call, at every level from A0 to A7, and a "no" spawns nothing.
  */
 import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync } from "node:fs";
@@ -22,8 +26,14 @@ import {
 } from "@prometheus/core/agent-system";
 import type { SecurityVerdict } from "@prometheus/engine-bridge";
 
+import { EventEmitter } from "node:events";
 import { type ExecAuditEntry, execAuditPath, resetScanCache } from "./exec-gate.js";
-import { runSystemTool } from "./system-tools.js";
+import {
+  type ApprovalAnswer,
+  type ApprovalView,
+  createPrivilegedGate,
+  runSystemTool,
+} from "./system-tools.js";
 
 beforeEach(() => resetScanCache());
 
@@ -50,32 +60,40 @@ function verdict(v: SecurityVerdict["verdict"], reasons: string[] = []): Securit
   };
 }
 
-/* ── half one: the agent can never run sudo ──────────────────────────────────*/
+/* ── half one: the agent never runs a privileged command on its own ──────────*/
 
-test("`sudo` is refused by the PARSER — it is never a confirm", async () => {
-  // The distinction matters. A confirm dialog reading "run `sudo rm -rf /var`?" is one
-  // mis-click from an unrecoverable machine, and injection makes mis-clicks cheap to
-  // manufacture. There is no button here to mis-click.
+test("run_command never runs a privileged command — it is redirected to propose_elevated", async () => {
+  // Privileged work has exactly one path, so there is one place to review. pkexec and run0
+  // were plain unknown programs here until the gate existed — tier `destructive`, which
+  // A6/A7 auto-approve, with only the kernel sandbox in the way.
   for (const line of [
     "sudo id",
     "ls | sudo tee /etc/hosts",
     "true && sudo id",
     "/usr/bin/sudo id",
+    "pkexec id",
+    "run0 id",
   ]) {
-    const p = parseCommand(line, { vars: {} });
-    const refused = !p.ok || !classifyCommand(p.command).ok;
-    assert.ok(refused, `"${line}" was not refused`);
+    const out = await runSystemTool(
+      "run_command",
+      { command: line },
+      { cwd: "/repo", spawnImpl: noSpawn, gateMode: "off", authLevel: 7 },
+    );
+    assert.equal(out?.ok, false, `"${line}" was not refused`);
+    assert.match(out?.summary ?? "", /propose_elevated/, line);
   }
 });
 
-test("propose_elevated never spawns — there is no exec seam in the handler at all", async () => {
+test("with no human attached, propose_elevated spawns nothing and returns the exact command", async () => {
   const out = await runSystemTool(
     "propose_elevated",
     { argv: ["systemctl", "restart", "nginx"], why: WHY },
     { cwd: "/repo", spawnImpl: noSpawn, gateMode: "off" },
   );
   assert.equal(out?.ok, true);
-  assert.match(out?.summary ?? "", /Prometheus will NOT run this/);
+  assert.match(out?.summary ?? "", /needs a human/);
+  assert.equal(out?.data?.needsHumanApproval, true);
+  assert.equal(out?.data?.command, "sudo systemctl restart nginx");
 });
 
 test("the agent must not write `sudo` itself — the prefix is ours to add", async () => {
@@ -117,6 +135,105 @@ test("NO authorization level auto-approves it — A7 included", () => {
   }
   // and the contrast: a genuinely destructive tool DOES auto-approve at 6/7
   assert.equal(authDecision(7, "prometheus_uninstall", { destructiveHint: true }), "allow");
+});
+
+/* ── with a human attached: the gate asks, every call, every level ───────────*/
+
+/** A fake `child_process.spawn` that records argv and exits 0 with some output. */
+function recordingSpawn(calls: string[][]) {
+  return (cmd: string, args: string[]) => {
+    calls.push([cmd, ...args]);
+    const child = Object.assign(new EventEmitter(), {
+      pid: 777,
+      stdout: new EventEmitter(),
+      stderr: new EventEmitter(),
+      kill() {},
+    });
+    setImmediate(() => {
+      child.stdout.emit("data", Buffer.from("reloaded\n"));
+      child.emit("close", 0, null);
+    });
+    return child;
+  };
+}
+
+function humanGate(answer: ApprovalAnswer, seen: ApprovalView[], calls: string[][]) {
+  return createPrivilegedGate({
+    passwordVia: "tty",
+    resolveElevator: () => "/usr/bin/sudo",
+    spawnImpl: recordingSpawn(calls) as never,
+    approver: async (v) => {
+      seen.push(v);
+      return answer;
+    },
+  });
+}
+
+test("A0 through A7: the human is asked for EVERY privileged call — no level skips the prompt", async () => {
+  const seen: ApprovalView[] = [];
+  const calls: string[][] = [];
+  const gate = humanGate({ decision: "approve" }, seen, calls);
+  for (let level = 0; level <= 7; level += 1) {
+    const out = await runSystemTool(
+      "propose_elevated",
+      { argv: ["systemctl", "restart", "nginx"], why: WHY },
+      { cwd: "/repo", spawnImpl: noSpawn, gateMode: "off", authLevel: level, privilegedGate: gate },
+    );
+    assert.equal(out?.ok, true, `A${level}: ${out?.summary}`);
+  }
+  assert.equal(seen.length, 8, "one prompt per call, at every level");
+  assert.equal(calls.length, 8);
+  assert.deepEqual(calls[0], [
+    "/usr/bin/sudo",
+    "-p",
+    "[PROMETHEUS] password for %u: ",
+    "--",
+    "systemctl",
+    "restart",
+    "nginx",
+  ]);
+  assert.equal(seen[7]?.commandLine, "sudo systemctl restart nginx");
+});
+
+test("a human `deny` spawns nothing, and the model is told so", async () => {
+  const calls: string[][] = [];
+  const out = await runSystemTool(
+    "propose_elevated",
+    { argv: ["systemctl", "restart", "nginx"], why: WHY },
+    {
+      cwd: "/repo",
+      spawnImpl: noSpawn,
+      gateMode: "off",
+      authLevel: 7,
+      privilegedGate: humanGate({ decision: "deny" }, [], calls),
+    },
+  );
+  assert.equal(out?.ok, false);
+  assert.match(out?.summary ?? "", /denied/);
+  assert.equal(calls.length, 0);
+});
+
+test("an approved run reports its exit code and output", async () => {
+  const out = await runSystemTool(
+    "propose_elevated",
+    { argv: ["systemctl", "restart", "nginx"], why: WHY },
+    {
+      cwd: "/repo",
+      spawnImpl: noSpawn,
+      gateMode: "off",
+      privilegedGate: humanGate({ decision: "approve" }, [], []),
+    },
+  );
+  assert.equal(out?.ok, true);
+  assert.match(out?.summary ?? "", /exit 0/);
+  assert.match(out?.summary ?? "", /reloaded/);
+  assert.equal(out?.data?.exitCode, 0);
+});
+
+test("--yes cannot approve it: only read-only tools are lifted by --yes, and this one has no hint", () => {
+  // `--yes` → tuning.yes → the broker's autoApprove, which lifts readOnlyHint tools only. The
+  // gate itself has no input a flag could reach.
+  assert.equal(PROPOSE_ELEVATED_TOOL.annotations.readOnlyHint, undefined);
 });
 
 test("a nemesis BLOCK refuses the proposal — we do not print what the scanner rejected", async () => {
