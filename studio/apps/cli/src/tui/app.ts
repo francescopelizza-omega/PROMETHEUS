@@ -27,6 +27,11 @@ import { loadSettings, prometheusHome } from "../home.js";
 import type { ParsedArgs } from "../parse.js";
 import { defaultColorEnabled } from "../render.js";
 import { readSavedAuthLevel } from "../session/authorisation-store.js";
+import {
+  buildStep as buildModelsStep,
+  overlayItems,
+  parseModelsArgs,
+} from "../session/models-wizard.js";
 import type { Backends } from "../session/onboarding.js";
 import { completePath, createPathCycler } from "../session/path-completer.js";
 import {
@@ -438,6 +443,7 @@ export async function launchTui(parsed: ParsedArgs, deps: TuiDeps = {}): Promise
     confirm: confirmModal,
     confirmPhrase: confirmPhraseModal,
     ask: askModal,
+    askSecret: askSecretModal,
     askPath: askPathModal, // CLI-066: Tab folder completion + candidate hint row
     /**
      * `/traits` — the typed way into the ⌃T rail mode.
@@ -1165,6 +1171,24 @@ export async function launchTui(parsed: ParsedArgs, deps: TuiDeps = {}): Promise
       );
       return;
     }
+    /**
+     * `/models` and its navigation steps open as arrow-key overlays — the SAME rows the readline
+     * host numbers (`session/models-wizard.ts`), each highlighted row showing its two lines and
+     * its fit/key verdict. A pick resubmits `/models <step>` or `/models use <ref>`, so the next
+     * step opens the same way and a final pick runs the shared prepare-and-switch flow.
+     * `/models use …`, `/models current` and the engine's tool actions fall through below.
+     */
+    if ((trimmed === "/models" || trimmed.startsWith("/models ")) && session.slashCtx.models) {
+      const args = parseModelsArgs(trimmed.slice("/models".length));
+      if (args.kind === "step") {
+        const step = await buildModelsStep(session.slashCtx.models, args.step, args.showAll);
+        if (step.intro.length > 0) {
+          renderer.printAbove(step.intro.map((l) => paint(l, "muted", caps)).join("\n"));
+        }
+        openPicker(step.title, overlayItems(step));
+        return;
+      }
+    }
     // bare `/invoke` in the TTY opens the arrow-nav overlay (CLI-059) instead of the number-pick;
     // `/invoke <filter>` and every non-TTY host keep the number-pick list unchanged.
     if (text.trim() === "/invoke") {
@@ -1351,6 +1375,10 @@ export async function launchTui(parsed: ParsedArgs, deps: TuiDeps = {}): Promise
   function askModal(prompt: string): Promise<string> {
     return queueModal(() => openAskModal(prompt), "");
   }
+  /** an ask modal whose typing is painted as bullets — for API keys. */
+  function askSecretModal(prompt: string): Promise<string> {
+    return queueModal(() => openAskModal(prompt, true), "");
+  }
   function askPathModal(prompt: string, def: string): Promise<string> {
     return queueModal(() => openAskPathModal(prompt, def), "");
   }
@@ -1390,7 +1418,7 @@ export async function launchTui(parsed: ParsedArgs, deps: TuiDeps = {}): Promise
   function confirmPhraseModal(prompt: string, phrase: string): Promise<boolean> {
     return askModal(prompt).then((a) => a.trim() === phrase);
   }
-  function openAskModal(prompt: string): Promise<string> {
+  function openAskModal(prompt: string, secret = false): Promise<string> {
     return new Promise((resolve) => {
       const done = (value: string): void => {
         cancelModal = null;
@@ -1417,7 +1445,7 @@ export async function launchTui(parsed: ParsedArgs, deps: TuiDeps = {}): Promise
         }
       };
       cancelModal = () => done("");
-      modal = { kind: "ask", prompt, buffer: "", caret: 0 };
+      modal = { kind: "ask", prompt, buffer: "", caret: 0, ...(secret ? { secret: true } : {}) };
       modalLines = 0;
       modalCursorRow = 0;
       try {

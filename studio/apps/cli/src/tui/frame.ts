@@ -305,6 +305,17 @@ export interface ModalView {
   caret: number;
   /** an optional dim hint row below the prompt (CLI-066 Tab-completion candidates). */
   hint?: string;
+  /**
+   * Mask the buffer on screen (an API key being pasted). The real text stays in `buffer` and is
+   * what the modal resolves with; only the PAINT changes, so a key never lands in the terminal's
+   * scrollback, a screen share, or a recording.
+   */
+  secret?: boolean;
+}
+
+/** What the screen shows for the buffer: the text, or one bullet per grapheme when secret. */
+function shownText(modal: ModalView, text: string): string {
+  return modal.secret ? "•".repeat(splitGraphemes(text).length) : text;
 }
 
 /**
@@ -359,7 +370,7 @@ export function applyModalKey(modal: ModalView, key: { name: string; ch?: string
 export function modalCursorCol(modal: ModalView): number {
   const prefix = modal.kind === "confirm" ? "? " : "› ";
   if (modal.kind === "confirm") return stringWidth(`${prefix}${modal.prompt} [y/N]`);
-  const before = graphemeSlice(modal.buffer, 0, modal.caret);
+  const before = shownText(modal, graphemeSlice(modal.buffer, 0, modal.caret));
   return stringWidth(`${prefix}${modal.prompt} ${before}`);
 }
 
@@ -371,7 +382,8 @@ export function modalCursorCol(modal: ModalView): number {
 export function renderModal(modal: ModalView, width: number, caps: ColorCaps): string[] {
   const w = Math.max(8, width - 1);
   const prefix = modal.kind === "confirm" ? "? " : "› ";
-  const suffix = modal.kind === "confirm" ? " [y/N]" : modal.buffer ? ` ${modal.buffer}` : "";
+  const suffix =
+    modal.kind === "confirm" ? " [y/N]" : modal.buffer ? ` ${shownText(modal, modal.buffer)}` : "";
   const role = modal.kind === "confirm" ? "warn" : "question";
   const plain = `${prefix}${modal.prompt}${suffix}`;
   const wrapped = plain === "" ? [""] : wrapLine(plain, w);

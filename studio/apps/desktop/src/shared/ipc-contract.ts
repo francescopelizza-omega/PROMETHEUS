@@ -30,6 +30,7 @@ import type {
   RepoStatus,
   ServerStatus,
   agent,
+  ai,
 } from "@prometheus/core";
 import type {
   AuditLogEntry,
@@ -153,6 +154,14 @@ export const IPC = {
   modelKill: "model:kill",
   modelServing: "model:serving",
   modelEndpoints: "model:endpoints",
+  // The guided model picker — the SAME steps the CLI's `/models` shows (main/model-wizard.ts).
+  // Keys go IN through `setKey` (verified, then stored in the OS keychain) and never come out.
+  modelWizardStep: "modelWizard:step",
+  modelWizardPlan: "modelWizard:plan",
+  modelWizardSetKey: "modelWizard:setKey",
+  modelWizardLiveModels: "modelWizard:liveModels",
+  modelWizardChoose: "modelWizard:choose",
+  modelWizardEndpoints: "modelWizard:endpoints",
   modelRepoint: "model:repoint",
   // /hug: bring in a model from a local folder or Hugging Face — fetch (if needed) →
   // convert (always via llama.cpp's own tools) → install into ollama/llama.cpp/vllm/
@@ -1817,6 +1826,12 @@ export interface PrometheusApi {
    * only ids/options, never a spawnable command.
    */
   models: ModelApi;
+
+  /**
+   * The guided model picker (local · free cloud · paid cloud · endless free rotation) — the
+   * desktop face of the CLI's `/models`. Main builds every step from core; the renderer draws.
+   */
+  modelWizard: ModelWizardApi;
 
   /**
    * The Catalog manager surface (file 06 §4): the faithful front-end over
@@ -5720,4 +5735,50 @@ export interface DiskSpaceApi {
   }): Promise<DiskDeleteRunView>;
   /** through the privileged gate: the human approves the exact root command first */
   rescanAsRoot(req: { path: string }): Promise<DiskMapView>;
+}
+
+/* ── the guided model picker (`modelWizard:*`) ──────────────────────────────── */
+
+/** A step of the picker, exactly as core builds it. */
+export type WizardStepView = ai.WizardStep;
+export type WizardRowView = ai.WizardRow;
+export type WizardStepId = ai.WizardStepId;
+export type WizardPreparePlan = ai.PreparePlan;
+export type WizardPrepareAction = ai.PrepareAction;
+
+/** A cloud endpoint the chat picker can list (never carries a key). */
+export interface WizardEndpoint {
+  id: string;
+  baseUrl: string;
+  model: string;
+  locality: "local" | "cloud";
+  contextWindow?: number;
+}
+
+export type ModelWizardStepResult =
+  | { ok: true; step: WizardStepView }
+  | { ok: false; error: string };
+export type ModelWizardPlanResult =
+  | { ok: true; plan: WizardPreparePlan }
+  | { ok: false; error: string };
+export type ModelWizardSetKeyResult = { ok: true; live: string[] } | { ok: false; error: string };
+export type ModelWizardLiveResult = { ok: true; models: string[] } | { ok: false; error: string };
+export type ModelWizardChooseResult =
+  | { ok: true; label: string; endpoint?: WizardEndpoint }
+  /** `live`: the provider's served models, when the catalogued id has vanished from it. */
+  | { ok: false; error: string; live?: string[] };
+export type ModelWizardEndpointsResult =
+  | { ok: true; endpoints: WizardEndpoint[] }
+  | { ok: false; error: string };
+
+export interface ModelWizardApi {
+  step(req: { step: WizardStepId; showAll?: boolean }): Promise<ModelWizardStepResult>;
+  plan(req: { ref: string }): Promise<ModelWizardPlanResult>;
+  /** verify + store a provider key in the OS keychain; the key is never returned. */
+  setKey(req: { providerId: string; key: string }): Promise<ModelWizardSetKeyResult>;
+  liveModels(req: { providerId: string }): Promise<ModelWizardLiveResult>;
+  /** remember the pick (shared with the CLI) and get the endpoint to select, for cloud picks. */
+  choose(req: { ref: string; model?: string }): Promise<ModelWizardChooseResult>;
+  /** configured cloud endpoints + the rotation, for the chat model menu. */
+  endpoints(): Promise<ModelWizardEndpointsResult>;
 }

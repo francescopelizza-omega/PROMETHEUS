@@ -261,3 +261,31 @@ export {
 // construct a child-process argv safely belongs beside the code that spawns it (C5 / SPINE).
 // The types are re-exported here so a caller reasoning about remote hosts has one import.
 export type { RemoteGpu, RemoteHardware, SshTarget } from "@prometheus/engine-bridge";
+
+// The `/models` guided picker: catalogue (local / free / paid), fit planning, wizard steps.
+export * from "./model-catalog/index.js";
+// The endless free rotation: one endpoint, every free provider behind it.
+export {
+  type RotationMember,
+  type RotationMemberOpts,
+  type RotationState,
+  type RotationMemberStatus,
+  type RotationEvent,
+  type RotatingFetchOpts,
+  ROTATION_BASE_URL,
+  ROTATION_ENDPOINT_ID,
+  ROTATION_MODEL,
+  MIN_MEMBER_CONTEXT,
+  rotationMembers,
+  rotationEndpoint,
+  isRotationUrl,
+  isRotationEndpoint,
+  createRotationState,
+  cooldownMs,
+  isRotatableStatus,
+  rotationStatus,
+  resetRotation,
+  onRotationEvent,
+  createRotatingFetch,
+  fetchForEndpoint,
+} from "./free-rotation.js";

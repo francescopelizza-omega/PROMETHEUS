@@ -1281,6 +1281,16 @@ export function createPrometheusApi(): PrometheusApi {
     // ── the Model Hub surface (file 05 §1,§7,§8) ──────────────────────────────
     models: createModelApi(),
 
+    // ── the guided model picker (local · free · paid · endless free rotation) ──
+    modelWizard: {
+      step: (req) => ipcRenderer.invoke(IPC.modelWizardStep, req),
+      plan: (req) => ipcRenderer.invoke(IPC.modelWizardPlan, req),
+      setKey: (req) => ipcRenderer.invoke(IPC.modelWizardSetKey, req),
+      liveModels: (req) => ipcRenderer.invoke(IPC.modelWizardLiveModels, req),
+      choose: (req) => ipcRenderer.invoke(IPC.modelWizardChoose, req),
+      endpoints: () => ipcRenderer.invoke(IPC.modelWizardEndpoints),
+    },
+
     // ── the Catalog manager surface (file 06 §4) ──────────────────────────────
     catalog: createCatalogApi(),
 

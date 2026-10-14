@@ -2306,6 +2306,19 @@ export function makeLlmClient(endpoint: AiEndpoint, deps: LlmClientDeps = {}): L
   const policy: WorkspacePolicy = deps.policy ?? { neverSendToCloud: false };
   const { policy: _omit, signal, ...aiDeps } = deps;
   const client: AiClient = createAiClient(endpoint, policy, aiDeps);
+  /**
+   * The native tool turn's fetch — rotating when this is the endless free rotation.
+   *
+   * `createAiClient` wraps its own fetch, but the native tool turn below is a SEPARATE
+   * transport with its own fetch parameter, and it is the one nearly every agentic turn takes.
+   * Unwrapped, a rotation session's tool turns would go to the reserved `.invalid` host and die
+   * in DNS while its plain chats worked — the worst kind of half-working.
+   */
+  const turnFetch: FetchLike = ai.fetchForEndpoint(
+    endpoint,
+    deps.fetch ?? (fetch as unknown as FetchLike),
+    deps.resolveKey,
+  );
   // What this endpoint has been observed to actually do, accumulated across the session.
   // Owned per-client so a `/model` switch starts a fresh hypothesis.
   let capabilityState: ToolCapabilityState = deps.capability ?? agent.protocol.initialCapability();
@@ -2472,7 +2485,7 @@ export function makeLlmClient(endpoint: AiEndpoint, deps: LlmClientDeps = {}): L
         // test that drains the iterator directly never breaks early. A live cloud round-trip
         // reported two rounds served and one usage record, which is how this surfaced.
         try {
-          yield* toolTurn(endpoint, messages, tools, policy, signal, effort, deps.fetch, observed, {
+          yield* toolTurn(endpoint, messages, tools, policy, signal, effort, turnFetch, observed, {
             ...(deps.resolveKey ? { resolveKey: deps.resolveKey } : {}),
             // Applies whether or not a `/think` tier was ever set: an R1-style model leaks its
             // inline `<think>` regardless of what effort was requested.

@@ -188,14 +188,43 @@ prometheus purge <agent>         # back up and remove a forgotten agent's config
 prometheus disk-space map /      # where the disk went (in the TUI: /disk-space, the full explorer)
 ```
 
-### 7. Run a model that does not fit in your RAM
+### 7. Pick a model in four questions — local, free cloud, paid, or an endless free spinner
+
+```bash
+/models                          # local (always free) or cloud?
+/models local                    # models for THIS machine, each fit-checked against your RAM
+/models free                     # NVIDIA NIM · Groq · Cerebras · Gemini · Mistral · OpenRouter …
+/models paid                     # Claude · GPT-5 / Codex · Gemini Pro · DeepSeek · Mistral
+/models spinner                  # one model that never runs dry: rotates across free LLM APIs
+```
+
+Every row carries two lines — what the model is good at and what will bite you (quota, speed,
+licence, data use). Picking one prepares it: Prometheus installs Ollama through the gated
+installer, downloads the weights, or asks for the provider's free key (hidden input, verified
+against the provider, stored in your OS keychain — never a file). A model too big for your RAM is
+named as such *before* any download: a large MoE runs through **colibri** (experts streamed from
+NVMe), a large dense model only through **AirLLM** (minutes per token, offline work), and if you
+decline either you are offered the strongest models that do fit. The same picker is the first
+panel of the desktop app's Models page. Your last pick is remembered across sessions and surfaces.
+
+The **endless free spinner** sends each request to the first free provider with quota left and,
+on a rate limit or exhausted credit, hands the same request to the next one before a single token
+reaches you — Retry-After honoured, one key per provider (never several accounts at one), and a
+`↻` notice whenever it switches. Provider list curated from
+[mnfst/awesome-free-llm-apis](https://github.com/mnfst/awesome-free-llm-apis),
+[open-free-llm-api/awesome-freellm-apis](https://github.com/open-free-llm-api/awesome-freellm-apis)
+and [amardeeplakshkar/awesome-free-llm-apis](https://github.com/amardeeplakshkar/awesome-free-llm-apis);
+anything that scrapes consumer chat sites is excluded.
+
+### 8. Run a model that does not fit in your RAM
 
 ```bash
 /remote add                      # a box you own, over LAN or ssh
-prometheus models                # offload / AirLLM techniques, ranked by feasibility
+/models tools                    # model-running tools (AirLLM, FlashAttention, …)
+prometheus models                # the same tool list, outside a session
 ```
 
-### 8. Work on several things at once without collisions
+### 9. Work on several things at once without collisions
 
 ```bash
 /orchestrate <task>              # fan out to parallel sub-agents
@@ -207,7 +236,7 @@ prometheus models                # offload / AirLLM techniques, ranked by feasib
 Sub-agents return only their final answer, so their intermediate work never fills the parent's
 context. Resource guards keep a swarm from starving the machine.
 
-### 9. Get oriented in a codebase you have never seen
+### 10. Get oriented in a codebase you have never seen
 
 ```bash
 prometheus meet                  # what this repo is and where things are
@@ -216,7 +245,7 @@ prometheus diagram uml src/      # Mermaid or Graphviz, from a read-only AST wal
 prometheus refactor structure    # structure tree, imports, call graph
 ```
 
-### 10. Keep the whole toolchain current without breaking it
+### 11. Keep the whole toolchain current without breaking it
 
 ```bash
 prometheus updates               # CLIs, local models, host tools, Prometheus itself
@@ -301,6 +330,8 @@ the full list of what is *not* finished.
 | **Model health ledger** | What we learned per endpoint: native vs text protocol, the context window actually served, observed failures. `/model-health` |
 | **Remote compute** | Register machines you own over LAN or ssh, confirm host keys, open tunnels, score remote RAM fit. `/remote` |
 | **Won't-fit toolkit** | A curated offload/AirLLM technique registry plus a feasibility assessor for models bigger than your RAM |
+| **Guided picker** | `/models` (and the desktop Models page): local · free cloud · paid cloud · endless free spinner, two lines per model, fit-checked, prepared for you |
+| **Endless free spinner** | One endpoint over every free LLM API you have a key for (plus keyless tiers): fails over on quota before the first token, honours Retry-After |
 
 ### 💸 Cost and context economy
 
@@ -828,7 +859,8 @@ get to vouch for its own new description.
 ### Model providers
 
 Native tool-calling support for **OpenAI**, **Anthropic**, and **Gemini**'s own protocols; every
-other provider (OpenRouter, Groq, DeepSeek, and more) speaks the OpenAI-compatible dialect. A
+other provider (OpenRouter, Groq, DeepSeek, NVIDIA NIM, Cerebras, Hugging Face, Z.ai, Ollama Cloud,
+OVHcloud and more) speaks the OpenAI-compatible dialect. A
 **local** tier runs entirely offline through Ollama, including a one-step "repoint" that swaps a
 metered open-weight model for its free local pull. A reasoning-effort knob (off / low / medium /
 high / max) adapts per model and runtime, preferring a live capability probe over guessing from a

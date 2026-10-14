@@ -87,6 +87,7 @@ import {
   validateModelServe,
   validateModelUnserve,
 } from "./model-validate.js";
+import { registerModelWizardIpc } from "./model-wizard-ipc.js";
 import type { ServeRecipe, ServeRow, ServeSupervisor } from "./serve-supervisor.js";
 import { readTelemetry } from "./telemetry.js";
 
@@ -777,8 +778,13 @@ export function registerModelIpcHandlers(wiring: ModelIpcWiring): () => void {
     },
   );
 
+  // The guided picker's channels ride the Model Hub's lifecycle, so BOTH bootstrap paths in
+  // main/index.ts (each calls this function) register them, and the disposer removes them.
+  const disposeWizard = registerModelWizardIpc();
+
   // ── disposer ─────────────────────────────────────────────────────────────
   return () => {
+    disposeWizard();
     serve.off("status", onServeStatus as (...a: unknown[]) => void);
     serve.off("evicted", onServeEviction as (...a: unknown[]) => void);
     for (const channel of [

@@ -2385,7 +2385,7 @@ export function AgentPane({
           {endpoints.length === 0 && !autoStarting && (
             <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
               <Button size="sm" variant="primary" onClick={() => onNavigate?.("models")}>
-                ⬇ Install a local model
+                ★ Choose a model (local · free · paid)
               </Button>
               <Button size="sm" variant="secondary" onClick={() => onNavigate?.("chat")}>
                 ◆ Use an AI CLI

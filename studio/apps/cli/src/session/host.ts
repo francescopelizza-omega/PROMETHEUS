@@ -186,6 +186,7 @@ import {
 import { type McpSession, openMcpSession, withMcpTools } from "./mcp-session.js";
 import { admitEndpoint, setRemoteHostLookup } from "./model-admission-host.js";
 import { modelCandidates, resolveModelCandidate } from "./model-candidates.js";
+import { createModelsHost, readModelChoice } from "./models-host.js";
 import {
   type Backends,
   backendSummary,
@@ -916,6 +917,34 @@ export async function launchSession(parsed: ParsedArgs, deps: SessionDeps = {}):
   // revoking it. This assignment is what makes `SessionCtx.resolveKey` — declared, threaded
   // and consumed all along — reachable for the first time.
   const resolveKey = createKeyResolver();
+  /**
+   * `/models` — the guided picker's IO, shared with the TUI bridge (`session/models-host.ts`).
+   * It mutates `backends`, `cloudEndpoints` and `cloudKeys` IN PLACE after an install, a pull or
+   * a stored key, so `/model` sees the new choice without a restart.
+   */
+  const modelsHost = createModelsHost({
+    home,
+    client,
+    backends,
+    cloudEndpoints,
+    keychainProviders: cloudKeys,
+    adoptEndpoint: async (next, model) => {
+      state = repl.reduce(state, { type: "tune", patch: { model } });
+      await adoptEndpoint(next);
+    },
+    activeId: () => endpoint?.id,
+    notify: (line) => writeLine(c.dim(line)),
+  });
+  // The user's last `/models` pick wins over "the first live runner" — but only when it can
+  // answer right now (its runner serving it, its key present); otherwise the old default stands.
+  const savedPick = readModelChoice(home);
+  const restored = modelsHost.restore(savedPick);
+  const pickHint = modelsHost.restoreHint(savedPick);
+  if (pickHint) writeLine(c.dim(pickHint));
+  if (restored) {
+    endpoint = restored.endpoint;
+    writeLine(c.dim(`model → ${restored.label} (your last /models pick)`));
+  }
   // A cloud endpoint is selected only when the user has no local runner; otherwise the local
   // one stays the default, because it is free, private and already warm.
   if (!endpoint && cloudEndpoints.length > 0) {
@@ -925,7 +954,15 @@ export async function launchSession(parsed: ParsedArgs, deps: SessionDeps = {}):
     state = repl.reduce(state, {
       type: "tune",
       patch: {
-        model: { provider: backends.localRunner?.name ?? "ollama", modelId: endpoint.model ?? "" },
+        // The provider of the endpoint actually chosen: this used to be the local runner's name
+        // unconditionally, so a session on a cloud model showed "ollama" in its footer.
+        model: restored?.model ?? {
+          provider:
+            endpoint.locality === "cloud"
+              ? (endpoint.id.split(":")[1] ?? "cloud")
+              : (backends.localRunner?.name ?? "ollama"),
+          modelId: endpoint.model ?? "",
+        },
       },
     });
     /**
@@ -1408,6 +1445,68 @@ export async function launchSession(parsed: ParsedArgs, deps: SessionDeps = {}):
     suspendTerminal: () => terminalHandover.suspend(),
     resumeTerminal: () => terminalHandover.resume(),
   });
+
+  /**
+   * `ask`, with the typing NOT echoed — for an API key pasted into `/models`.
+   *
+   * readline has no public mute, so the prompt is written normally and every write after it is
+   * swallowed until Enter, through `_writeToOutput` (the hook Node's own readline examples use
+   * for exactly this). If a future Node drops the hook this REFUSES rather than echoing a
+   * secret. The answer is also taken back out of readline's history, or Up-arrow would recall
+   * the key; and the mute is lifted on ^C / close, or a cancelled prompt would silence the
+   * session for good.
+   */
+  const askSecret = (prompt: string): Promise<string> =>
+    whileBlocked(() =>
+      oneQuestion(
+        () =>
+          new Promise<string>((resolveAsk) => {
+            const r = rl as unknown as {
+              _writeToOutput?: (s: string) => void;
+              history?: string[];
+            };
+            const original = r._writeToOutput;
+            if (typeof original !== "function") {
+              writeLine(
+                c.yellow(
+                  "this terminal can't hide typing — use `prometheus provider connect <id>`",
+                ),
+              );
+              resolveAsk("");
+              return;
+            }
+            let muted = false;
+            // The question is WITHDRAWN on ^C / close, not merely abandoned: a pending
+            // `rl.question` would otherwise swallow the user's next line (the same trap
+            // `ask-cancellable.ts` documents and avoids the same way).
+            const ac = new AbortController();
+            const restore = (): void => {
+              r._writeToOutput = original;
+              rl.off("SIGINT", onAbort);
+              rl.off("close", onAbort);
+            };
+            const onAbort = (): void => {
+              restore();
+              ac.abort();
+              resolveAsk("");
+            };
+            r._writeToOutput = (text: string) => {
+              if (!muted) original.call(rl, text);
+              else if (/[\r\n]/.test(text)) original.call(rl, "\n");
+            };
+            rl.once("SIGINT", onAbort);
+            rl.once("close", onAbort);
+            rl.question(`${c.cyan("›")} ${prompt} `, { signal: ac.signal }, (answer) => {
+              restore();
+              // readline keeps history newest-first; take back THIS answer, not an older
+              // identical line further down.
+              if (Array.isArray(r.history) && r.history[0] === answer) r.history.shift();
+              resolveAsk(answer);
+            });
+            muted = true;
+          }),
+      ),
+    );
 
   /**
    * `ask`, for a question the user may walk away from: Ctrl-C and Ctrl-D both answer "", and keys
@@ -2631,6 +2730,8 @@ export async function launchSession(parsed: ParsedArgs, deps: SessionDeps = {}):
     ask,
     confirm,
     askPath,
+    askSecret,
+    models: modelsHost,
     runSetup: runHostSetup,
     runPaths: runHostPaths,
     runDemos: (rest) =>

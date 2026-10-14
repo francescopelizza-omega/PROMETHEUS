@@ -93,8 +93,18 @@ export const API_PROVIDERS: readonly ApiProvider[] = Object.freeze([
     // The wire format appends `/v1/messages` — this is the API ROOT, not a chat path.
     baseUrl: "https://api.anthropic.com",
     apiKeyEnv: ["ANTHROPIC_API_KEY"],
-    defaultModel: "claude-sonnet-4-6",
-    models: ["claude-opus-4-8", "claude-sonnet-4-6", "claude-haiku-4-5"],
+    defaultModel: "claude-sonnet-5-5",
+    // Claude 5 first (current generation); the 4.x ids stay because they are still served and
+    // a saved choice naming one must keep resolving.
+    models: [
+      "claude-opus-5-5",
+      "claude-sonnet-5-5",
+      "claude-haiku-5-5",
+      "claude-fable-5-1",
+      "claude-opus-4-8",
+      "claude-sonnet-4-6",
+      "claude-haiku-4-5",
+    ],
     contextWindow: 200_000,
     verifyPath: "/v1/models",
     automation: "allowed",
@@ -370,6 +380,127 @@ export const API_PROVIDERS: readonly ApiProvider[] = Object.freeze([
     tosUrl: "https://platform.moonshot.ai/docs/agreement/modeluse",
     note: "Strong long-context Kimi models — data may be processed in China (privacy flag); confirm region/terms at setup.",
     dataRegion: "CN",
+  },
+  /**
+   * --- added for the `/models` guided picker (2026-10-12) ---
+   *
+   * Each of these was reachable from somewhere else in the repo and from none of the places a
+   * session picks a model. NVIDIA NIM and the first-party OpenAI API sat in the engine's
+   * `OPEN_AI_ENDPOINTS` (prometheus.py) while this registry — the only one a session's key
+   * resolver reads — never heard of them, so a user who exported `NVIDIA_API_KEY` got nothing.
+   *
+   * Their free-tier facts (limits, data use, sign-up page) live in `ai/model-catalog/free-tier.ts`
+   * rather than here: this table answers "where is it and which env var holds the key", and the
+   * quota facts rot on a different clock.
+   *
+   * Every row is `confidence: "verify"` on purpose. The base URLs are each vendor's documented
+   * OpenAI-compatible surface, but the model ids are a snapshot and these catalogues retire
+   * models monthly; the picker treats the provider's live `GET /models` as the authority once a
+   * key exists (`ai/model-catalog/live-models.ts`).
+   */
+  {
+    id: "openai",
+    label: "OpenAI",
+    baseUrl: "https://api.openai.com/v1",
+    apiKeyEnv: ["OPENAI_API_KEY"],
+    defaultModel: "gpt-5",
+    models: ["gpt-5", "gpt-5-mini", "gpt-5-codex"],
+    // The smallest window across the listed models: under-stating costs a compaction,
+    // over-stating costs a 400 mid-turn (see the `contextWindow` field comment).
+    contextWindow: 128_000,
+    automation: "allowed",
+    confidence: "verify",
+    tosUrl: "https://openai.com/policies/services-agreement/",
+    note: "First-party OpenAI API (the models behind Codex). Paid, metered per token.",
+    dataRegion: "US",
+  },
+  {
+    id: "nvidia",
+    label: "NVIDIA NIM (build.nvidia.com)",
+    baseUrl: "https://integrate.api.nvidia.com/v1",
+    apiKeyEnv: ["NVIDIA_API_KEY", "NGC_API_KEY"],
+    defaultModel: "nvidia/llama-3.3-nemotron-super-49b-v1.5",
+    models: [
+      "nvidia/llama-3.3-nemotron-super-49b-v1.5",
+      "nvidia/llama-3.1-nemotron-ultra-253b-v1",
+      "nvidia/nvidia-nemotron-nano-9b-v2",
+      "qwen/qwen3-coder-480b-a35b-instruct",
+      "moonshotai/kimi-k2-instruct",
+      "deepseek-ai/deepseek-v3.1",
+      "openai/gpt-oss-120b",
+      "meta/llama-3.3-70b-instruct",
+    ],
+    contextWindow: 128_000,
+    automation: "allowed",
+    confidence: "verify",
+    tosUrl:
+      "https://assets.ngc.nvidia.com/products/api-catalog/legal/NVIDIA%20API%20Trial%20Terms%20of%20Service.pdf",
+    note: "NVIDIA's hosted catalogue (Nemotron + popular open models). Free developer access is for prototyping/testing; requests are logged.",
+    dataRegion: "US",
+  },
+  {
+    id: "huggingface",
+    label: "Hugging Face Inference Providers",
+    baseUrl: "https://router.huggingface.co/v1",
+    apiKeyEnv: ["HF_TOKEN", "HUGGING_FACE_HUB_TOKEN"],
+    defaultModel: "openai/gpt-oss-120b",
+    models: [
+      "openai/gpt-oss-120b",
+      "Qwen/Qwen3-Coder-480B-A35B-Instruct",
+      "deepseek-ai/DeepSeek-V3.1",
+      "moonshotai/Kimi-K2-Instruct",
+      "zai-org/GLM-4.5",
+      "meta-llama/Llama-3.3-70B-Instruct",
+    ],
+    contextWindow: 128_000,
+    automation: "allowed",
+    confidence: "verify",
+    tosUrl: "https://huggingface.co/terms-of-service",
+    note: "One HF token routes to many third-party inference hosts. Small monthly free credit, then per-token.",
+    dataRegion: "global",
+  },
+  {
+    id: "zai",
+    label: "Z.ai (GLM)",
+    baseUrl: "https://api.z.ai/api/paas/v4",
+    apiKeyEnv: ["ZAI_API_KEY", "ZHIPUAI_API_KEY"],
+    defaultModel: "glm-4.7-flash",
+    models: ["glm-4.7-flash", "glm-4.5-flash", "glm-4.6"],
+    contextWindow: 128_000,
+    automation: "allowed",
+    confidence: "verify",
+    tosUrl: "https://docs.z.ai/legal-agreement/terms-of-use",
+    note: "Zhipu's international endpoint. The -flash GLM models are free; the rest are metered.",
+    dataRegion: "CN",
+  },
+  {
+    id: "ollama-cloud",
+    label: "Ollama Cloud",
+    baseUrl: "https://ollama.com/v1",
+    apiKeyEnv: ["OLLAMA_API_KEY"],
+    defaultModel: "gpt-oss:120b",
+    models: ["gpt-oss:120b", "qwen3-coder:480b", "deepseek-v3.1:671b"],
+    contextWindow: 128_000,
+    automation: "allowed",
+    confidence: "verify",
+    tosUrl: "https://ollama.com/terms",
+    note: "Ollama's hosted large models with a free hourly/weekly allowance (key from ollama.com/settings/keys).",
+    dataRegion: "US",
+  },
+  {
+    id: "ovhcloud",
+    label: "OVHcloud AI Endpoints",
+    baseUrl: "https://oai.endpoints.kepler.ai.cloud.ovh.net/v1",
+    // Optional: the anonymous tier needs NO key (2 req/min per IP per model). A token lifts it.
+    apiKeyEnv: ["OVH_AI_ENDPOINTS_ACCESS_TOKEN"],
+    defaultModel: "gpt-oss-120b",
+    models: ["gpt-oss-120b", "Meta-Llama-3_3-70B-Instruct"],
+    contextWindow: 128_000,
+    automation: "allowed",
+    confidence: "verify",
+    tosUrl: "https://www.ovhcloud.com/en/terms-and-conditions/",
+    note: "EU-hosted (France). Works anonymously at a low rate; an access token raises the limit.",
+    dataRegion: "EU",
   },
 ]);
 

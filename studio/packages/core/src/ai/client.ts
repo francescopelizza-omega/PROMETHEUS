@@ -25,6 +25,7 @@ import { IdleWatchdog } from "../agent/idle-watchdog.js";
 import { applyEffort, applyEffortToMessages } from "./effort/apply.js";
 import { runtimeFromBaseUrl } from "./effort/rules.js";
 import type { EffortResolution } from "./effort/types.js";
+import { type RotationMember, fetchForEndpoint } from "./free-rotation.js";
 import { localKeepAliveField } from "./local-runners.js";
 import { applyPromptCache, cacheDialectFor } from "./prompt-cache.js";
 import { endpointBreaker, fetchModelWithRetry } from "./request.js";
@@ -82,6 +83,13 @@ export interface AiEndpoint {
    * as grounds for refusal".
    */
   contextWindowMeasured?: boolean;
+  /**
+   * Set only on the endless free rotation (`ai/free-rotation.ts`): the members a request to
+   * this endpoint may be served by. Its presence is what makes a transport wrap its fetch in
+   * `createRotatingFetch`; its `baseUrl` is a reserved `.invalid` host, so a transport that
+   * ignores this field fails in DNS instead of sending the prompt anywhere.
+   */
+  rotation?: readonly RotationMember[];
 }
 
 /** Per-workspace privacy policy (file 07 §7.5). */
@@ -477,7 +485,7 @@ export function createAiClient(
   policy: WorkspacePolicy,
   deps: AiClientDeps = {},
 ): AiClient {
-  const doFetch: FetchLike =
+  const rawFetch: FetchLike =
     deps.fetch ??
     ((globalThis as { fetch?: unknown }).fetch as FetchLike | undefined) ??
     (() => {
@@ -488,6 +496,9 @@ export function createAiClient(
     (async (ref) => {
       throw new Error(`no key resolver; cannot resolve apiKeyRef "${ref}"`);
     });
+  // The endless free rotation is a FETCH, not a transport: every other line below is the same
+  // for it as for a single provider. A pass-through for every ordinary endpoint.
+  const doFetch: FetchLike = fetchForEndpoint(endpoint, rawFetch, resolveKey);
 
   /**
    * The protocol this endpoint speaks, chosen from the runtime its base URL implies.

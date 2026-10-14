@@ -90,6 +90,8 @@ import {
   resolveModelCandidate,
 } from "./model-candidates.js";
 import { runModelHealthCommand } from "./model-health-command.js";
+import type { ModelsHost } from "./models-host.js";
+import { runModelsCommand } from "./models-wizard.js";
 import { MAX_SUBAGENTS } from "./orchestrator.js";
 import {
   confirmHostKey,
@@ -407,6 +409,13 @@ export interface SlashCtx {
   ask: (prompt: string) => Promise<string>;
   /** yes/no prompt. */
   confirm: (prompt: string) => Promise<boolean>;
+  /**
+   * A prompt whose typing is NOT echoed (an API key). Optional: a host without one makes
+   * `/models` say how to store the key outside the session instead of echoing it.
+   */
+  askSecret?: (prompt: string) => Promise<string>;
+  /** `/models` — the guided picker's IO (`session/models-host.ts`). Absent ⇒ "not available". */
+  models?: ModelsHost;
   /** folder picker with tab-completion. */
   askPath: (prompt: string, def: string) => Promise<string>;
   /** run the /setup onboarding wizard. */
@@ -2893,7 +2902,19 @@ export const SLASH_REGISTRY: readonly SlashCmd[] = Object.freeze([
   }),
 
   /* ---- model hub ---- */
-  verb("models", "models", "Model-running tools (AirLLM/FlashAttention/…).", { args: "[action]" }),
+  /**
+   * `/models` — the guided model picker (local / free cloud / paid cloud / endless free
+   * rotation). It used to be the engine verb for model-running TOOLS; every engine action
+   * (`install`, `list`, `status` …) is still passed through by `runModelsCommand`, and
+   * `/models tools` is the old bare listing.
+   */
+  {
+    name: "models",
+    group: "models",
+    summary: "Pick a model: local (free) · free cloud · paid cloud · endless free spinner.",
+    args: "[local|cloud|free|paid|spinner|use <ref>|current|tools]",
+    run: (rest, ctx) => runModelsCommand(rest, ctx),
+  },
   verb("hw", "models", "Scan host hardware + usable model budget.", {
     verb: "model",
     fixed: ["hw"],

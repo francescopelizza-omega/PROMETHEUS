@@ -63,6 +63,7 @@ import type {
   ModelServeResult,
   ModelServeRow,
 } from "../shared/ipc-contract.js";
+import { ModelWizardPanel } from "./model-wizard.js";
 import {
   type InstalledRow,
   PULL_SCAN_NOTE,
@@ -752,6 +753,10 @@ export function ModelsRoute(): ReactElement {
       {/* ── §3: the four islands ──────────────────────────────────────────────
           `auto-fit` at 360px, so four islands on a wide window collapse to two and then
           one without any of them being crushed (§7). */}
+      {/* The guided picker first: the question most people arrive with is "which model?", and
+          the islands below are the expert tools for the answer. */}
+      <ModelWizardPanel />
+
       <div
         style={{
           display: "grid",

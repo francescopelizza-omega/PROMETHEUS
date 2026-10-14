@@ -363,6 +363,7 @@ ${c.bold("ENVIRONMENTS · MODELS · REPOS · PRIVACY")}
   ${c.cyan("env")} <list|create|clone|delete|use|export|import|doctor|add|remove|...>
   ${c.cyan("model")} <hw|list|search|browse|info|card|fit|pull|remove|serve|stop|endpoints|repoint>
   ${c.cyan("models")} <…> --set-root DIR    Local model-running tools (AirLLM/FA/…)
+  ${c.dim("in a session:")} ${c.cyan("/models")}      Guided picker: local · free cloud · paid · endless free rotation
   ${c.cyan("repo")} <add|list|status|update|pin|branch|rescan|remove|vault>
   ${c.cyan("metadata")} <inspect|scrub|edit|timestomp> <file>   file-metadata privacy
   ${c.cyan("disk-space")} [map|levels|files|mounts|delete|cleanup] [PATH]   disk usage (TUI: full explorer)

@@ -29,6 +29,7 @@
 // for it — the composition root already has it.
 import type { IpcMain, WebContents } from "electron";
 
+import type { FetchLike } from "@prometheus/core";
 import {
   PROBE_CACHE_TTL_MS,
   ai,
@@ -75,6 +76,7 @@ import {
 import { getBudgetGate, isLocalModelId } from "./budget-gate.js";
 import { touchModelActivity } from "./model-activity-store.js";
 import { admitDesktopModelLoad } from "./model-admission-gate.js";
+import { modelWizard } from "./model-wizard.js";
 
 /**
  * Native tool calls as they accumulate, keyed by the wire's GROUPING key rather than by
@@ -462,6 +464,13 @@ async function resolveCloudAuth(
   };
 }
 
+/** The status line for a rotation switch — the CLI's wording (`session/models-host.ts`). */
+function rotationNoticeText(e: ai.RotationEvent): string {
+  return e.from
+    ? `↻ free rotation: ${e.from.label} ${e.reason ? `(${e.reason}) ` : ""}→ now ${e.to.label}`
+    : `↻ free rotation: answering from ${e.to.label}`;
+}
+
 export async function runAiStream(
   req: AiStreamRequest,
   sender: WebContents | undefined,
@@ -548,6 +557,10 @@ export async function runAiStream(
   // walk straight past a `local-only` profile. The label is a hint for the UI; the URL is the
   // fact.
   const locality = localityOfUrl(req.endpoint.baseUrl);
+  // The endless free rotation (core `ai/free-rotation.ts`): a reserved `.invalid` base URL that
+  // only a ROTATING fetch can serve. It is cloud (the URL is not loopback), so every policy
+  // floor below — cloud, egress, the A5 authorisation level, the budget — applies unchanged.
+  const rotation = ai.isRotationUrl(req.endpoint.baseUrl);
   const cloud = coreSettings.cloudAllowed(locality, posture, req.neverSendToCloud);
   if (!cloud.allowed) {
     return {
@@ -937,7 +950,36 @@ export async function runAiStream(
      * `prometheus provider connect` writes, so a key configured once works on both surfaces.
      */
     let authHeader: Record<string, string> = {};
-    if (locality === "cloud") {
+    /**
+     * The fetch this request goes out on. For the rotation it is wrapped so each attempt is
+     * re-addressed to a real member — its URL, ITS key, its model — and a quota refusal moves
+     * on to the next member before a byte reaches the renderer. The members are computed HERE
+     * from the environment and the keychain, never taken from the request: the member list is
+     * where prompts go, and the renderer is the side this process does not trust.
+     */
+    let sendFetch: typeof fetch = doFetch;
+    if (rotation) {
+      const r = await modelWizard().rotationForMain();
+      if (r.members.length === 0) {
+        return {
+          ok: false,
+          error:
+            "the endless free rotation has no reachable provider — add a free key in Models → Guided setup",
+          text: "",
+          toolCalls: [],
+          breaker: breaker.snapshot(),
+        };
+      }
+      // Announced through THIS fetch's own hook, not the process-wide listener: two panes
+      // streaming on the rotation at once must each hear only their own switches.
+      sendFetch = ai.createRotatingFetch(doFetch as unknown as FetchLike, {
+        members: r.members,
+        resolveKey: r.resolveKey,
+        onEvent: (e) =>
+          emit(sender, { runId: req.runId, kind: "status", text: rotationNoticeText(e) }),
+      }) as unknown as typeof fetch;
+    }
+    if (locality === "cloud" && !rotation) {
       const auth = await resolveCloudAuth(req.endpoint.baseUrl);
       if (!auth.ok) {
         return {
@@ -976,7 +1018,7 @@ export async function runAiStream(
           },
           body: JSON.stringify(body),
         },
-        doFetch: doFetch as never,
+        doFetch: sendFetch as never,
         signalFor: armAttempt,
         // The STABLE controller — checked by `retry()` before each attempt AND right after a
         // failed one, which is what actually closes the backoff-sleep gap (see `outerAc`'s doc

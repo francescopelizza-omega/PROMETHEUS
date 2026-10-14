@@ -84,9 +84,31 @@ export const FAQ_DB: readonly FaqEntry[] = Object.freeze([
     keywords: ["venv", "conda", "python", "pip", "package", "cuda", "torch"],
   },
   {
+    topic: "models-pick",
+    q: "How do I choose a model (local, free cloud, paid, or the endless free rotation)?",
+    a: "/models walks you through it: local (always free, fit-checked against your RAM — it installs Ollama and downloads the model for you, and says when a model only runs through colibri or AirLLM) or cloud (free quotas like NVIDIA NIM / Groq / Cerebras, paid like Claude / GPT-5 / Gemini, or the endless free rotation that moves to the next free provider when one runs out). /models use <ref> switches directly; /models current shows the rotation's state.",
+    keywords: [
+      "model",
+      "models",
+      "pick",
+      "choose",
+      "free",
+      "nvidia",
+      "nemotron",
+      "kimi",
+      "glm",
+      "rotation",
+      "airllm",
+      "colibri",
+      "lm studio",
+    ],
+  },
+  {
     topic: "models-tools",
     q: "How do I discover + download open models?",
-    a: "/model search <q>, /model fit (scores models vs your hardware), /model pull <id> (gated download → ~/.prometheus/open_models), /model hw (hardware budget), /model endpoints (live runners).",
+    // These are their OWN verbs. This answer used to say `/model search|fit|pull|hw|endpoints`,
+    // and `/model search x` answered "no model matching" — `/model` only switches models.
+    a: "/fit (scores models vs your hardware), /pull <id> (gated download → ~/.prometheus/open_models), /hw (hardware budget), /endpoints (live runners). Model-running tools (AirLLM, FlashAttention …): /models tools, /models install <tool>.",
     keywords: ["huggingface", "search model", "quant", "fit", "hardware", "vram"],
   },
   {

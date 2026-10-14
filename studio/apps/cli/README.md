@@ -124,7 +124,7 @@ Aliases: `--print` and `--prompt` are the same flag.
 | **lifecycle** | `install`/`uninstall <name>` `[--only --skip --host --arm]` · `enable`/`disable <name>` `[--component hooks\|mcp --host]` · `bundle` · `sync` · `plugin`/`skill`/`app`/`worldsim` `<action>` |
 | **security** | `gate <t>` · `secure scan <t>` · `secure db [status\|update]` · `secure trust [list\|log\|verify <f>\|revoke <n>]` · `secure disinfect <t> --out D` · `secure quarantine [list\|restore <id>]` · `harden` · `audit <name>` |
 | **environments** | `env <list\|create\|clone\|delete\|use\|export\|import\|doctor\|add\|remove\|update\|upgrade\|enable\|disable\|cuda>` (over `envmgr.py`) |
-| **models** | `model <hw\|list\|search\|fit\|pull\|remove\|serve\|endpoints\|repoint>` (over `modelhub.py`) · `models <…> --set-root DIR` (model-running tools) |
+| **models** | `model <hw\|list\|search\|fit\|pull\|remove\|serve\|endpoints\|repoint>` (over `modelhub.py`) · `models <…> --set-root DIR` (model-running tools) · in a session: **`/models`** — guided picker (local · free cloud · paid cloud · endless free spinner), `/models use <ref>`, `/models current`, `/models tools` |
 | **repos** | `repo <add\|list\|status\|update\|pin\|branch\|rescan\|remove\|vault>` (over `repo.py`, the only arbitrary-URL clone path — nemesis-gated) |
 | **privacy** | `metadata <inspect\|scrub\|edit\|timestomp> <file>` (over `metadata.py`) |
 | **disk space** | `disk-space [map\|levels\|files\|mounts\|delete\|cleanup] [PATH] [--sudo]` (over `disk_map.py`; in the TUI `/disk-space` opens the full explorer — Ctrl+] minimise/resume, Ctrl+D quit) |

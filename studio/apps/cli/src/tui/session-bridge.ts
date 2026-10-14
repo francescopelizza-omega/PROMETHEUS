@@ -147,6 +147,7 @@ import { applyInDirective, createOutputDir } from "../session/in.js";
 import { type McpSession, openMcpSession, withMcpTools } from "../session/mcp-session.js";
 import { admitEndpoint, setRemoteHostLookup } from "../session/model-admission-host.js";
 import { modelCandidates, resolveModelCandidate } from "../session/model-candidates.js";
+import { createModelsHost, readModelChoice } from "../session/models-host.js";
 import {
   type Backends,
   backendSummary,
@@ -373,6 +374,8 @@ export interface BridgeDeps {
   confirmPhrase: (prompt: string, phrase: string) => Promise<boolean>;
   /** in-TUI free-text prompt. */
   ask: (prompt: string) => Promise<string>;
+  /** in-TUI prompt whose typing is painted as bullets (API keys). Absent ⇒ no in-session key entry. */
+  askSecret?: (prompt: string) => Promise<string>;
   /** in-TUI folder prompt. */
   askPath: (prompt: string, def: string) => Promise<string>;
   /**
@@ -617,6 +620,10 @@ export async function createSessionBridge(deps: BridgeDeps): Promise<SessionBrid
   const askPhrase = (prompt: string, phrase: string): Promise<boolean> =>
     whileBlocked(() => deps.confirmPhrase(prompt, phrase));
   const askText = (prompt: string): Promise<string> => whileBlocked(() => deps.ask(prompt));
+  const askSecretFn = deps.askSecret;
+  const askSecretText = askSecretFn
+    ? (prompt: string): Promise<string> => whileBlocked(() => askSecretFn(prompt))
+    : undefined;
   const askFolder = (prompt: string, def: string): Promise<string> =>
     whileBlocked(() => deps.askPath(prompt, def));
   /**
@@ -791,6 +798,30 @@ export async function createSessionBridge(deps: BridgeDeps): Promise<SessionBrid
     hasKeychainKey: (id) => cloudKeys.has(id),
   });
   const resolveKey = createKeyResolver();
+  // `/models` — identical to the readline host's block (see `session/models-host.ts`).
+  const modelsHost = createModelsHost({
+    home,
+    client,
+    backends,
+    cloudEndpoints,
+    keychainProviders: cloudKeys,
+    adoptEndpoint: async (next, model) => {
+      state = repl.reduce(state, { type: "tune", patch: { model } });
+      await adoptEndpoint(next);
+    },
+    activeId: () => endpoint?.id,
+    notify: (line) => deps.write(c.dim(line)),
+  });
+  const savedPick = readModelChoice(home);
+  const restored = modelsHost.restore(savedPick);
+  const pickHint = modelsHost.restoreHint(savedPick);
+  if (pickHint) deps.write(c.dim(pickHint));
+  if (restored) {
+    endpoint = restored.endpoint;
+    // `deps.write`, not `write`: that alias is declared further down, and touching it here
+    // would be a temporal-dead-zone throw at session start.
+    deps.write(c.dim(`model → ${restored.label} (your last /models pick)`));
+  }
   if (!endpoint && cloudEndpoints.length > 0) {
     endpoint = cloudEndpoints[0]?.endpoint;
   }
@@ -798,7 +829,13 @@ export async function createSessionBridge(deps: BridgeDeps): Promise<SessionBrid
     state = repl.reduce(state, {
       type: "tune",
       patch: {
-        model: { provider: backends.localRunner?.name ?? "ollama", modelId: endpoint.model ?? "" },
+        model: restored?.model ?? {
+          provider:
+            endpoint.locality === "cloud"
+              ? (endpoint.id.split(":")[1] ?? "cloud")
+              : (backends.localRunner?.name ?? "ollama"),
+          modelId: endpoint.model ?? "",
+        },
       },
     });
     // Warm the model AND ask the runner how big its context ACTUALLY is / what it can do.
@@ -2232,6 +2269,8 @@ export async function createSessionBridge(deps: BridgeDeps): Promise<SessionBrid
     ask: askText,
     confirm: askConfirm,
     askPath: askFolder,
+    ...(askSecretText ? { askSecret: askSecretText } : {}),
+    models: modelsHost,
     ...(deps.focusTraitRail ? { focusTraitRail: deps.focusTraitRail } : {}),
     runSetup: runHostSetup,
     runPaths: runHostPaths,

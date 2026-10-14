@@ -14,12 +14,50 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 
+import type { WizardEndpoint } from "../../../shared/ipc-contract.js";
 import { useAiSessionStore } from "../state/stores.js";
 import type { RendererEndpoint } from "./ai-client.js";
-import { toEndpoints } from "./endpoints.js";
+import { localityOf, toEndpoints } from "./endpoints.js";
 
 function models(): Window["prometheus"]["models"] | undefined {
   return typeof window !== "undefined" ? window.prometheus?.models : undefined;
+}
+
+/**
+ * The cloud endpoints the guided picker knows about: every provider with a key, the remembered
+ * `/models` pick, and the endless free rotation. The engine's `model:endpoints` lists base URLs
+ * and nothing about keys, so a key added in the picker never reached this menu without it.
+ *
+ * Locality is RE-DERIVED from the URL here, never taken from main's label — the same rule
+ * `toEndpoints` follows — so the no-cloud checks always see the URL's truth.
+ */
+export function wizardToEndpoints(rows: readonly WizardEndpoint[] | undefined): RendererEndpoint[] {
+  return (rows ?? []).map((e) => ({
+    id: e.id,
+    baseUrl: e.baseUrl,
+    locality: localityOf(e.baseUrl),
+    model: e.model,
+    ...(e.contextWindow ? { contextWindow: e.contextWindow } : {}),
+  }));
+}
+
+/** Append `extra` to `base`, skipping ids already present (the engine's rows win). */
+export function mergeEndpoints(
+  base: readonly RendererEndpoint[],
+  extra: readonly RendererEndpoint[],
+): RendererEndpoint[] {
+  const seen = new Set(base.map((e) => e.id));
+  return [...base, ...extra.filter((e) => !seen.has(e.id))];
+}
+
+async function wizardEndpoints(): Promise<RendererEndpoint[]> {
+  try {
+    const api = typeof window !== "undefined" ? window.prometheus?.modelWizard : undefined;
+    const r = await api?.endpoints();
+    return r?.ok ? wizardToEndpoints(r.endpoints) : [];
+  } catch {
+    return []; // an older main without the channel — the engine's list stands alone
+  }
 }
 
 function sleep(ms: number): Promise<void> {
@@ -340,9 +378,12 @@ export function useActiveEndpoint(): ActiveEndpoint {
     let alive = true;
     void (async () => {
       try {
-        const res = await models()?.endpoints();
+        const [res, extra] = await Promise.all([models()?.endpoints(), wizardEndpoints()]);
         if (!alive) return;
-        const eps = applyMeasured(await expandServedModels(toEndpoints(res)));
+        const eps = mergeEndpoints(
+          applyMeasured(await expandServedModels(toEndpoints(res))),
+          extra,
+        );
         if (!alive) return;
         setEndpoints(eps);
         // auto-select the first when none chosen OR the persisted choice no longer exists

@@ -113,6 +113,8 @@ All powered by the same agent loop in `studio/packages/core`:
 
 - **RAM admission** — Real KV-cache arithmetic: refuses models that won't fit, explains why
 - **Model Hub** — Score models against your hardware, pull through gate, manage runtimes
+- **Guided model picker (`/models`)** — Local (always free) or cloud → free cloud · paid cloud · endless free spinner; two lines per model; installs Ollama, pulls weights or stores a verified key for you; warns before a model that only runs via colibri/AirLLM and offers ones that fit
+- **Endless free spinner** — One model that never runs dry: rotates across free LLM APIs (NVIDIA NIM, Groq, Cerebras, Gemini, Mistral, OpenRouter, SambaNova, Z.ai, Ollama Cloud, Hugging Face, keyless OVHcloud) on quota limits, before the first token
 - **Local runtimes** — Ollama and LM Studio first-class; llama.cpp and vLLM as targets
 - **Hugging Face import** — Convert and install models with one command
 - **Remote compute** — SSH or LAN GPU boxes with feasibility assessment for offloading
