@@ -185,6 +185,7 @@ test("A0 through A7: the human is asked for EVERY privileged call — no level s
   assert.equal(calls.length, 8);
   assert.deepEqual(calls[0], [
     "/usr/bin/sudo",
+    "-k",
     "-p",
     "[PROMETHEUS] password for %u: ",
     "--",

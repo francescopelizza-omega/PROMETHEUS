@@ -12,7 +12,7 @@
  * already denied the request, a late answer is reported rather than silently dropped, so the
  * human is never left believing a command ran.
  */
-import { type Approver, formatApprovalView } from "@prometheus/core/agent-system-host";
+import { type Approver, formatApprovalView, visibleText } from "@prometheus/core/agent-system-host";
 
 export interface TerminalPromptIo {
   write: (line: string) => void;
@@ -27,7 +27,7 @@ export function makeTerminalApprover(io: TerminalPromptIo): Approver {
     let answer: Awaited<ReturnType<Approver>>;
     if (view.phrase) {
       const typed = (
-        await io.ask(`type ${view.phrase} to approve once (Enter denies, ${secs} s): `)
+        await io.ask(`type ${visibleText(view.phrase)} to approve once (Enter denies, ${secs} s): `)
       ).trim();
       answer = typed ? { decision: "approve", phrase: typed } : { decision: "deny" };
     } else {

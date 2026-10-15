@@ -125,6 +125,7 @@ export {
   createPrivilegedGate,
   formatApprovalView,
   sudoAuditPath,
+  visibleText,
   trustedBinary,
   DEFAULT_APPROVAL_TIMEOUT_MS,
   SUDO_PROMPT,

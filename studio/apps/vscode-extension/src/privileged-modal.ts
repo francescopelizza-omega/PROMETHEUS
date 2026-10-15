@@ -19,6 +19,7 @@ import {
   type ApprovalAnswer,
   type Approver,
   formatApprovalView,
+  visibleText,
 } from "@prometheus/core/agent-system-host";
 
 export interface ModalWindow {
@@ -48,7 +49,7 @@ export function makeVsCodeApprover(win: ModalWindow): Approver {
       if (view.phrase) {
         const typed = (
           await win.showInputBox({
-            prompt: `This can destroy data. Type ${view.phrase} to approve once.`,
+            prompt: `This can destroy data. Type ${visibleText(view.phrase)} to approve once.`,
             ignoreFocusOut: true,
           })
         )?.trim();

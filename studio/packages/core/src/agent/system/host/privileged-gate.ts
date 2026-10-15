@@ -316,8 +316,12 @@ function digestOf(
 
 function execArgsFor(elevator: GateElevator, argv: readonly string[], askpass: boolean): string[] {
   switch (elevator) {
+    // `-k`: ignore (and do not refresh) sudo's cached credential, so EVERY approved command asks
+    // for the password again. Without it an approval within sudo's timestamp window ran with no
+    // password at all — the view's "sudo asks for the password" was false, and on the desktop the
+    // renderer's click was then the only thing between a request and root.
     case "sudo":
-      return ["-p", SUDO_PROMPT, ...(askpass ? ["-A"] : []), "--", ...argv];
+      return ["-k", "-p", SUDO_PROMPT, ...(askpass ? ["-A"] : []), "--", ...argv];
     case "pkexec":
       return [...argv];
     default:
@@ -612,22 +616,42 @@ export function createPrivilegedGate(deps: GateDeps): PrivilegedGate {
 }
 
 /**
+ * Every character of an approval field, made visible. The view is printed to terminals and
+ * shown in dialogs, and its fields carry model-chosen text (argv, cwd, the reason). A raw ESC,
+ * CR or backspace there could redraw the lines above it — show `ls` while `rm -rf` runs — and a
+ * bidi override or zero-width character could make the text read differently from what runs.
+ * Each such character is shown as an escape instead, so what the human reads is what runs.
+ */
+export function visibleText(s: string): string {
+  return s.replace(
+    /[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u2028-\u202e\u2060-\u2069\ufeff]/g,
+    (ch) => {
+      const c = ch.codePointAt(0) ?? 0;
+      return c <= 0xff
+        ? `\\x${c.toString(16).padStart(2, "0")}`
+        : `\\u${c.toString(16).padStart(4, "0")}`;
+    },
+  );
+}
+
+/**
  * The lines every host shows before asking. One renderer, so the TUI, the readline host, the
  * VS Code modal and an audit reader all see the same facts in the same order — the command
  * first, because it is the thing being decided.
  */
 export function formatApprovalView(v: ApprovalView): string[] {
+  const t = visibleText;
   const lines = [
     "PRIVILEGED COMMAND — approve this exact command, once?",
-    `  ${v.commandLine}`,
-    `runs: ${v.execArgv.map(shellQuote).join(" ")}`,
-    `in:       ${v.cwd}`,
-    `asked by: ${v.requester} (${v.surface})`,
-    `why:      ${v.why}`,
+    `  ${t(v.commandLine)}`,
+    `runs: ${t(v.execArgv.map(shellQuote).join(" "))}`,
+    `in:       ${t(v.cwd)}`,
+    `asked by: ${t(v.requester)} (${t(v.surface)})`,
+    `why:      ${t(v.why)}`,
   ];
   if (v.script) {
-    lines.push(`script: ${v.script.path} (${v.script.size} bytes, sha256 ${v.script.sha256})`);
-    for (const l of v.script.head) lines.push(`  │ ${l}`);
+    lines.push(`script: ${t(v.script.path)} (${v.script.size} bytes, sha256 ${v.script.sha256})`);
+    for (const l of v.script.head) lines.push(`  │ ${t(l)}`);
   }
   lines.push(
     v.passwordVia === "tty"
@@ -635,7 +659,7 @@ export function formatApprovalView(v: ApprovalView): string[] {
       : "password: a system dialog asks for the password (sudo itself) — Prometheus never sees it",
   );
   if (v.phrase) {
-    lines.push(`THIS CAN DESTROY DATA — to approve, type ${v.phrase} exactly`);
+    lines.push(`THIS CAN DESTROY DATA — to approve, type ${t(v.phrase)} exactly`);
   }
   lines.push(
     `approve once or deny · no "always" · no answer in ${Math.round(v.timeoutMs / 1000)} s = deny`,

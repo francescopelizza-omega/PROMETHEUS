@@ -41,12 +41,15 @@ const VIEW: ApprovalView = {
   passwordVia: "askpass",
 };
 
+/** the webContents id of the window every request is sent to */
+const WIN = 7;
+
 function harness(windowOpen = true) {
   const sent: { channel: string; payload: unknown }[] = [];
   const a = createStudioApprover((channel, payload) => {
     if (!windowOpen) return false;
     sent.push({ channel, payload });
-    return true;
+    return WIN;
   });
   return { a, sent };
 }
@@ -59,32 +62,42 @@ test("the view goes to the window with the formatted lines, and an approve answe
   assert.equal(payload.id, "abc123");
   assert.equal(payload.commandLine, VIEW.commandLine);
   assert.match(payload.lines[0] ?? "", /PRIVILEGED COMMAND/);
-  assert.deepEqual(a.decide({ id: "abc123", decision: "approve" }), { ok: true });
+  assert.deepEqual(a.decide({ id: "abc123", decision: "approve" }, WIN), { ok: true });
   assert.deepEqual(await p, { decision: "approve" });
 });
 
 test("a decision answers ONE request, once — a replay is refused", async () => {
   const { a } = harness();
   const p = a.approver(VIEW, new AbortController().signal);
-  a.decide({ id: "abc123", decision: "approve" });
+  a.decide({ id: "abc123", decision: "approve" }, WIN);
   await p;
-  assert.equal(a.decide({ id: "abc123", decision: "approve" }).ok, false);
+  assert.equal(a.decide({ id: "abc123", decision: "approve" }, WIN).ok, false);
 });
 
 test("an unknown id, a malformed argument or an odd decision never approves", async () => {
   const { a } = harness();
   const p = a.approver(VIEW, new AbortController().signal);
-  assert.equal(a.decide({ id: "nope", decision: "approve" }).ok, false);
-  assert.equal(a.decide(null).ok, false);
-  assert.equal(a.decide({ id: 7, decision: "approve" }).ok, false);
-  assert.equal(a.decide({ id: "abc123", decision: "always" }).ok, true);
+  assert.equal(a.decide({ id: "nope", decision: "approve" }, WIN).ok, false);
+  assert.equal(a.decide(null, WIN).ok, false);
+  assert.equal(a.decide({ id: 7, decision: "approve" }, WIN).ok, false);
+  assert.equal(a.decide({ id: "abc123", decision: "always" }, WIN).ok, true);
+  assert.deepEqual(await p, { decision: "deny" });
+});
+
+test("only the window that was asked can answer — another window's approve is refused", async () => {
+  const { a } = harness();
+  const p = a.approver(VIEW, new AbortController().signal);
+  const other = a.decide({ id: "abc123", decision: "approve" }, WIN + 1);
+  assert.equal(other.ok, false);
+  // the request is still open for the asked window, which denies it
+  assert.deepEqual(a.decide({ id: "abc123", decision: "deny" }, WIN), { ok: true });
   assert.deepEqual(await p, { decision: "deny" });
 });
 
 test("the typed phrase travels with an approve", async () => {
   const { a } = harness();
   const p = a.approver({ ...VIEW, phrase: "/dev/disk4" }, new AbortController().signal);
-  a.decide({ id: "abc123", decision: "approve", phrase: "/dev/disk4" });
+  a.decide({ id: "abc123", decision: "approve", phrase: "/dev/disk4" }, WIN);
   assert.deepEqual(await p, { decision: "approve", phrase: "/dev/disk4" });
 });
 
@@ -96,7 +109,7 @@ test("a timed-out request closes the dialog and denies; a late click is refused"
   assert.deepEqual(await p, { decision: "deny" });
   assert.equal(sent.at(-1)?.channel, IPC.privilegedClose);
   assert.deepEqual(sent.at(-1)?.payload, { id: "abc123" });
-  assert.equal(a.decide({ id: "abc123", decision: "approve" }).ok, false);
+  assert.equal(a.decide({ id: "abc123", decision: "approve" }, WIN).ok, false);
 });
 
 test("no window to ask means deny", async () => {

@@ -4,7 +4,8 @@
  * main/privileged-approver.ts — Studio's approver for the privileged gate (Electron-free).
  *
  * The gate (core `privileged-gate.ts`) asks; this sends the view to the window and resolves
- * with THAT window's decision for THAT request id. The decision is one-shot: the pending entry
+ * with THAT window's decision for THAT request id — a decision from any other webContents is
+ * refused, so a second window (or anything else running this preload) cannot answer for it. The decision is one-shot: the pending entry
  * is removed the moment it is answered, so a replayed or forged decision finds nothing to
  * approve. Anything malformed denies. When the gate times out, the dialog is told to close and
  * the request denies — a click that arrives afterwards is refused.
@@ -25,8 +26,11 @@ import {
   type PrivilegedPromptView,
 } from "../shared/ipc-contract.js";
 
-/** Send to the approving window; false when there is no window to ask. */
-export type PrivilegedSend = (channel: string, payload: unknown) => boolean;
+/**
+ * Send to the approving window. Returns that window's webContents id (the only sender whose
+ * decision is accepted for this request), or false when there is no window to ask.
+ */
+export type PrivilegedSend = (channel: string, payload: unknown) => number | false;
 
 export function toPromptView(v: ApprovalView): PrivilegedPromptView {
   return {
@@ -47,17 +51,18 @@ export function toPromptView(v: ApprovalView): PrivilegedPromptView {
 
 export function createStudioApprover(send: PrivilegedSend): {
   approver: Approver;
-  decide: (arg: unknown) => PrivilegedDecideResult;
+  decide: (arg: unknown, senderId: number) => PrivilegedDecideResult;
 } {
-  const pending = new Map<string, (a: ApprovalAnswer) => void>();
+  const pending = new Map<string, { resolve: (a: ApprovalAnswer) => void; senderId: number }>();
 
   const approver: Approver = (view, signal) =>
     new Promise<ApprovalAnswer>((resolve) => {
-      if (!send(IPC.privilegedRequest, toPromptView(view))) {
+      const senderId = send(IPC.privilegedRequest, toPromptView(view));
+      if (senderId === false) {
         resolve({ decision: "deny" });
         return;
       }
-      pending.set(view.id, resolve);
+      pending.set(view.id, { resolve, senderId });
       signal.addEventListener(
         "abort",
         () => {
@@ -69,11 +74,16 @@ export function createStudioApprover(send: PrivilegedSend): {
       );
     });
 
-  const decide = (arg: unknown): PrivilegedDecideResult => {
+  const decide = (arg: unknown, senderId: number): PrivilegedDecideResult => {
     const a = arg as { id?: unknown; decision?: unknown; phrase?: unknown } | null;
     if (!a || typeof a.id !== "string") return { ok: false, error: "malformed decision" };
-    const resolve = pending.get(a.id);
-    if (!resolve) return { ok: false, error: "no such request (answered, timed out or unknown)" };
+    const entry = pending.get(a.id);
+    if (!entry) return { ok: false, error: "no such request (answered, timed out or unknown)" };
+    // Not the window that was asked: refused, and the request stays open for that window.
+    if (entry.senderId !== senderId) {
+      return { ok: false, error: "this window was not asked to approve that request" };
+    }
+    const { resolve } = entry;
     pending.delete(a.id);
     if (a.decision === "approve") {
       resolve(

@@ -336,21 +336,22 @@ test("trustedBinary refuses a binary the user owns (a fake sudo would harvest th
 
 /* ── execution ────────────────────────────────────────────────────────────── */
 
-test("tty mode: sudo -p <prompt> -- argv, stdin inherited, no askpass in the env", async () => {
+test("tty mode: sudo -k -p <prompt> -- argv, stdin inherited, no askpass in the env", async () => {
   const calls: SpawnCall[] = [];
   await createPrivilegedGate(
     deps({ calls, approver: approveWith({ decision: "approve" }) }),
   ).requestAndRun(REQ);
   const c = calls[0] as SpawnCall;
   assert.equal(c.cmd, "/usr/bin/sudo");
-  assert.deepEqual(c.args, ["-p", "[PROMETHEUS] password for %u: ", "--", ...REQ.argv]);
+  // -k: a cached sudo credential is never used, so every approval asks for the password
+  assert.deepEqual(c.args, ["-k", "-p", "[PROMETHEUS] password for %u: ", "--", ...REQ.argv]);
   assert.equal(c.opts.shell, false);
   assert.equal(c.opts.cwd, "/tmp");
   assert.deepEqual(c.opts.stdio, ["inherit", "pipe", "pipe"]);
   assert.equal((c.opts.env as Record<string, string>).SUDO_ASKPASS, undefined);
 });
 
-test("askpass mode: sudo -A, SUDO_ASKPASS set, stdin ignored", async () => {
+test("askpass mode: sudo -k -A, SUDO_ASKPASS set, stdin ignored", async () => {
   const calls: SpawnCall[] = [];
   await createPrivilegedGate(
     deps({
@@ -361,7 +362,7 @@ test("askpass mode: sudo -A, SUDO_ASKPASS set, stdin ignored", async () => {
     }),
   ).requestAndRun(REQ);
   const c = calls[0] as SpawnCall;
-  assert.deepEqual(c.args.slice(0, 4), ["-p", "[PROMETHEUS] password for %u: ", "-A", "--"]);
+  assert.deepEqual(c.args.slice(0, 5), ["-k", "-p", "[PROMETHEUS] password for %u: ", "-A", "--"]);
   assert.equal((c.opts.env as Record<string, string>).SUDO_ASKPASS, "/tmp/prom-askpass/askpass.sh");
   assert.deepEqual(c.opts.stdio, ["ignore", "pipe", "pipe"]);
 });
@@ -474,6 +475,39 @@ test("every request leaves one JSON line: no environment, no phrase, no output; 
 });
 
 /* ── what every host prints ───────────────────────────────────────────────── */
+
+test("formatApprovalView: control, bidi and zero-width characters are shown as escapes, never sent raw", async () => {
+  const { formatApprovalView, visibleText } = await import("./privileged-gate.js");
+  // ESC/CR in an argument could redraw the lines above it; a bidi override reorders what is read
+  const evil = "x\r\u001b[2K\u001b[1A  sudo ls\u202e";
+  const lines = formatApprovalView({
+    id: "x",
+    commandLine: `sudo rm -rf '${evil}'`,
+    execArgv: ["/usr/bin/sudo", "--", "rm", "-rf", evil],
+    elevator: "sudo",
+    argv: ["rm", "-rf", evil],
+    cwd: `/tmp/${evil}`,
+    surface: "tui",
+    requester: "agent",
+    why: "cleanup\u001b[2Jok\u200b",
+    script: { path: `/tmp/${evil}.sh`, size: 1, sha256: "a".repeat(64), head: ["\u202eecho"] },
+    phrase: evil,
+    timeoutMs: 120_000,
+    passwordVia: "tty",
+  });
+  for (const l of lines) {
+    assert.doesNotMatch(
+      l,
+      /[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u2028-\u202e\u2060-\u2069\ufeff]/,
+      l,
+    );
+  }
+  const text = lines.join("\n");
+  assert.match(text, /x\\x0d\\x1b\[2K\\x1b\[1A {2}sudo ls\\u202e/);
+  assert.match(text, /why: +cleanup\\x1b\[2Jok\\u200b/);
+  assert.equal(visibleText("plain sudo ls /etc"), "plain sudo ls /etc");
+  assert.equal(visibleText("tab\there"), "tab\\x09here");
+});
 
 test("formatApprovalView: the command first, then folder, requester, reason, password route, rules", async () => {
   const { formatApprovalView } = await import("./privileged-gate.js");
