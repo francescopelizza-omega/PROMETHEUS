@@ -41,6 +41,17 @@ test("every verb goes to disk_map.py with its exact argv; paths always after --"
   );
 });
 
+test("privilegedExplorer asks for the interactive root command; a path comes after --", async () => {
+  const r = recorder();
+  const c = createDiskSpaceClient(r.run);
+  await c.privilegedExplorer();
+  await c.privilegedExplorer("/data");
+  assert.deepEqual(
+    r.calls.map((x) => x.argv),
+    [["privileged-explorer"], ["privileged-explorer", "--", "/data"]],
+  );
+});
+
 test("a path that starts with '-' is a path, never an option", async () => {
   const r = recorder();
   await createDiskSpaceClient(r.run).deletePlan(["-rf"]);
@@ -120,9 +131,13 @@ test("the full TUI is always launched with --no-sudo, from the tools dir beside 
     tool: "/opt/prom/studio/python/tools/disk_space.py",
     ptyHost: "/opt/prom/studio/python/tools/pty_host.py",
   });
-  assert.deepEqual(diskSpaceTuiArgv(p), ["/usr/bin/python3", p.tool, "--no-sudo"]);
+  // -I: under `sudo prometheus disk-space` this runs as ROOT with the user's HOME (macOS sudo
+  // keeps it) — without isolated mode root would load the user's site-packages `.pth` files and
+  // let the user-writable tools/ dir shadow the standard library
+  assert.deepEqual(diskSpaceTuiArgv(p), ["/usr/bin/python3", "-I", p.tool, "--no-sudo"]);
   assert.deepEqual(diskSpaceTuiArgv(p, "/data"), [
     "/usr/bin/python3",
+    "-I",
     p.tool,
     "--no-sudo",
     "--map",

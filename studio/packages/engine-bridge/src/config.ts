@@ -21,6 +21,7 @@
 import { existsSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { safeChildEnv } from "./safe-env.js";
 
 export interface EngineConfig {
   prometheusPy?: string;
@@ -113,6 +114,48 @@ function siblingRoot(): string {
 }
 
 /**
+ * Where a PACKAGED app's engine lives, set once by its main process — never exported to the
+ * environment. Studio used to `Object.assign` these into `process.env`, so every child inherited
+ * them: the user's own terminal, the agent's commands, and `prometheus` typed in Studio's
+ * terminal then drove the app bundle's engine. An explicit env value still wins over these.
+ */
+export interface EngineOverrides {
+  prometheusPy?: string;
+  nemesisBin?: string;
+  sidecarDir?: string;
+  pythonBin?: string;
+  /** extra env for the engine's OWN python children (e.g. PYTHONDONTWRITEBYTECODE in a bundle) */
+  childEnv?: Record<string, string>;
+}
+
+let overrides: EngineOverrides = {};
+
+export function setEngineOverrides(o: EngineOverrides): void {
+  overrides = { ...o, ...(o.childEnv ? { childEnv: { ...o.childEnv } } : {}) };
+}
+
+export function engineOverrides(): Readonly<EngineOverrides> {
+  return overrides;
+}
+
+/** The env for a child running the engine or a sidecar: the safe env plus the overrides' extras. */
+export function engineChildEnv(extra?: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  return safeChildEnv({ ...(overrides.childEnv ?? {}), ...(extra ?? {}) });
+}
+
+/**
+ * The interpreter the engine and its sidecars run on when nothing explicit was passed.
+ * `PROMETHEUS_PYTHON` first — it names the engine's OWN interpreter (a packaged Studio points it
+ * at the CPython it ships; `locate.ts` already ranks it first for the CLI) — then the generic
+ * `PYTHON` / `PYTHON_BIN`, then `python3` from PATH.
+ */
+export function defaultPythonBin(
+  env: Readonly<Record<string, string | undefined>> = process.env,
+): string {
+  return env.PROMETHEUS_PYTHON || overrides.pythonBin || env.PYTHON || env.PYTHON_BIN || "python3";
+}
+
+/**
  * Resolve engine paths. Env overrides win; otherwise default to the sibling
  * engine. The returned paths are NOT guaranteed to exist — the spawn layer
  * turns a missing file into a fail-closed EngineError.
@@ -133,14 +176,16 @@ export function resolveEngine(config: EngineConfig = {}): ResolvedEngine {
     config.prometheusPy ||
     process.env.PROMETHEUS_PY ||
     process.env.PROMETHEUS_ENGINE ||
+    overrides.prometheusPy ||
     firstExisting(join(root, "prometheus.py")) ||
     join(root, "prometheus.py");
 
-  const pythonBin = config.pythonBin || process.env.PYTHON || process.env.PYTHON_BIN || "python3";
+  const pythonBin = config.pythonBin || defaultPythonBin();
 
   const nemesisBin =
     config.nemesisBin ||
     process.env.NEMESIS_BIN ||
+    overrides.nemesisBin ||
     firstExisting(join(root, "nemesis")) ||
     join(root, "nemesis");
 

@@ -82,7 +82,7 @@ All powered by the same agent loop in `studio/packages/core`:
 - 73 CLI subcommands for headless automation
 - Shell completion for bash/zsh/fish
 - Man page generation
-- Headless mode: `prometheus -p "<prompt>"` for one-shot operations
+- Headless mode: `prometheus run <prompt…>` or `prometheus -p "<prompt>"` — one turn with a model, the answer on stdout, then exit
 - tmux integration with auto-scaled sub-agent swarms
 
 **MCP Plugin Server** (Integrate with Claude Code, Cursor, Gemini, etc.)
@@ -119,7 +119,7 @@ All powered by the same agent loop in `studio/packages/core`:
 - **Hugging Face import** — Convert and install models with one command
 - **Remote compute** — SSH or LAN GPU boxes with feasibility assessment for offloading
 - **Model health ledger** — Tracks native vs. text-protocol, context window served, failures
-- **Disk space** — `/disk-space` opens the full disk explorer over the TUI (Ctrl+] minimise/resume, Ctrl+D quit); `map` / `levels` / `files` / `mounts` views, plan-first delete with every protection, Linux cleanup, and a root rescan you approve (`--sudo`). Studio: a Disk space panel with treemap, pie and levels. MCP: read-only `prometheus_disk_space`
+- **Disk space** — `/disk-space` opens the full disk explorer over the TUI (Ctrl+] minimise/resume, Ctrl+D quit); `map` / `levels` / `files` / `mounts` views, plan-first delete with every protection, Linux cleanup, and a root rescan you approve (`--sudo`). `prometheus disk-space` from a shell runs the explorer full-screen and exits on Ctrl+D (`sudo prometheus disk-space` as root). Studio: a Disk space panel with treemap, pie and levels, and Open as administrator (approve, then the system password dialog, then the explorer as root in its own window, where only your keyboard can type). MCP: read-only `prometheus_disk_space`
 
 ---
 

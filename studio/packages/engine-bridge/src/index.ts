@@ -39,8 +39,14 @@ export {
 } from "./errors.js";
 
 // --- config / resolution ---------------------------------------------------
-export type { EngineConfig, ResolvedEngine } from "./config.js";
-export { resolveEngine, DEFAULT_TIMEOUT_MS } from "./config.js";
+export type { EngineConfig, EngineOverrides, ResolvedEngine } from "./config.js";
+export {
+  resolveEngine,
+  DEFAULT_TIMEOUT_MS,
+  defaultPythonBin,
+  engineChildEnv,
+  setEngineOverrides,
+} from "./config.js";
 // bundled-or-dev engine path resolver (file 10 §1): prepends process.resourcesPath
 // (packaged extraResources) to the resolveEngine fallback chain.
 export type { EnginePaths, EnginePathsOptions } from "./locate.js";

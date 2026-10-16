@@ -46,6 +46,7 @@ import {
   renderMounts,
   renderTree,
 } from "../render/disk-space-view.js";
+import { type FullScreenResult, runFullScreen } from "../tui/full-screen.js";
 import type { OverlayLaunch } from "../tui/overlay-session.js";
 
 export interface DiskSpaceIo {
@@ -53,6 +54,8 @@ export interface DiskSpaceIo {
   confirm(prompt: string): Promise<boolean>;
   ask(prompt: string): Promise<string>;
   cwd: string;
+  /** a one-shot run on a terminal: the tool IS the session, until it quits or Ctrl+D */
+  runFullScreen?(o: OverlayLaunch): Promise<FullScreenResult>;
   /** the TUI: show the curses tool over the session */
   openOverlay?(o: OverlayLaunch): "started" | "resumed" | "busy";
   /** `--plain`: hand the real terminal to the tool until it exits */
@@ -152,14 +155,21 @@ async function explorer(
     return fail(io, "disk-space", `the disk tool is not shipped here (${deps.paths.tool})`);
   }
   const argv = diskSpaceTuiArgv(deps.paths, path);
+  const launch: OverlayLaunch = {
+    label: "disk-space",
+    argv,
+    python: deps.paths.python,
+    ptyHost: deps.paths.ptyHost,
+    cwd: io.cwd,
+  };
+  if (io.runFullScreen) {
+    const r = await io.runFullScreen(launch);
+    if (r.terminated || r.code === 0) return 0;
+    io.write(`  ⎿ disk-space ended (exit ${r.code ?? "?"})`);
+    return r.code ?? 1;
+  }
   if (io.openOverlay) {
-    const r = io.openOverlay({
-      label: "disk-space",
-      argv,
-      python: deps.paths.python,
-      ptyHost: deps.paths.ptyHost,
-      cwd: io.cwd,
-    });
+    const r = io.openOverlay(launch);
     if (r === "busy") return fail(io, "disk-space", "another full-screen program is open");
     if (r === "resumed") io.write("  ⎿ resumed the running disk-space");
     return 0;
@@ -385,8 +395,20 @@ export function defaultDiskSpaceDeps(surface: Surface, gate?: PrivilegedGate): D
 /**
  * One-shot `prometheus disk-space …` — no human-attached approver here, so root work is
  * printed, never run; `--json` prints the sidecar envelope of the native views.
+ *
+ * On a terminal, the bare explorer (`prometheus disk-space [PATH]`) runs disk_space.py's own
+ * TUI full-screen and returns when it ends — `q`, or Ctrl+D — so the process exits with it.
+ * Launched by the human as `sudo prometheus disk-space`, it runs as root: they elevated it
+ * themselves at their own shell, which is the one way root is ever reached without the gate.
  */
-export async function runDiskSpaceCommand(ctx: CliContext): Promise<CommandOutcome> {
+export async function runDiskSpaceCommand(
+  ctx: CliContext,
+  seams: {
+    tty?: boolean;
+    deps?: DiskSpaceDeps;
+    fullScreen?: (o: OverlayLaunch) => Promise<FullScreenResult>;
+  } = {},
+): Promise<CommandOutcome> {
   const args = [
     ...(ctx.args.unmatchedSub ? [ctx.args.unmatchedSub] : ctx.args.command.slice(1)),
     ...Object.entries(ctx.args.flags ?? {}).flatMap(([k, v]) =>
@@ -395,7 +417,11 @@ export async function runDiskSpaceCommand(ctx: CliContext): Promise<CommandOutco
     ...ctx.args.positionals,
   ];
   const lines: string[] = [];
-  const deps = defaultDiskSpaceDeps("cli");
+  const deps = seams.deps ?? defaultDiskSpaceDeps("cli");
+  const tty = seams.tty ?? (process.stdin.isTTY === true && process.stdout.isTTY === true);
+  const fullScreen =
+    seams.fullScreen ??
+    ((o: OverlayLaunch) => runFullScreen(o, { stdin: process.stdin, stdout: process.stdout }));
   if (ctx.json) {
     const { sub, pos } = parse(args);
     const path = absPath(process.cwd(), pos[0] ?? ".");
@@ -417,6 +443,7 @@ export async function runDiskSpaceCommand(ctx: CliContext): Promise<CommandOutco
       // no prompts in a one-shot run: anything that would ask is answered "no"
       confirm: async () => false,
       ask: async () => "",
+      ...(tty ? { runFullScreen: fullScreen } : {}),
     },
     deps,
   );

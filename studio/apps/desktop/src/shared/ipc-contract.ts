@@ -244,6 +244,18 @@ export const IPC = {
   diskDeletePlan: "disk:deletePlan",
   diskDelete: "disk:delete",
   diskRescanAsRoot: "disk:rescanAsRoot",
+  // the interactive tool as root, in its own window (gate terminal mode): one session at a time.
+  // There is deliberately NO input channel: the root window's keys reach main only through
+  // Electron's before-input-event (real keyboard input), never from any renderer.
+  diskOpenAdmin: "disk:openAdmin",
+  diskAdminResize: "disk:adminResize",
+  diskAdminStop: "disk:adminStop",
+  /** main → the root window: the program's screen bytes */
+  diskAdminData: "disk:adminData",
+  /** main → the root window: a status line ("enter your password…") */
+  diskAdminStatus: "disk:adminStatus",
+  /** the root window's page → main: it is listening; main holds the screen until then */
+  diskAdminReady: "disk:adminReady",
   // ── SPECTACULAR power-up: catalog cards + chat + models folder + harden ────
   // Read-only/preview engine commands over a PrometheusEngine facade in MAIN.
   // chat is PREVIEW-only here (the engine assembles an injection-safe argv); the
@@ -5735,6 +5747,28 @@ export interface DiskSpaceApi {
   }): Promise<DiskDeleteRunView>;
   /** through the privileged gate: the human approves the exact root command first */
   rescanAsRoot(req: { path: string }): Promise<DiskMapView>;
+  /**
+   * disk_space.py's own interactive TUI as ROOT, in its own window: the human approves the exact
+   * command, then sudo's native password dialog asks (every time). Resolves when it ends. Keys
+   * typed in that window come from the keyboard itself — no renderer can send any.
+   */
+  openAsAdmin(req: { path?: string }): Promise<DiskAdminResultView>;
+  /** the root window's terminal size (accepted from the root window only) */
+  adminResize(cols: number, rows: number): void;
+  /** end the session (accepted from the panel that opened it or the root window) */
+  adminStop(): void;
+  /** the root window's page is subscribed (accepted from the root window only) */
+  adminReady(): void;
+  onAdminData(cb: (chunk: string) => void): () => void;
+  onAdminStatus(cb: (text: string) => void): () => void;
+}
+
+export interface DiskAdminResultView {
+  ok: boolean;
+  /** the privileged gate's decision */
+  decision?: string;
+  exitCode?: number;
+  error?: string;
 }
 
 /* ── the guided model picker (`modelWizard:*`) ──────────────────────────────── */

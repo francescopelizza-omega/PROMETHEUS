@@ -12,6 +12,9 @@
  *    typed. The sidecar re-checks every protection at that moment.
  *  - **Rescan as root** goes through the privileged gate: the approval dialog shows the exact
  *    root command, and the password goes to a native dialog, straight to sudo.
+ *  - **Open as administrator** is the same door for disk_space.py's own interactive TUI: after
+ *    the approval and the password dialog it runs as root in its OWN window, whose keys come
+ *    from the keyboard and never from a page (AdminSession here, RootTerminalView there).
  *  - **Charts** follow the validated chart tokens: the pie's slices are `--chart-1..7` in fixed
  *    order plus "Other"; the treemap is one hue by size. The table always carries the same
  *    numbers in text, so no value depends on colour.
@@ -33,6 +36,7 @@ import type {
   DiskMapView,
   DiskMountsView,
 } from "../../shared/ipc-contract.js";
+import { AdminSession } from "./disk-space/AdminSession.js";
 import {
   type Row,
   childRows,
@@ -103,6 +107,7 @@ export function DiskSpacePanel(): ReactElement {
   const [plan, setPlan] = useState<{ view: DiskDeletePlanView; paths: string[] } | null>(null);
   const [typed, setTyped] = useState("");
   const [note, setNote] = useState<string | null>(null);
+  const [admin, setAdmin] = useState(false);
 
   const run = useCallback(async <T,>(label: string, fn: () => Promise<T>): Promise<T | null> => {
     setBusy(label);
@@ -252,12 +257,23 @@ export function DiskSpacePanel(): ReactElement {
         >
           Rescan as root…
         </Button>
+        <Button
+          size="sm"
+          variant="ghost"
+          disabled={busy !== null || admin}
+          title="open the interactive disk-space explorer as root — you approve the exact command, then the system asks for your password"
+          onClick={() => setAdmin(true)}
+        >
+          Open as administrator…
+        </Button>
         {busy ? (
           <span style={muted}>
             <Spinner size={14} /> {busy}
           </span>
         ) : null}
       </div>
+
+      {admin ? <AdminSession onClose={() => setAdmin(false)} /> : null}
 
       <div
         role="tablist"

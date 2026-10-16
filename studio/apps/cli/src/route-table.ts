@@ -50,6 +50,7 @@ export const RECOGNIZED_VERBS: readonly string[] = [
   "agents",
   "mcp",
   "chat",
+  "run",
   "repl",
   "tui",
   "session",

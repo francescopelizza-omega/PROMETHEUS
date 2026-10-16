@@ -57,6 +57,8 @@ export function stdinPromptSink(
   if (command[0] === "chat" && positionals.length === 0 && flags.cli === undefined) {
     return "positional";
   }
+  // `cat task.md | prometheus run` — `run` reads its prompt from positionals, like `chat`.
+  if (command[0] === "run" && positionals.length === 0) return "positional";
   // A BARE `-p` / `--print` / `--prompt`: present, but with no value of its own. A flag that
   // already carries a string is an explicit prompt and takes precedence — stdin is the fallback.
   const bareOneShot = ONE_SHOT_FLAGS.some((k) => flags[k] === true);

@@ -1375,6 +1375,24 @@ function createDiskSpaceApi(): DiskSpaceApi {
     deletePlan: (req) => ipcRenderer.invoke(IPC.diskDeletePlan, req),
     delete: (req) => ipcRenderer.invoke(IPC.diskDelete, req),
     rescanAsRoot: (req) => ipcRenderer.invoke(IPC.diskRescanAsRoot, req),
+    openAsAdmin: (req) => ipcRenderer.invoke(IPC.diskOpenAdmin, req),
+    adminResize: (cols, rows) => ipcRenderer.send(IPC.diskAdminResize, { cols, rows }),
+    adminReady: () => ipcRenderer.send(IPC.diskAdminReady),
+    adminStop: () => ipcRenderer.send(IPC.diskAdminStop),
+    onAdminData: (cb) => {
+      const wrapped = (_e: unknown, chunk: string): void => cb(chunk);
+      ipcRenderer.on(IPC.diskAdminData, wrapped);
+      return () => {
+        ipcRenderer.removeListener(IPC.diskAdminData, wrapped);
+      };
+    },
+    onAdminStatus: (cb) => {
+      const wrapped = (_e: unknown, text: string): void => cb(text);
+      ipcRenderer.on(IPC.diskAdminStatus, wrapped);
+      return () => {
+        ipcRenderer.removeListener(IPC.diskAdminStatus, wrapped);
+      };
+    },
   };
 }
 

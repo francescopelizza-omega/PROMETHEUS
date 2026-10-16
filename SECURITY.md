@@ -62,6 +62,14 @@ approval.
   cannot approve; with no human attached the command is returned for a person to run.
 - The password never passes through Prometheus: sudo reads it from the terminal, or a fixed
   askpass helper shows a native dialog and hands it straight to sudo. Sudoers is never touched.
+- An interactive root program in a GUI (Studio's "Open disk space as administrator") runs only
+  with the native dialog — never with a password typed into Prometheus's own window — on a
+  pseudo-terminal relay (`pty_host.py`, running as you) that runs from its verified bytes. It is
+  shown in its own window whose keys come only from the keyboard (main reads them from Electron's
+  `before-input-event`; no page can send one), and keys pressed before it draws are dropped.
+- Root runs exactly the approved script bytes: Python through a fixed loader that re-hashes the
+  file as root and runs the bytes it hashed, shell scripts from their approved bytes passed
+  inline, root-owned scripts as they are; anything else is refused.
 - Every request is appended to `~/.prometheus/audit/sudo.log` (0600): requester, argv, folder,
   reason, script hash, decision, exit code — never the environment, output or password.
 

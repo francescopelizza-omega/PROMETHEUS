@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!--
+      The root terminal window ("Open as administrator"). Same strict production CSP as
+      renderer/index.html (C5); the devCspRelax Vite plugin relaxes it in DEV only. This page is
+      display-only: its keys are read by MAIN from the keyboard (before-input-event), never sent
+      by the page.
+    -->
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; worker-src 'self' blob:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'"
+    />
+    <title>disk-space — administrator (root)</title>
+    <style>
+      :root {
+        color-scheme: dark;
+      }
+      html,
+      body,
+      #root {
+        margin: 0;
+        height: 100%;
+        /* Pre-mount paint = the dark --bg-app token value, so no flash before tokens load. */
+        background: #070d18;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="./admin-terminal-main.tsx"></script>
+  </body>
+</html>

@@ -374,6 +374,12 @@ test("dispatch: prom-native + stubs route without the engine", async () => {
   const chat = await run(["chat"]);
   assert.equal((chat.json as { status: string }).status, "repl-tui");
 
+  // `run` with no prompt reaches dispatch (bin.ts runs a real prompt before it): usage, exit 2,
+  // never the engine passthrough to a verb it does not have.
+  const bare = await run(["run"]);
+  assert.equal(bare.exitCode, 2);
+  assert.match(String(bare.text), /usage: prometheus run/);
+
   // `repo add` is now WIRED (repo.py sidecar): a mutating verb PREVIEWS by default
   // (touches nothing, no spawn) and only executes on --yes. Parity with the GUI's
   // plan→confirm flow, and safe to call here because preview never runs the sidecar.
@@ -948,6 +954,9 @@ test("a piped prompt for a BARE -p goes to the FLAG sink — the documented `cat
   assert.equal(stdinPromptSink([], ["something"], { p: true }, undefined), null);
   // no prompt flag at all and not chat → stdin is not the prompt.
   assert.equal(stdinPromptSink(["scan"], [], {}, undefined), null);
+  // `cat task.md | prometheus run` reads its prompt the way `chat` does — as a positional.
+  assert.equal(stdinPromptSink(["run"], [], {}, undefined), "positional");
+  assert.equal(stdinPromptSink(["run"], ["typed"], {}, undefined), null);
   // the old predicate stays true wherever a sink exists (its callers are unchanged).
   assert.equal(shouldReadStdinPrompt([], [], { p: true }, undefined), true);
   assert.equal(shouldReadStdinPrompt(["scan"], [], {}, undefined), false);

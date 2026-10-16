@@ -42,7 +42,7 @@
 import { createHash, randomBytes } from "node:crypto";
 import { appendFileSync, mkdirSync, readFileSync, statSync } from "node:fs";
 import { createRequire } from "node:module";
-import { dirname, join, resolve as resolvePath } from "node:path";
+import { dirname, isAbsolute, join, resolve as resolvePath } from "node:path";
 import { safeChildEnv } from "@prometheus/engine-bridge";
 import { shellQuote } from "../../exec/parse.js";
 import {
@@ -51,6 +51,7 @@ import {
   classifyPrivileged,
 } from "../../exec/privileged.js";
 import { renderElevated } from "../elevated.js";
+import { PY_LOADER, type VerifyMode, trustedBinary, verifiedRun } from "./privileged-verify.js";
 
 const nodeRequire = createRequire(import.meta.url);
 
@@ -92,6 +93,10 @@ export interface ApprovalView {
   phrase?: string;
   timeoutMs: number;
   passwordVia: "tty" | "askpass";
+  /** it opens interactively in a window of its own (keys from the keyboard only), not as a job */
+  terminal?: boolean;
+  /** how root is held to the approved script bytes (absent when no script runs) */
+  verified?: Exclude<VerifyMode, "none">;
 }
 
 export type ApprovalAnswer = { decision: "approve"; phrase?: string } | { decision: "deny" };
@@ -126,9 +131,35 @@ type SpawnFn = (
   pid?: number;
   stdout: { on(e: "data", cb: (c: Buffer) => void): void; destroy?(): void } | null;
   stderr: { on(e: "data", cb: (c: Buffer) => void): void; destroy?(): void } | null;
+  stdin?: {
+    write(data: string | Buffer): unknown;
+    on?(e: "error", cb: (err: unknown) => void): unknown;
+  } | null;
+  stdio?: readonly unknown[];
   on(e: "error" | "close" | "exit", cb: (a?: unknown, b?: unknown) => void): void;
   kill(sig?: string): void;
 };
+
+/**
+ * Run the approved command INTERACTIVELY, on a pseudo-terminal a GUI host shows in a terminal
+ * view (Studio's "Open disk space as administrator"). The stdlib relay `pty_host.py` runs as the
+ * USER and execs the approved elevator command on a pty; screen bytes arrive through `onOutput`,
+ * keystrokes go in through the handle `onStart` receives.
+ *
+ * Only with the native password dialog (`sudo -A`): with a terminal view the password would
+ * otherwise be typed into Prometheus's own window and pass through its process on the way to
+ * sudo. The relay decides what sudo is handed, so its SHA-256 is bound to the approval exactly
+ * like a script's and re-checked immediately before the spawn.
+ */
+export interface PrivilegedTerminal {
+  /** the interpreter that runs the relay, as the user */
+  python: string;
+  /** `studio/python/tools/pty_host.py` */
+  ptyHost: string;
+  cols: number;
+  rows: number;
+  onStart(handle: { write(data: string): void; resize(cols: number, rows: number): void }): void;
+}
 
 export interface GateDeps {
   /** absent ⇒ no human attached ⇒ every request becomes a proposal */
@@ -156,6 +187,8 @@ export interface GateDeps {
   exitGraceMs?: number;
   /** test seam: resolve an elevator to a trusted absolute path */
   resolveElevator?: (e: GateElevator) => string | null;
+  /** test seam: is this script's whole path controlled by root (so it may run as it is)? */
+  rootControlled?: (path: string) => boolean;
   /** test seam */
   spawnImpl?: SpawnFn;
 }
@@ -168,6 +201,10 @@ export interface PrivilegedGate {
       signal?: AbortSignal;
       /** how much of each stream to keep (default 1 MiB) — a caller that parses output asks for more */
       captureBytes?: number;
+      /** run it interactively on a pseudo-terminal the host shows (see PrivilegedTerminal) */
+      terminal?: PrivilegedTerminal;
+      /** this call's wall clock, replacing the gate's default (an interactive session is long) */
+      timeoutMs?: number;
     },
   ): Promise<PrivilegedResult>;
 }
@@ -190,14 +227,7 @@ const CANDIDATES: Readonly<Record<GateElevator, readonly string[]>> = Object.fre
 });
 
 /** Root-owned and not writable by group/other: a binary only root could have put there. */
-export function trustedBinary(path: string): boolean {
-  try {
-    const st = statSync(path);
-    return st.isFile() && st.uid === 0 && (st.mode & 0o022) === 0;
-  } catch {
-    return false;
-  }
-}
+export { trustedBinary };
 
 function defaultResolveElevator(e: GateElevator): string | null {
   return CANDIDATES[e].find(trustedBinary) ?? null;
@@ -427,10 +457,38 @@ export function createPrivilegedGate(deps: GateDeps): PrivilegedGate {
         }
       }
 
+      const term = io.terminal;
+      if (term && (!isAbsolute(term.python) || !isAbsolute(term.ptyHost))) {
+        // the relay is hashed HERE but opened by a child whose cwd is the request's folder: a
+        // relative path would name two different files
+        return finish("refused", {
+          reason: "the terminal relay and its interpreter must be absolute paths",
+        });
+      }
+      if (term && (elevator !== "sudo" || askpassPath === null)) {
+        return finish("refused", {
+          reason:
+            "an interactive root program in a window needs sudo's native password dialog — a password typed into the window would pass through Prometheus",
+        });
+      }
+      const relay = term ? scriptInfo(term.ptyHost) : null;
+      if (term && !relay) {
+        return finish("refused", { reason: `the terminal relay is unreadable (${term.ptyHost})` });
+      }
+
       const scriptPath = scriptPathOf(argv, cwd);
       const script = scriptPath ? scriptInfo(scriptPath) : null;
+      if (scriptPath && !script) {
+        return finish("refused", { reason: `the script ${scriptPath} could not be read` });
+      }
+      // root must run EXACTLY the approved bytes: the file is opened by root only after the
+      // password, seconds after the last check here (privileged-verify.ts)
+      const plan = verifiedRun(argv, cwd, script, {
+        ...(deps.rootControlled ? { rootControlled: deps.rootControlled } : {}),
+      });
+      if ("refusal" in plan) return finish("refused", { script, reason: plan.refusal });
       const phrase = catastrophicTarget(argv, deps.userHome);
-      const execArgs = execArgsFor(elevator, argv, askpassPath !== null);
+      const execArgs = execArgsFor(elevator, plan.argv, askpassPath !== null);
       const view: ApprovalView = {
         id: randomBytes(8).toString("hex"),
         commandLine,
@@ -445,10 +503,20 @@ export function createPrivilegedGate(deps: GateDeps): PrivilegedGate {
         ...(phrase ? { phrase } : {}),
         timeoutMs: approvalTimeoutMs,
         passwordVia: deps.passwordVia,
+        ...(term ? { terminal: true } : {}),
+        ...(plan.mode !== "none" ? { verified: plan.mode } : {}),
       };
+
+      // A caller that has already given up is never asked, and never run: an abort listener
+      // added to an already-aborted signal never fires, so a session cancelled while the
+      // dialog waited used to start anyway — as root, with no view and nothing left to stop it.
+      const cancelled = (): PrivilegedResult =>
+        finish("refused", { script, phrase, reason: "cancelled before it ran" });
+      if (io.signal?.aborted) return cancelled();
 
       // ── ask. No answer in time is a deny; a late answer is ignored. ──
       const ac = new AbortController();
+      io.signal?.addEventListener("abort", () => ac.abort(), { once: true });
       let timer: ReturnType<typeof setTimeout> | undefined;
       const answer = await Promise.race([
         Promise.resolve()
@@ -468,6 +536,7 @@ export function createPrivilegedGate(deps: GateDeps): PrivilegedGate {
         });
       }
       if (answer.decision !== "approve") return finish("denied", { script, phrase });
+      if (io.signal?.aborted) return cancelled();
       if (phrase && (answer.phrase ?? "").trim() !== phrase) {
         return finish("refused", {
           script,
@@ -487,10 +556,12 @@ export function createPrivilegedGate(deps: GateDeps): PrivilegedGate {
       const liveSha = liveScriptPath ? (scriptInfo(liveScriptPath)?.sha256 ?? "unreadable") : null;
       const grant = approvals.get(token);
       approvals.delete(token);
+      const liveRelaySha = term ? (scriptInfo(term.ptyHost)?.sha256 ?? "unreadable") : null;
       if (
         !grant ||
         grant.expires < Date.now() ||
-        grant.digest !== digestOf(req.elevator ?? "sudo", liveArgv, req.cwd, liveSha)
+        grant.digest !== digestOf(req.elevator ?? "sudo", liveArgv, req.cwd, liveSha) ||
+        liveRelaySha !== (relay?.sha256 ?? null)
       ) {
         return finish("refused", {
           script,
@@ -533,8 +604,29 @@ export function createPrivilegedGate(deps: GateDeps): PrivilegedGate {
             grace?: ReturnType<typeof setTimeout>;
             exit?: ReturnType<typeof setTimeout>;
           } = {};
+          const dim = (n: number): string =>
+            String(Math.min(1000, Math.max(1, Math.floor(n) || 1)));
           const child = ((): ReturnType<SpawnFn> | null => {
             try {
+              if (term) {
+                return spawn(
+                  term.python,
+                  // the relay chooses what sudo is handed: it too runs from its verified bytes
+                  [
+                    "-I",
+                    "-c",
+                    PY_LOADER,
+                    (relay as ScriptInfo).sha256,
+                    term.ptyHost,
+                    dim(term.cols),
+                    dim(term.rows),
+                    "--",
+                    binary,
+                    ...execArgs,
+                  ],
+                  { cwd, env, shell: false, stdio: ["pipe", "pipe", "pipe", "pipe"] },
+                );
+              }
               return spawn(binary, execArgs, {
                 cwd,
                 env,
@@ -547,6 +639,18 @@ export function createPrivilegedGate(deps: GateDeps): PrivilegedGate {
             }
           })();
           if (!child) return;
+          if (term) {
+            const ctl = child.stdio?.[3] as
+              | { write?(s: string): unknown; on?(e: "error", cb: () => void): unknown }
+              | undefined;
+            // a key typed after the program ended hits a closed pipe: EPIPE is expected, not a crash
+            child.stdin?.on?.("error", () => {});
+            ctl?.on?.("error", () => {});
+            term.onStart({
+              write: (data) => void child.stdin?.write(data),
+              resize: (c, r) => void ctl?.write?.(`resize ${dim(c)} ${dim(r)}\n`),
+            });
+          }
           // Signal the sudo process itself, never a group: its children run as root, so a
           // group signal is EPERM — and sudo relays SIGTERM to the command it started.
           const stop = (): void => {
@@ -556,8 +660,9 @@ export function createPrivilegedGate(deps: GateDeps): PrivilegedGate {
           timers.kill = setTimeout(() => {
             timedOut = true;
             stop();
-          }, timeoutMs);
-          io.signal?.addEventListener("abort", stop, { once: true });
+          }, io.timeoutMs ?? timeoutMs);
+          if (io.signal?.aborted) stop();
+          else io.signal?.addEventListener("abort", stop, { once: true });
           const cap = Math.max(1, io.captureBytes ?? MAX_CAPTURE);
           const keep = (have: string, more: string): string => {
             if (have.length + more.length <= cap) return have + more;
@@ -639,12 +744,44 @@ export function visibleText(s: string): string {
  * VS Code modal and an audit reader all see the same facts in the same order — the command
  * first, because it is the thing being decided.
  */
+/**
+ * The exact spawn argv, quoted — except that a shell script's own bytes, passed inline with
+ * `-c`, are named rather than dumped: they are the script shown below (path, size, SHA-256, first
+ * lines), and repeating thousands of characters here would bury the command.
+ */
+function runsLine(v: ApprovalView): string {
+  const argv = [...v.execArgv];
+  if (v.verified === "python-loader") {
+    // shown in full, line by line, right below — an escaped one-line blob is unreadable
+    const i = argv.indexOf(PY_LOADER);
+    if (i >= 0) {
+      return argv
+        .map((a, k) => (k === i ? "<the verifying loader below>" : shellQuote(a)))
+        .join(" ");
+    }
+  }
+  if (v.verified === "shell-inline" && v.script) {
+    const i = argv.findIndex((a, k) => a === "-c" && argv[k + 2] === v.script?.path);
+    if (i >= 0) argv[i + 1] = `<approved bytes of ${v.script.path}>`;
+    return argv.map((a, k) => (k === i + 1 ? a : shellQuote(a))).join(" ");
+  }
+  return argv.map(shellQuote).join(" ");
+}
+
+const VERIFIED_LINE: Record<Exclude<VerifyMode, "none">, string> = {
+  "python-loader":
+    "verified: root runs exactly the bytes you approved — the loader re-hashes the script as root and refuses if it changed",
+  "shell-inline":
+    "verified: root runs exactly the bytes you approved — they are handed to the shell directly; the file is not read again",
+  "root-owned": "verified: only root can change this script or any folder above it",
+};
+
 export function formatApprovalView(v: ApprovalView): string[] {
   const t = visibleText;
   const lines = [
     "PRIVILEGED COMMAND — approve this exact command, once?",
     `  ${t(v.commandLine)}`,
-    `runs: ${t(v.execArgv.map(shellQuote).join(" "))}`,
+    `runs: ${t(runsLine(v))}`,
     `in:       ${t(v.cwd)}`,
     `asked by: ${t(v.requester)} (${t(v.surface)})`,
     `why:      ${t(v.why)}`,
@@ -652,12 +789,22 @@ export function formatApprovalView(v: ApprovalView): string[] {
   if (v.script) {
     lines.push(`script: ${t(v.script.path)} (${v.script.size} bytes, sha256 ${v.script.sha256})`);
     for (const l of v.script.head) lines.push(`  │ ${t(l)}`);
+    if (v.verified) lines.push(VERIFIED_LINE[v.verified]);
+    if (v.verified === "python-loader") {
+      lines.push("loader: runs as root before the script (fixed text, verbatim):");
+      for (const l of PY_LOADER.split("\n")) lines.push(`  │ ${t(l)}`);
+    }
   }
   lines.push(
     v.passwordVia === "tty"
       ? "password: your terminal asks for the password (sudo itself) — Prometheus never sees it"
       : "password: a system dialog asks for the password (sudo itself) — Prometheus never sees it",
   );
+  if (v.terminal) {
+    lines.push(
+      "opens: an interactive root terminal in its own window — only your keyboard can type into it; Ctrl+D or Stop ends it",
+    );
+  }
   if (v.phrase) {
     lines.push(`THIS CAN DESTROY DATA — to approve, type ${t(v.phrase)} exactly`);
   }

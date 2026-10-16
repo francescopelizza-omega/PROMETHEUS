@@ -21,8 +21,7 @@ import { existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { findRootFrom } from "./config.js";
-import { safeChildEnv } from "./safe-env.js";
+import { defaultPythonBin, engineChildEnv, engineOverrides, findRootFrom } from "./config.js";
 
 /** A sidecar envelope: ok + command + per-verb fields (mirror C7). */
 export interface SidecarEnvelope {
@@ -100,6 +99,8 @@ export function resolveSidecarDir(override?: string): string {
   if (override) return override;
   const env = process.env.PROMETHEUS_SIDECAR_DIR;
   if (env) return env;
+  const packaged = engineOverrides().sidecarDir;
+  if (packaged) return packaged;
   let here: string | undefined;
   try {
     here = dirname(fileURLToPath(import.meta.url));
@@ -122,7 +123,7 @@ export function resolveSidecarDir(override?: string): string {
 }
 
 function pythonBin(opts: SidecarOptions): string {
-  return opts.pythonBin || process.env.PYTHON || process.env.PYTHON_BIN || "python3";
+  return opts.pythonBin || defaultPythonBin();
 }
 
 const looksLikeSidecarObject = (o: unknown): o is Record<string, unknown> =>
@@ -216,7 +217,7 @@ export function runSidecar<T extends SidecarEnvelope = SidecarEnvelope>(
         shell: false,
         stdio: ["pipe", "pipe", "pipe"],
         cwd: opts.cwd,
-        env: safeChildEnv(opts.env),
+        env: engineChildEnv(opts.env),
       });
     } catch (err) {
       resolve(fail(`failed to launch ${bin}: ${(err as Error).message}`));
@@ -432,7 +433,7 @@ const MAX_KERNEL_STDERR_TAIL = 8 * 1024;
 export function spawnKernelSidecar(opts: KernelSidecarOptions = {}): KernelSidecar {
   const dir = resolveSidecarDir(opts.sidecarDir);
   const scriptPath = opts.scriptPath ?? join(dir, "kernel.py");
-  const bin = opts.pythonBin || process.env.PYTHON || process.env.PYTHON_BIN || "python3";
+  const bin = opts.pythonBin || defaultPythonBin();
 
   const listeners = new Set<(e: KernelEvent) => void>();
   /** Cells whose execute has been sent but whose terminal `done` has not yet arrived. */
@@ -485,7 +486,7 @@ export function spawnKernelSidecar(opts: KernelSidecarOptions = {}): KernelSidec
         shell: false,
         stdio: ["pipe", "pipe", "pipe"],
         cwd: opts.cwd,
-        env: safeChildEnv(opts.env),
+        env: engineChildEnv(opts.env),
         // Own the process GROUP so dispose() can kill the ipykernel grandchild too.
         detached: process.platform !== "win32",
       });

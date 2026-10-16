@@ -12,6 +12,7 @@ import {
   interpretSudoAnswer,
   isElevated,
   resolveSudoDecision,
+  rootStateHome,
   runElevationGate,
   sudoWarningLines,
 } from "./sudo.js";
@@ -159,4 +160,25 @@ test("an UNELEVATED process passes straight through the gate", async () => {
     if (realUser !== undefined) process.env.SUDO_USER = realUser;
     if (realUid !== undefined) process.env.SUDO_UID = realUid;
   }
+});
+
+test("rootStateHome: `sudo prometheus disk-space` keeps its own state out of the user's home", () => {
+  // macOS sudo keeps HOME, so root's registry/config writes would land in the user's
+  // ~/.prometheus as root-owned files — and the user's next normal run fails on them.
+  const base = {
+    getuid: () => 0,
+    env: { HOME: "/Users/someone", SUDO_USER: "someone" } as NodeJS.ProcessEnv,
+    ownerOf: (p: string) => (p === "/Users/someone" ? 501 : 0),
+    rootHome: "/var/root",
+    command: "disk-space",
+  };
+  assert.equal(rootStateHome(base), "/var/root/.prometheus");
+  assert.equal(rootStateHome({ ...base, getuid: () => 501 }), null, "not root");
+  assert.equal(rootStateHome({ ...base, ownerOf: () => 0 }), null, "HOME is root's own");
+  assert.equal(
+    rootStateHome({ ...base, env: { ...base.env, PROMETHEUS_HOME: "/x" } }),
+    null,
+    "an explicit PROMETHEUS_HOME wins",
+  );
+  assert.equal(rootStateHome({ ...base, command: "scan" }), null, "only the disk-space one-shot");
 });

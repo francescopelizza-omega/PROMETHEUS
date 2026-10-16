@@ -49,7 +49,10 @@ export interface OverlayLaunch {
 
 interface OverlayChild {
   pid?: number;
-  stdin: { write(data: Buffer | string): unknown } | null;
+  stdin: {
+    write(data: Buffer | string): unknown;
+    on?(event: "error", cb: (err: unknown) => void): unknown;
+  } | null;
   stdout: { on(event: "data", cb: (chunk: Buffer) => void): unknown } | null;
   stdio?: readonly unknown[];
   on(event: "close" | "error", cb: (a?: unknown, b?: unknown) => void): unknown;
@@ -77,6 +80,11 @@ export interface OverlayOptions {
   cwd: string;
   term: OverlayTerminal;
   env?: NodeJS.ProcessEnv;
+  /**
+   * false when there is nothing to minimise TO (`prometheus disk-space` run straight from the
+   * shell): Ctrl+] is then the program's own key and only Ctrl+D is Prometheus's. Default true.
+   */
+  minimizable?: boolean;
   /** the overlay was minimised: the program runs on, Prometheus gets the screen back */
   onDetach(why: "minimized"): void;
   /** the program ended; `attached` says whether it was on screen at that moment */
@@ -100,6 +108,7 @@ export class OverlaySession {
   /** the end of the previous output chunk, so a split escape sequence is still seen */
   private tail = "";
   private killTimer: unknown = null;
+  private endedByCtrlD = false;
   private readonly setTimer: (fn: () => void, ms: number) => unknown;
   private readonly clearTimer: (handle: unknown) => void;
 
@@ -119,13 +128,19 @@ export class OverlaySession {
     return this.o.label;
   }
 
+  /** the human ended it with Ctrl+D (as opposed to the program quitting on its own) */
+  get terminated(): boolean {
+    return this.endedByCtrlD;
+  }
+
   start(): void {
     const { cols, rows } = this.o.term.size();
     const spawn =
       this.o.spawn ?? (nodeRequire("node:child_process") as { spawn: OverlaySpawn }).spawn;
     const child = spawn(
       this.o.python,
-      [this.o.ptyHost, String(cols), String(rows), "--", ...this.o.argv],
+      // -I: the relay may run as root (`sudo prometheus disk-space`) with the user's HOME
+      ["-I", this.o.ptyHost, String(cols), String(rows), "--", ...this.o.argv],
       {
         cwd: this.o.cwd,
         env: this.o.env ?? process.env,
@@ -134,6 +149,12 @@ export class OverlaySession {
     );
     this.child = child;
     this.current = "attached";
+    // a key typed after the program ended hits a closed pipe: EPIPE is expected, not a crash
+    child.stdin?.on?.("error", () => {});
+    (child.stdio?.[3] as { on?(e: "error", cb: () => void): unknown } | undefined)?.on?.(
+      "error",
+      () => {},
+    );
     child.stdout?.on("data", (chunk: Buffer) => this.onOutput(chunk));
     child.on("close", (code) => this.onClose(typeof code === "number" ? code : null));
     child.on("error", () => this.onClose(null));
@@ -142,14 +163,18 @@ export class OverlaySession {
   /** Raw keystrokes while attached. Ctrl+] and Ctrl+D are ours; everything else is the program's. */
   input(chunk: Buffer): void {
     if (this.current !== "attached" || !this.child) return;
-    const stop = chunk.findIndex((b) => b === MINIMIZE || b === TERMINATE);
+    const minimizable = this.o.minimizable !== false;
+    const stop = chunk.findIndex((b) => (minimizable && b === MINIMIZE) || b === TERMINATE);
     if (stop < 0) {
       this.child.stdin?.write(chunk);
       return;
     }
     if (stop > 0) this.child.stdin?.write(chunk.subarray(0, stop));
     if (chunk[stop] === MINIMIZE) this.minimize();
-    else this.terminate();
+    else {
+      this.endedByCtrlD = true;
+      this.terminate();
+    }
   }
 
   minimize(): void {
