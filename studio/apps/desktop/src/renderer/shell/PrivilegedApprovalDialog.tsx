@@ -121,7 +121,12 @@ export function PrivilegedApprovalDialog(): ReactElement | null {
             width: 640,
             maxWidth: "92vw",
             maxHeight: "90vh",
-            overflow: "auto",
+            // the title, the command and the buttons stay put; only the details scroll. With the
+            // whole dialog scrolling, focusing Deny scrolled the COMMAND out of view whenever a
+            // long script preview made it tall — the human saw everything but what they approve.
+            display: "flex",
+            flexDirection: "column",
+            overflow: "hidden",
             background: "var(--bg-surface-2)",
             border: "1px solid var(--danger)",
             borderRadius: "var(--radius-xl, 14px)",
@@ -131,12 +136,23 @@ export function PrivilegedApprovalDialog(): ReactElement | null {
             fontFamily: "var(--font-ui)",
           }}
         >
-          <h2 style={{ margin: 0, fontSize: "var(--text-h2-size, 1rem)", color: "var(--danger)" }}>
+          <h2
+            style={{
+              margin: 0,
+              flexShrink: 0,
+              fontSize: "var(--text-h2-size, 1rem)",
+              color: "var(--danger)",
+            }}
+          >
             {title}
           </h2>
           <code
             style={{
               display: "block",
+              flexShrink: 0,
+              // a very long command scrolls inside its own box; it never pushes the buttons off
+              maxHeight: "40vh",
+              overflowY: "auto",
               margin: "var(--space-6, 12px) 0",
               padding: "var(--space-4, 8px)",
               background: "var(--bg-surface)",
@@ -151,6 +167,9 @@ export function PrivilegedApprovalDialog(): ReactElement | null {
           <pre
             style={{
               margin: 0,
+              flex: "1 1 auto",
+              minHeight: 0,
+              overflowY: "auto",
               whiteSpace: "pre-wrap",
               overflowWrap: "break-word",
               fontFamily: "var(--font-mono)",
@@ -161,7 +180,7 @@ export function PrivilegedApprovalDialog(): ReactElement | null {
             {details.join("\n")}
           </pre>
           {head.phrase ? (
-            <label style={{ display: "block", marginTop: "var(--space-6, 12px)" }}>
+            <label style={{ display: "block", flexShrink: 0, marginTop: "var(--space-6, 12px)" }}>
               <span style={{ fontSize: "0.8rem" }}>
                 Type <code>{head.phrase}</code> to approve:
               </span>
@@ -183,6 +202,7 @@ export function PrivilegedApprovalDialog(): ReactElement | null {
           <div
             style={{
               display: "flex",
+              flexShrink: 0,
               alignItems: "center",
               gap: "var(--space-4, 8px)",
               marginTop: "var(--space-8, 16px)",

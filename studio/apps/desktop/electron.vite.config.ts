@@ -346,6 +346,9 @@ export default defineConfig({
           // mirroring the main-process `worker`/`extRunner` multi-input). electron-vite
           // requires each renderer entry be an `.html` with its own <script type=module>.
           floatingTerminal: resolve(__dirname, "src/renderer/floating-terminal.html"),
+          // the root terminal window ("Open as administrator"): display-only; its keys are read
+          // by main from the keyboard (main/root-terminal-window.ts), never sent by the page
+          adminTerminal: resolve(__dirname, "src/renderer/admin-terminal.html"),
         },
         // BUNDLE Monaco + xterm when installed; EXTERNALISE them when not (this pass)
         // so the source-only build SUCCEEDS without the heavy deps (§12). Once the

@@ -16,6 +16,7 @@
  * stream the sidecar's `progress:` lines through `onStderr`.
  */
 import { join } from "node:path";
+import { defaultPythonBin } from "./config.js";
 import {
   type SidecarEnvelope,
   type SidecarOptions,
@@ -218,6 +219,8 @@ export interface DiskSpaceClient {
     args?: { depthCap?: number; minSize?: string },
     opts?: SidecarOptions,
   ): Promise<DiskPrivilegedRescanResult>;
+  /** the exact command that opens the interactive tool as root (for the gate's terminal mode) */
+  privilegedExplorer(path?: string, opts?: SidecarOptions): Promise<DiskPrivilegedRescanResult>;
 }
 
 export const DISK_SCAN_TIMEOUT_MS = 30 * 60_000;
@@ -311,6 +314,12 @@ export function createDiskSpaceClient(
         ],
         quick(opts),
       ),
+    privilegedExplorer: (path, opts) =>
+      run<DiskPrivilegedRescanResult>(
+        "disk_map.py",
+        ["privileged-explorer", ...(path ? ["--", path] : [])],
+        quick(opts),
+      ),
   };
 }
 
@@ -326,7 +335,7 @@ export function diskSpaceToolPaths(
 ): DiskToolPaths {
   const tools = join(resolveSidecarDir(opts.sidecarDir), "..", "tools");
   return {
-    python: opts.pythonBin || process.env.PYTHON || process.env.PYTHON_BIN || "python3",
+    python: opts.pythonBin || defaultPythonBin(),
     tool: join(tools, "disk_space.py"),
     ptyHost: join(tools, "pty_host.py"),
   };
@@ -335,8 +344,10 @@ export function diskSpaceToolPaths(
 /**
  * The argv of the full curses TUI. `--no-sudo` ALWAYS: left to itself the tool re-executes
  * through sudo, and nothing here may elevate on its own — a root scan goes through the
- * privileged gate instead.
+ * privileged gate instead. `-I` (isolated) because `sudo prometheus disk-space` runs this as
+ * ROOT with the user's HOME: root must not load the user's site-packages `.pth` files, nor let
+ * the user-writable tools/ dir shadow the standard library.
  */
 export function diskSpaceTuiArgv(paths: DiskToolPaths, mapPath?: string): string[] {
-  return [paths.python, paths.tool, "--no-sudo", ...(mapPath ? ["--map", mapPath] : [])];
+  return [paths.python, "-I", paths.tool, "--no-sudo", ...(mapPath ? ["--map", mapPath] : [])];
 }

@@ -44,6 +44,7 @@ import {
   gateFull as engineGateFull,
   safeChildEnv,
   safeFetch,
+  setEngineOverrides,
 } from "@prometheus/engine-bridge";
 import { type PrGateway, createPrGateway, createTokenSecretsStore } from "./pr-gateway.js";
 
@@ -126,11 +127,13 @@ import { registerModelHealthIpcHandlers } from "./model-health-ipc.js";
 import { migrateModelHealthStore, sharedModelHealthStorePath } from "./model-health-store-path.js";
 import { registerModelIpcHandlers } from "./model-ipc.js";
 import { registerOllamaIpc } from "./ollama-ipc.js";
+import { bundledConfigPath, packagedEngineEnv, toEngineOverrides } from "./packaged-engine.js";
 import { registerPathCompletionIpcHandlers } from "./path-completion-ipc.js";
 import { registerPersonaIpcHandlers } from "./persona-ipc.js";
 import { registerPrivilegedIpcHandlers, studioPrivilegedGate } from "./privileged-ipc.js";
 import { registerRepoIpcHandlers } from "./repo-ipc.js";
 import { repairPath } from "./resolve-path.js";
+import { type WindowLike, createRootTerminalWindowOpener } from "./root-terminal-window.js";
 import { registerScheduleIpcHandlers } from "./schedule-ipc.js";
 import { migrateScheduleStore, sharedScheduleStorePath } from "./schedule-store-path.js";
 import { registerSecurityIpcHandlers } from "./security-ipc.js";
@@ -158,11 +161,7 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
  */
 function bundledConfig(file: string): string {
   const res = (process as unknown as { resourcesPath?: string }).resourcesPath;
-  if (res) {
-    const packaged = join(res, "config", file);
-    if (existsSync(packaged)) return packaged;
-  }
-  return join(__dirname, "..", "..", "..", "..", "config", file);
+  return bundledConfigPath(file, res, join(__dirname, "..", "..", "..", "..", "config"));
 }
 
 // APP-PATH: repair PATH for GUI (Finder/Dock) launches BEFORE any engine/sidecar/
@@ -171,6 +170,19 @@ function bundledConfig(file: string): string {
 // detection reports false-negatives. safeChildEnv forwards process.env.PATH to every
 // child, so fixing it here fixes installs AND detection app-wide. Runs once, sync.
 repairPath();
+
+// A packaged build ships the engine, the Python sidecars, disk_space.py and a relocatable
+// CPython under Resources; tell every resolver where (only what is unset and really on disk).
+if (app.isPackaged) {
+  setEngineOverrides(
+    toEngineOverrides(
+      packagedEngineEnv({
+        resourcesPath: (process as unknown as { resourcesPath?: string }).resourcesPath,
+        env: process.env,
+      }),
+    ),
+  );
+}
 
 /** The Local History manager (APP-063), lazily created after `app` is ready (getPath). */
 let localHistoryManager: LocalHistoryManager | null = null;
@@ -750,6 +762,31 @@ function createFloatingTerminalWindow(req: {
   });
 }
 
+/**
+ * The root terminal window ("Open as administrator"): hardened like every window, and opened only
+ * by the disk-space session after the human approved the exact command. Its keys are read here,
+ * in main, from the keyboard (root-terminal-window.ts) — never from any page.
+ */
+const openRootTerminal = createRootTerminalWindowOpener({
+  createWindow: () => {
+    const win = new BrowserWindow({
+      width: 1100,
+      height: 700,
+      minWidth: 480,
+      minHeight: 240,
+      show: false,
+      backgroundColor: "#070d18",
+      title: "disk-space — running as administrator (root)",
+      ...(appIcon.isEmpty() ? {} : { icon: appIcon }),
+      webPreferences: hardenedWebPreferences(),
+    });
+    applyWindowHardening(win);
+    if (RENDERER_DEV_URL) void win.loadURL(`${RENDERER_DEV_URL}/admin-terminal.html`);
+    else void win.loadFile(join(__dirname, "../renderer/admin-terminal.html"));
+    return win as unknown as WindowLike;
+  },
+});
+
 /** Re-dock: close the float for `ptyId` (its `closed` handler emits the returned event). */
 function closeFloatingTerminal(ptyId: string): void {
   const win = floatingTerminals.get(ptyId);
@@ -869,7 +906,10 @@ async function runHeadlessSmoke(): Promise<void> {
   // The privileged gate (sudo): the ONLY path to root — a human approves each exact command.
   disposePrivilegedIpc = registerPrivilegedIpcHandlers();
   // Disk space: the disk_map sidecar's views + delete plan/confirm; "Rescan as root" via the gate.
-  disposeDiskSpaceIpc = registerDiskSpaceIpcHandlers({ gate: studioPrivilegedGate });
+  disposeDiskSpaceIpc = registerDiskSpaceIpcHandlers({
+    gate: studioPrivilegedGate,
+    rootWindow: openRootTerminal,
+  });
   // The Code-Editor / IDE surface (file 07 §3.2/§4/§5/§6/§9) — LSP/DAP/PTY/git/fs
   // hosts + the REAL engine-bridge run-gate. The renderer drives them over IPC (C5).
   disposeIdeIpc = registerIdeIpcHandlers({
@@ -1239,7 +1279,10 @@ async function bootstrap(): Promise<void> {
   // The privileged gate (sudo): the ONLY path to root — a human approves each exact command.
   disposePrivilegedIpc = registerPrivilegedIpcHandlers();
   // Disk space: the disk_map sidecar's views + delete plan/confirm; "Rescan as root" via the gate.
-  disposeDiskSpaceIpc = registerDiskSpaceIpcHandlers({ gate: studioPrivilegedGate });
+  disposeDiskSpaceIpc = registerDiskSpaceIpcHandlers({
+    gate: studioPrivilegedGate,
+    rootWindow: openRootTerminal,
+  });
   // The Code-Editor / IDE surface (file 07 §3.2/§4/§5/§6/§9) — registered alongside
   // the main ipc so the editor's hosts (LSP/DAP/PTY/git/fs + run-gate) are live from
   // boot. The renderer never spawns a child; it drives these hosts over IPC (C5).

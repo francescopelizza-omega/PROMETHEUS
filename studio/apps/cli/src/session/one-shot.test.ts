@@ -26,6 +26,7 @@ import {
   oneShotPrompt,
   renderOneShot,
   runOneShot,
+  runPrompt,
 } from "./one-shot.js";
 
 function args(over: Partial<ParsedArgs> = {}): ParsedArgs {
@@ -119,6 +120,25 @@ test("headless is READ-ONLY by default, and the flags are the only way up", () =
   assert.equal(headlessAuthLevel(parseArgs(["-p", "x", "--allow-commands"])), 4);
   // Neither flag reaches `installs` (5) or `runall` (7).
   assert.ok(headlessAuthLevel(parseArgs(["-p", "x", "--allow-commands"])) < 5);
+});
+
+/* ── `prometheus run <prompt…>` ───────────────────────────────────────────── */
+
+test("`run <prompt…>` is the headless one-shot: the words after it are the prompt", () => {
+  assert.equal(runPrompt(parseArgs(["run", "what", "is", "2+2"])), "what is 2+2");
+  assert.equal(runPrompt(parseArgs(["run", "explain this file", "--json"])), "explain this file");
+  // `--` keeps a prompt word that starts with a dash from being read as a flag
+  assert.equal(runPrompt(parseArgs(["run", "--", "-rf", "means?"])), "-rf means?");
+  assert.equal(runPrompt(parseArgs(["run"])), null, "no prompt: usage, not an empty turn");
+  assert.equal(runPrompt(parseArgs(["chat", "hi"])), null);
+});
+
+test("`run` is a known verb: no unknown-command help screen swallows the prompt", () => {
+  const a = parseArgs(["run", "summarise", "README.md", "--allow-writes"]);
+  assert.deepEqual(a.command, ["run"]);
+  assert.ok(!a.unknownCommand);
+  assert.ok(!a.help);
+  assert.equal(a.flags["allow-writes"], true, "the one-shot flags still parse after the prompt");
 });
 
 /* ── `prometheus chat "<message>"` ─────────────────────────────────────────── */

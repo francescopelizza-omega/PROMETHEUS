@@ -17,6 +17,8 @@ Verbs (contract: ``CONTRACT.md`` § disk_map.py — one JSON object on stdout, e
   privileged-rescan PATH [--depth-cap N] [--depth N] [--min-size S]
                                            the exact command that rescans PATH as root — for
                                            the privileged gate to show, and run on approval
+  privileged-explorer [PATH]               the exact command that opens the interactive tool as
+                                           root (Studio: "Open disk space as administrator")
 
 The tool is REUSED, not copied: it is loaded by path under its own module name (a plain
 ``import disk_space`` would be ambiguous next to this file's directory on sys.path). Its CLI
@@ -492,6 +494,22 @@ def v_privileged_rescan(argv: List[str]) -> int:
                 why=f"measure folders under {root} that your user cannot read")
 
 
+def v_privileged_explorer(argv: List[str]) -> int:
+    cmd = "disk.privileged-explorer"
+    refused = not_root(cmd)
+    if refused is not None:
+        return refused
+    _, pos = parse(argv, [], [])
+    extra: List[str] = []
+    if pos:
+        root, err = need_dir(cmd, pos)
+        if err is not None:
+            return err
+        extra = ["--map", root]
+    return emit(cmd, argv=tool_command(*extra), script=script_info(TOOL_PATH), cwd="/",
+                why="explore the whole disk as root, including folders your user cannot read")
+
+
 def v_cleanup_plan(argv: List[str]) -> int:
     cmd = "disk.cleanup-plan"
     refused = not_root(cmd)
@@ -541,6 +559,7 @@ HANDLERS = {
     "largest-files": guarded("disk.files", v_largest_files),
     "delete": guarded("disk.delete", v_delete),
     "privileged-rescan": guarded("disk.privileged-rescan", v_privileged_rescan),
+    "privileged-explorer": guarded("disk.privileged-explorer", v_privileged_explorer),
     "cleanup-plan": guarded("disk.cleanup-plan", v_cleanup_plan),
 }
 

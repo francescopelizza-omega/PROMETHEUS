@@ -252,6 +252,7 @@ const ONE_WORD = new Set([
   "agents",
   "mcp",
   "chat",
+  "run",
   "repl",
   "tui",
   "session",

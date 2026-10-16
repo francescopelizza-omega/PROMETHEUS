@@ -129,8 +129,26 @@ before spawn. No authorization level (A7 included), `--yes`, grant, MCP client o
 can approve; with no human attached the command is returned instead. The password goes from
 the TTY or a native askpass dialog straight to sudo, never through Prometheus. The elevator is
 resolved only from root-owned system paths. Every request is logged to
-`~/.prometheus/audit/sudo.log`. Residual risk: a script is re-hashed microseconds before it
-runs, not executed from a root-owned copy.
+`~/.prometheus/audit/sudo.log`.
+
+The root interpreter opens a script only after the password has been typed — seconds after the
+gate's last check — so the gate does not rely on the file staying put (`privileged-verify.ts`):
+a Python script runs through a fixed loader that, as root, reads the file once, compares the
+SHA-256 of those bytes with the approved one and executes the same bytes (a swapped file exits
+126); a shell script's approved bytes are passed to the shell with `-c` and the file is never
+read again; a script whose whole path is root-controlled runs as it is; anything else is refused
+before the human is asked. The PTY relay of terminal mode runs through the same loader. Residual:
+the interpreter binary itself is not verified — a user-writable interpreter can be replaced by
+anything running as the user.
+
+Terminal mode (an interactive root program in a GUI) requires the askpass route, so the password
+never transits the app. Its screen is shown in a dedicated window whose keys main reads from
+Electron's `before-input-event` — raised by the browser process for real keyboard input, which
+page JavaScript cannot synthesise — and suppresses for the page. There is no IPC input channel,
+so no renderer (the app's main page, an extension, the root window's own page) can type into the
+root program. Keys pressed before the program draws are dropped; Ctrl+D, Stop, or closing the
+root window or the panel's window ends the session. Residual: OS-level input automation the user
+has granted Accessibility permission can type into the focused window, as into any terminal.
 
 ## Offline / degraded operation
 

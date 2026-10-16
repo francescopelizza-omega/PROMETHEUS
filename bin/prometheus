@@ -238,9 +238,17 @@ JS
 # Skipped when PROMETHEUS_CLI_JS pins an explicit bundle (nothing to compare it
 # against), when PROMETHEUS_SKIP_BUILD is set, or when this isn't a source checkout
 # at all (a published npm install ships dist/bin.js with no src/ next to it).
+# Never as root: `sudo prometheus disk-space` would otherwise run pnpm as root inside the user's
+# checkout and leave root-owned node_modules/ and dist/ that their next ordinary run cannot replace.
+# Nor does root run the stale bundle: it predates the current sources, including the code that
+# keeps a root run's own state out of the user's home.
 if [ -z "${PROMETHEUS_CLI_JS:-}" ] && [ -z "${PROMETHEUS_SKIP_BUILD:-}" ] \
   && [ -d "$ROOT/studio/apps/cli/src" ] && bundle_is_stale; then
-  if ! PNPM=$(find_pnpm); then
+  if [ "$(id -u)" = 0 ]; then
+    echo "prometheus: source changed since the last build, and a rebuild must not run as root (it would leave root-owned files in $ROOT)." >&2
+    echo "prometheus: run \`prometheus --version\` once as yourself to rebuild, then retry." >&2
+    exit 1
+  elif ! PNPM=$(find_pnpm); then
     echo "prometheus: source changed since the last build — rebuilding…" >&2
     echo "prometheus: pnpm not found — skipping rebuild (re-run \"$ROOT/install.sh\" --from-local \"$ROOT\", which installs it)." >&2
   elif [ -t 2 ] && tidy=$(mktemp -d "${TMPDIR:-/tmp}/prometheus-launch.XXXXXX" 2>/dev/null); then

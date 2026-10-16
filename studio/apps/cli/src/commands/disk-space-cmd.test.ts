@@ -7,9 +7,11 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type { PrivilegedGate, PrivilegedRequest } from "@prometheus/core/agent-system-host";
 import type { DiskSpaceClient, DiskToolPaths } from "@prometheus/engine-bridge";
+import type { CliContext } from "../context.js";
+import { parseArgs } from "../parse.js";
 import { setColorEnabled } from "../render.js";
 import type { OverlayLaunch } from "../tui/overlay-session.js";
-import { type DiskSpaceIo, runDiskSpace } from "./disk-space-cmd.js";
+import { type DiskSpaceIo, runDiskSpace, runDiskSpaceCommand } from "./disk-space-cmd.js";
 
 setColorEnabled(false);
 
@@ -167,7 +169,12 @@ test("bare /disk-space opens disk_space.py's own TUI over the session — never 
     f.deps,
   );
   assert.equal(rc, 0);
-  assert.deepEqual(f.overlays[0]?.argv, ["/usr/bin/python3", "/t/disk_space.py", "--no-sudo"]);
+  assert.deepEqual(f.overlays[0]?.argv, [
+    "/usr/bin/python3",
+    "-I",
+    "/t/disk_space.py",
+    "--no-sudo",
+  ]);
   assert.equal(f.overlays[0]?.ptyHost, "/t/pty_host.py");
   assert.equal(f.overlays[0]?.label, "disk-space");
   assert.deepEqual(f.calls, []);
@@ -209,7 +216,73 @@ test("--plain hands the real terminal over instead", async () => {
     },
     f.deps,
   );
-  assert.deepEqual(handed[0], ["/usr/bin/python3", "/t/disk_space.py", "--no-sudo"]);
+  assert.deepEqual(handed[0], ["/usr/bin/python3", "-I", "/t/disk_space.py", "--no-sudo"]);
+});
+
+test("straight from the shell the tool takes the terminal; Ctrl+D ending it is a clean exit", async () => {
+  const f = fakes();
+  const shown: OverlayLaunch[] = [];
+  const rc = await runDiskSpace(
+    [],
+    {
+      ...f.io,
+      runFullScreen: async (o) => {
+        shown.push(o);
+        return { code: 143, terminated: true };
+      },
+    },
+    f.deps,
+  );
+  assert.equal(rc, 0);
+  assert.deepEqual(shown[0]?.argv, ["/usr/bin/python3", "-I", "/t/disk_space.py", "--no-sudo"]);
+  assert.equal(shown[0]?.ptyHost, "/t/pty_host.py");
+  assert.deepEqual(f.out, [], "nothing is printed over a deliberate quit");
+});
+
+test("the tool failing on its own is reported with its code", async () => {
+  const f = fakes();
+  const rc = await runDiskSpace(
+    [],
+    { ...f.io, runFullScreen: async () => ({ code: 1, terminated: false }) },
+    f.deps,
+  );
+  assert.equal(rc, 1);
+  assert.match(f.out.join("\n"), /exit 1/);
+});
+
+const oneShot = (argv: string[]): CliContext =>
+  ({ json: false, quiet: false, args: parseArgs(argv) }) as unknown as CliContext;
+
+test("`prometheus disk-space` on a terminal runs the explorer full-screen, then returns", async () => {
+  const f = fakes();
+  const shown: OverlayLaunch[] = [];
+  const out = await runDiskSpaceCommand(oneShot(["disk-space", "/data"]), {
+    tty: true,
+    deps: f.deps,
+    fullScreen: async (o) => {
+      shown.push(o);
+      return { code: 0, terminated: false };
+    },
+  });
+  assert.equal(out.exitCode, 0);
+  assert.deepEqual(shown[0]?.argv.slice(-2), ["--map", "/data"]);
+  assert.equal(out.text, "");
+});
+
+test("`prometheus disk-space` with no terminal prints the filesystems instead", async () => {
+  const f = fakes();
+  let shown = 0;
+  const out = await runDiskSpaceCommand(oneShot(["disk-space"]), {
+    tty: false,
+    deps: f.deps,
+    fullScreen: async () => {
+      shown++;
+      return { code: 0, terminated: false };
+    },
+  });
+  assert.equal(shown, 0);
+  assert.ok(f.calls.includes("mounts"));
+  assert.equal(out.exitCode, 0);
 });
 
 test("a missing tool is reported, never half-launched", async () => {

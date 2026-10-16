@@ -81,13 +81,17 @@ prometheus chat --cli claude [--open|--tmux]   # preview the injection-safe laun
 A bare `prometheus` on a TTY opens the readline session (catalog / models / env / security / health
 panes + slash + `/help`); without tmux it stays single-window, with tmux enabled it fans out.
 
-## Headless (`-p`) — one turn, then exit
+## Headless (`run` / `-p`) — one turn, then exit
 
-`prometheus -p "<prompt>"` runs **one agentic turn** and exits. It is the scripting surface: the
+`prometheus run <prompt…>` and `prometheus -p "<prompt>"` are the same thing: **one agentic
+turn** with the session's model, the answer printed, then exit. With `run`, every word after it
+is the prompt (put `--` before a prompt that starts with a dash). It is the scripting surface: the
 model can read files, run commands and call the same tools the interactive session exposes, and
 the whole thing is over when it answers.
 
 ```sh
+prometheus run summarise the failing tests in this repo
+cat task.md | prometheus run                      # stdin is the prompt when none is given
 prometheus -p "summarise the failing tests in this repo"
 cat task.md | prometheus -p                       # stdin is the prompt when none is given
 prometheus -p "list the TODOs" --json             # ONE machine-readable object on stdout
@@ -127,7 +131,7 @@ Aliases: `--print` and `--prompt` are the same flag.
 | **models** | `model <hw\|list\|search\|fit\|pull\|remove\|serve\|endpoints\|repoint>` (over `modelhub.py`) · `models <…> --set-root DIR` (model-running tools) · in a session: **`/models`** — guided picker (local · free cloud · paid cloud · endless free spinner), `/models use <ref>`, `/models current`, `/models tools` |
 | **repos** | `repo <add\|list\|status\|update\|pin\|branch\|rescan\|remove\|vault>` (over `repo.py`, the only arbitrary-URL clone path — nemesis-gated) |
 | **privacy** | `metadata <inspect\|scrub\|edit\|timestomp> <file>` (over `metadata.py`) |
-| **disk space** | `disk-space [map\|levels\|files\|mounts\|delete\|cleanup] [PATH] [--sudo]` (over `disk_map.py`; in the TUI `/disk-space` opens the full explorer — Ctrl+] minimise/resume, Ctrl+D quit) |
+| **disk space** | `disk-space [map\|levels\|files\|mounts\|delete\|cleanup] [PATH] [--sudo]` (over `disk_map.py`; in the TUI `/disk-space` opens the full explorer — Ctrl+] minimise/resume, Ctrl+D quit; bare `prometheus disk-space [PATH]` on a terminal runs it full-screen and exits when Ctrl+D ends it, `sudo prometheus disk-space` as root) |
 | **providers / system** | `provider list` (C11 Tier-A first) · `doctor [--bridge]` · `pentest <action>` · `version` · `help` |
 
 ### Mutating verbs: preview → execute

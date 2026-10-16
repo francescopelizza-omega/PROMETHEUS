@@ -280,6 +280,21 @@ class RootWork(Sandbox):
         digest = hashlib.sha256(TOOL.read_bytes()).hexdigest()
         self.assertEqual(env["script"]["sha256"], digest)
 
+    def test_privileged_explorer_is_the_interactive_tool_for_the_gate(self):
+        # Studio's "Open disk space as administrator": the full curses tool, as root, in a terminal
+        # view — returned as a command for the gate, never run here
+        env = run("privileged-explorer")
+        self.assertTrue(env["ok"], env)
+        argv = env["argv"]
+        self.assertTrue(os.path.isabs(argv[0]))
+        self.assertEqual(argv[1:3], ["-I", str(TOOL)])
+        self.assertIn("--no-sudo", argv)
+        self.assertNotIn("--map-json", argv)
+        self.assertEqual(env["cwd"], "/")
+        self.assertEqual(env["script"]["sha256"], hashlib.sha256(TOOL.read_bytes()).hexdigest())
+        argv = run("privileged-explorer", str(self.tmp))["argv"]
+        self.assertEqual(argv[-2:], ["--map", str(self.tmp)])
+
     def test_privileged_rescan_bounds_its_output_depth(self):
         # a root scan of / with no depth printed the WHOLE tree (to_dict depth 64) — far past
         # what a pipe capture holds; the default keeps it predictable, callers can ask for more

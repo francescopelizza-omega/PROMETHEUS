@@ -20,9 +20,8 @@ import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 
 import { Commands } from "./commands.js";
-import { DEFAULT_TIMEOUT_MS, type EngineConfig, resolveEngine } from "./config.js";
+import { DEFAULT_TIMEOUT_MS, type EngineConfig, engineChildEnv, resolveEngine } from "./config.js";
 import { EngineError } from "./errors.js";
-import { safeChildEnv } from "./safe-env.js";
 import type { ForcedDanger } from "./security/verdict.js";
 
 export interface RunOptions {
@@ -143,7 +142,7 @@ export function runPrometheus<T extends EngineEnvelope = EngineEnvelope>(
         shell: false,
         stdio: ["pipe", "pipe", "pipe"],
         cwd: opts.cwd ?? config.cwd,
-        env: safeChildEnv(),
+        env: engineChildEnv(),
       });
     } catch (err) {
       reject(

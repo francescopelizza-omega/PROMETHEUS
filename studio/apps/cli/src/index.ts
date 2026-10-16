@@ -193,6 +193,14 @@ async function runByKey(path: string[], ctx: CliContext): Promise<CommandOutcome
   if (head === "sessions") return runSessions(ctx);
   // the full-screen interactive REPL/TUI (P4) — one-shot context can't host it.
   if (head === "repl" || head === "tui" || head === "session") return replStub(path);
+  // A real `run <prompt…>` never gets here — bin.ts runs it as a headless turn first.
+  if (head === "run") {
+    return {
+      text: "usage: prometheus run <prompt…>   one headless turn: the answer on stdout, then exit\n       cat task.md | prometheus run",
+      json: { ok: false, error: "run needs a prompt" },
+      exitCode: 2,
+    };
+  }
   // `chat --cli X` → the rich terminal PREVIEW (the engine's injection-safe argv +
   // notes). dispatch is a pure path, so it NEVER spawns: a launch (--open/--tmux) is
   // owned by bin.ts (TTY + readline confirm); reaching here (a programmatic run() or a

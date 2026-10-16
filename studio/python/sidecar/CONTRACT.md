@@ -421,6 +421,7 @@ back. Positionals after `--` are always paths, so a folder named `-rf` is never 
 | `largest-files` | `PATH [--top K=100]` | `{ok, command:"disk.files", root, files:[{path, rawPath?, size, mtime}]}` |
 | `delete` | `PATH… [--trash\|--permanent] [--confirm] [--ack-high-risk]` | plan: `{ok, command:"disk.delete", planned:true, mode, items:[{path, size, sizeAtLeast?, risk, reason, protected, mode, trashDir?}], worstRisk, total, requiresPhrase, note}` · run: `{ok, command:"disk.delete", executed:true, mode, results:[{path, ok, msg}], deleted}` |
 | `privileged-rescan` | `PATH [--depth-cap N=12] [--min-size S=1M]` | `{ok, command:"disk.privileged-rescan", argv:[python, disk_space.py, "--no-sudo", "--log", "/dev/null", "--map-json", PATH, …], script:{path, size, sha256}, cwd:"/", why}` |
+| `privileged-explorer` | `[PATH]` | `{ok, command:"disk.privileged-explorer", argv:[python, "-I", disk_space.py, "--no-sudo", "--log", "/dev/null", ("--map", PATH)], script:{path, size, sha256}, cwd:"/", why}` — the interactive TUI as root, for the gate's terminal mode (Studio: Open as administrator) |
 | `cleanup-plan` | — | `{ok, command:"disk.cleanup-plan", findings:[{id, title, category, size, reclaimable, mountpoint, risk, summary, actions:[{id, title, risk, needsRoot, needsInput, preview, requiresReboot, recommended, command}]}], errors}` (Linux; elsewhere `findings:[]` + `note`) |
 
 - **Tree payload.** Breadth-first, biggest first, capped at `--max-nodes`: the cap drops the

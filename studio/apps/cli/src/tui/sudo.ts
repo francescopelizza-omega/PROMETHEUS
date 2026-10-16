@@ -37,6 +37,33 @@ export function detectElevation(probe: ElevationProbe = {}): Elevation {
   return null;
 }
 
+/**
+ * Where a root one-shot keeps Prometheus's OWN state, or null to leave it alone.
+ *
+ * `sudo prometheus disk-space` runs as root, and macOS sudo keeps HOME — so the orphan-guard
+ * registry and the config migration that run before any command would write ROOT-OWNED files
+ * into the user's `~/.prometheus`, and the user's next ordinary run would fail on them. For that
+ * one-shot the state goes to root's own home (read from the password database, not HOME). The
+ * tool itself still knows the user: sudo passes SUDO_USER and disk_space.py reads it.
+ */
+export function rootStateHome(probe: {
+  getuid?: () => number;
+  env: NodeJS.ProcessEnv;
+  /** uid owning a path, undefined when it cannot be read */
+  ownerOf: (path: string) => number | undefined;
+  /** root's home from the password database */
+  rootHome: string;
+  command: string | undefined;
+}): string | null {
+  if (probe.command !== "disk-space") return null;
+  if (probe.getuid?.() !== 0 || probe.env.PROMETHEUS_HOME) return null;
+  const home = probe.env.HOME;
+  if (!home || home === probe.rootHome) return null;
+  const owner = probe.ownerOf(home);
+  if (owner === undefined || owner === 0) return null;
+  return `${probe.rootHome.replace(/\/+$/, "")}/.prometheus`;
+}
+
 /** Is the process elevated at all? */
 export function isElevated(probe: ElevationProbe = {}): boolean {
   return detectElevation(probe) !== null;

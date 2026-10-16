@@ -10,12 +10,16 @@
  *   - nemesis         (copied verbatim, chmod 0755 on posix)
  *   - VERSION.json    { engine, studioBuilt, builtAt }
  *   - studio/config/effort-capabilities.builtin.json  (the engine READS this at runtime)
+ *   - studio/config/providers.config.json             (Studio main reads it: bundledConfigPath)
+ *   - studio/python/sidecar/*.py                      (every sidecar; no tests, no caches)
+ *   - studio/python/tools/{disk_space.py,pty_host.py} (`/disk-space` and its PTY relay)
  *
  * The engine is the SINGLE source of truth at the repo root; we never fork it.
  * `engine` is read from prometheus.py's SCRIPT_VERSION; `studioBuilt` is the git
  * sha (env GITHUB_SHA / git rev-parse, else "dev"); `builtAt` is the build time.
  *
- * Run: node scripts/stage-engine.mjs   (idempotent; overwrites staging/engine).
+ * Run: node scripts/stage-engine.mjs [--out DIR]   (idempotent; overwrites staging/engine,
+ * or DIR — the packaged-engine test stages into a temp dir and runs what it staged).
  */
 import { execSync } from "node:child_process";
 import {
@@ -24,6 +28,7 @@ import {
   existsSync,
   mkdirSync,
   readFileSync,
+  readdirSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
@@ -33,7 +38,11 @@ import { fileURLToPath } from "node:url";
 const here = dirname(fileURLToPath(import.meta.url));
 const studio = resolve(here, "..");
 const repoRoot = resolve(studio, ".."); // PROMETHEUS/ — prometheus.py + nemesis live here
-const out = join(studio, "staging", "engine");
+const outFlag = process.argv.indexOf("--out");
+const out =
+  outFlag > 0 && process.argv[outFlag + 1]
+    ? resolve(process.argv[outFlag + 1])
+    : join(studio, "staging", "engine");
 
 const SRC = {
   prometheus: join(repoRoot, "prometheus.py"),
@@ -51,7 +60,24 @@ const SRC = {
    * verbatim, so both resolve identically and there is no second path to keep in sync.
    */
   effortTable: join(studio, "config", "effort-capabilities.builtin.json"),
+  providers: join(studio, "config", "providers.config.json"),
+  sidecars: join(studio, "python", "sidecar"),
+  tools: join(studio, "python", "tools"),
 };
+
+/**
+ * The Python half of the app. Every Studio panel backed by a sidecar (tests, repo map, linters,
+ * coverage, modelhub, disk space…) spawns `studio/python/sidecar/<name>.py`, and `/disk-space`
+ * runs `studio/python/tools/disk_space.py` through `pty_host.py`. None of it used to be staged, so
+ * those panels worked from a checkout and failed from the DMG with "sidecar not found".
+ *
+ * Same repo-relative layout as the checkout, for the same reason as the effort table above:
+ * `prometheus.py`'s `disk-space` and `disk_map.py`'s `../tools/disk_space.py` resolve relative to
+ * their own paths. Tools are an ALLOW-list — that directory also holds build-time and destructive
+ * utilities that have no business inside an app bundle.
+ */
+const SHIPPED_TOOLS = ["disk_space.py", "pty_host.py"];
+const isShippedSidecar = (name) => name.endsWith(".py") && !name.startsWith("test_");
 
 for (const [name, p] of Object.entries(SRC)) {
   if (!existsSync(p)) {
@@ -90,6 +116,22 @@ copyFileSync(SRC.nemesis, join(out, "nemesis"));
 const effortOut = join(out, "studio", "config", "effort-capabilities.builtin.json");
 mkdirSync(dirname(effortOut), { recursive: true });
 copyFileSync(SRC.effortTable, effortOut);
+copyFileSync(SRC.providers, join(dirname(effortOut), "providers.config.json"));
+
+const sidecarOut = join(out, "studio", "python", "sidecar");
+const toolsOut = join(out, "studio", "python", "tools");
+mkdirSync(sidecarOut, { recursive: true });
+mkdirSync(toolsOut, { recursive: true });
+const sidecars = readdirSync(SRC.sidecars).filter(isShippedSidecar).sort();
+for (const name of sidecars) copyFileSync(join(SRC.sidecars, name), join(sidecarOut, name));
+for (const name of SHIPPED_TOOLS) {
+  const from = join(SRC.tools, name);
+  if (!existsSync(from)) {
+    console.error(`stage-engine: tool ${name} not found at ${from}`);
+    process.exit(1);
+  }
+  copyFileSync(from, join(toolsOut, name));
+}
 if (process.platform !== "win32") {
   chmodSync(join(out, "prometheus.py"), 0o755);
   chmodSync(join(out, "nemesis"), 0o755);
@@ -114,3 +156,6 @@ console.log(
   `  prometheus.py + nemesis + VERSION.json (engine ${version.engine}, build ${version.studioBuilt})`,
 );
 console.log(`  studio/config/effort-capabilities.builtin.json (${stagedRules} rules)`);
+console.log(
+  `  studio/python/sidecar (${sidecars.length} sidecars) + tools (${SHIPPED_TOOLS.join(", ")})`,
+);

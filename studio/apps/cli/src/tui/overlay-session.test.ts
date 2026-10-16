@@ -9,18 +9,21 @@ import { EventEmitter } from "node:events";
 import test from "node:test";
 import { CTRL_D, CTRL_RIGHT_BRACKET, OverlaySession } from "./overlay-session.js";
 
-function harness(size = { cols: 120, rows: 40 }) {
+function harness(size = { cols: 120, rows: 40 }, minimizable?: boolean) {
   const out: string[] = [];
   const stdin: string[] = [];
   const ctl: string[] = [];
   const killed: string[] = [];
   const spawned: { cmd: string; args: string[]; opts: Record<string, unknown> }[] = [];
   const timers: { ms: number; fn: () => void }[] = [];
+  const ctlPipe = Object.assign(new EventEmitter(), { write: (s: string) => ctl.push(s) });
   const child = Object.assign(new EventEmitter(), {
     pid: 4321,
-    stdin: { write: (b: Buffer | string) => stdin.push(String(b)) },
+    stdin: Object.assign(new EventEmitter(), {
+      write: (b: Buffer | string) => stdin.push(String(b)),
+    }),
     stdout: new EventEmitter(),
-    stdio: [null, null, null, { write: (s: string) => ctl.push(s) }],
+    stdio: [null, null, null, ctlPipe],
     kill: (sig?: string) => {
       killed.push(sig ?? "SIGTERM");
       return true;
@@ -45,6 +48,7 @@ function harness(size = { cols: 120, rows: 40 }) {
     clearTimer: () => {},
     onDetach: (why) => events.push(`detach:${why}`),
     onExit: (code, attached) => events.push(`exit:${code}:${attached}`),
+    ...(minimizable === undefined ? {} : { minimizable }),
   });
   return { s, out, stdin, ctl, killed, spawned, timers, child, events };
 }
@@ -57,6 +61,7 @@ test("start: the program runs under pty_host at the terminal's size, attached", 
   h.s.start();
   assert.equal(h.spawned[0]?.cmd, "/usr/bin/python3");
   assert.deepEqual(h.spawned[0]?.args, [
+    "-I",
     "/t/pty_host.py",
     "120",
     "40",
@@ -165,4 +170,32 @@ test("a mode sequence split across two chunks is still tracked", () => {
   emitOut(h.child, "49h");
   h.s.input(Buffer.from(CTRL_RIGHT_BRACKET));
   assert.match(h.out.at(-1) ?? "", /\x1b\[\?1049l/);
+});
+
+test("not minimizable (a one-shot run has nothing to minimise to): Ctrl+] is the program's key", () => {
+  const h = harness(undefined, false);
+  h.s.start();
+  h.s.input(Buffer.from(`a${CTRL_RIGHT_BRACKET}b`));
+  assert.deepEqual(h.stdin, [`a${CTRL_RIGHT_BRACKET}b`]);
+  assert.equal(h.s.state, "attached");
+  h.s.input(Buffer.from(CTRL_D));
+  assert.deepEqual(h.killed, ["SIGTERM"], "Ctrl+D still ends it");
+});
+
+test("`terminated` says the human ended it with Ctrl+D, not the program on its own", () => {
+  const h = harness();
+  h.s.start();
+  assert.equal(h.s.terminated, false);
+  h.s.input(Buffer.from(CTRL_D));
+  assert.equal(h.s.terminated, true);
+});
+
+test("a key typed after the program ended (EPIPE on its pipes) is not a crash", () => {
+  // an 'error' event with no listener throws: the CLI's crash guard then printed
+  // "prometheus: unexpected: write EPIPE" into the restored terminal and exited 2
+  const h = harness();
+  h.s.start();
+  const epipe = Object.assign(new Error("write EPIPE"), { code: "EPIPE" });
+  assert.doesNotThrow(() => h.child.stdin.emit("error", epipe));
+  assert.doesNotThrow(() => (h.child.stdio[3] as EventEmitter).emit("error", epipe));
 });

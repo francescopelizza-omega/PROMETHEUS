@@ -10,6 +10,8 @@
  * verdicts are produced by engine-bridge/nemesis; this file only renders and
  * propagates the exit code (C5).
  */
+import { statSync } from "node:fs";
+import { userInfo } from "node:os";
 import { createInterface } from "node:readline";
 
 import { cliProfiles } from "@prometheus/core";
@@ -35,11 +37,13 @@ import {
   oneShotPrompt,
   renderOneShot,
   runOneShot,
+  runPrompt,
 } from "./session/one-shot.js";
 import { readStdinPrompt, stdinPromptSink } from "./stdin.js";
 import { isTerminalChatLaunch, routeTerminalChat } from "./terminal/chat-route.js";
 import { launchTmuxSession } from "./tmux/multiplexer.js";
 import { TUI_NOT_TTY, launchTui } from "./tui/index.js";
+import { rootStateHome } from "./tui/sudo.js";
 
 // FIRST, before anything below can print: the launcher's rebuild log (bin/prometheus) is
 // erased at the CLI's first visible write — the TUI/REPL banner, or an earlier warning — and
@@ -138,7 +142,8 @@ async function main(): Promise<void> {
   );
   if (stdinSink) {
     const piped = await readStdinPrompt();
-    const label = stdinSink === "flag" ? "prometheus -p" : "prometheus chat";
+    const label =
+      stdinSink === "flag" ? "prometheus -p" : `prometheus ${parsed.command[0] ?? "chat"}`;
     if (piped.error) {
       if (parsed.json) emitJson({ ok: false, error: piped.error });
       else process.stderr.write(`${label}: ${piped.error}\n`);
@@ -170,7 +175,7 @@ async function main(): Promise<void> {
      * file for the same reason `-p` is: dispatch() is a pure, non-streaming path, so an
      * agentic turn cannot run from inside it.
      */
-    const prompt = oneShotPrompt(parsed) ?? chatPrompt(parsed);
+    const prompt = oneShotPrompt(parsed) ?? chatPrompt(parsed) ?? runPrompt(parsed);
     if (prompt) {
       /**
        * STDOUT carries the RESULT. Everything else is progress and goes to stderr.
@@ -285,6 +290,25 @@ async function main(): Promise<void> {
 /** A friendly one-line message for any thrown value — NEVER a raw stack (§6). */
 function friendly(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
+}
+
+// `sudo prometheus disk-space`: root's own state (the orphan-guard registry below, the config
+// migration in main) goes to root's home, never as root-owned files into the user's.
+{
+  const rootState = rootStateHome({
+    getuid: process.getuid?.bind(process),
+    env: process.env,
+    ownerOf: (p) => {
+      try {
+        return statSync(p).uid;
+      } catch {
+        return undefined;
+      }
+    },
+    rootHome: userInfo().homedir,
+    command: parseArgs(process.argv.slice(2)).command[0],
+  });
+  if (rootState) process.env.PROMETHEUS_HOME = rootState;
 }
 
 // Kill every child we spawned on EVERY exit path — normal return, Ctrl-C, SIGTERM, crash.

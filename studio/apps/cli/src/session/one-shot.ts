@@ -123,6 +123,19 @@ export function chatPrompt(parsed: ParsedArgs): string | null {
 }
 
 /**
+ * The prompt from `prometheus run <prompt…>` — or null when that is not what this is.
+ *
+ * The same headless turn as `-p`, spelled as a verb: every word after `run` is the prompt, it
+ * runs once against the session's model, the answer goes to stdout and the process exits. `--`
+ * keeps a prompt word that begins with a dash from being read as a flag.
+ */
+export function runPrompt(parsed: ParsedArgs): string | null {
+  if (parsed.command[0] !== "run") return null;
+  const text = parsed.positionals.join(" ").trim();
+  return text === "" ? null : text;
+}
+
+/**
  * How much this headless run is allowed to do, from explicit flags only.
  *
  * Two flags rather than one blanket bypass, each named for its exact effect, because "can

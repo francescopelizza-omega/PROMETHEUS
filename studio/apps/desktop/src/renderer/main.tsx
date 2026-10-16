@@ -17,6 +17,9 @@
  */
 
 import "./styles/global.css";
+// xterm's required stylesheet: without it the terminal's hidden input helper is drawn as a grey
+// box over the screen and selection/cursor layers are mispositioned
+import "@xterm/xterm/css/xterm.css";
 
 // Bundled Space Grotesk — the BRAND face (handoff §1): the wordmark, the Home greeting
 // and every island/card title. Offline, self-hosted via @fontsource (no network/CSP

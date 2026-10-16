@@ -186,7 +186,14 @@ prometheus harden                # firewall, ports, ssh, disk encryption — rea
 prometheus audit <name>          # deep-scan one installed plugin's artifacts
 prometheus purge <agent>         # back up and remove a forgotten agent's config
 prometheus disk-space map /      # where the disk went (in the TUI: /disk-space, the full explorer)
+prometheus disk-space            # the full explorer, full-screen; Ctrl+D ends it and Prometheus exits
+sudo prometheus disk-space       # the same, as root — you typed sudo, so root is your call
 ```
+
+On Linux distributions whose sudo sets `secure_path` (Debian, Ubuntu, Fedora), `~/.local/bin` is
+not on it, so `sudo prometheus` reports "command not found"; run `sudo "$(command -v prometheus)"
+disk-space` instead. Run as root, the launcher never rebuilds your checkout (that would leave
+root-owned files in it), and the one-shot keeps its own state in root's home, not yours.
 
 ### 7. Pick a model in four questions — local, free cloud, paid, or an endless free spinner
 
@@ -418,8 +425,8 @@ the full list of what is *not* finished.
 | **Full-screen TUI** | Bare `prometheus` — history, autocomplete, markdown and syntax-highlighted rendering, a status strip |
 | **141 slash commands** | One registry drives every `/command`, and the same registry drives the CLI verbs and the GUI. `/commands` lists them |
 | **73 CLI subcommands** | `scan` `doctor` `model` `repo` `env` `budget` `updates` `sessions` `test` `harden` `pentest` `disk-space` … |
-| **Disk space** | `/disk-space` opens the full disk explorer over your session — Ctrl+] minimises it without stopping it, Ctrl+] again brings it back, Ctrl+D ends it — plus `map` / `levels` / `files` / `mounts`, a plan-first `delete`, Linux `cleanup`, and `--sudo` for a root rescan you approve. Studio has a Disk space panel (treemap, pie, levels) |
-| **Headless** | `prometheus -p "<prompt>"` for one shot; `prometheus chat` for terminal chat |
+| **Disk space** | `/disk-space` opens the full disk explorer over your session — Ctrl+] minimises it without stopping it, Ctrl+] again brings it back, Ctrl+D ends it — plus `map` / `levels` / `files` / `mounts`, a plan-first `delete`, Linux `cleanup`, and `--sudo` for a root rescan you approve. `prometheus disk-space` from a shell runs the explorer full-screen and exits when Ctrl+D ends it (`sudo prometheus disk-space` runs it as root). Studio has a Disk space panel (treemap, pie, levels) and **Open as administrator…**: you approve the exact command, the system asks for your password, and the explorer runs as root in its own window, where only your keyboard can type |
+| **Headless** | `prometheus run <prompt…>` (or `prometheus -p "<prompt>"`): one turn with a model, the answer on stdout, then exit; `prometheus chat` for terminal chat |
 | **tmux** | `prometheus session --tmux N` with auto-scaled sub-agent fan-out and a swarm board |
 | **Shell completion + man page** | bash/zsh/fish completions and a roff man page, both generated from the one command registry |
 | **8 languages** | English, Italian, French, Spanish, German, Portuguese, Dutch, Polish — with per-key fallback to English, so a partial translation never shows a blank |
@@ -1079,7 +1086,7 @@ two abuse.ch feeds are skipped, so a keyless update exits `1` by design), `2` fo
   prompt shows the argv, folder, who asked and why, and a script's path, size, SHA-256 and first
   lines; it offers **Approve once** or **Deny** (the default — and what no answer becomes); a
   catastrophic command (`rm -rf /`, `dd of=/dev/…`, `mkfs`, sudoers) also needs its target typed.
-  The approval is bound to that argv, folder and script hash and re-checked just before it runs.
+  The approval is bound to that argv, folder and script hash and re-checked just before sudo starts.
   `--yes`, A7, grants, MCP and headless runs cannot approve — with no human attached the command
   comes back for you to run. The password never passes through Prometheus: sudo reads it from
   your terminal, or a native dialog hands it straight to sudo (`sudo -A`); sudoers is never
@@ -1172,19 +1179,40 @@ The privileged gate (sudo) has its own limits:
   approve/deny/timeout/re-check/audit logic, every surface's wiring and the sandbox's refusal of
   setuid are covered by tests (the last one live, on macOS). A real sudo password round-trip —
   the TTY prompt in the TUI, the `osascript` dialog in Studio and VS Code, and the Linux helpers
-  (zenity, kdialog, ssh-askpass) — has not been exercised by the test suite. A GUI surface with
+  (zenity, kdialog, ssh-askpass) — has not been exercised by the test suite with a real password.
+  What has been exercised on a real terminal: the TTY path end to end with a stand-in elevator
+  (the password reaches it with echo off and appears in no output, result or audit line), the
+  Studio terminal mode through the real `pty_host.py` with a stand-in `sudo -A`, the AppleScript
+  of the macOS dialog (compiled, not shown), and the real approval dialog in the built Studio app
+  (denied). The Linux dialogs could not be tried here (macOS only). A GUI surface with
   no desktop session has no helper at all; it refuses and points you to a terminal. A sudoers
   policy with `requiretty` breaks the GUI path.
-- A script is re-hashed immediately before it runs, which leaves a window of microseconds in
-  which something already running as you could swap it. If that matters, keep scripts you run
-  as root where only root can write them. The same goes for the interpreter: a root rescan runs
-  the `python3` the sidecar ran under (isolated with `-I`, so the tool's own folder cannot shadow
-  the standard library) — if that interpreter lives somewhere you can write, so could anything
-  running as you.
-- `/disk-space` in the packaged Studio app: the Python sidecars are not staged into the app
-  bundle yet (true of every sidecar today), so the panel works from an installed checkout and
-  says "not shipped" in the DMG. CI runs no Python tests; the disk-space and gate suites are run
-  locally.
+- Root runs exactly the script bytes you approved, even though it opens the file seconds later
+  (after your password). A Python script runs through a fixed loader that, as root, reads the
+  file once, checks its SHA-256 against the one you approved and runs those bytes — a swapped
+  file exits 126 and nothing runs. A shell script's approved bytes are handed to the shell
+  directly; the file is not read again. A script only root can change runs as it is. Anything
+  else (perl, ruby, node, an unusual `#!` line, a shell script over 100 KB) is refused — keep it
+  where only root can write, or run it with sh or python. A bash script that finds itself through
+  `BASH_SOURCE` sees `$0` instead. Proven end to end: a stand-in sudo swaps the file after the
+  password, and the swap does not run.
+- What is still yours to keep safe is the interpreter: a root rescan runs the `python3` the
+  sidecar ran under (isolated with `-I`). If that interpreter lives somewhere you can write, so
+  could anything running as you.
+- Studio's "Open as administrator" shows the root program in **its own window**, and that window
+  takes its keys from your keyboard only: main reads them from Electron's `before-input-event`,
+  which page JavaScript cannot fake, and the page never even receives them. No IPC channel lets
+  any renderer type into root. Keys pressed before the program has drawn (while the password
+  dialog is up) are dropped; Ctrl+D, Stop, or closing either window ends it. OS-level input
+  automation you have granted Accessibility access (as for any terminal) can still type into it.
+- The packaged Studio app now ships the Python sidecars, `disk_space.py` and its PTY relay under
+  `Resources/engine/studio/python/`, and runs them on its bundled CPython. This has been checked by
+  staging into a temp dir and running what was staged; a built DMG has not been launched. A sidecar
+  that runs the user's own tools (tests, venvs) now uses the bundled interpreter there too, unless
+  `PROMETHEUS_PYTHON` says otherwise. These paths stay inside the app: Studio's own terminal and
+  the agent's commands do not inherit them, and the app's Python never writes bytecode into its
+  bundle. CI runs no Python tests; the disk-space, gate and
+  real-terminal suites are run locally (`tests/test_disk_space_e2e.py`, `tests/test_privileged_tty_e2e.py`).
 
 ---
 

@@ -327,6 +327,7 @@ ${c.bold("USAGE")}
   prometheus [--json] [--no-color] <command> [args]
   prometheus            (no args) → the interactive single-window session
   prometheus -p "…"     HEADLESS: run ONE agentic turn, print the answer, exit
+  prometheus run …      the same, as a verb: every word after \`run\` is the prompt
 
 ${c.bold("INTERACTIVE SESSION")}
   ${c.cyan("prometheus")}            Unified session in ONE window: chat + agent loop + panes
