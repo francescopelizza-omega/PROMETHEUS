@@ -17,6 +17,7 @@
  * estimate deliberately pessimistic rather than absent.
  */
 import type { FootprintObservation } from "./footprint-ledger.js";
+import { lmStudioCandidates } from "./lmstudio-models.js";
 import type { ModelCandidate } from "./model-admission.js";
 import { type KvCacheType, type KvGeometry, parseKvGeometry } from "./model-footprint.js";
 
@@ -131,6 +132,16 @@ export async function inventoryCandidates(
     kvCacheType?: KvCacheType;
   } = {},
 ): Promise<ModelCandidate[]> {
+  // LM Studio has no /api/tags or /api/show (it answers them with HTTP 200 + an error), so the
+  // Ollama inventory came back empty there and every load was waved through unweighed.
+  if (opts.runner === "lmstudio") {
+    return lmStudioCandidates(baseUrl, contextTokens, {
+      ...(opts.fetchFn ? { fetchFn: opts.fetchFn } : {}),
+      ...(opts.timeoutMs !== undefined ? { timeoutMs: opts.timeoutMs } : {}),
+      ...(opts.host !== undefined ? { host: opts.host } : {}),
+      ...(opts.resident ? { resident: opts.resident } : {}),
+    });
+  }
   const models = await listInstalledModels(baseUrl, opts);
   const runner = opts.runner ?? "ollama";
   return Promise.all(

@@ -96,6 +96,22 @@ export function parseDirectives(text: string): ParsedOutput {
   return { result: resultLines.join("\n").trim(), directives };
 }
 
+/** A size/variant tag as Ollama spells it: `7b`, `latest`, `3.2-instruct-q4_K_M`, `70b-q8_0`. */
+const OLLAMA_TAG = /^(latest|\d+(\.\d+)?[bkm]?([-_][\w.]+)*|[a-z]+\d*[-_]?q\d[\w]*)$/i;
+
+/** `<svc>`, `<svc>:<model>`, `<svc>:local[:<model>]` → a cli BackendRef. */
+function cliRef(spec: string): BackendRef {
+  const i = spec.indexOf(":");
+  const service = (i >= 0 ? spec.slice(0, i) : spec).trim().toLowerCase();
+  const rest = i >= 0 ? spec.slice(i + 1).trim() : "";
+  if (rest === "local") return { kind: "cli", service, local: true };
+  if (rest.startsWith("local:")) {
+    const model = rest.slice("local:".length).trim();
+    return { kind: "cli", service, local: true, ...(model ? { model } : {}) };
+  }
+  return { kind: "cli", service, ...(rest ? { model: rest } : {}) };
+}
+
 const KNOWN_CLI = new Set([
   "claude",
   "codex",
@@ -119,6 +135,9 @@ const KNOWN_CLI = new Set([
  *   "local:qwen2.5"             → local model
  *   "engine:llama3"             → engine-chat model
  *   "cli:gemini"                → cli:gemini
+ *   "opencode:anthropic/claude" → cli:opencode with ITS OWN model id (its own login)
+ *   "opencode:local:qwen3.6"    → cli:opencode on a LOCAL model (Ollama / LM Studio)
+ *   "mistral:7b"                → a local model (an Ollama tag), NOT the Mistral cloud API
  *   "fake"                      → fake (tests)
  *   anything else               → a local model id (safest default)
  */
@@ -130,7 +149,12 @@ export function parseBackendRef(token: string): BackendRef {
     const tail = v.slice(idx + 1).trim();
     if (k === "local") return { kind: "local", model: tail };
     if (k === "engine" || k === "engine-chat") return { kind: "engine-chat", model: tail };
-    if (k === "cli") return { kind: "cli", service: tail.toLowerCase() };
+    if (k === "cli") return cliRef(tail);
+    // `<cli>:<model>` — unless that name is ALSO an API provider (`gemini:<model>` has always
+    // meant the Gemini API), where only the explicit `:local` form means the CLI
+    if (KNOWN_CLI.has(k) && (!isApiProvider(k) || tail === "local" || tail.startsWith("local:"))) {
+      return cliRef(v);
+    }
     if (k === "in-process" || k === "inprocess") return { kind: "in-process", model: tail };
     if (k === "fake") return { kind: "fake" };
     if (k === "api") {
@@ -141,8 +165,10 @@ export function parseBackendRef(token: string): BackendRef {
       const ref = apiBackendFor(pid, model);
       if (ref) return ref;
     }
-    // "<apiProvider>:<model>" shorthand (e.g. "together:Qwen/Qwen2.5-Coder-32B").
-    if (isApiProvider(k)) {
+    // "<apiProvider>:<model>" shorthand (e.g. "together:Qwen/Qwen2.5-Coder-32B") — but an
+    // Ollama TAG (`mistral:7b`, `qwen2.5:latest`) names a local model, and sending it to the
+    // provider's cloud API was a local agent quietly becoming a paid, remote one.
+    if (isApiProvider(k) && !OLLAMA_TAG.test(tail)) {
       const ref = apiBackendFor(k, tail);
       if (ref) return ref;
     }

@@ -147,12 +147,20 @@ export function applyHostEnv(
 
   // An IPv6 literal needs its brackets back before it goes into a URL.
   const authority = `${host.includes(":") ? `[${host}]` : host}:${port}`;
+  // A start command that names its port must name THIS one: `lms server start --port 1234`
+  // with the probe moved to 4321 started a server nobody then looked for ("start-failed").
+  const at = spec.start ? spec.start.indexOf("--port") : -1;
+  const start =
+    spec.start && at >= 0 && at + 1 < spec.start.length
+      ? Object.freeze(spec.start.map((a, i) => (i === at + 1 ? String(port) : a)))
+      : spec.start;
   return Object.freeze({
     ...spec,
     host,
     port,
     baseUrl: `${scheme}://${authority}/v1`,
     ...(spec.nativeUrl ? { nativeUrl: `${scheme}://${authority}` } : {}),
+    ...(start ? { start } : {}),
   });
 }
 
@@ -332,11 +340,41 @@ export function localKeepAlive(): string | undefined {
 }
 
 /**
- * Spread into a local request body. Emits nothing unless the endpoint is local AND a value is
- * explicitly configured — never send a non-standard field to a non-Ollama endpoint.
+ * `keep_alive` ("60s", "5m", "1h", "300") as whole seconds, or undefined for "never unload"
+ * (`-1`), "unload now" (`0`) and anything unparseable. Kept here (not imported from
+ * engine-bridge's twin) because this module stays dependency-free for every surface.
  */
-export function localKeepAliveField(locality: string | undefined): { keep_alive?: string } {
+export function keepAliveSeconds(keepAlive: string | undefined): number | undefined {
+  const m = /^(\d+(?:\.\d+)?)\s*(ms|s|m|h)?$/i.exec((keepAlive ?? "").trim());
+  if (!m) return undefined;
+  const n = Number(m[1]);
+  const unit = (m[2] ?? "s").toLowerCase();
+  const secs = unit === "ms" ? n / 1000 : unit === "m" ? n * 60 : unit === "h" ? n * 3600 : n;
+  const whole = Math.ceil(secs);
+  return whole >= 1 ? whole : undefined;
+}
+
+/**
+ * Spread into a local request body. Emits nothing unless the endpoint is local AND a value is
+ * explicitly configured — never send a non-standard field to a cloud endpoint.
+ *
+ * LM Studio ignores Ollama's `keep_alive`; its own knob is `ttl` (seconds, for a JIT-loaded
+ * model). Sending only `keep_alive` there left every model Prometheus woke resident for LM
+ * Studio's idle default — about an hour — instead of the 60 s asked of Ollama. Pass the
+ * endpoint's `baseUrl` and LM Studio gets `ttl` instead.
+ */
+export function localKeepAliveField(
+  locality: string | undefined,
+  baseUrl?: string,
+): { keep_alive?: string; ttl?: number } {
   if (locality !== "local") return {};
   const v = localKeepAlive();
-  return v ? { keep_alive: v } : {};
+  if (!v) return {};
+  const port = baseUrl ? portOf(baseUrl) : undefined;
+  const runner = port !== undefined ? localRunners().find((r) => r.port === port) : undefined;
+  if (runner?.id === "lmstudio") {
+    const ttl = keepAliveSeconds(v);
+    return ttl ? { ttl } : {};
+  }
+  return { keep_alive: v };
 }

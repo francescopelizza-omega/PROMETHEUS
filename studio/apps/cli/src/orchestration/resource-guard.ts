@@ -47,7 +47,9 @@ const GUARDED_BINS = new Set(["opencode", "hermes"]);
 /** `spawn-capture.ts` tracks every recipe child as `agent:<bin>` — extract `<bin>` and confirm
  *  it is one this guard protects. Returns undefined for anything else (untouched). */
 function guardedBin(label: string): string | undefined {
-  const bin = label.startsWith("agent:") ? label.slice("agent:".length) : label;
+  const raw = label.startsWith("agent:") ? label.slice("agent:".length) : label;
+  // a CLI found off PATH is spawned by absolute path (`~/.opencode/bin/opencode`)
+  const bin = raw.split("/").pop() ?? raw;
   return GUARDED_BINS.has(bin) ? bin : undefined;
 }
 

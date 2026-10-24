@@ -83,7 +83,7 @@ All powered by the same agent loop in `studio/packages/core`:
 - Shell completion for bash/zsh/fish
 - Man page generation
 - Headless mode: `prometheus run <prompt…>` or `prometheus -p "<prompt>"` — one turn with a model, the answer on stdout, then exit
-- tmux integration with auto-scaled sub-agent swarms
+- tmux integration (optional): named multi-window sessions and a windowed `/demos` swarm; without tmux the same features run in one terminal (compatibility mode), and sub-agents run in-process either way
 
 **MCP Plugin Server** (Integrate with Claude Code, Cursor, Gemini, etc.)
 - 14 read + 5 write tools exposed via Model Context Protocol

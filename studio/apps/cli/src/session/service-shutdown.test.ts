@@ -104,3 +104,53 @@ test("maybeStopServicesOnExit: loaded + NO ⇒ leaves it loaded", async () => {
   await maybeStopServicesOnExit({ fetchFn: fn, confirm: async () => false, write: () => {} });
   assert.equal(unloads.length, 0);
 });
+
+test("exit: a model LM Studio holds is offered and unloaded by REST, beside Ollama's", async () => {
+  const posts: { url: string; body: unknown }[] = [];
+  const fetchFn = (async (url: string | URL, init?: RequestInit) => {
+    const u = String(url);
+    if (init?.method === "POST") {
+      posts.push({ url: u, body: JSON.parse(String(init.body)) });
+      return new Response("{}", { status: 200 });
+    }
+    if (u === "http://localhost:11434/api/ps") {
+      return new Response(JSON.stringify({ models: [{ name: "qwen3.6:latest", size: 23e9 }] }));
+    }
+    if (u === "http://localhost:1234/api/v1/models") {
+      return new Response(
+        JSON.stringify({
+          models: [
+            {
+              type: "llm",
+              key: "google/gemma-3-12b",
+              size_bytes: 8e9,
+              loaded_instances: [{ id: "google/gemma-3-12b" }],
+            },
+            { type: "llm", key: "qwen/qwen3-coder-30b", size_bytes: 18e9, loaded_instances: [] },
+          ],
+        }),
+      );
+    }
+    throw new Error("ECONNREFUSED");
+  }) as unknown as typeof fetch;
+  const loaded = await detectLoadedAiModels(fetchFn);
+  assert.deepEqual(
+    loaded.map((m) => [m.name, m.runner ?? "ollama"]),
+    [
+      ["qwen3.6:latest", "ollama"],
+      ["google/gemma-3-12b", "lmstudio"],
+    ],
+  );
+  const freed = await unloadAiModels(loaded, fetchFn);
+  assert.equal(freed, 2);
+  assert.deepEqual(posts, [
+    {
+      url: "http://localhost:1234/api/v1/models/unload",
+      body: { instance_id: "google/gemma-3-12b" },
+    },
+    {
+      url: "http://localhost:11434/api/generate",
+      body: { model: "qwen3.6:latest", keep_alive: 0 },
+    },
+  ]);
+});

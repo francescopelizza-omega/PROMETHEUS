@@ -30,6 +30,9 @@ const GLOBAL_FLAGS = [
   "--gate-mode",
   "--effort",
   "--force-effort",
+  "--plain",
+  "--tmux",
+  "--no-tmux",
   "--help",
   "--version",
 ] as const;

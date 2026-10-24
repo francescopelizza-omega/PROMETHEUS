@@ -247,6 +247,8 @@ function parseJson(payload: string): Record<string, unknown> | null {
  * `undefined`, because an error that cannot be described must still be REPORTED.
  */
 function errorMessage(o: Record<string, unknown>): string {
+  // LM Studio (and llama.cpp builds) send the error as a bare STRING: `{"error":"…"}`
+  if (typeof o.error === "string" && o.error) return o.error;
   const e = isRecord(o.error) ? o.error : o;
   const msg = typeof e.message === "string" && e.message ? e.message : "";
   const kind = typeof e.type === "string" && e.type ? e.type : "";
@@ -412,7 +414,11 @@ export const OPENAI_WIRE: WireFormat = {
   parseWhole(body) {
     const o = parseJson(body);
     if (!o) return {};
-    if (isRecord(o.error)) return { error: errorMessage(o) };
+    // `{"error":"…"}` as a string too: LM Studio's overflow / unknown-route answers were dropped
+    // and the turn reported "no readable content", losing the one sentence that said why
+    if (isRecord(o.error) || (typeof o.error === "string" && o.error)) {
+      return { error: errorMessage(o) };
+    }
     const out: WireEvent = {};
     const choices = o.choices;
     if (Array.isArray(choices) && choices.length > 0) {
@@ -441,8 +447,11 @@ export const OPENAI_WIRE: WireFormat = {
     const o = parseJson(payload);
     if (!o) return {};
     // A mid-stream failure arrives as its own frame, AFTER a 200 — so neither the retry
-    // classifier nor the error path ever saw it and the turn just ended empty.
-    if (isRecord(o.error)) return { error: errorMessage(o) };
+    // classifier nor the error path ever saw it and the turn just ended empty. (LM Studio sends
+    // the error as a bare string; that shape was dropped the same way.)
+    if (isRecord(o.error) || (typeof o.error === "string" && o.error)) {
+      return { error: errorMessage(o) };
+    }
     const out: WireEvent = {};
     const choices = o.choices;
     if (Array.isArray(choices) && choices.length > 0) {

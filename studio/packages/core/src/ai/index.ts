@@ -231,6 +231,23 @@ export {
   reclaimableBytes,
   renderRefusal,
 } from "./model-admission.js";
+export type { LmStudioInstance, LmStudioModel } from "./lmstudio-listing.js";
+export {
+  fetchLmStudioModels,
+  isLmStudioChatModel,
+  isLmStudioUnknownRoute,
+  lmStudioRoot,
+  lmStudioServedContext,
+  parseLmStudioModels,
+  rankLmStudioChatModels,
+} from "./lmstudio-listing.js";
+export type { CensusProbe } from "./lmstudio-models.js";
+export {
+  censusProbesFor,
+  lmStudioCandidates,
+  lmStudioCandidatesFrom,
+  runnerIdForUrl,
+} from "./lmstudio-models.js";
 export type { InstalledModel } from "./ollama-inventory.js";
 export {
   fetchModelGeometry,

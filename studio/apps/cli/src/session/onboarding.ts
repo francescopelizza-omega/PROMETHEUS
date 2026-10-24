@@ -23,6 +23,7 @@ import { createRequire } from "node:module";
 import {
   DEFAULT_CONTEXT_WINDOW,
   type LocalRunnerSpec,
+  ai,
   localRunners,
   runnerById,
 } from "@prometheus/core";
@@ -35,12 +36,14 @@ import {
   execCapture,
   launchGuardVerdict,
   listenersOnPort,
+  lmsBinary,
   modelServerStatus,
   releaseRunnerStartLock,
   sampleLaunchGuard,
   signalPid,
   spawnWatchdogIfNeeded,
   startModelServer,
+  unloadLmStudio,
 } from "@prometheus/engine-bridge";
 
 import type { FleetPeer } from "../fleet/heartbeat.js";
@@ -183,6 +186,19 @@ async function probeRunner(
   fetchFn: typeof fetch,
   timeoutMs: number,
 ): Promise<LocalRunner | null> {
+  if (runner.name === "lmstudio") {
+    // LM Studio's own listing: chat models only, loaded first. `/v1/models` lists every
+    // download, embeddings included, and `models[0]` becomes the session's model — the bundled
+    // embedding model (or an arbitrary 26 GB one) was then JIT-loaded by the warm-up.
+    const listed = await ai.fetchLmStudioModels(runner.baseUrl, { fetchFn, timeoutMs });
+    if (listed) {
+      return {
+        name: runner.name,
+        baseUrl: runner.baseUrl,
+        models: ai.rankLmStudioChatModels(listed).map((m) => m.id),
+      };
+    }
+  }
   try {
     const res = await fetchFn(`${runner.baseUrl}/models`, {
       signal: AbortSignal.timeout(timeoutMs),
@@ -319,15 +335,32 @@ export async function detectBackends(deps: DetectDeps): Promise<Backends> {
 
   const started = new Set<string>();
   const unavailableRunners: UnavailableRunner[] = [];
-  const probed = await Promise.all(
-    // `localRunners()`, not the raw constant: the probe must go where the user's OLLAMA_HOST
-    // says the daemon is. The Python sidecar has honoured that variable since it existed and
-    // every TypeScript surface ignored it, so a relocated daemon was visible from one half of
-    // the product and not the other.
-    localRunners().map((r) =>
-      probeAndMaybeStart(r, fetchFn, timeoutMs, started, unavailableRunners, ops),
-    ),
+  // `localRunners()`, not the raw constant: the probe must go where the user's OLLAMA_HOST
+  // says the daemon is. The Python sidecar has honoured that variable since it existed and
+  // every TypeScript surface ignored it, so a relocated daemon was visible from one half of
+  // the product and not the other.
+  const specs = localRunners();
+  // LOOK before starting anything. This used to probe-and-start every runner in one
+  // Promise.all, so a machine with Ollama AND LM Studio installed cold-started both on every
+  // boot — two servers, two watchdogs, each free to load a model, for a session that uses one.
+  const probed: (LocalRunner | null)[] = await Promise.all(
+    specs.map((r) => probeRunner({ name: r.id, baseUrl: r.baseUrl }, fetchFn, timeoutMs)),
   );
+  if (!probed.some((r) => r && r.models.length > 0)) {
+    // nothing serves a model yet: start AT MOST the first that will, in registry order
+    for (let i = 0; i < specs.length; i++) {
+      if (probed[i]) continue; // up already (serving nothing) — not ours to start
+      probed[i] = await probeAndMaybeStart(
+        specs[i] as LocalRunnerSpec,
+        fetchFn,
+        timeoutMs,
+        started,
+        unavailableRunners,
+        ops,
+      );
+      if ((probed[i]?.models.length ?? 0) > 0) break;
+    }
+  }
   const liveRunners = probed.filter((r): r is LocalRunner => r !== null);
   const localRunner = liveRunners.find((r) => r.models.length > 0);
 
@@ -372,6 +405,11 @@ export interface StopRunnersDeps {
    *  defaults to the real `execCapture`. See `LocalRunnerSpec.stop`'s doc for why this is
    *  ALWAYS preferred over `signalPidFn` when a spec has one. */
   execCaptureFn?: typeof execCapture;
+  /** frees LM Studio's loaded models before its server stops (`lms server stop` alone leaves
+   *  them resident). Injected for tests; the default is engine-bridge's REST unload, used only
+   *  when a test has not replaced the process side (`execCaptureFn`) — a unit test must never
+   *  reach a real LM Studio and unload someone's model. */
+  unloadLmStudioFn?: (baseUrl: string) => Promise<unknown>;
 }
 
 export async function stopSelfStartedRunners(
@@ -383,6 +421,11 @@ export async function stopSelfStartedRunners(
   const statusFn = deps.modelServerStatusFn ?? modelServerStatus;
   const signal = deps.signalPidFn ?? signalPid;
   const runCmd = deps.execCaptureFn ?? execCapture;
+  const unload =
+    deps.unloadLmStudioFn ??
+    (deps.execCaptureFn
+      ? async () => {}
+      : (url: string) => unloadLmStudio(url, { timeoutMs: 15_000 }));
   const others = peers.filter((p) => !p.self && p.state !== "dead" && p.model);
   await Promise.all(
     Array.from(startedRunnerIds).map(async (id) => {
@@ -397,7 +440,10 @@ export async function stopSelfStartedRunners(
           // process (verified for LM Studio: its own process reports as "Bionic" in `ps`, not
           // even "LM Studio") would have the WHOLE app quit by a raw SIGTERM, not just its
           // server component. Let the vendor's own tool decide how to shut down.
-          const [bin, ...args] = spec.stop;
+          if (spec.id === "lmstudio") await unload(spec.baseUrl).catch(() => {});
+          const [name, ...args] = spec.stop;
+          // `lms` usually is not on PATH: it lives in the app's ~/.lmstudio/bin
+          const bin = name === "lms" && !deps.execCaptureFn ? (lmsBinary() ?? name) : name;
           if (bin) await runCmd(bin, args, { timeoutMs: 15_000 });
           return;
         }

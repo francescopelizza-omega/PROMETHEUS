@@ -383,3 +383,94 @@ test("/demos replay errors clearly when no run log matches the id (CLI-073)", as
     rmSync(home, { recursive: true, force: true });
   }
 });
+
+// ── tmux compatibility mode ───────────────────────────────────────────────────────
+test("/demos <goal> without a usable tmux runs the SAME swarm headless, and says so", async () => {
+  const home = tmpHome();
+  try {
+    saveTopology(
+      home,
+      orch.normalizeTopology({
+        orchestrator: "demo",
+        agents: [{ name: "demo", backend: { kind: "fake" }, role: "orchestrate" }],
+      }),
+    );
+    const lines: string[] = [];
+    const notice = "tmux is not installed — compatibility mode: running the swarm headless.";
+    await runDemos("build a small parser", { ...deps(home, lines), tmuxCompat: () => notice });
+    const out = lines.join("\n");
+    assert.ok(lines.includes(notice), "the compatibility line is printed");
+    assert.doesNotMatch(out, /needs tmux/, "no refusal — it ran");
+    assert.match(out, /swarm done/);
+    const runs = readdirSync(join(home, "orchestration", "runs"));
+    assert.ok(
+      runs.some((f) => f.endsWith(".jsonl")),
+      "the headless bus log was written",
+    );
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("headless /demos asks the ToS question for a subscription-login agent (as tmux mode does)", async () => {
+  const home = tmpHome();
+  try {
+    saveTopology(
+      home,
+      orch.normalizeTopology({
+        orchestrator: "c",
+        agents: [{ name: "c", backend: { kind: "cli", service: "claude" }, role: "orchestrate" }],
+      }),
+    );
+    const lines: string[] = [];
+    const asked: string[] = [];
+    await runDemos("--headless build a parser", {
+      ...deps(home, lines),
+      // claude installed and logged in, NO API key in the environment ⇒ subscription automation
+      detect: async () => [
+        { service: "claude", bin: "claude", installed: true, authed: true, note: "" },
+      ],
+      env: {},
+      confirm: async (q) => {
+        asked.push(q);
+        return false;
+      },
+    });
+    const out = lines.join("\n");
+    assert.match(out, /ToS WARNING/);
+    assert.equal(asked.length, 1, "the human was asked exactly once");
+    assert.match(out, /Cancelled/);
+    assert.ok(!/swarm done/.test(out), "a declined gate must not run the swarm");
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("/demos <goal> whose windowed run tmux cannot start falls back to headless", async () => {
+  const home = tmpHome();
+  try {
+    saveTopology(
+      home,
+      orch.normalizeTopology({
+        orchestrator: "demo",
+        agents: [{ name: "demo", backend: { kind: "fake" }, role: "orchestrate" }],
+      }),
+    );
+    const lines: string[] = [];
+    let windowed = 0;
+    await runDemos("build a small parser", {
+      ...deps(home, lines),
+      tmuxCompat: () => null,
+      runTmux: async () => {
+        windowed++;
+        return { ok: false, reason: "old-tmux" };
+      },
+    });
+    const out = lines.join("\n");
+    assert.equal(windowed, 1, "the windowed run was tried first");
+    assert.match(out, /running the swarm headless in this terminal/);
+    assert.match(out, /swarm done/);
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});

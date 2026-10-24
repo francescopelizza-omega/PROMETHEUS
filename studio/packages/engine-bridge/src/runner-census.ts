@@ -19,14 +19,20 @@
  * throws would block the very load it exists to permit.
  */
 
+import { fetchLmStudioModels, isLmStudioUnknownRoute } from "./lmstudio.js";
+
 /** A runner we know how to ask. */
 export interface RunnerProbe {
   /** stable id used by the admission rules — "ollama", "lmstudio". */
   id: string;
   /** e.g. "http://127.0.0.1:11434" */
   baseUrl: string;
-  /** which dialect its residency endpoint speaks. */
-  api: "ollama" | "openai";
+  /**
+   * which dialect its residency endpoint speaks. `lmstudio` reads LM Studio's own REST listing
+   * (`/api/v1/models`, else `/api/v0/models`), which says what is LOADED and how big it is;
+   * `openai` is the bare catalogue and can only say "up".
+   */
+  api: "ollama" | "openai" | "lmstudio";
 }
 
 /**
@@ -45,7 +51,7 @@ export interface RunnerProbe {
  */
 export const FALLBACK_RUNNER_PROBES: readonly RunnerProbe[] = Object.freeze([
   { id: "ollama", baseUrl: "http://127.0.0.1:11434", api: "ollama" },
-  { id: "lmstudio", baseUrl: "http://127.0.0.1:1234", api: "openai" },
+  { id: "lmstudio", baseUrl: "http://127.0.0.1:1234", api: "lmstudio" },
 ]);
 
 export interface ResidentModelInfo {
@@ -128,6 +134,31 @@ export async function probeRunner(
 ): Promise<RunnerStatus> {
   const f = opts.fetchFn ?? fetch;
   const base = probe.baseUrl.replace(/\/+$/, "").replace(/\/v1$/, "");
+  if (probe.api === "lmstudio") {
+    const listed = await fetchLmStudioModels(base, {
+      fetchFn: f,
+      ...(opts.timeoutMs !== undefined ? { timeoutMs: opts.timeoutMs } : {}),
+    });
+    if (listed) {
+      return {
+        runner: probe.id,
+        baseUrl: probe.baseUrl,
+        up: true,
+        models: listed
+          .filter((m) => m.loaded.length > 0)
+          .map((m) => {
+            const ctx = m.loaded.map((i) => i.contextLength).find((n) => n !== undefined);
+            // the file size is the weights; the KV cache comes on top and is priced by admission
+            return { id: m.id, sizeBytes: m.sizeBytes, ...(ctx ? { contextTokens: ctx } : {}) };
+          }),
+        // LM Studio's own listing reports residency — the one-server rule may now count it
+        residencyKnown: true,
+        ...(opts.host ? { host: opts.host } : {}),
+      };
+    }
+    // too old for either REST route: fall back to the catalogue, which can only say "up"
+    return probeRunner({ ...probe, api: "openai" }, opts);
+  }
   const path = probe.api === "ollama" ? "/api/ps" : "/v1/models";
   const ac = new AbortController();
   const timer = setTimeout(() => ac.abort(), opts.timeoutMs ?? 2000);
@@ -143,6 +174,20 @@ export async function probeRunner(
       };
     }
     const json = (await res.json()) as unknown;
+    // LM Studio answers routes it does not have with HTTP 200 + `{"error":"Unexpected endpoint…"}`:
+    // an `ollama` probe aimed at its port is not an Ollama that is up and idle.
+    if (
+      isLmStudioUnknownRoute(json) ||
+      (probe.api === "ollama" && !Array.isArray((json as { models?: unknown })?.models))
+    ) {
+      return {
+        runner: probe.id,
+        baseUrl: probe.baseUrl,
+        up: false,
+        models: [],
+        residencyKnown: probe.api === "ollama",
+      };
+    }
     return {
       runner: probe.id,
       baseUrl: probe.baseUrl,

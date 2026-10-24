@@ -82,3 +82,34 @@ test("parseBackendRef resolves cli / local / engine / fake", () => {
   // unknown bare token → local model (safe default)
   assert.deepEqual(parseBackendRef("mistral-7b"), { kind: "local", model: "mistral-7b" });
 });
+
+test("CLI agents name their model; `:local` puts them on the local model server", () => {
+  assert.deepEqual(parseBackendRef("opencode:local:qwen3.6:latest"), {
+    kind: "cli",
+    service: "opencode",
+    local: true,
+    model: "qwen3.6:latest",
+  });
+  assert.deepEqual(parseBackendRef("hermes:local"), {
+    kind: "cli",
+    service: "hermes",
+    local: true,
+  });
+  assert.deepEqual(parseBackendRef("cli:hermes:local:nvidia/nemotron-3-nano-omni"), {
+    kind: "cli",
+    service: "hermes",
+    local: true,
+    model: "nvidia/nemotron-3-nano-omni",
+  });
+  assert.deepEqual(parseBackendRef("opencode:anthropic/claude-sonnet-4"), {
+    kind: "cli",
+    service: "opencode",
+    model: "anthropic/claude-sonnet-4",
+  });
+  assert.deepEqual(parseBackendRef("cli:gemini"), { kind: "cli", service: "gemini" });
+});
+
+test("an Ollama tag is a LOCAL model, not the provider's cloud API (`mistral:7b`)", () => {
+  assert.deepEqual(parseBackendRef("mistral:7b"), { kind: "local", model: "mistral:7b" });
+  assert.equal(parseBackendRef("mistral:mistral-large-latest").kind, "api");
+});

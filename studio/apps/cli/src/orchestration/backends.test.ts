@@ -267,3 +267,189 @@ test("cli backend → an auth error is NOT retried (no lockout hammering)", asyn
   );
   assert.equal(calls, 1); // tried once, no retry
 });
+
+/* ── CLI agents on a LOCAL model (Ollama / LM Studio), one at a time per server ── */
+
+const LMS = {
+  id: "local:lmstudio",
+  baseUrl: "http://localhost:1234/v1",
+  locality: "local" as const,
+  contextWindow: 32768,
+  model: "nvidia/nemotron-3-nano-omni",
+};
+
+function recordSpawn() {
+  const runs: { bin: string; args: string[]; env?: Record<string, string>; idleMs?: number }[] = [];
+  const spawn: InvokerDeps["spawn"] = async (bin, opts) => {
+    runs.push({
+      bin,
+      args: opts.args,
+      ...(opts.env ? { env: opts.env as Record<string, string> } : {}),
+      ...(opts.idleMs !== undefined ? { idleMs: opts.idleMs } : {}),
+    });
+    return capture("ok", "done");
+  };
+  return { runs, spawn };
+}
+
+test("opencode on a local model: inline provider config + -m prometheus-local/<id>, never the user's config", async () => {
+  const { runs, spawn } = recordSpawn();
+  const invoke = makeInvoker({
+    client: fakeEngine({}),
+    which: () => true,
+    spawn,
+    endpoint: LMS,
+    ...FAST_LAUNCH_GUARD,
+  });
+  await invoke(
+    req({ name: "oc", role: "coder", backend: { kind: "cli", service: "opencode", local: true } }),
+  );
+  const r = runs[0];
+  assert.deepEqual(r?.args, [
+    "run",
+    "-m",
+    "prometheus-local/nvidia/nemotron-3-nano-omni",
+    "--",
+    "do the thing",
+  ]);
+  const cfg = JSON.parse(r?.env?.OPENCODE_CONFIG_CONTENT ?? "{}");
+  assert.equal(cfg.provider["prometheus-local"].options.baseURL, "http://localhost:1234/v1");
+  assert.ok(cfg.provider["prometheus-local"].models["nvidia/nemotron-3-nano-omni"]);
+  assert.equal(r?.idleMs, 10 * 60_000, "a cold local load prints nothing — no 90 s silence kill");
+});
+
+test("hermes and aider on a local model: their own OpenAI-compatible flags/env", async () => {
+  const { runs, spawn } = recordSpawn();
+  const ollama = {
+    ...LMS,
+    id: "local:ollama",
+    baseUrl: "http://localhost:11434/v1",
+    model: "qwen3.6:latest",
+  };
+  const invoke = makeInvoker({
+    client: fakeEngine({}),
+    which: () => true,
+    spawn,
+    endpoint: ollama,
+    ...FAST_LAUNCH_GUARD,
+  });
+  await invoke(
+    req({ name: "h", role: "r", backend: { kind: "cli", service: "hermes", local: true } }),
+  );
+  await invoke(
+    req({
+      name: "a",
+      role: "r",
+      backend: { kind: "cli", service: "aider", local: true, model: "gemma4:12b" },
+    }),
+  );
+  assert.deepEqual(runs[0]?.args, [
+    "-z",
+    "do the thing",
+    "--provider",
+    "custom",
+    "--base-url",
+    "http://localhost:11434/v1",
+    "--api-key",
+    "local",
+    "-m",
+    "qwen3.6:latest",
+  ]);
+  assert.ok(runs[1]?.args.includes("openai/gemma4:12b"));
+  assert.equal(runs[1]?.env?.OPENAI_API_BASE, "http://localhost:11434/v1");
+});
+
+test("a local agent on a CLI with no local mode is REFUSED — never sent to the vendor's cloud", async () => {
+  const { runs, spawn } = recordSpawn();
+  const invoke = makeInvoker({
+    client: fakeEngine({}),
+    which: () => true,
+    spawn,
+    endpoint: LMS,
+    ...FAST_LAUNCH_GUARD,
+  });
+  await assert.rejects(
+    invoke(req({ name: "c", role: "r", backend: { kind: "cli", service: "claude", local: true } })),
+    /no local-model mode .*opencode/,
+  );
+  const noServer = makeInvoker({
+    client: fakeEngine({}),
+    which: () => true,
+    spawn,
+    ...FAST_LAUNCH_GUARD,
+  });
+  await assert.rejects(
+    noServer(
+      req({ name: "o", role: "r", backend: { kind: "cli", service: "opencode", local: true } }),
+    ),
+    /needs a local model server/,
+  );
+  assert.equal(runs.length, 0);
+});
+
+test("ONE request at a time per local model server — across opencode, hermes and local agents", async () => {
+  let inFlight = 0;
+  let peak = 0;
+  const slow = async () => {
+    inFlight++;
+    peak = Math.max(peak, inFlight);
+    await new Promise((r) => setTimeout(r, 15));
+    inFlight--;
+  };
+  const invoke = makeInvoker({
+    client: fakeEngine({}),
+    which: () => true,
+    endpoint: LMS,
+    ...FAST_LAUNCH_GUARD,
+    spawn: async () => {
+      await slow();
+      return capture("ok", "done");
+    },
+    aiClientFactory: (() => ({
+      chat: async function* () {
+        await slow();
+        yield "ok";
+      },
+    })) as never,
+  });
+  await Promise.all([
+    invoke(
+      req({ name: "o1", role: "r", backend: { kind: "cli", service: "opencode", local: true } }),
+    ),
+    invoke(
+      req({ name: "o2", role: "r", backend: { kind: "cli", service: "opencode", local: true } }),
+    ),
+    invoke(
+      req({ name: "h1", role: "r", backend: { kind: "cli", service: "hermes", local: true } }),
+    ),
+    invoke(req({ name: "l1", role: "r", backend: { kind: "local", model: "x" } })),
+  ]);
+  assert.equal(
+    peak,
+    1,
+    "two requests on one model server at once is two models in RAM, or a thrash",
+  );
+});
+
+test("a crashed attempt is not relaunched into the same memory pressure", async () => {
+  let samples = 0;
+  let spawns = 0;
+  const invoke = makeInvoker({
+    client: fakeEngine({}),
+    which: () => true,
+    sleep: async () => {},
+    launchGuardWaits: 0,
+    // clear for the first launch, then saturated (the guard just killed the agent)
+    launchGuardFn: async () =>
+      samples++ === 0 ? { cpuPct: 10, ramPct: 10 } : { cpuPct: 10, ramPct: 97 },
+    spawn: async () => {
+      spawns++;
+      return { code: null, signal: "SIGTERM", stdout: "", stderr: "", outcome: "crashed" };
+    },
+  });
+  await assert.rejects(
+    invoke(req({ name: "o", role: "r", backend: { kind: "cli", service: "opencode" } })),
+    /temporarily unavailable/,
+  );
+  assert.equal(spawns, 1);
+});

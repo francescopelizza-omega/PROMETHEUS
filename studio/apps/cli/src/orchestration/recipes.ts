@@ -29,6 +29,47 @@ export interface CliRecipe {
   timeoutMs: number;
   /** a human note (auth assumption / caveats), surfaced in the wizard. */
   note: string;
+  /**
+   * How to point THIS CLI at a LOCAL OpenAI-compatible server (Ollama `:11434/v1`, LM Studio
+   * `:1234/v1`) instead of its own cloud login — the extra argv and the env for that one run.
+   * Absent ⇒ the CLI has no local-model mode Prometheus knows how to drive, and a local agent
+   * of that kind is refused rather than silently sent to the vendor's cloud.
+   *
+   * Nothing is written to the user's own config: the wiring rides in argv/env of the child.
+   */
+  localWiring?: (baseUrl: string, model: string) => LocalWiring;
+}
+
+/** The argv and env one local-model run of a CLI needs. */
+export interface LocalWiring {
+  /** replaces the recipe's `buildArgs` model handling: the full argv after `bin`. */
+  args: (prompt: string) => string[];
+  env?: Record<string, string>;
+}
+
+/** The OpenAI-compatible root with exactly one `/v1`. */
+function v1(baseUrl: string): string {
+  const root = baseUrl.replace(/\/+$/, "").replace(/\/v1$/, "");
+  return `${root}/v1`;
+}
+
+/**
+ * opencode reads a whole config from `OPENCODE_CONFIG_CONTENT` (verified in the 1.18 binary),
+ * merged over the user's own. One provider, the model by its exact id: opencode then takes
+ * `-m prometheus-local/<id>` — an LM Studio id with its own `/` stays intact after the first.
+ */
+export function opencodeLocalConfig(baseUrl: string, model: string): string {
+  return JSON.stringify({
+    $schema: "https://opencode.ai/config.json",
+    provider: {
+      "prometheus-local": {
+        npm: "@ai-sdk/openai-compatible",
+        name: "Prometheus local model",
+        options: { baseURL: v1(baseUrl), apiKey: "local" },
+        models: { [model]: { name: model } },
+      },
+    },
+  });
 }
 
 const MIN = 60_000;
@@ -92,26 +133,62 @@ export const CLI_RECIPES: Readonly<Record<string, CliRecipe>> = Object.freeze({
     ],
     promptVia: "arg",
     timeoutMs: 10 * MIN,
-    note: "aider one-shot --message (all --no-* + --yes-always; raw stdout, no JSON). Auth: a provider API key in env.",
+    note: "aider one-shot --message (all --no-* + --yes-always; raw stdout, no JSON). Auth: a provider API key in env; a local model needs none.",
+    // aider (litellm) speaks to any OpenAI-compatible server as `openai/<id>` + OPENAI_API_BASE
+    localWiring: (baseUrl, model) => ({
+      args: (p) => [
+        "--message",
+        p,
+        "--yes-always",
+        "--no-stream",
+        "--no-pretty",
+        "--no-check-update",
+        "--no-analytics",
+        "--model",
+        `openai/${model}`,
+      ],
+      env: { OPENAI_API_BASE: v1(baseUrl), OPENAI_API_KEY: "local" },
+    }),
   },
   opencode: {
     service: "opencode",
     bin: "opencode",
     // flags MUST precede the message; prompt is the FINAL positional.
-    buildArgs: (p, model) => ["run", ...(model ? ["-m", model] : []), p],
+    buildArgs: (p, model) => ["run", ...(model ? ["-m", model] : []), "--", p],
     promptVia: "arg",
     timeoutMs: 10 * MIN,
-    note: "opencode run (non-interactive, auto-approves). Auth: opencode auth.json. Do NOT set provider key env (it overrides the login).",
+    note: 'opencode run (non-interactive). Tool permissions set to "ask" are NOT auto-approved headless (opencode ≥1.18 needs --auto, which Prometheus never adds for you). Auth: opencode auth.json; a local model needs none.',
+    localWiring: (baseUrl, model) => ({
+      args: (p) => ["run", "-m", `prometheus-local/${model}`, "--", p],
+      env: { OPENCODE_CONFIG_CONTENT: opencodeLocalConfig(baseUrl, model) },
+    }),
   },
   hermes: {
     service: "hermes",
     bin: "hermes",
     // hermes -z is the cleanest one-shot in the fleet: prompt in, final reply on stdout.
-    buildArgs: (p) => ["-z", p],
+    // `-m` is honoured by `-z` (docs: hermes-agent.nousresearch.com/docs/reference/cli-commands)
+    buildArgs: (p, model) => ["-z", p, ...(model ? ["-m", model] : [])],
     promptVia: "arg",
     authProbe: ["auth", "status"],
     timeoutMs: 10 * MIN,
-    note: "Nous Research Hermes agent CLI (`hermes -z`). Auth: HERMES_HOME/auth.json (`hermes auth add`).",
+    note: "Nous Research Hermes agent CLI (`hermes -z`). Auth: HERMES_HOME/auth.json (`hermes auth add`); a local model needs none.",
+    // `--provider custom --base-url` is Hermes's own way to use any OpenAI-compatible server;
+    // the key is a placeholder a local runner ignores (Hermes keeps it in memory only).
+    localWiring: (baseUrl, model) => ({
+      args: (p) => [
+        "-z",
+        p,
+        "--provider",
+        "custom",
+        "--base-url",
+        v1(baseUrl),
+        "--api-key",
+        "local",
+        "-m",
+        model,
+      ],
+    }),
   },
   cline: {
     service: "cline",
@@ -246,6 +323,8 @@ export interface CliLaunch {
   args: string[];
   stdin?: string;
   timeoutMs: number;
+  /** env for this run only (a local-model wiring); added to the child, never persisted. */
+  env?: Record<string, string>;
 }
 
 /**
@@ -259,9 +338,23 @@ export function launchFor(
   prompt: string,
   model?: string,
   recipes: Readonly<Record<string, CliRecipe>> = CLI_RECIPES,
+  local?: { baseUrl: string },
 ): CliLaunch | null {
   const r = recipeFor(service, recipes);
   if (!r) return null;
+  if (local) {
+    // a LOCAL agent on a CLI with no local mode is refused (null), never sent to the cloud
+    if (!r.localWiring || !model) return null;
+    const w = r.localWiring(local.baseUrl, model);
+    return {
+      bin: r.bin,
+      binFallbacks: r.binFallbacks ?? [],
+      args: w.args(prompt),
+      timeoutMs: r.timeoutMs,
+      ...(w.env ? { env: w.env } : {}),
+      ...(r.promptVia === "stdin" ? { stdin: prompt } : {}),
+    };
+  }
   const args = r.buildArgs(prompt, model);
   return {
     bin: r.bin,
@@ -270,4 +363,13 @@ export function launchFor(
     timeoutMs: r.timeoutMs,
     ...(r.promptVia === "stdin" ? { stdin: prompt } : {}),
   };
+}
+
+/** The services that can run against a local model server. */
+export function localCapableServices(
+  recipes: Readonly<Record<string, CliRecipe>> = CLI_RECIPES,
+): string[] {
+  return Object.values(recipes)
+    .filter((r) => r.localWiring)
+    .map((r) => r.service);
 }

@@ -36,6 +36,11 @@
  * or stubbed `fetch`, never an env flag") and it is what lets the tests below run with no
  * network and no `ollama` on PATH.
  */
+import {
+  fetchLmStudioModels,
+  isLmStudioUnknownRoute,
+  rankLmStudioChatModels,
+} from "./lmstudio-listing.js";
 import { type LocalRunnerSpec, localRunners } from "./local-runners.js";
 
 /**
@@ -178,13 +183,29 @@ async function probeOne(
   doFetch: typeof fetch,
   timeoutMs: number,
 ): Promise<{ models: string[] } | { detail: string }> {
+  if (spec.id === "lmstudio") {
+    // LM Studio's own listing: chat models only (its bundled embedding model was offered as a
+    // chat model, and `models[0]` became the session default), loaded ones first. An LM Studio
+    // too old for the REST listing falls through to the catalogue below.
+    const listed = await fetchLmStudioModels(spec.baseUrl, { fetchFn: doFetch, timeoutMs });
+    if (listed) return { models: rankLmStudioChatModels(listed).map((m) => m.id) };
+  }
   const { url, parse } = metadataProbe(spec);
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), timeoutMs);
   try {
     const res = await doFetch(url, { method: "GET", signal: ctrl.signal });
     if (!res.ok) return { detail: `${url} answered HTTP ${res.status}` };
-    return { models: parse(await res.json()) };
+    const body = await res.json();
+    // LM Studio answers a route it lacks with HTTP 200 + an error — not "up, serving nothing"
+    if (isLmStudioUnknownRoute(body)) {
+      return {
+        detail: `port ${spec.port} answered, but not as ${spec.name} (LM Studio is on it?)`,
+      };
+    }
+    const models = parse(body);
+    // the catalogue fallback: keep embedding models out of a CHAT picker
+    return { models: spec.id === "lmstudio" ? models.filter((m) => !/embed/i.test(m)) : models };
   } catch (err) {
     return { detail: describeProbeFailure(err, spec, timeoutMs) };
   } finally {

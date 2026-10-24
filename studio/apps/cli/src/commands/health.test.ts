@@ -8,6 +8,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
+import { onboarding } from "@prometheus/core";
+
 import type { CliContext } from "../context.js";
 import { type DoctorDeps, buildDoctorChecks, runDoctor } from "../doctor-bridge.js";
 import type { ParsedArgs } from "../parse.js";
@@ -136,4 +138,44 @@ test("doctor: pretty table renders per-check marks + a remedy line (CLI-051)", a
   assert.match(out.text ?? "", /CHECK/);
   assert.match(out.text ?? "", /node-pty spawn-helper/);
   assert.match(out.text ?? "", /chmod \+x/); // the remedy line under the fail
+});
+
+test("doctor: missing system packages WARN with the exact command — never a fail", async () => {
+  // CI runs `prometheus doctor` on images without tmux or bubblewrap; each has a working
+  // fallback, so this row may only ever warn.
+  const has =
+    (...bins: string[]) =>
+    (b: string) =>
+      bins.includes(b) ? `/usr/bin/${b}` : null;
+  const checks = buildDoctorChecks(
+    deps({
+      systemPackages: () =>
+        onboarding.scanSystemPackages({
+          platform: "linux",
+          osRelease: 'ID=ubuntu\nPRETTY_NAME="Ubuntu 24.04 LTS"\n',
+          which: has("apt-get", "git"),
+        }),
+    }),
+  );
+  const row = checks.find((c) => c.id === "system-packages");
+  const r = await row?.run();
+  assert.equal(r?.status, "warn");
+  assert.match(r?.detail ?? "", /missing: tmux, bubblewrap/);
+  assert.match(
+    r?.remedy ?? "",
+    /sudo apt-get update && sudo apt-get install -y --no-install-recommends tmux bubblewrap/,
+  );
+  assert.match(r?.remedy ?? "", /prometheus requirements/);
+
+  const done = buildDoctorChecks(
+    deps({
+      systemPackages: () =>
+        onboarding.scanSystemPackages({
+          platform: "darwin",
+          osRelease: null,
+          which: has("brew", "git", "tmux"),
+        }),
+    }),
+  ).find((c) => c.id === "system-packages");
+  assert.equal((await done?.run())?.status, "pass");
 });

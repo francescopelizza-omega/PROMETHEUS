@@ -26,6 +26,11 @@ test("/faq matches by keyword → the right answer", () => {
 
 test("/faq matches an exact topic slug strongly", () => {
   assert.match(renderFaq("tmux"), /subagent|orchestrator/i);
+  // users without tmux must find out it is optional, not that something is missing
+  assert.match(renderFaq("do I need tmux"), /tmux is optional/);
+  assert.match(renderFaq("without tmux"), /compatibility mode/);
+  assert.match(renderFaq("what do I need to install"), /prometheus requirements/);
+  assert.match(renderFaq("dependencies"), /privileged gate/);
   assert.match(renderFaq("paths"), /\.prometheus|repoint/i);
 });
 

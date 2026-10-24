@@ -1438,7 +1438,7 @@ export function warmupLocalModel(endpoint: AiEndpoint | undefined, home?: string
       messages: [{ role: "user", content: "ping" }],
       max_tokens: 1,
       stream: false,
-      ...localKeepAliveField(endpoint.locality),
+      ...localKeepAliveField(endpoint.locality, endpoint.baseUrl),
     }),
   })
     .then((res) => {
@@ -1584,8 +1584,23 @@ async function* toolTurn(
   /** Preserves emit order: the sequence in which each key was first seen. */
   const callOrder = new Map<string, number>();
   let callSeen = 0;
-  function callKey(tc: { index: number; complete?: boolean }): string {
-    return tc.complete === true ? `whole:${completeCallSeq++}` : `idx:${tc.index}`;
+  /**
+   * A NEW `id` on an index that already holds a call is a new call. Some servers (older Ollama
+   * builds, proxies) send each parallel call as its own fragment with `index: 0` and a fresh
+   * id; keyed by index alone they merged into one — last name wins, arguments `{…}{…}` — and
+   * both were reported as malformed.
+   */
+  const idxGen = new Map<number, number>();
+  function callKey(tc: { index: number; id?: string; complete?: boolean }): string {
+    if (tc.complete === true) return `whole:${completeCallSeq++}`;
+    const gen = idxGen.get(tc.index) ?? 0;
+    const key = gen === 0 ? `idx:${tc.index}` : `idx:${tc.index}#${gen}`;
+    const held = calls.get(key)?.id;
+    if (tc.id && held && held !== tc.id) {
+      idxGen.set(tc.index, gen + 1);
+      return `idx:${tc.index}#${gen + 1}`;
+    }
+    return key;
   }
   // …and a text scanner for the same turn, because a model with a native channel may still
   // answer in prose (see where `delta.content` is consumed).
@@ -1822,7 +1837,7 @@ async function* toolTurn(
           // Ollama extension (ignored by other endpoints): keep the model resident 30m so a
           // second prompt doesn't pay the multi-second cold RELOAD. Only for LOCAL runners —
           // never send a non-standard field to a cloud endpoint.
-          ...localKeepAliveField(endpoint.locality),
+          ...localKeepAliveField(endpoint.locality, endpoint.baseUrl),
         },
         // Same discipline as `keep_alive` above: a field goes on the wire only when THIS
         // model is known to accept it. A knobless model gets nothing rather than a 400.
@@ -3962,6 +3977,8 @@ function eventLine(ev: AgentEvent): string | null {
  */
 /** Providers whose models can actually run on a LOCAL OpenAI-compatible runner. */
 const LOCAL_PROVIDERS = new Set(["ollama", "lmstudio", "vllm", "llamacpp", "local"]);
+/** the runners the engine's `chat --runner` accepts (prometheus.py CHAT_LOCAL_ENDPOINTS). */
+const ENGINE_RUNNERS = new Set(["ollama", "lmstudio", "vllm", "llamacpp"]);
 
 async function offlineReply(ctx: SessionCtx, message: string): Promise<string> {
   const model = ctx.tuning.model.modelId;
@@ -3980,7 +3997,10 @@ async function offlineReply(ctx: SessionCtx, message: string): Promise<string> {
   try {
     // `--` end-of-options separator: the user message may legitimately start with `-`,
     // which must reach the engine as the prompt positional, never as an injected flag.
-    const argv = ["chat", "--local", model, "--", message];
+    // `--runner`: the engine defaults to Ollama, so an LM Studio model id (provider lmstudio)
+    // was sent to Ollama and came back "Is the local runner running?"
+    const runner = ENGINE_RUNNERS.has(provider) ? provider : undefined;
+    const argv = ["chat", "--local", model, ...(runner ? ["--runner", runner] : []), "--", message];
     const env = (await ctx.client.runPrometheus(argv)) as unknown as Record<string, unknown>;
     if (env.ok === false) {
       const detail = typeof env.error === "string" ? env.error : "local chat unavailable";

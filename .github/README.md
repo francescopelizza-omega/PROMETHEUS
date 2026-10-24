@@ -73,16 +73,29 @@ No `curl`? Use `wget`:
 wget -qO- https://gitlab.com/red-beard-phoenix/PROMETHEUS/-/raw/main/install.sh | sh
 ```
 
-Linux and macOS. The installer needs no root — it only offers your package manager where no
-pinned build exists, showing you the exact command first — and writes nothing outside
-`~/.prometheus`, `~/.local/bin` and one marked block in your shell rc. Then:
+Linux and macOS. The installer starts with a **requirements scan**: one table of what this
+machine has, what it will fetch privately, and which system packages are missing (git; tmux and
+bubblewrap, optional), followed by the **one command for your OS** that adds them — macOS,
+Debian / Ubuntu, Fedora / Nobara, RHEL / CentOS / Rocky / Alma, and Arch, openSUSE, Alpine
+best-effort. It offers to run that command; `sudo` (or `su` on a Debian with no sudo, or `doas`)
+then asks for **your** password in the same terminal — the installer never sees it. On a Mac
+without Homebrew it offers Homebrew's own installer, scanned by nemesis before it runs. Say no
+and the install continues; everything works without them, and the end of the run names what is
+still missing with its command.
+
+The installer itself needs no root and writes nothing outside `~/.prometheus`, `~/.local/bin` and
+one marked block in your shell rc. Then:
 
 ```bash
 prometheus              # the interactive TUI
 prometheus doctor       # check the environment end to end
+prometheus requirements # what this OS still needs + the command, offered (runs through the privileged gate)
 prometheus-app          # launch Prometheus Studio (the desktop app)
 nemesis update          # seed the security feeds once — until then the hash/IOC/CVE layers are off
 ```
+
+Only want the scan? `sh install.sh --check` prints it and changes nothing; `sh install.sh --deps`
+runs just the requirements step (scan, then the offer) without installing Prometheus.
 
 **This pipes a script from the internet into a shell.** That is a real trade, so the script is
 built to let you refuse it. Read it first — [`install.sh`](install.sh) is one file and says what
@@ -104,9 +117,11 @@ reverses every step including the PATH block. `install.sh --help` lists them all
 **Requirements** — just `curl` or `wget`, on Linux or macOS (the BSDs best-effort; Windows: use
 WSL). Whatever else is missing — **Node.js ≥ 22.6**, **Python ≥ 3.9**, **ripgrep**, **pnpm** — is
 installed for you, privately under `~/.prometheus/toolchain`, from official releases whose SHA-256
-is pinned in `install.sh` (a mismatch is refused). Nothing goes system-wide; your package manager is
-used only where no such build exists (git anywhere; Node/Python on the BSDs), and only after you say
-yes or pass `--system-deps`.
+is pinned in `install.sh` (a mismatch is refused). Nothing of that goes system-wide. Your package
+manager is used for the system packages the scan finds missing — git, and the optional tmux,
+bubblewrap and (on a Linux desktop) secret-tool — and where no pinned build exists (Node/Python on
+the BSDs), only after you say yes or pass `--system-deps`. The full per-OS table is under
+[Requirements](#requirements).
 
 ---
 
@@ -142,6 +157,14 @@ prometheus                       # the TUI, on a local model
 
 Local is **tier A** — the default and the only tier ever promoted. Ollama and LM Studio are
 first-class; `/ram` explains any refusal with real KV-cache arithmetic instead of a guess.
+
+**LM Studio** is read through its own REST listing, not Ollama's routes:
+- **Models:** chat models only (never its bundled embedding model), loaded ones first.
+- **Context:** the context window that is really loaded.
+- **Memory:** sizes plus LM Studio's own estimate (`lms load --estimate-only`, which loads nothing).
+- **What is resident:** shown beside Ollama's, so two runners never both hold a model unnoticed.
+- **Release:** idle models are freed with LM Studio's `ttl`, and quitting unloads what Prometheus loaded (`lms server stop` alone frees no RAM).
+- **Finding `lms`:** it is found in `~/.lmstudio/bin` even when it is not on your `PATH`.
 
 ### 3. Put a security gate in front of an agent CLI you already use
 
@@ -330,7 +353,7 @@ the full list of what is *not* finished.
 |---|---|
 | **Local-first, three tiers** | **A** local/free is the default and the only tier ever promoted; **B** subscription-included is bounded; **C** metered is allowed, never promoted, and needs explicit one-time consent |
 | **Providers** | Local (Model Hub) and any OpenAI-compatible endpoint · Claude · ChatGPT · Gemini · GitHub Copilot · plus native wire formats with real tool calling for each |
-| **Local runtimes** | Ollama and LM Studio as first-class runners with live endpoint discovery; llama.cpp and vLLM as conversion/serve targets |
+| **Local runtimes** | Ollama and LM Studio as first-class runners with live endpoint discovery, each read through its own API (LM Studio: loaded models, loaded context, `ttl`, unload); one runner started at a time; llama.cpp and vLLM as conversion/serve targets |
 | **Model Hub** | Probe your hardware, score models against it, pull Hugging Face weights through the gate (`model pull <org/repo> --staged`), build a serve profile, start/stop a supervisor. `prometheus model …` |
 | **Hugging Face import** | `/hug org/repo` — convert and install for Ollama / llama.cpp / vLLM / LM Studio, with one copy on disk |
 | **RAM admission** | Refuses a model that cannot fit, using real KV-cache arithmetic — and `/ram` tells you *why* |
@@ -366,9 +389,10 @@ the full list of what is *not* finished.
 | | |
 |---|---|
 | **Multi-CLI swarm** | An orchestrator plus sub-agents each bound to a different backend — claude / codex / gemini / a local model. `/demos` |
+| **Agent CLIs on local models** | Run opencode, Hermes or aider on Ollama or LM Studio. Write `opencode:local:qwen3.6:latest` or `hermes:local:nvidia/nemotron-3-nano-omni`. The wiring lives only in that run's command and environment; your own CLI config is never written, and no vendor login is used. |
 | **Fan-out workflows** | Decompose a task across parallel sub-agents, or fan out research and get a cited synthesis. `/orchestrate` |
 | **Fleet view** | Every Prometheus window on the machine with its CPU/RAM/GPU split. `/fleet` |
-| **Resource guards** | Concurrency caps, an idle classifier and a guard so a swarm cannot starve the machine |
+| **Resource guards** | Concurrency caps, an idle classifier and a guard so a swarm cannot starve the machine; ONE request at a time per local model server, so a swarm never makes a runner hold two models or reload on every turn |
 | **Git worktrees** | Parallel sessions that do not collide. `/worktree` |
 
 ### 📦 Catalog — plugins, skills, apps
@@ -427,7 +451,7 @@ the full list of what is *not* finished.
 | **73 CLI subcommands** | `scan` `doctor` `model` `repo` `env` `budget` `updates` `sessions` `test` `harden` `pentest` `disk-space` … |
 | **Disk space** | `/disk-space` opens the full disk explorer over your session — Ctrl+] minimises it without stopping it, Ctrl+] again brings it back, Ctrl+D ends it — plus `map` / `levels` / `files` / `mounts`, a plan-first `delete`, Linux `cleanup`, and `--sudo` for a root rescan you approve. `prometheus disk-space` from a shell runs the explorer full-screen and exits when Ctrl+D ends it (`sudo prometheus disk-space` runs it as root). Studio has a Disk space panel (treemap, pie, levels) and **Open as administrator…**: you approve the exact command, the system asks for your password, and the explorer runs as root in its own window, where only your keyboard can type |
 | **Headless** | `prometheus run <prompt…>` (or `prometheus -p "<prompt>"`): one turn with a model, the answer on stdout, then exit; `prometheus chat` for terminal chat |
-| **tmux** | `prometheus session --tmux N` with auto-scaled sub-agent fan-out and a swarm board |
+| **tmux (optional)** | `prometheus --tmux [NAME]` opens a named multi-window session (the REPL plus chat / health / logs / env windows); inside tmux the sub-agent fan-out auto-scales per prompt, and `/demos` gives each swarm agent its own window. Without tmux everything still runs in **compatibility mode**: `--tmux` opens the normal single-window session, `chat --cli X --tmux` opens the chat in the same terminal, `/demos` runs its swarm headless, and sub-agents are in-process either way. `--no-tmux` / `PROMETHEUS_NO_TMUX=1` forces it |
 | **Shell completion + man page** | bash/zsh/fish completions and a roff man page, both generated from the one command registry |
 | **8 languages** | English, Italian, French, Spanish, German, Portuguese, Dutch, Polish — with per-key fallback to English, so a partial translation never shows a blank |
 
@@ -911,14 +935,20 @@ desktop app) into `~/.local/bin`, and patches that onto `PATH` in your shell pro
 writes nothing outside your home directory.
 
 Studio's per-command OS sandbox uses **bubblewrap** (`bwrap`) on Linux. It's optional — its
-absence is handled as an honest, logged "ran unconfined," never a silent downgrade — but install it
-first if you want `run_command` calls actually confined at the kernel level:
+absence is handled as an honest, logged "ran unconfined," never a silent downgrade — and the
+installer's requirements scan offers it with the rest. To add it yourself:
 
 ```bash
 sudo apt install bubblewrap      # Debian / Ubuntu
-sudo dnf install bubblewrap      # Fedora
+sudo dnf install bubblewrap      # Fedora, Nobara, RHEL, CentOS Stream, Rocky, Alma
 sudo pacman -S bubblewrap        # Arch
 ```
+
+Installed is not always working: **Ubuntu 24.04+** restricts unprivileged user namespaces through
+AppArmor, and bwrap then cannot create its sandbox. Prometheus detects that, says so, and runs the
+command unconfined exactly as without bwrap (it used to fail every command instead). The scan
+(`install.sh --check`, `prometheus requirements`) shows it as **blocked** and prints the AppArmor
+profile that restores it — not applied for you, because it changes a system security policy.
 
 ### macOS
 
@@ -975,12 +1005,40 @@ cloning anything.
   - **pnpm** at the pinned version — installed with `npm install --global --prefix`, never
     `npm install -g` or `corepack enable`, which write next to the node binary and fail without
     root (corepack is not bundled with Node 25+ anyway).
-- **From your package manager, only with consent** (a prompt on the terminal that shows the exact
-  command it will run, sudo or doas included — or `--system-deps`, the same consent given in
-  advance at your own shell):
-  `git` (plugin installs stage through git clone; the install itself fetches a source archive when
-  git is missing), Alpine's `libstdc++` for Node's musl build, and on the BSDs Node/Python/ripgrep.
-- Optional: `bubblewrap` (`bwrap`) confines the agent's commands on Linux.
+- **From your package manager, only with consent** — the requirements scan at the start of the
+  install lists them and shows ONE command for your OS; it runs only on a `y` typed at the
+  terminal (or `--system-deps`, the same consent given in advance at your own shell), and the
+  password goes to `sudo` / `su` / `doas` on that terminal:
+  - `git` — plugin installs stage through git clone (the install itself fetches a source archive
+    when git is missing). On apt it comes with `ca-certificates`, which `--no-install-recommends`
+    would otherwise drop.
+  - `tmux` (optional) — only adds extra windows (`--tmux`, `chat --cli X --tmux`, the windowed
+    `/demos` swarm). It is **not required**: without it Prometheus runs in compatibility mode, says
+    so in one line, and every feature still works in a single terminal. `--no-tmux` (or
+    `PROMETHEUS_NO_TMUX=1`) chooses compatibility mode on a machine that has tmux.
+  - `bubblewrap` (optional, recommended, Linux) — confines the agent's commands.
+  - `secret-tool` (optional, Linux desktops) — keeps provider API keys in the desktop keyring
+    (`libsecret-tools` on Debian/Ubuntu, `libsecret` on Fedora/RHEL/Arch); without it, use
+    environment variables.
+  - with `--with-app`: a C++ toolchain and make (`build-essential` / `gcc-c++ make`; Apple's
+    Command Line Tools on macOS) — the desktop app compiles node-pty.
+  - Alpine's `libstdc++` for Node's musl build, and on the BSDs Node/Python/ripgrep.
+
+  What that command is, per OS (only the missing ones are listed in yours):
+
+  | OS | command |
+  |---|---|
+  | Debian / Ubuntu / Mint / Pop!_OS | `sudo apt-get update && sudo apt-get install -y --no-install-recommends git ca-certificates tmux bubblewrap` |
+  | Debian with a root password (no sudo) | `su root -c 'apt-get update && apt-get install -y --no-install-recommends git ca-certificates tmux bubblewrap'` |
+  | Fedora / Nobara / RHEL / CentOS Stream / Rocky / Alma | `sudo dnf install -y git tmux bubblewrap` |
+  | CentOS 7 | `sudo yum install -y git tmux bubblewrap` |
+  | Fedora Silverblue / Kinoite / Bazzite | `sudo rpm-ostree install --idempotent git tmux bubblewrap` (reboot to use them) |
+  | macOS with Homebrew | `brew install tmux` (git comes with Apple's Command Line Tools) |
+  | macOS without Homebrew | the installer offers Homebrew's official installer — fetched, scanned by nemesis, shown, run only on a yes — then `brew install git tmux` |
+
+  Check any time, from any install: `prometheus requirements` (offers the command and runs each
+  step through the privileged gate — shown verbatim, approved by you, sudo asks for the password),
+  `prometheus doctor`, `python3 prometheus.py doctor` from a checkout, or `sh install.sh --check`.
 
 ### From source (both Linux and macOS)
 

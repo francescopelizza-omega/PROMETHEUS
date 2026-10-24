@@ -15,31 +15,93 @@
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
-import { type AiEndpoint, orchestration as orch } from "@prometheus/core";
-import type { EngineClient } from "@prometheus/engine-bridge";
+import { type AiEndpoint, ai, orchestration as orch } from "@prometheus/core";
+import { type EngineClient, lmsBinary } from "@prometheus/engine-bridge";
 
+import { parseTmuxVersion } from "../tmux/tmux.js";
 import { authGateVerdict } from "./auth-gate.js";
 import { startBusRelay } from "./bus-relay.js";
 import { type RosterEntry, buildPreamble } from "./preamble.js";
 import { installPromMsg } from "./prom-msg.js";
-import { recipeFor } from "./recipes.js";
+import { opencodeLocalConfig, recipeFor } from "./recipes.js";
 import { type TmuxRun, injectLine, makeTmuxRelay, makeTmuxRun } from "./tmux-driver.js";
 
 type OrchestrationTopology = orch.OrchestrationTopology;
 type AgentSpec = orch.AgentSpec;
 type RelayResult = orch.RelayResult;
 
-/** The INTERACTIVE launch command for an agent (bare CLI — never the headless `-p`). null = unsupported. */
-export function interactiveCommand(agent: AgentSpec): string[] | null {
+/** The local server + model an agent runs on in a window, from its backend or the session. */
+function localTarget(
+  agent: AgentSpec,
+  endpoint?: AiEndpoint,
+): { baseUrl: string; model: string } | null {
+  const b = agent.backend;
+  const session = endpoint?.locality === "local" ? endpoint : undefined;
+  const baseUrl = b.baseUrl ?? session?.baseUrl;
+  const model = b.model ?? session?.model;
+  return baseUrl && model ? { baseUrl, model } : null;
+}
+
+const v1 = (u: string): string => `${u.replace(/\/+$/, "").replace(/\/v1$/, "")}/v1`;
+
+/**
+ * The INTERACTIVE launch command for an agent (bare CLI — never the headless `-p`). null = unsupported.
+ *
+ * A local agent used to get `ollama run <model ?? "llama3">`: on a machine without that model
+ * `ollama run` PULLS it — a multi-GB download nobody asked for — and on an LM Studio-only
+ * machine there is no `ollama` at all, so the window died and was respawned. Now: no default
+ * model, and the runner that serves the model (`lms chat` for LM Studio).
+ */
+export function interactiveCommand(agent: AgentSpec, endpoint?: AiEndpoint): string[] | null {
   const b = agent.backend;
   if (b.kind === "cli" && b.service) {
     const r = recipeFor(b.service);
-    return [r ? r.bin : b.service]; // bare interactive launch
+    const bin = r ? r.bin : b.service;
+    if (!b.local) return [bin]; // bare interactive launch
+    const t = localTarget(agent, endpoint);
+    if (!t) return null;
+    if (b.service === "opencode") return [bin, "-m", `prometheus-local/${t.model}`];
+    if (b.service === "hermes") {
+      return [
+        bin,
+        "chat",
+        "--provider",
+        "custom",
+        "--base-url",
+        v1(t.baseUrl),
+        "--api-key",
+        "local",
+        "-m",
+        t.model,
+      ];
+    }
+    if (b.service === "aider") return [bin, "--model", `openai/${t.model}`];
+    return null; // no local mode for this CLI — never its cloud login instead
   }
   if (b.kind === "local" || b.kind === "engine-chat" || b.kind === "in-process") {
-    return ["ollama", "run", b.model ?? "llama3"];
+    // a NAMED model with no server named runs where it always did (Ollama); no model, no window
+    const model = b.model ?? (endpoint?.locality === "local" ? endpoint.model : undefined);
+    if (!model) return null;
+    const t = localTarget(agent, endpoint) ?? { baseUrl: "http://localhost:11434/v1", model };
+    return ai.runnerIdForUrl(t.baseUrl) === "lmstudio"
+      ? [lmsBinary() ?? "lms", "chat", t.model]
+      : ["ollama", "run", t.model];
   }
   return null; // fake / unsupported in a tmux window
+}
+
+/** The `-e K=V` pairs a local CLI agent's window needs (its local wiring), else []. */
+export function interactiveEnv(agent: AgentSpec, endpoint?: AiEndpoint): string[] {
+  const b = agent.backend;
+  if (b.kind !== "cli" || !b.local) return [];
+  const t = localTarget(agent, endpoint);
+  if (!t) return [];
+  if (b.service === "opencode") {
+    return ["-e", `OPENCODE_CONFIG_CONTENT=${opencodeLocalConfig(t.baseUrl, t.model)}`];
+  }
+  if (b.service === "aider")
+    return ["-e", `OPENAI_API_BASE=${v1(t.baseUrl)}`, "-e", "OPENAI_API_KEY=local"];
+  return [];
 }
 
 export interface DemosTmuxDeps {
@@ -66,9 +128,26 @@ export interface DemosTmuxDeps {
 
 export interface DemosTmuxOutcome {
   ok: boolean;
-  reason?: RelayResult["reason"] | "no-tmux" | "declined" | "unsupported";
+  /**
+   * `no-tmux` / `old-tmux` / `launch-failed`: tmux could not run the windowed swarm, and NOTHING
+   * was launched — the caller runs the same swarm headless instead.
+   */
+  reason?:
+    | RelayResult["reason"]
+    | "no-tmux"
+    | "old-tmux"
+    | "launch-failed"
+    | "declined"
+    | "unsupported";
   session?: string;
 }
+
+/**
+ * The oldest tmux the windowed run works on. Each agent window gets its own environment with
+ * `new-session -e` / `new-window -e`, which tmux 3.2 introduced (3.0 for new-window). Older
+ * servers reject the flag: RHEL 8 ships 2.7, Debian 10 2.8, Ubuntu 20.04 3.0a.
+ */
+export const DEMOS_MIN_TMUX = { major: 3, minor: 2 } as const;
 
 const roster = (t: OrchestrationTopology): RosterEntry[] =>
   t.agents.map((a) => ({ name: a.name, role: a.role }));
@@ -80,10 +159,26 @@ export async function runDemosTmux(deps: DemosTmuxDeps): Promise<DemosTmuxOutcom
   const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
   const runRelayFn = deps.runRelayFn ?? orch.runRelay;
 
-  // 1) tmux is mandatory.
-  if (run(["-V"]).status !== 0) {
-    deps.write("/demos needs tmux (each agent runs in its own window). Install tmux + retry.");
+  // 1) tmux is mandatory for THIS mode. `/demos` itself routes a machine without tmux to the
+  //    headless run before calling here (tmux compatibility mode), so reaching this means a
+  //    tmux that is on PATH but does not answer — say so, and name the way that still works.
+  const probe = run(["-V"]);
+  if (probe.status !== 0) {
+    deps.write(
+      "/demos needs tmux for the windowed run (each agent in its own window), and tmux did not answer.",
+    );
     return { ok: false, reason: "no-tmux" };
+  }
+  const ver = parseTmuxVersion(probe.stdout);
+  if (
+    ver !== null &&
+    (ver.major < DEMOS_MIN_TMUX.major ||
+      (ver.major === DEMOS_MIN_TMUX.major && ver.minor < DEMOS_MIN_TMUX.minor))
+  ) {
+    deps.write(
+      `/demos needs tmux ${DEMOS_MIN_TMUX.major}.${DEMOS_MIN_TMUX.minor}+ for the windowed run (each agent window gets its own environment); this is ${probe.stdout?.trim()}.`,
+    );
+    return { ok: false, reason: "old-tmux" };
   }
 
   // 2) ToS auth gate — warn/confirm before driving a subscription-auth agent.
@@ -100,7 +195,9 @@ export async function runDemosTmux(deps: DemosTmuxDeps): Promise<DemosTmuxOutcom
   }
 
   // 3) agents that can run interactively in a window (skip fake/unsupported).
-  const launchable = deps.topology.agents.filter((a) => interactiveCommand(a) !== null);
+  const launchable = deps.topology.agents.filter(
+    (a) => interactiveCommand(a, deps.endpoint) !== null,
+  );
   if (launchable.length === 0) {
     deps.write(
       "No agents in this swarm can run as an interactive CLI window. Configure cli/local backends.",
@@ -134,8 +231,9 @@ export async function runDemosTmux(deps: DemosTmuxDeps): Promise<DemosTmuxOutcom
     // 6) launch a window per agent, env-injected, running the bare interactive CLI.
     run(["kill-session", "-t", session]); // clear any stale
     launchable.forEach((a, i) => {
-      const cmd = interactiveCommand(a) as string[];
+      const cmd = interactiveCommand(a, deps.endpoint) as string[];
       const e = [
+        ...interactiveEnv(a, deps.endpoint),
         "-e",
         `PROM_BUS_SOCK=${sock}`,
         "-e",
@@ -152,7 +250,14 @@ export async function runDemosTmux(deps: DemosTmuxDeps): Promise<DemosTmuxOutcom
         i === 0
           ? ["new-session", "-d", "-s", session, "-n", a.name, ...startDir, ...e, ...cmd]
           : ["new-window", "-t", session, "-n", a.name, ...startDir, ...e, ...cmd];
-      run(argv);
+      const made = run(argv);
+      // Unchecked, a refused window still printed "swarm launched", and the relay then polled
+      // panes that never existed until it timed out.
+      if (made.status !== 0) {
+        throw new WindowLaunchError(
+          `tmux ${argv[0]} for ${a.name} failed${made.stderr?.trim() ? `: ${made.stderr.trim()}` : ""}`,
+        );
+      }
       // CLI-075: keep a crashed pane LISTED (with #{pane_dead}=1) so the relay can detect + respawn
       // it; default remain-on-exit=off would destroy the window on exit and hide the crash.
       run(["set-window-option", "-t", `${session}:${a.name}`, "remain-on-exit", "on"]);
@@ -225,7 +330,16 @@ export async function runDemosTmux(deps: DemosTmuxDeps): Promise<DemosTmuxOutcom
       `Swarm finished (${result.reason}) · ${result.delivered} messages relayed · log: ${join(runDir, "bus.jsonl")}`,
     );
     return { ok: result.reason === "complete", reason: result.reason, session };
+  } catch (err) {
+    if (!(err instanceof WindowLaunchError)) throw err;
+    // nothing ran yet (no preamble, no relay): take the half-built session down again
+    run(["kill-session", "-t", session]);
+    deps.write(err.message);
+    return { ok: false, reason: "launch-failed", session };
   } finally {
     relay.close();
   }
 }
+
+/** A tmux window for an agent could not be created — the windowed swarm never started. */
+class WindowLaunchError extends Error {}

@@ -96,11 +96,29 @@ export function isRetryableStatus(status: number): boolean {
   return status >= 500 && status !== 501;
 }
 
+/**
+ * Node's fetch (undici) gave up waiting for the response HEADERS — 300 s by default.
+ *
+ * A local runner sends its headers only after it has loaded the model and processed the prompt,
+ * so a cold 20 GB load plus a long prompt can pass 300 s without anything being wrong. Retrying
+ * then restarts that work from zero (the server cancels on disconnect), and on LM Studio, whose
+ * JIT load may still be running, it can start a SECOND load of the same weights.
+ */
+export function isHeadersTimeout(err: unknown): boolean {
+  const codeOf = (x: unknown): unknown =>
+    typeof x === "object" && x !== null ? (x as { code?: unknown }).code : undefined;
+  const cause =
+    typeof err === "object" && err !== null ? (err as { cause?: unknown }).cause : undefined;
+  return codeOf(err) === "UND_ERR_HEADERS_TIMEOUT" || codeOf(cause) === "UND_ERR_HEADERS_TIMEOUT";
+}
+
 /** Whether a thrown value is worth trying again. */
 export function isRetryableAiError(err: unknown): boolean {
   if (err instanceof AiHttpError) return isRetryableStatus(err.status);
   // An abort is the user's decision, never a transient fault.
   if (isAbort(err)) return false;
+  // Not transient: see `isHeadersTimeout` — a retry repeats the slow part, or loads it twice.
+  if (isHeadersTimeout(err)) return false;
   // A network-level throw (DNS, connection reset, TLS) is transient by nature: there is no
   // status to consult, and the request provably never got an answer.
   return err instanceof Error;
@@ -150,6 +168,33 @@ export const AI_RETRY_DEFAULTS = Object.freeze({
   adviceCapMs: 60_000,
 });
 
+/**
+ * What a local runner's rejection MEANS, when its body says so. LM Studio's and llama.cpp's
+ * overflow sentences ("tokens to keep … greater than the context length", "context the
+ * overflows") and "No models loaded" were cut at 200 characters into a generic "rejected",
+ * which removed the part that said what to do.
+ */
+export function localRunnerHint(detail: string): string | undefined {
+  const d = detail.toLowerCase();
+  if (
+    d.includes("greater than the context length") ||
+    d.includes("context the overflows") ||
+    d.includes("exceeds the context") ||
+    d.includes("context length exceeded") ||
+    d.includes("context_length_exceeded") ||
+    (d.includes("maximum context length") && d.includes("token"))
+  ) {
+    return "the conversation no longer fits the context the model was LOADED with — /compact, or reload the model with a larger context (LM Studio: `lms load <model> --context-length 32768`; Ollama: OLLAMA_CONTEXT_LENGTH)";
+  }
+  if (d.includes("no models loaded")) {
+    return "LM Studio has no model loaded and just-in-time loading is off — load one (`lms load <model>`), or turn on JIT loading in LM Studio's server settings";
+  }
+  if (d.includes("model_not_found") || (d.includes("model") && d.includes("not found"))) {
+    return `the server does not have that model: ${detail.slice(0, 160)} — pick one it lists (/models)`;
+  }
+  return undefined;
+}
+
 /** A one-line, honest explanation of a failure, for a transcript or a status line. */
 export function describeAiFailure(err: unknown): string {
   if (err instanceof AiHttpError) {
@@ -161,10 +206,15 @@ export function describeAiFailure(err: unknown): string {
       return `rate limited by the provider${wait}`;
     }
     if (err.status === 401 || err.status === 403) return "the endpoint rejected the credentials";
+    const known = localRunnerHint(err.detail);
+    if (known) return known;
     if (err.status >= 500) return `the provider had a server error (${err.status})`;
     return `the request was rejected (${err.status}): ${err.detail.slice(0, 200)}`;
   }
   if (isAbort(err)) return "cancelled";
+  if (isHeadersTimeout(err)) {
+    return "the model server took over 5 minutes to start answering (a cold model load plus a long prompt) — not retried, so nothing was loaded twice. Load the model first (`lms load <model>` / `ollama run <model>`), or shorten the prompt";
+  }
   return err instanceof Error ? err.message : String(err);
 }
 

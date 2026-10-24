@@ -10,7 +10,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import { type agent, ai } from "@prometheus/core";
+import { agent, ai } from "@prometheus/core";
 
 import { setColorEnabled } from "../render.js";
 import { resolveKeymap } from "../tui/keys.js";
@@ -698,6 +698,22 @@ test("/agents sets the subagent count", async () => {
   const { ctx } = fakeCtx();
   await findSlash("agents")?.run("5", ctx);
   assert.equal(ctx.agents.count(), 5);
+});
+
+test("/agents without tmux states the real in-process cap — never 'single agent'", async () => {
+  const { ctx, calls } = fakeCtx();
+  const noTmux = { ...ctx, agents: { ...ctx.agents, insideTmux: false, explicit: () => null } };
+  await findSlash("agents")?.run("", noTmux);
+  const out = strip(calls.writes.join("\n"));
+  assert.doesNotMatch(out, /single agent/);
+  assert.match(out, new RegExp(`subagents: up to ${agent.DEFAULT_MAX_SPAWNS} per turn`));
+  assert.match(out, /no tmux needed/);
+
+  // once the user has set a number, that number is what is shown
+  calls.writes.length = 0;
+  const set = { ...noTmux, agents: { ...noTmux.agents, explicit: () => 2 } };
+  await findSlash("agents")?.run("", set);
+  assert.match(strip(calls.writes.join("\n")), /subagents: 2/);
 });
 
 /** A candidate + fake `modelPicker` (mirrors the real session-bridge/host `select` contract). */

@@ -47,7 +47,7 @@
  * measure ⇒ do not stand in the way") and is the only safe default for a check this new.
  */
 import { ai } from "@prometheus/core";
-import { localMemorySnapshot, runnerCensus } from "@prometheus/engine-bridge";
+import { lmsEstimateBytes, localMemorySnapshot, runnerCensus } from "@prometheus/engine-bridge";
 
 /** What the gate concluded. `allow:false` carries prose a user can act on. */
 export interface AdmissionGateResult {
@@ -89,6 +89,8 @@ export interface AdmissionGateDeps {
   memoryFn?: typeof localMemorySnapshot;
   censusFn?: typeof runnerCensus;
   inventoryFn?: typeof ai.inventoryCandidates;
+  /** LM Studio's own load estimate (`lms load --estimate-only`, loads nothing). */
+  lmsEstimateFn?: (model: string, ctx: number) => Promise<number | null>;
 }
 
 /**
@@ -116,31 +118,16 @@ export async function admitDesktopModelLoad(
   checks += 1;
   let result: AdmissionGateResult;
   try {
-    const runner = ai.runnerForBaseUrl(baseUrl)?.id;
-    const ollamaRoot = ai.ollamaRoot(baseUrl);
+    const runner = ai.runnerForBaseUrl(baseUrl)?.id ?? ai.runnerIdForUrl(baseUrl);
     const [snapshot, census] = await Promise.all([
       // `localMemorySnapshot` takes no timeout — it is a bounded `sysctl`/`vm_stat` read, not a
       // network call. Its cost is the SPAWN, which is why this gate is cached per model rather
       // than run per turn.
       memoryFn({}),
-      // Only the runners this endpoint could collide with, and ollama is the only one whose
-      // residency we can actually read. LM Studio is probed too so the one-server rule can see
-      // it — but `residencyKnown:false` keeps a mere catalogue from blocking anything.
-      censusFn(
-        [
-          { id: "ollama", baseUrl: ollamaRoot, api: "ollama" as const },
-          ...(runner === "lmstudio"
-            ? []
-            : [
-                {
-                  id: "lmstudio",
-                  baseUrl: baseUrl.replace(/:\d+.*$/, ":1234"),
-                  api: "openai" as const,
-                },
-              ]),
-        ],
-        { timeoutMs: CENSUS_TIMEOUT_MS },
-      ),
+      // The runners this endpoint could collide with, each at its OWN port. Both report
+      // residency now: Ollama through /api/ps, LM Studio through its own REST listing (an old
+      // LM Studio without it falls back to the catalogue, `residencyKnown:false`).
+      censusFn(ai.censusProbesFor(baseUrl), { timeoutMs: CENSUS_TIMEOUT_MS }),
     ]);
 
     const resident = census.flatMap((s) => s.models);
@@ -150,7 +137,17 @@ export async function admitDesktopModelLoad(
       timeoutMs: INVENTORY_TIMEOUT_MS,
     });
 
-    const candidate = candidates.find((c) => c.id === model);
+    let candidate = candidates.find((c) => c.id === model);
+    // LM Studio has no KV geometry to price with: ask LM Studio itself (see the terminal gate,
+    // model-admission-host.ts), floored at the weights + 1 GiB. Only on the real path.
+    if (candidate && runner === "lmstudio" && ai.isLocalUrl(baseUrl) && !candidate.measuredTotalBytes) {
+      const estimate =
+        deps.lmsEstimateFn ?? (deps.inventoryFn ? async () => null : lmsEstimateBytes);
+      const est = await estimate(candidate.id, candidate.contextTokens).catch(() => null);
+      if (est) {
+        candidate = { ...candidate, measuredTotalBytes: Math.max(est, candidate.weightsBytes + 2 ** 30) };
+      }
+    }
     // Not installed here, or `/api/tags` did not answer: there is nothing to weigh, so there is
     // nothing to refuse. Identical reasoning to the terminal's `weightsBytes <= 0` branch.
     if (!candidate || candidate.weightsBytes <= 0) {

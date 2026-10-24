@@ -8,7 +8,9 @@
  * per prompt, the main agent (orchestrator) decides whether 3 is enough or the task is
  * complex enough to warrant more — `decideSubagentCount` is that decision, a pure,
  * dependency-free complexity heuristic (so it's deterministic + unit-testable). The
- * host announces the decision; the actual pane fan-out is the tmux multiplexer's job.
+ * host announces the decision. tmux changes only that announcement and the display
+ * default: the sub-agents themselves are `spawn_agent` calls run in-process by the agent
+ * loop, identically with or without tmux (see `spawnCapFor`).
  */
 
 import { KeyedSemaphore, defaultProviderLimit } from "../orchestration/concurrency.js";

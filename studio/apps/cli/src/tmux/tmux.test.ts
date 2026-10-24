@@ -23,11 +23,15 @@ import {
   type TmuxDeps,
   type TmuxSpec,
   buildTmuxCommands,
+  resolveTmuxCompat,
   runTmux,
   shlexJoin,
   shlexQuote,
   tmuxAvailable,
+  tmuxCompatNotice,
   tmuxEnabled,
+  tmuxForcedOff,
+  tmuxInstallHint,
   tmuxSessionName,
   windowCommand,
 } from "./tmux.js";
@@ -252,7 +256,10 @@ test("runTmux: missing binary → friendly line, code 2, tty restored", async ()
   assert.equal(f.restored.count, 1);
   assert.equal(f.runs.length, 0);
   assert.equal(f.attaches.length, 0);
-  assert.match(f.writes.join("\n"), /tmux not found/);
+  const said = f.writes.join("\n");
+  assert.match(said, /tmux is not available — not launched/);
+  // it returns 2 and launches nothing, so it must not claim a fallback it does not perform
+  assert.doesNotMatch(said, /falling back/);
 });
 
 test("runTmux: new session → runs create steps then attaches", async () => {
@@ -352,4 +359,50 @@ test("the DEFAULT PATH lookup — no injected lookupBin — finds a real binary"
     tmuxAvailable({ env: { PATH: mkdtempSync(join(tmpdir(), "prom-tmux-empty-")) } }),
     false,
   );
+});
+
+/* ── compatibility mode (no tmux) ───────────────────────────────────────── */
+
+const HAS_TMUX = (): string => "/usr/bin/tmux";
+const NO_TMUX = (): null => null;
+
+test("compat: PROMETHEUS_NO_TMUX=1 makes tmux unavailable even where it is installed", () => {
+  assert.equal(tmuxForcedOff({ PROMETHEUS_NO_TMUX: "1" }), true);
+  assert.equal(tmuxForcedOff({ PROMETHEUS_NO_TMUX: "0" }), false);
+  assert.equal(tmuxForcedOff({}), false);
+  assert.equal(
+    tmuxAvailable({ lookupBin: HAS_TMUX, env: { PROMETHEUS_NO_TMUX: "1" } }),
+    false,
+    "a forced-off tmux must read as absent to every caller",
+  );
+  assert.equal(tmuxAvailable({ lookupBin: HAS_TMUX, env: {} }), true);
+});
+
+test("compat: resolveTmuxCompat multiplexes only with tmux installed, allowed and not nested", () => {
+  assert.deepEqual(resolveTmuxCompat({ lookupBin: HAS_TMUX, env: {} }), { multiplex: true });
+  assert.deepEqual(resolveTmuxCompat({ lookupBin: NO_TMUX, env: {} }), {
+    multiplex: false,
+    reason: "missing",
+  });
+  assert.deepEqual(resolveTmuxCompat({ lookupBin: HAS_TMUX, env: { PROMETHEUS_NO_TMUX: "1" } }), {
+    multiplex: false,
+    reason: "forced-off",
+  });
+  // inside a tmux client: never `tmux attach` again (tmux refuses to nest)
+  assert.deepEqual(
+    resolveTmuxCompat({ lookupBin: HAS_TMUX, env: { TMUX: "/tmp/tmux-501/default,1,0" } }),
+    { multiplex: false, reason: "nested" },
+  );
+});
+
+test("compat: the notice says the feature still works and how to get tmux", () => {
+  const missing = tmuxCompatNotice("missing", "single window", "linux");
+  assert.match(missing, /not installed/);
+  assert.match(missing, /compatibility mode: single window/);
+  assert.match(missing, /Everything works/);
+  assert.match(missing, /apt install tmux/);
+  assert.match(tmuxCompatNotice("missing", "x", "darwin"), /brew install tmux/);
+  assert.match(tmuxCompatNotice("forced-off", "this terminal"), /PROMETHEUS_NO_TMUX=1/);
+  assert.match(tmuxCompatNotice("nested", "this terminal"), /already inside tmux/);
+  assert.match(tmuxInstallHint("win32"), /WSL/);
 });

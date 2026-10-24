@@ -66,6 +66,7 @@ export {
   buildSeatbeltProfile,
   describeSandbox,
   planExecSandbox,
+  probeBwrap,
   sandboxArgv,
   sandboxHint,
   type BwrapPlan,

@@ -26,6 +26,9 @@ export const RECOGNIZED_VERBS: readonly string[] = [
   "completion",
   "man",
   "ls",
+  // `prometheus requirements` (`commands/requirements-cmd.ts`) — the install-time requirements
+  // scan for this OS, from the CLI, with the offer to run the package command through the gate.
+  "requirements",
   "scan",
   "superscan",
   "doctor",

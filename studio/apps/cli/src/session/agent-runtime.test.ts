@@ -2391,13 +2391,13 @@ test("a dead endpoint trips the circuit breaker — later turns fail FAST, never
     calls += 1;
     return {
       ok: false,
-      status: 400,
-      statusText: "Bad Request",
+      status: 501,
+      statusText: "Not Implemented",
       body: null,
       async text() {
-        // an UNRELATED 400 — not a tools rejection, so each turn fails via the generic path,
-        // and not-retryable, so each turn costs exactly one doFetch call.
-        return '{"error":{"message":"maximum context length is 8192 tokens"}}';
+        // a SERVER-side failure (counted by the breaker) that is not retryable, so each turn
+        // costs exactly one doFetch call. A 4xx no longer counts — see the test below.
+        return '{"error":{"message":"the runner is broken"}}';
       },
     };
   };
@@ -4645,4 +4645,31 @@ test("a successful probe marks the window measured; a failed one leaves it unmar
     undefined,
     "and it is NOT claimed as measured — that flag is what stops it refusing a turn",
   );
+});
+
+test("a request the endpoint REJECTS (context overflow 400) never opens the breaker — the real reason stays visible", async () => {
+  let calls = 0;
+  const fetchImpl = async () => {
+    calls += 1;
+    return {
+      ok: false,
+      status: 400,
+      statusText: "Bad Request",
+      body: null,
+      async text() {
+        return '{"error":"The number of tokens to keep from the initial prompt is greater than the context length"}';
+      },
+    };
+  };
+  const endpoint = { ...OLLAMA_ENDPOINT, id: "local:breaker-4xx-test", supportsTools: true };
+  const llm = makeLlmClient(endpoint, { fetch: fetchImpl as never });
+  const tools = [fakeTool("read_file", () => ["read"])];
+  for (let i = 0; i < 6; i++) await collect(llm.turn(thread("go"), fakeTuning(), tools));
+  assert.equal(calls, 6, "every turn still reached the endpoint: no breaker opened on a 400");
+  const turns = await collect(llm.turn(thread("go"), fakeTuning(), tools));
+  const text = turns
+    .filter((t) => t.kind === "text")
+    .map((t) => (t.kind === "text" ? t.text : ""))
+    .join("");
+  assert.doesNotMatch(text, /circuit open/);
 });

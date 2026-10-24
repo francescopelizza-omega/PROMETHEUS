@@ -99,7 +99,14 @@ export interface TerminalChatDeps {
   /** P5: spawn the previewed argv as a live terminal; returns the child's code. */
   runLiveTerminal?: (env: ChatTerminalEnvelope) => Promise<number>;
   /** P6: wrap the previewed argv in a tmux session; returns the tmux exit code. */
-  runTmux?: (env: ChatTerminalEnvelope) => Promise<number>;
+  /** run the envelope in a tmux session; `started: false` = tmux never got the user there. */
+  runTmux?: (env: ChatTerminalEnvelope) => Promise<{ code: number; started: boolean }>;
+  /**
+   * Can a `--tmux` launch actually use tmux here? `null` = yes; a string = no, and it is the
+   * compatibility-mode line to print before opening the chat in THIS terminal instead.
+   * Default: the tmux module's `resolveTmuxCompat` (missing, PROMETHEUS_NO_TMUX=1, nested).
+   */
+  tmuxCompat?: () => Promise<string | null>;
   /**
    * Type-confirm the bypass LAUNCH (never-force). Resolves true ONLY on an exact
    * phrase match; a non-interactive host resolves false (deny). When absent the
@@ -171,11 +178,18 @@ async function defaultRunLiveTerminal(env: ChatTerminalEnvelope): Promise<number
 /** Lazy default tmux seam (P6). The tmux module owns TmuxSpec; we hand it the
  *  whole envelope (the engine's single source of truth) and let it assemble the
  *  injection-safe `has-session → new-session → attach` commands itself. */
-async function defaultRunTmux(env: ChatTerminalEnvelope): Promise<number> {
-  const mod = (await import("../tmux/tmux.js")) as {
-    runTmuxFromEnvelope: (env: ChatTerminalEnvelope) => Promise<number>;
-  };
+async function defaultRunTmux(
+  env: ChatTerminalEnvelope,
+): Promise<{ code: number; started: boolean }> {
+  const mod = await import("../tmux/tmux.js");
   return mod.runTmuxFromEnvelope(env);
+}
+
+/** Lazy default compat probe — same decision `--tmux` makes for the session (tmux.ts). */
+async function defaultTmuxCompat(): Promise<string | null> {
+  const mod = await import("../tmux/tmux.js");
+  const t = mod.resolveTmuxCompat();
+  return t.multiplex ? null : mod.tmuxCompatNotice(t.reason, "opening the chat in this terminal");
 }
 
 /* ------------------------------------------------------------------------- *
@@ -256,8 +270,21 @@ export async function runTerminalChat(
   //    failure inside the seam is caught → friendly line + non-zero code.
   try {
     if (wantsTmux) {
-      const runTmux = deps.runTmux ?? defaultRunTmux;
-      return await runTmux(env);
+      // tmux compatibility mode: without a usable tmux, `--tmux` means "open it", not "fail".
+      // The argv is the same engine-blessed one either way; only the wrapper is dropped.
+      const compat = await (deps.tmuxCompat ?? defaultTmuxCompat)();
+      if (compat === null) {
+        const runTmux = deps.runTmux ?? defaultRunTmux;
+        const t = await runTmux(env);
+        if (t.started) return t.code;
+        // tmux is installed but could not give the user a session (an unknown TERM over ssh,
+        // an old or broken server): the chat still opens, here, rather than ending on one line.
+        write(
+          "tmux could not start the session — compatibility mode: opening the chat in this terminal.",
+        );
+      } else {
+        write(compat);
+      }
     }
     const runLive = deps.runLiveTerminal ?? defaultRunLiveTerminal;
     return await runLive(env);

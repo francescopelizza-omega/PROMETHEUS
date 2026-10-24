@@ -11,8 +11,15 @@
  * heavy memory immediately. The idle `ollama serve` daemon (~tens of MB) is left running;
  * fully killing that daemon is a process spawn and must route through the engine bridge.
  *
+ * LM Studio too (2026-10-22). This only ever asked Ollama, so a model LM Studio held — loaded
+ * by Prometheus's own warm-up — stayed resident after quit, and `lms server stop` (the only other
+ * teardown) frees the port, not the weights. LM Studio's REST listing says what is loaded and
+ * `POST /api/v1/models/unload` frees it; no `lms` spawn is involved.
+ *
  * PURE except for the injected `fetch` seam (tests pass a stub). Never throws.
  */
+import { ai } from "@prometheus/core";
+import { unloadLmStudio } from "@prometheus/engine-bridge";
 
 /** Ollama's OpenAI-compatible runner also exposes these native control endpoints. */
 const OLLAMA_PS_URL = "http://localhost:11434/api/ps";
@@ -24,6 +31,8 @@ export type FetchFn = typeof fetch;
 /** One model currently held resident by the local runner. */
 export interface LoadedModel {
   name: string;
+  /** which runner holds it — absent means Ollama (the historical, only, answer). */
+  runner?: "ollama" | "lmstudio";
   /** approximate resident bytes (RAM + VRAM), 0 when the runner didn't report it. */
   sizeBytes: number;
 }
@@ -36,8 +45,25 @@ export function humanBytes(n: number): string {
   return `${Math.round(n / 1e6)} MB`;
 }
 
-/** Probe the local runner for models resident in memory. [] when none / unreachable. */
+/** LM Studio's base URL on this machine (honours PROMETHEUS_RUNNER_LMSTUDIO_URL). */
+function lmStudioUrl(): string {
+  return ai.runnerById("lmstudio")?.baseUrl ?? "http://localhost:1234/v1";
+}
+
+/** Probe the local runners for models resident in memory. [] when none / unreachable. */
 export async function detectLoadedAiModels(fetchFn: FetchFn = fetch): Promise<LoadedModel[]> {
+  const [ollama, lms] = await Promise.all([detectOllama(fetchFn), detectLmStudio(fetchFn)]);
+  return [...ollama, ...lms];
+}
+
+async function detectLmStudio(fetchFn: FetchFn): Promise<LoadedModel[]> {
+  const listed = await ai.fetchLmStudioModels(lmStudioUrl(), { fetchFn, timeoutMs: 1500 });
+  return (listed ?? [])
+    .filter((m) => m.loaded.length > 0)
+    .map((m) => ({ name: m.id, sizeBytes: m.sizeBytes, runner: "lmstudio" as const }));
+}
+
+async function detectOllama(fetchFn: FetchFn): Promise<LoadedModel[]> {
   try {
     const res = await fetchFn(OLLAMA_PS_URL, { method: "GET" });
     if (!res.ok) return [];
@@ -63,7 +89,16 @@ export async function unloadAiModels(
   fetchFn: FetchFn = fetch,
 ): Promise<number> {
   let freed = 0;
+  const lms = models.filter((m) => m.runner === "lmstudio").map((m) => m.name);
+  if (lms.length > 0) {
+    // REST only (`lms: null`): this module never spawns
+    const r = await unloadLmStudio(lmStudioUrl(), { fetchFn, only: lms, lms: null }).catch(
+      () => null,
+    );
+    freed += r ? new Set(r.unloaded).size : 0;
+  }
   for (const m of models) {
+    if (m.runner === "lmstudio") continue;
     try {
       const res = await fetchFn(OLLAMA_GENERATE_URL, {
         method: "POST",
@@ -118,6 +153,6 @@ export async function maybeStopServicesOnExit(deps: ExitShutdownDeps): Promise<v
 
   const freed = await unloadAiModels(loaded, fetchFn);
   deps.write(
-    `  ⎿ freed ${freed} model${freed === 1 ? "" : "s"} from memory (RAM/GPU/NPU released; ollama daemon left running)`,
+    `  ⎿ freed ${freed} model${freed === 1 ? "" : "s"} from memory (RAM/GPU/NPU released; the model servers themselves left running)`,
   );
 }

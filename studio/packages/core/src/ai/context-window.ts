@@ -20,6 +20,8 @@
  */
 
 /** The conservative floor used when nothing reports a real number. */
+import { fetchLmStudioModels, lmStudioServedContext } from "./lmstudio-listing.js";
+
 export const DEFAULT_CONTEXT_WINDOW = 8192;
 
 /**
@@ -38,7 +40,13 @@ const MIN_PLAUSIBLE = 512;
 const MAX_PLAUSIBLE = 10_000_000;
 
 /** Where a window came from — so a caller never presents a default as a measurement. */
-export type ContextWindowSource = "ollama" | "ollama-loaded" | "openai-models" | "default";
+export type ContextWindowSource =
+  | "ollama"
+  | "ollama-loaded"
+  | "lmstudio"
+  | "lmstudio-loaded"
+  | "openai-models"
+  | "default";
 
 export interface ContextWindowResult {
   contextWindow: number;
@@ -288,6 +296,34 @@ export async function probeContextWindow(
         // a 200 whose body is not JSON (a proxy error page, a wrong runner) — fall through to
         // the /v1/models attempt, then to the floor. This function's whole contract is that it
         // never throws at its caller.
+      }
+    }
+  }
+  {
+    // LM Studio: its own REST listing knows the LOADED context (what a request is measured
+    // against) and the model's maximum. `/v1/models` there carries neither, so without this
+    // every LM Studio session was budgeted at the 8192 floor whatever it was really serving.
+    const listed = await fetchLmStudioModels(root, {
+      fetchFn: doFetch as unknown as typeof fetch,
+      timeoutMs,
+    });
+    const m =
+      listed?.find((x) => x.id === model) ?? listed?.find((x) => model.startsWith(`${x.id}@`));
+    if (m) {
+      const served = lmStudioServedContext(m);
+      if (served !== undefined && served >= MIN_PLAUSIBLE && served <= MAX_PLAUSIBLE) {
+        const loadedSmaller =
+          m.loaded.length > 0 && m.maxContextLength !== undefined && served < m.maxContextLength;
+        return {
+          contextWindow: served,
+          source: loadedSmaller ? "lmstudio-loaded" : "lmstudio",
+          capabilities: [
+            "completion",
+            ...(m.toolUse ? ["tools"] : []),
+            ...(m.reasoning ? ["thinking"] : []),
+            ...(m.vision ? ["vision"] : []),
+          ],
+        };
       }
     }
   }

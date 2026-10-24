@@ -43,7 +43,8 @@ export type CallDialect =
   | "tool_call_fence"
   | "mistral"
   | "python_tag"
-  | "function_tag";
+  | "function_tag"
+  | "lmstudio_request";
 
 /** A tool call read out of text. `args` is always an object — never null, never an array. */
 export interface TextToolCall {
@@ -94,6 +95,11 @@ const MARKERS: readonly Marker[] = Object.freeze([
   { open: "```tool_call", dialect: "tool_call_fence" as const, close: "```" },
   { open: "```tool_code", dialect: "tool_call_fence" as const, close: "```" },
   { open: "[TOOL_CALLS]", dialect: "mistral" as const },
+  // LM Studio's own text format, injected into the prompt of a model with no native tool
+  // template and returned as plain `content` when LM Studio's parser does not recognise the
+  // reply: `[TOOL_REQUEST]{"name":…,"arguments":{…}}[END_TOOL_REQUEST]`. Unknown here, every
+  // such call was shown as prose and nothing ran.
+  { open: "[TOOL_REQUEST]", dialect: "lmstudio_request" as const, close: "[END_TOOL_REQUEST]" },
   { open: "<function=", dialect: "function_tag" as const, close: "</function>", nameInTag: true },
   // ONE entry for the whole `<tool_call…>` family, because a real gemma4:12b produced two
   // shapes neither a fixed `<tool_call>` string nor a hand-written corpus had anticipated:

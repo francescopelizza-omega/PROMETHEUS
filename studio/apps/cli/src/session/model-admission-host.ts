@@ -24,6 +24,7 @@ import { type AiEndpoint, ai } from "@prometheus/core";
 import {
   type MemorySnapshot,
   type RunnerStatus,
+  lmsEstimateBytes,
   localMemorySnapshot,
   remoteMemorySnapshot,
   runnerCensus,
@@ -76,6 +77,8 @@ export interface AdmissionDeps {
   memory?: (host?: string) => Promise<MemorySnapshot>;
   census?: (baseUrl: string, host?: string) => Promise<RunnerStatus[]>;
   inventory?: (baseUrl: string, ctx: number) => Promise<ai.ModelCandidate[]>;
+  /** LM Studio's own load estimate (`lms load --estimate-only`); injected for tests. */
+  lmsEstimate?: (model: string, ctx: number) => Promise<number | null>;
   /** opt-out for a user who genuinely wants two runners up. */
   allowSecondServer?: boolean;
 }
@@ -87,10 +90,9 @@ export interface AdmissionOutcome {
   lines: string[];
 }
 
-/** The runner id behind a base URL, for the one-server rule. */
+/** The runner id behind a base URL, for the one-server rule (by port, overrides honoured). */
 export function runnerIdFor(baseUrl: string): string {
-  if (/:1234(\/|$)/.test(baseUrl)) return "lmstudio";
-  return "ollama";
+  return ai.runnerIdForUrl(baseUrl);
 }
 
 /**
@@ -178,18 +180,9 @@ export async function admitEndpoint(
       deps.census ??
       ((url: string, h?: string) =>
         runnerCensus(
-          [
-            { id: "ollama", baseUrl: ai.ollamaRoot(url), api: "ollama" as const },
-            ...(runner === "lmstudio"
-              ? []
-              : [
-                  {
-                    id: "lmstudio",
-                    baseUrl: url.replace(/:\d+.*$/, ":1234"),
-                    api: "openai" as const,
-                  },
-                ]),
-          ],
+          // every runner this load could collide with, each at its OWN port on that host — the
+          // old list probed "ollama" at an LM Studio endpoint's port and never saw the real one
+          ai.censusProbesFor(url),
           // A remote host gets a budget that fits a network round trip; see the constants.
           { host: h, timeoutMs: h ? REMOTE_PROBE_TIMEOUT_MS : LOCAL_PROBE_TIMEOUT_MS },
         ));
@@ -230,12 +223,28 @@ export async function admitEndpoint(
     return { allow: true, lines: [] };
   }
 
-  const candidate =
+  let candidate =
     candidates.find((c) => c.id === modelId) ??
     ({ id: modelId, weightsBytes: 0, contextTokens, geometry: null, runner } as ai.ModelCandidate);
   // Weights of 0 means the model is not installed here (or `/api/tags` did not answer); there is
   // nothing to weigh, so there is nothing to refuse.
   if (candidate.weightsBytes <= 0) return { allow: true, lines: [] };
+  // LM Studio reports no KV geometry, so arithmetic priced its models at the cautious estimate
+  // — 46.5 GB for one LM Studio itself loads in 24.3 GiB. Ask LM Studio (it loads nothing to
+  // answer), floored at the weights + 1 GiB so an estimate can never count less than the file.
+  if (runner === "lmstudio" && !host && !candidate.measuredTotalBytes) {
+    // the real `lms` only on the real path: a test that fakes the inventory never spawns it
+    const estimate =
+      deps.lmsEstimate ??
+      (deps.inventory ? async () => null : (m: string, c: number) => lmsEstimateBytes(m, c));
+    const est = await estimate(candidate.id, candidate.contextTokens).catch(() => null);
+    if (est) {
+      candidate = {
+        ...candidate,
+        measuredTotalBytes: Math.max(est, candidate.weightsBytes + 2 ** 30),
+      };
+    }
+  }
 
   const decision = ai.admitModelLoad({
     candidate,

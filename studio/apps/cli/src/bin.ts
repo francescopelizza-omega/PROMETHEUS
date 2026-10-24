@@ -25,6 +25,7 @@ import { startOrchestrationResourceGuard } from "./orchestration/resource-guard.
 import { bootOrphanGuard, stopSentinel } from "./orphan-guard-boot.js";
 import { type ParsedArgs, parseArgs } from "./parse.js";
 import {
+  c,
   defaultColorEnabled,
   defaultUnicodeEnabled,
   emitJson,
@@ -42,6 +43,7 @@ import {
 import { readStdinPrompt, stdinPromptSink } from "./stdin.js";
 import { isTerminalChatLaunch, routeTerminalChat } from "./terminal/chat-route.js";
 import { launchTmuxSession } from "./tmux/multiplexer.js";
+import { resolveTmuxCompat, tmuxCompatNotice } from "./tmux/tmux.js";
 import { TUI_NOT_TTY, launchTui } from "./tui/index.js";
 import { rootStateHome } from "./tui/sudo.js";
 
@@ -113,6 +115,12 @@ function wantsInteractiveSession(parsed: ParsedArgs): boolean {
 async function main(): Promise<void> {
   const argv = process.argv.slice(2);
   const parsed = parseArgs(argv);
+
+  // `--no-tmux`: tmux compatibility mode on request (tmux installed but unwanted or broken).
+  // Lifted into the ENVIRONMENT, not kept as a flag, because the features that use tmux are
+  // reached from inside the session (`/demos`) and from child processes — one variable is the
+  // only answer all of them read the same way. See tmux/tmux.ts `tmuxForcedOff`.
+  if (parsed.flags["no-tmux"] === true) process.env.PROMETHEUS_NO_TMUX = "1";
 
   /**
    * One home: bring an existing install's config across before anything reads it.
@@ -221,26 +229,42 @@ async function main(): Promise<void> {
     // `--ink` opts into the optional Ink renderer; default = zero-dep readline host.
     if (parsed.flags.ink === true && (await launchInkRepl(parsed))) return;
     // The DEFAULT interactive surface is the rich raw-mode TUI (resizable composer +
-    // slash autocomplete + permission modes + sudo gate). `--plain` / `--tmux` /
-    // PROMETHEUS_TMUX=1 opt out to the readline / tmux host; a non-TTY TUI returns
-    // TUI_NOT_TTY and we fall back to the same host.
+    // slash autocomplete + permission modes + sudo gate). `--plain` opts out to the readline
+    // host; `--tmux` / PROMETHEUS_TMUX=1 to the multi-window tmux host when tmux is usable,
+    // and to the TUI (with one line saying so) when it is not. A non-TTY TUI returns
+    // TUI_NOT_TTY and we fall back to the readline host.
     // a flag is "set" when present and not explicitly disabled — `--plain`, `--plain=1`,
     // and `--plain true` all count; `--plain=0`/`false` do not. (parse stores `string|true`.)
     const flagOn = (v: string | true | undefined): boolean =>
       v === true || (typeof v === "string" && v !== "" && v !== "0" && v !== "false");
-    const wantsTmuxOrPlain =
-      flagOn(parsed.flags.plain) ||
-      flagOn(parsed.flags.tmux) ||
-      process.env.PROMETHEUS_TMUX === "1";
-    if (!wantsTmuxOrPlain) {
+    const plain = flagOn(parsed.flags.plain);
+    const wantsTmux = flagOn(parsed.flags.tmux) || process.env.PROMETHEUS_TMUX === "1";
+    if (wantsTmux) {
+      const tmux = resolveTmuxCompat();
+      if (tmux.multiplex) {
+        process.exitCode = await launchTmuxSession(parsed);
+        return;
+      }
+      /**
+       * tmux compatibility mode: asked for tmux, cannot have it (not installed, switched off,
+       * or already inside a tmux client). The session the user gets is the DEFAULT one, the
+       * full TUI — this used to drop silently into the plain readline host, so a machine
+       * without tmux looked broken AND got the lesser surface, with nothing saying why.
+       * `--plain --tmux` says so too: it gets the plain host, but not in silence.
+       */
+      const say = tmuxCompatNotice(tmux.reason, "single window");
+      process.stderr.write(`${tmux.reason === "nested" ? c.dim(say) : c.yellow(say)}\n`);
+    }
+    if (!plain) {
       const code = await launchTui(parsed);
       if (code !== TUI_NOT_TTY) {
         process.exitCode = code;
         return;
       }
     }
-    // launchTmuxSession spans multiple windows when tmux is present + enabled
-    // (--tmux / PROMETHEUS_TMUX=1), else falls back to the single-window host.
+    // `--plain`, or a terminal the TUI cannot drive: the single-window readline host.
+    // (launchTmuxSession only multiplexes when tmux is usable AND asked for; here it is either
+    // not asked for or, per the branch above, not usable — so this is always one window.)
     process.exitCode = await launchTmuxSession(parsed);
     return;
   }

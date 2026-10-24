@@ -319,6 +319,34 @@ test("…and the same broken working set with NO bwrap is still just absence", (
   assert.equal(plan.kind, "none");
 });
 
+test("bwrap installed but refused a namespace by the kernel is ABSENCE, not a refusal of every command", () => {
+  // Ubuntu 24.04's AppArmor userns restriction: before, every run_command failed at bwrap's own
+  // startup, so installing bubblewrap — the advice — made the agent unable to run anything.
+  const seen: string[] = [];
+  const plan = linuxReq({
+    bwrapWorks: (bin) => {
+      seen.push(bin);
+      return "bwrap: setting up uid map: Permission denied";
+    },
+  });
+  assert.deepEqual(seen, [BWRAP_CANDIDATES[0]]);
+  assert.equal(plan.kind, "none");
+  if (plan.kind !== "none") return;
+  assert.match(plan.reason, /installed but this host does not let it create a sandbox/);
+  assert.match(plan.reason, /setting up uid map: Permission denied/);
+  assert.match(describeSandbox(plan), /^unsandboxed \(/, "it is recorded, never silent");
+});
+
+test("a bwrap that works keeps confining — the probe changes nothing there", () => {
+  const plan = linuxReq({ bwrapWorks: () => null });
+  assert.equal(plan.kind, "bwrap");
+});
+
+test("a working set that cannot be built still FAILS CLOSED when bwrap works", () => {
+  const plan = linuxReq({ writableRoots: ["/"], bwrapWorks: () => null });
+  assert.equal(plan.kind, "error");
+});
+
 test("bwrap is found by absolute path, in order, and never through PATH", () => {
   const second = BWRAP_CANDIDATES[1] as string;
   const plan = linuxReq({ exists: (p) => p === second });

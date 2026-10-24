@@ -309,7 +309,9 @@ export function parseTopologySpec(text: string): OrchestrationTopology {
 export function topologyToSpec(t: OrchestrationTopology): string {
   const backendTok = (a: AgentSpec): string => {
     const b = a.backend;
-    if (b.kind === "cli") return b.service ?? "cli";
+    if (b.kind === "cli") {
+      return `${b.service ?? "cli"}${b.local ? ":local" : ""}${b.model ? `:${b.model}` : ""}`;
+    }
     if (b.kind === "api") return `api:${b.service ?? "?"}${b.model ? `:${b.model}` : ""}`;
     if (b.kind === "local") return `local:${b.model ?? "default"}`;
     if (b.kind === "engine-chat") return `engine:${b.model ?? "default"}`;

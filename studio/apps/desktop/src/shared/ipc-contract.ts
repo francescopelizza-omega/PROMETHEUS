@@ -520,7 +520,14 @@ export interface ModelHealthRecordView {
   breakerFailures: number;
   breakerOpenedAt: number | null;
   contextWindow: number;
-  contextWindowSource: "ollama" | "ollama-loaded" | "openai-models" | "default" | "declared";
+  contextWindowSource:
+    | "ollama"
+    | "ollama-loaded"
+    | "lmstudio"
+    | "lmstudio-loaded"
+    | "openai-models"
+    | "default"
+    | "declared";
   lastUsedIso: string;
 }
 
@@ -1243,7 +1250,7 @@ export interface AiProbeEndpointResult {
   ok: boolean;
   contextWindow: number;
   /** `"ollama"` / `"openai-models"` ⇒ measured. `"default"` ⇒ the probe failed. */
-  source: "ollama" | "ollama-loaded" | "openai-models" | "default";
+  source: "ollama" | "ollama-loaded" | "lmstudio" | "lmstudio-loaded" | "openai-models" | "default";
   /** the runner's own capability array, when it reported one. */
   capabilities?: string[];
   /** opaque build identity for cache invalidation — see core's `ContextWindowResult.revision`. */

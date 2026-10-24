@@ -845,3 +845,76 @@ test("runPathsWizard: lists categories and repoints one via askPath", async () =
   assert.equal(resolveCategory("open_models", home), newDir);
   assert.match(out.join("\n"), /Open LLM models/);
 });
+
+/* ── one runner at a time, and LM Studio's real listing (2026-10-22) ─────────── */
+
+test("detectBackends: Ollama already serving a model ⇒ LM Studio is NOT cold-started beside it", async () => {
+  const startedArgv: (readonly string[])[] = [];
+  const b = await detect({
+    client: fakeClient([]),
+    fetchFn: fakeFetch({ "http://localhost:11434/v1": ["qwen3.6:latest"] }),
+    canStartFn: async () => true,
+    startModelServerFn: (argv) => {
+      startedArgv.push(argv);
+      return { ok: true, pid: 1 };
+    },
+    retryDelayMs: 0,
+  });
+  assert.deepEqual(startedArgv, [], "two model servers for a session that uses one");
+  assert.equal(b.localEndpoint?.model, "qwen3.6:latest");
+});
+
+test("detectBackends: LM Studio's own listing — chat models only, the loaded one first, never the embedding model", async () => {
+  const fetchFn = (async (url: string | URL) => {
+    const u = String(url);
+    if (u === "http://localhost:1234/api/v1/models") {
+      return new Response(
+        JSON.stringify({
+          models: [
+            {
+              type: "embedding",
+              key: "text-embedding-nomic-embed-text-v1.5",
+              size_bytes: 84106624,
+              loaded_instances: [],
+            },
+            { type: "llm", key: "qwen/qwen3-coder-30b", size_bytes: 1, loaded_instances: [] },
+            {
+              type: "llm",
+              key: "google/gemma-3-12b",
+              size_bytes: 1,
+              loaded_instances: [{ id: "google/gemma-3-12b" }],
+            },
+          ],
+        }),
+      );
+    }
+    throw new Error("ECONNREFUSED");
+  }) as unknown as typeof fetch;
+  const b = await detect({ client: fakeClient([]), fetchFn });
+  assert.deepEqual(b.liveRunners.find((r) => r.name === "lmstudio")?.models, [
+    "google/gemma-3-12b",
+    "qwen/qwen3-coder-30b",
+  ]);
+  assert.equal(b.localEndpoint?.model, "google/gemma-3-12b");
+});
+
+test("stopSelfStartedRunners: LM Studio's models are unloaded BEFORE `lms server stop` (the stop frees no RAM)", async () => {
+  const order: string[] = [];
+  await stopSelfStartedRunners(new Set(["lmstudio"]), [], {
+    modelServerStatusFn: async () => ({
+      runnerId: "lmstudio",
+      listening: true,
+      healthy: true,
+      models: ["google/gemma-3-12b"],
+      processes: [{ pid: 25161, command: "Bionic" }],
+    }),
+    unloadLmStudioFn: async (url) => {
+      order.push(`unload ${url}`);
+    },
+    execCaptureFn: async (command, args = []) => {
+      order.push(`${command} ${args.join(" ")}`);
+      return { code: 0, stdout: "", stderr: "" };
+    },
+  });
+  assert.deepEqual(order, ["unload http://localhost:1234/v1", "lms server stop"]);
+});

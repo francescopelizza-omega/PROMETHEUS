@@ -19,7 +19,7 @@
  *   node scripts/run-tests.mjs packages/core   # only suites under a path prefix
  */
 import { spawnSync } from "node:child_process";
-import { readdirSync, statSync } from "node:fs";
+import { existsSync, readdirSync, statSync } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -202,6 +202,29 @@ function modelResidency() {
     for (const row of rows) held.push(`ollama: ${row.replace(/\s{2,}/g, "  ")}`);
   }
 
+  // LM Studio holds its models inside its own app (no `llama-server` to see), and its weights
+  // count exactly the same. `lms ps --json` answers `[]` when nothing is loaded. It lives in the
+  // app's ~/.lmstudio/bin, which is often not on PATH. (2026-10-22)
+  const lms = [process.env.HOME ? `${process.env.HOME}/.lmstudio/bin/lms` : "", "lms"].find(
+    (b) => b && (b === "lms" || existsSync(b)),
+  );
+  if (lms) {
+    const r = spawnSync(lms, ["ps", "--json"], { encoding: "utf8", timeout: 10_000 });
+    if (r.status === 0 && typeof r.stdout === "string") {
+      try {
+        const rows = JSON.parse(r.stdout.trim() || "[]");
+        if (Array.isArray(rows)) {
+          for (const m of rows) {
+            const id = m?.identifier ?? m?.modelKey ?? m?.path ?? "a model";
+            held.push(`LM Studio: ${id}`);
+          }
+        }
+      } catch {
+        /* not JSON (an older lms) — say nothing rather than guess */
+      }
+    }
+  }
+
   return held.length > 0 ? held : null;
 }
 
@@ -293,7 +316,7 @@ if (!OVERRIDE) {
   const memWhy = memoryRefusal();
   if (memWhy) {
     console.error(
-      `run-tests: REFUSING — ${memWhy}.\n  Check what is holding it:  ollama ps ; pgrep -xl llama-server ; memory_pressure -Q`,
+      `run-tests: REFUSING — ${memWhy}.\n  Check what is holding it:  ollama ps ; ~/.lmstudio/bin/lms ps ; pgrep -xl llama-server ; memory_pressure -Q`,
     );
     process.exit(2);
   }

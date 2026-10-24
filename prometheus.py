@@ -6009,7 +6009,9 @@ REPO_TOOLS: list[RepoTool] = [
         repo="https://github.com/ollama/ollama",
         blurb="Run open LLMs locally (Llama, Qwen, Mistral, …) behind a simple API on :11434. The de-facto easy local-model server.",
         kind="docker-run", docker_image="ollama/ollama", docker_name="ollama", docker_volumes=("ollama",), port="11434",
-        docker_run=("run", "-d", "-v", "ollama:/root/.ollama", "-p", "11434:11434", "--name", "ollama", "ollama/ollama"),
+        # 127.0.0.1-bound: a bare `-p 11434:11434` publishes on 0.0.0.0 — the whole LAN could
+        # drive (and load models on) this machine, while the line below promised loopback
+        docker_run=("run", "-d", "-v", "ollama:/root/.ollama", "-p", "127.0.0.1:11434:11434", "--name", "ollama", "ollama/ollama"),
         post_run=(("docker", "exec", "ollama", "ollama", "--version"),),
         recommend="official Docker image — isolated + trivially removable (`docker rm -f ollama` + drop the volume). Safer than the curl|sh installer.",
         security="Official `ollama/ollama` image. Binds 127.0.0.1:11434 by default via the published port; do not expose :11434 publicly.",
@@ -10228,6 +10230,105 @@ def cmd_info(args, osi: OSInfo) -> int:
     return 0
 
 
+# ---- system requirements (the install.sh scan, for whoever never ran install.sh) -------------
+# install.sh scans the machine before installing and offers ONE package-manager command for what is
+# missing; `python3 prometheus.py doctor` from a checkout never saw that scan. Same table as
+# install.sh's `pkg_name` and the CLI's onboarding/system-packages.ts — the three are pinned
+# against each other by tests/test_install_requirements.py. Printed, never run: the engine starts
+# no elevated process (that is the privileged gate's job, in the CLI: `prometheus requirements`).
+_SYS_PACKAGES: tuple[tuple[str, str, str, bool, bool, dict[str, list[str]]], ...] = (
+    # id, binary, why, linux-only, desktop-only, {manager: packages}
+    ("git", "git", "plugin installs clone through it", False, False,
+     {"apt-get": ["git", "ca-certificates"], **{m: ["git"] for m in (
+         "brew", "dnf", "yum", "rpm-ostree", "zypper", "pacman", "apk", "xbps-install")}}),
+    ("tmux", "tmux", "extra windows (--tmux); without it: compatibility mode, one terminal", False, False,
+     {m: ["tmux"] for m in ("brew", "apt-get", "dnf", "yum", "rpm-ostree", "zypper", "pacman",
+                            "apk", "xbps-install")}),
+    ("bubblewrap", "bwrap", "confines the agent's commands on Linux", True, False,
+     {m: ["bubblewrap"] for m in ("apt-get", "dnf", "yum", "rpm-ostree", "zypper", "pacman",
+                                  "apk", "xbps-install")}),
+    ("secret-tool", "secret-tool", "keeps provider API keys in the desktop keyring", True, True,
+     {"apt-get": ["libsecret-tools"], "zypper": ["libsecret-tools"],
+      **{m: ["libsecret"] for m in ("dnf", "yum", "rpm-ostree", "pacman", "xbps-install")}}),
+)
+
+
+def _os_release(path: Optional[str] = None) -> dict[str, str]:
+    """/etc/os-release as a dict, read line by line (never sourced). {} when unreadable."""
+    for f in ([path] if path else ["/etc/os-release", "/usr/lib/os-release"]):
+        try:
+            text = Path(f).read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        out: dict[str, str] = {}
+        for line in text.splitlines():
+            k, sep, v = line.strip().partition("=")
+            if sep and k and not k.startswith("#"):
+                if len(v) >= 2 and v[0] == v[-1] and v[0] in "\"'":
+                    v = v[1:-1]
+                out[k] = v
+        return out
+    return {}
+
+
+def _sys_manager(system: str) -> Optional[str]:
+    """install.sh's choice: brew on macOS; on Linux the distro's own manager before Linuxbrew,
+    and rpm-ostree on an image-based Fedora."""
+    if system == "Darwin":
+        return "brew" if shutil.which("brew") else None
+    if system != "Linux":
+        return None
+    if os.path.exists("/run/ostree-booted") and shutil.which("rpm-ostree"):
+        return "rpm-ostree"
+    for m in ("apt-get", "dnf", "yum", "zypper", "pacman", "apk", "xbps-install", "brew"):
+        if shutil.which(m):
+            return m
+    return None
+
+
+def _sys_install_cmd(manager: str, names: list[str], elevate: bool) -> str:
+    """The command line for `names`, in install.sh's form (apt runs non-interactively)."""
+    e = "sudo " if elevate and manager != "brew" else ""
+    n = " ".join(names)
+    if manager == "apt-get":
+        return (f"{e}env DEBIAN_FRONTEND=noninteractive apt-get update && "
+                f"{e}env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends {n}")
+    return {
+        "brew": f"brew install {n}",
+        "dnf": f"{e}dnf install -y {n}", "yum": f"{e}yum install -y {n}",
+        "rpm-ostree": f"{e}rpm-ostree install --idempotent {n}",
+        "zypper": f"{e}zypper --non-interactive install {n}",
+        "pacman": f"{e}pacman -S --needed --noconfirm {n}",
+        "apk": f"{e}apk add --no-cache {n}", "xbps-install": f"{e}xbps-install -Sy {n}",
+    }[manager]
+
+
+def system_requirements(system: Optional[str] = None, os_release: Optional[str] = None,
+                        desktop: Optional[bool] = None) -> dict:
+    """What this machine is missing from the system packages, and the command that adds them."""
+    system = system or platform.system()
+    rel = _os_release(os_release) if system == "Linux" else {}
+    if desktop is None:
+        desktop = bool(os.environ.get("DBUS_SESSION_BUS_ADDRESS") or os.environ.get("XDG_CURRENT_DESKTOP"))
+    manager = _sys_manager(system)
+    rows, missing = [], []
+    for pid, binary, why, linux_only, desktop_only, names in _SYS_PACKAGES:
+        if (linux_only and system != "Linux") or (desktop_only and not desktop):
+            continue
+        found = shutil.which(binary)
+        rows.append({"id": pid, "found": found, "why": why})
+        if not found:
+            missing.append(pid)
+    pkgs = [n for pid, *_x, names in _SYS_PACKAGES if pid in missing for n in names.get(manager or "", [])]
+    elevate = hasattr(os, "geteuid") and os.geteuid() != 0
+    return {
+        "distro": rel.get("PRETTY_NAME") or ("macOS" if system == "Darwin" else system),
+        "manager": manager, "rows": rows, "missing": missing,
+        "command": _sys_install_cmd(manager, pkgs, elevate) if manager and pkgs else None,
+        "needs_homebrew": system == "Darwin" and manager is None and bool(missing),
+    }
+
+
 def cmd_doctor(args, osi: OSInfo) -> int:
     # doctor's HUMAN text is captured by engine-bridge types/doctor.ts (the health pill) when
     # called WITHOUT --json. But the bridge contract is UNIVERSAL: under --json we MUST emit one
@@ -10235,6 +10336,7 @@ def cmd_doctor(args, osi: OSInfo) -> int:
     # under --json → the bridge saw non-JSON → `error (bad_json)`. Honor --json.
     detected = detect_hosts()
     ok = osi.family != "unsupported" and bool(detected)
+    reqs = system_requirements()
     if JSON_OUT:
         emit_json(
             {
@@ -10247,6 +10349,8 @@ def cmd_doctor(args, osi: OSInfo) -> int:
                 "ai_agents": [h.name for h in detected],
                 "config_dir": str(PROM_DIR),
                 "config_dir_is_legacy": PROM_DIR == LEGACY_PROM_DIR,
+                # informational: never changes `ok` — every one has a working fallback
+                "system_requirements": reqs,
             }
         )
         return 0 if ok else 2
@@ -10257,6 +10361,17 @@ def cmd_doctor(args, osi: OSInfo) -> int:
     print(f"  git           : {shutil.which('git') or 'NOT FOUND'}")
     print(f"  AI agents     : {', '.join(h.name for h in detected) or 'none detected'}")
     print(f"  config dir    : {PROM_DIR}")
+    print(f"  system pkgs   : {reqs['distro']}"
+          + (f" · {reqs['manager']}" if reqs["manager"] else ""))
+    for r in reqs["rows"]:
+        mark = Log._c("ok     ", "green") if r["found"] else Log._c("missing", "yellow")
+        print(f"    {mark} {r['id']:<12} {r['found'] or r['why']}")
+    if reqs["command"]:
+        print("  add them      : " + reqs["command"])
+        print("                  (or `prometheus requirements`, which offers to run it; install.sh --deps too)")
+    elif reqs["needs_homebrew"]:
+        print("  add them      : install Homebrew (https://brew.sh), then: brew install "
+              + " ".join(reqs["missing"]) + "   — or: sh install.sh --deps")
     # ONE HOME: everything Prometheus owns now hangs off ~/.prometheus. An install that predates
     # that keeps working from the old root — silently, which is how a "moved" setting turns into
     # a lost one — so say so, and say what to do about it. Deliberately NOT moved automatically:
@@ -15402,7 +15517,22 @@ def build_terminal_cmd(service: str, *, model: Optional[str] = None,
     # flag VALUE (e.g. `-m -x`) a dash-leading token can be mis-parsed as another flag.
     if model and model.startswith("-"):
         raise RuntimeError(f"refusing model id that starts with '-' (option-injection guard): {model}")
-    if model and spec.get("model"):
+    if model and service == "opencode" and "/" not in model:
+        # opencode takes `-m provider/model`; a bare id (`qwen3:8b`, an Ollama tag) failed its
+        # provider lookup. A bare id is a LOCAL model: wire a one-run provider for it through
+        # OPENCODE_CONFIG_CONTENT (merged over the user's own config, which is never written).
+        runner = "lmstudio" if "@" in model else "ollama"
+        local_base = CHAT_LOCAL_ENDPOINTS[runner]
+        env["OPENCODE_CONFIG_CONTENT"] = json.dumps({
+            "$schema": "https://opencode.ai/config.json",
+            "provider": {"prometheus-local": {
+                "npm": "@ai-sdk/openai-compatible", "name": "Prometheus local model",
+                "options": {"baseURL": local_base, "apiKey": "local"},
+                "models": {model: {"name": model}}}}})
+        argv += ["-m", f"prometheus-local/{model}"]
+        notes.append(f"opencode → local model '{model}' on {runner} ({local_base}); "
+                     "an opencode provider/model id (e.g. anthropic/…) uses its own login instead")
+    elif model and spec.get("model"):
         argv += [t.replace("{model}", model) for t in spec["model"]]
     # post-subcommand bypass tokens (claude/gemini/cursor)
     if bypass and not spec.get("bypass_global"):
@@ -15447,20 +15577,184 @@ def build_terminal_cmd(service: str, *, model: Optional[str] = None,
     return argv, env, notes
 
 
-def _tmux_launch(session: str, argv: list[str], env: dict[str, str]) -> None:
+def _tmux_compat_reason() -> Optional[str]:
+    """tmux compatibility mode: why a `--tmux` launch must open in THIS terminal instead, or None
+    when tmux is usable. tmux is optional — it only adds a detachable session. Mirrors the CLI's
+    `resolveTmuxCompat` (studio/apps/cli/src/tmux/tmux.ts): switched off (PROMETHEUS_NO_TMUX=1),
+    not installed, or already inside a tmux client (where `tmux attach` refuses to nest)."""
+    if os.environ.get("PROMETHEUS_NO_TMUX") == "1":
+        return "tmux compatibility mode (--no-tmux / PROMETHEUS_NO_TMUX=1)"
+    if not shutil.which("tmux"):
+        return "tmux is not installed — compatibility mode"
+    if os.environ.get("TMUX"):
+        return "already inside tmux"
+    return None
+
+
+# An attach that exits nonzero this fast never showed the user a session: tmux refused it (an
+# xterm-kitty / xterm-ghostty TERM over ssh, TERM=dumb, an unusable socket dir). Mirrors the CLI's
+# ATTACH_FAILED_WITHIN_MS (studio/apps/cli/src/tmux/tmux.ts).
+_TMUX_ATTACH_FAILED_WITHIN_S = 1.5
+
+
+def _tmux_launch(session: str, argv: list[str], env: dict[str, str]) -> Optional[int]:
     """Spawn argv detached inside a named tmux session ('let it run' / leave-PC),
-    then attach. Uses shlex.join for a safe one-string command tmux re-parses."""
+    then attach. Uses shlex.join for a safe one-string command tmux re-parses.
+
+    Returns the attach's exit code, or None when tmux could not give the user the session —
+    `new-session` refused, or the attach failed straight away. A session this call created is
+    killed again in that case, so the caller can open the same argv in this terminal instead of
+    leaving it running detached for nobody. (It used to `check=True` the new-session, which the
+    global guard turned into an error exit, and to exec the attach, so a refused attach had no
+    way back at all.)"""
     import shlex
     prefix = "".join(f"{k}={shlex.quote(v)} " for k, v in env.items())
     cmdstr = prefix + shlex.join(argv)
+    created = False
     # create only if missing, then attach
     if _run_timed(["tmux", "has-session", "-t", session], capture_output=True, timeout=10).returncode != 0:
-        _run_timed(["tmux", "new-session", "-d", "-s", session, cmdstr], check=True, timeout=30)
+        r = _run_timed(["tmux", "new-session", "-d", "-s", session, cmdstr],
+                       capture_output=True, text=True, timeout=30)
+        if r.returncode != 0:
+            Log.warn(f"tmux new-session failed: {(r.stderr or '').strip() or f'exit {r.returncode}'}")
+            return None
+        created = True
         Log.ok(f"tmux session '{session}' started (detached) — running: {cmdstr}")
     else:
         Log.info(f"tmux session '{session}' already exists — attaching")
     Log.step(f"detach with Ctrl-b d · reattach later: tmux attach -t {session}")
-    os.execvp("tmux", ["tmux", "attach", "-t", session])
+    t0 = time.monotonic()
+    rc = subprocess.call(["tmux", "attach", "-t", session])
+    if rc != 0 and time.monotonic() - t0 < _TMUX_ATTACH_FAILED_WITHIN_S:
+        if created:
+            _run_timed(["tmux", "kill-session", "-t", session], capture_output=True, timeout=10)
+        return None
+    return rc
+
+
+# Mirrors `PROMETHEUS_OLLAMA_CAPS` in studio/packages/engine-bridge/src/model-server.ts: the caps
+# Prometheus applies to an ollama daemon IT starts (never to one the user runs). Keep in step.
+_PROMETHEUS_OLLAMA_CAPS = {
+    "OLLAMA_MAX_LOADED_MODELS": "1",
+    "OLLAMA_NUM_PARALLEL": "1",
+    "OLLAMA_KEEP_ALIVE": "60s",
+    "OLLAMA_CONTEXT_LENGTH": "131072",
+    "OLLAMA_FLASH_ATTENTION": "1",
+    "OLLAMA_KV_CACHE_TYPE": "q8_0",
+    "OLLAMA_MAX_QUEUE": "8",
+}
+
+
+def _lms_binary() -> Optional[str]:
+    """LM Studio's `lms`: on PATH, else the app's own ~/.lmstudio/bin/lms (often off PATH)."""
+    found = shutil.which("lms")
+    if found:
+        return found
+    bundled = HOME / ".lmstudio" / "bin" / "lms"
+    return str(bundled) if bundled.exists() else None
+
+
+def _lmstudio_models(base: str, timeout: float = 2.0) -> Optional[list]:
+    """LM Studio's OWN listing (`/api/v1/models`, else `/api/v0/models`): which models are chat
+    models and which are LOADED. `/v1/models` lists every download, embeddings included, and an
+    Ollama route on this port answers HTTP 200 with an error — neither says what is resident.
+    None when the server is not an LM Studio, or does not answer."""
+    root = base.rstrip("/").rsplit("/v1", 1)[0]
+    for path in ("/api/v1/models", "/api/v0/models"):
+        try:
+            with urllib.request.urlopen(root + path, timeout=timeout) as r:  # noqa: S310
+                body = json.loads(r.read() or b"{}")
+        except Exception:  # noqa: BLE001 — try the next route, then give up
+            continue
+        if not isinstance(body, dict):
+            continue
+        out = []
+        if isinstance(body.get("models"), list):
+            for m in body["models"]:
+                if isinstance(m, dict) and (m.get("key") or m.get("id")):
+                    out.append({"id": m.get("key") or m.get("id"),
+                                "type": str(m.get("type", "")).lower(),
+                                "loaded": bool(m.get("loaded_instances")),
+                                "max_context": m.get("max_context_length")})
+            return out
+        rows = body.get("data")
+        if isinstance(rows, list) and any(isinstance(m, dict) and "state" in m for m in rows):
+            for m in rows:
+                if isinstance(m, dict) and m.get("id"):
+                    out.append({"id": m["id"], "type": str(m.get("type", "")).lower(),
+                                "loaded": m.get("state") == "loaded",
+                                "max_context": m.get("max_context_length")})
+            return out
+    return None
+
+
+def _ensure_lmstudio_server(base: str) -> bool:
+    """Start LM Studio's server if it is installed but off (`lms server start --port <port>`) —
+    the twin of `_ensure_ollama_daemon`. It starts the HTTP server only; it loads no model.
+    Best-effort — returns whether LM Studio answers."""
+    if _lmstudio_models(base, 1.0) is not None:
+        return True
+    lms = _lms_binary()
+    if not lms:
+        return False
+    try:
+        port = str(urllib.parse.urlsplit(base).port or 1234)
+    except ValueError:
+        port = "1234"
+    try:
+        subprocess.run([lms, "server", "start", "--port", port], stdin=subprocess.DEVNULL,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=60,
+                       check=False)  # noqa: S603 — fixed argv, no shell
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    deadline = time.monotonic() + 20.0
+    while time.monotonic() < deadline:
+        if _lmstudio_models(base, 0.5) is not None:
+            return True
+        time.sleep(0.4)
+    return False
+
+
+def _local_keep_alive() -> Optional[str]:
+    """PROMETHEUS_LOCAL_KEEP_ALIVE (default "60s", "" = send nothing) — the TS `localKeepAlive`."""
+    raw = os.environ.get("PROMETHEUS_LOCAL_KEEP_ALIVE")
+    if raw is None:
+        return "60s"
+    return raw.strip() or None
+
+
+def _keep_alive_seconds(v: Optional[str]) -> Optional[int]:
+    m = re.match(r"^(\d+(?:\.\d+)?)\s*(ms|s|m|h)?$", (v or "").strip(), re.I)
+    if not m:
+        return None
+    n, unit = float(m.group(1)), (m.group(2) or "s").lower()
+    secs = n / 1000 if unit == "ms" else n * 60 if unit == "m" else n * 3600 if unit == "h" else n
+    whole = int(-(-secs // 1))
+    return whole if whole >= 1 else None
+
+
+def _runner_hint(runner: str, model: str, kind: str) -> str:
+    """What to do next, per runner — LM Studio advice was given to every non-Ollama runner."""
+    if kind == "unreachable":
+        return {
+            "ollama": f"start it: `ollama serve` (or `apps install ollama`), then `ollama pull {model}`",
+            "lmstudio": "start LM Studio's server: `lms server start` (or LM Studio → Developer → Start Server)",
+            "llamacpp": f"start llama.cpp: `llama-server -m <model.gguf> --port 8080`",
+            "vllm": f"start vLLM: `vllm serve {model} --port 8000`",
+        }.get(runner, "start the local server")
+    if kind == "unknown-model":
+        return {
+            "ollama": f"`ollama pull {model}`, or pick one from `ollama list`",
+            "lmstudio": f"`lms get {model}`, or pick one from `lms ls` (LM Studio ids look like publisher/model)",
+        }.get(runner, f"check the model name — the server does not know '{model}'")
+    if kind == "overflow":
+        return {
+            "lmstudio": f"the conversation exceeds the context LM Studio loaded the model with — `lms load {model} --context-length 32768`",
+            "ollama": "the conversation exceeds the served context — raise OLLAMA_CONTEXT_LENGTH, or start a new chat",
+        }.get(runner, "the conversation exceeds the model's context — start a new chat")
+    if kind == "not-loaded":
+        return f"no model is loaded and JIT loading is off — `lms load {model}`"
+    return ""
 
 
 def _ensure_ollama_daemon() -> bool:
@@ -15471,9 +15765,12 @@ def _ensure_ollama_daemon() -> bool:
     root = CHAT_LOCAL_ENDPOINTS["ollama"].rsplit("/v1", 1)[0]
 
     def reachable(timeout: float = 1.0) -> bool:
+        # `status < 500` counted ANY HTTP server on 11434 as Ollama (LM Studio answers unknown
+        # routes with HTTP 200 + an error): only Ollama's own `{"version": …}` reply means up.
         try:
             with urllib.request.urlopen(root + "/api/version", timeout=timeout) as r:  # noqa: S310
-                return int(getattr(r, "status", 200)) < 500
+                body = json.loads(r.read(4096) or b"{}")
+                return isinstance(body, dict) and "version" in body
         except Exception:  # noqa: BLE001 — any failure ⇒ not reachable
             return False
 
@@ -15482,8 +15779,22 @@ def _ensure_ollama_daemon() -> bool:
     ollama = shutil.which("ollama")
     if not ollama:
         return False  # not installed → let ask() surface the graceful install hint
-    kwargs: dict = {"stdin": subprocess.DEVNULL, "stdout": subprocess.DEVNULL,
-                    "stderr": subprocess.DEVNULL}
+    # The SERVER decides where models live and how much memory it may hold: `OLLAMA_MODELS`
+    # set only on `ollama pull` (the client) was ignored by a daemon started here without it,
+    # and this daemon got none of the memory caps Prometheus's own TS launcher applies — one
+    # loaded model, one request, 60 s keep-alive. The user's own environment always wins.
+    env = _ollama_env()
+    for k, v in _PROMETHEUS_OLLAMA_CAPS.items():
+        env.setdefault(k, v)
+    log = None
+    try:
+        logs = HOME / ".prometheus" / "logs"
+        logs.mkdir(parents=True, exist_ok=True)
+        log = open(logs / "ollama-serve.log", "ab")  # noqa: SIM115 — handed to the child
+    except OSError:
+        log = None
+    kwargs: dict = {"stdin": subprocess.DEVNULL, "stdout": log or subprocess.DEVNULL,
+                    "stderr": log or subprocess.DEVNULL, "env": env}
     if os.name == "nt":
         kwargs["creationflags"] = 0x00000008 | 0x00000200  # DETACHED | NEW_PROCESS_GROUP
     else:
@@ -15492,6 +15803,9 @@ def _ensure_ollama_daemon() -> bool:
         subprocess.Popen([ollama, "serve"], **kwargs)  # noqa: S603 — fixed argv, no shell
     except OSError:
         return False
+    finally:
+        if log is not None:
+            log.close()  # the child holds its own descriptor
     deadline = time.monotonic() + 20.0
     while time.monotonic() < deadline:
         if reachable(0.5):
@@ -15512,6 +15826,22 @@ def chat_local(model: str, prompt: Optional[str], runner: str = "ollama",
     url = base + "/chat/completions"
     if runner == "ollama":
         _ensure_ollama_daemon()  # best-effort: start the daemon if the user only has the CLI
+    elif runner == "lmstudio":
+        _ensure_lmstudio_server(base)  # its server can be off while the app runs
+        listed = _lmstudio_models(base)
+        if listed is not None and not JSON_OUT:
+            mine = next((m for m in listed if m["id"] == model or model.startswith(m["id"] + "@")), None)
+            if mine is None:
+                Log.warn(f"LM Studio does not list '{model}' — " + _runner_hint(runner, model, "unknown-model"))
+            elif mine["type"] == "embedding" or mine["type"] == "embeddings":
+                Log.warn(f"'{model}' is an EMBEDDING model in LM Studio — it cannot chat; pick an llm from `lms ls`")
+            elif not mine["loaded"]:
+                Log.info(f"LM Studio will load '{model}' on this first request (can take a minute)")
+    # how long to wait for the NEXT byte (first byte included: a cold load sends nothing)
+    try:
+        sock_timeout = float(os.environ.get("PROMETHEUS_LOCAL_TIMEOUT", "600"))
+    except ValueError:
+        sock_timeout = 600.0
 
     # ── the `/think` ladder ────────────────────────────────────────────────────
     # Resolve ONCE per session, not per turn: the capability is a property of the
@@ -15546,20 +15876,106 @@ def chat_local(model: str, prompt: Optional[str], runner: str = "ollama",
     # answer, and the JSON envelope still needs the deliberation it split off.
     last: dict = {}
 
+    keep = _local_keep_alive()
+    # LM Studio ignores Ollama's `keep_alive`; its knob is `ttl` (seconds, for a JIT load).
+    # Without it a model this chat woke stayed resident for LM Studio's own default: an hour.
+    hold = ({"ttl": _keep_alive_seconds(keep)} if runner == "lmstudio" and _keep_alive_seconds(keep)
+            else {"keep_alive": keep} if runner == "ollama" and keep else {})
+
+    def fail(kind: str, message: str) -> None:
+        last["error"] = message
+        last["error_kind"] = kind
+
+    def read_reply(r) -> dict:
+        """Read a streamed (SSE) reply — or a whole JSON body from a server that ignored
+        `stream`. Streaming is what keeps a long answer alive: the socket timeout now bounds
+        the wait for the NEXT chunk, where the old non-streamed read had to finish everything
+        inside one 300 s window."""
+        content, reasoning, raw_lines = [], [], []
+        finish, err, saw_sse = None, None, False
+        for raw in r:
+            line = raw.decode("utf-8", "replace").strip()
+            if not line:
+                continue
+            if not line.startswith("data:"):
+                raw_lines.append(line)
+                continue
+            saw_sse = True
+            data = line[5:].strip()
+            if data == "[DONE]":
+                break
+            try:
+                o = json.loads(data)
+            except ValueError:
+                continue
+            if isinstance(o, dict) and o.get("error"):
+                e = o["error"]
+                err = e.get("message") if isinstance(e, dict) else str(e)
+                break
+            ch = (o.get("choices") or [{}])[0] if isinstance(o, dict) else {}
+            d = ch.get("delta") or {}
+            if isinstance(d.get("content"), str):
+                content.append(d["content"])
+            rc = d.get("reasoning_content") or d.get("reasoning")
+            if isinstance(rc, str):
+                reasoning.append(rc)
+            if d.get("tool_calls"):
+                finish = finish or "tool_calls"
+            if ch.get("finish_reason"):
+                finish = ch["finish_reason"]
+        if not saw_sse:
+            o = json.loads("\n".join(raw_lines) or "{}")
+            if isinstance(o, dict) and o.get("error"):
+                e = o["error"]
+                return {"error": e.get("message") if isinstance(e, dict) else str(e)}
+            ch = (o.get("choices") or [{}])[0]
+            msg = ch.get("message") or {}
+            c = msg.get("content")
+            return {"content": c if isinstance(c, str) else "",
+                    "reasoning": msg.get("reasoning_content") or msg.get("reasoning") or "",
+                    "finish": ch.get("finish_reason") or ("tool_calls" if msg.get("tool_calls") else None)}
+        return {"content": "".join(content), "reasoning": "".join(reasoning), "finish": finish,
+                **({"error": err} if err else {})}
+
     def ask(msgs: list[dict]) -> Optional[str]:
         # The prompt half first (a trained-on literal, or the emulation nudge), then
         # the body half — so a knobless model still gets the tier, in words.
+        last.pop("error", None)
+        last.pop("error_kind", None)
         sent = effort_apply_messages(msgs, eff_res) if eff_res else msgs
-        payload = effort_apply({"model": model, "messages": sent, "stream": False}, eff_res)
+        payload = effort_apply({"model": model, "messages": sent, "stream": True, **hold}, eff_res)
         body = json.dumps(payload).encode()
         req = urllib.request.Request(url, data=body, method="POST",
                                      headers={"Content-Type": "application/json",
                                               "Authorization": "Bearer local"})
         try:
-            with urllib.request.urlopen(req, timeout=300) as r:
-                data = json.loads(r.read())
-            content = data["choices"][0]["message"]["content"]
+            with urllib.request.urlopen(req, timeout=sock_timeout) as r:
+                reply = read_reply(r)
+            if reply.get("error"):
+                detail = str(reply["error"])
+                low = detail.lower()
+                kind = ("overflow" if "context" in low and ("length" in low or "overflow" in low)
+                        else "not-loaded" if "no models loaded" in low else "server-error")
+                fail(kind, detail)
+                Log.err(f"{runner}: {detail}")
+                hint = _runner_hint(runner, model, kind)
+                if hint:
+                    Log.step(hint)
+                return None
+            # `content: null` is a real answer shape: a reasoning model that put everything in
+            # `reasoning_content`, or a tool call. It is not "the server is unreachable".
+            content = reply.get("content") or ""
+            if reply.get("reasoning") and not content:
+                last["thinking"] = reply["reasoning"]
+            if reply.get("finish") == "length" and not JSON_OUT:
+                Log.warn("the answer was cut off by the length limit (finish_reason=length)")
+            if reply.get("finish") == "tool_calls" and not content:
+                fail("tool-call", "the model answered with a tool call, which plain chat cannot run")
+                Log.warn("the model answered with a tool call — use the prometheus TUI for agentic tools")
+                return None
             visible, thinking = _effort_split_reasoning(content, reasoning_tag)
+            if reply.get("reasoning"):
+                thinking = (reply["reasoning"] + ("\n" + thinking if thinking else "")) if thinking else reply["reasoning"]
             if thinking:
                 last["thinking"] = thinking
                 if not JSON_OUT:
@@ -15582,21 +15998,30 @@ def chat_local(model: str, prompt: Optional[str], runner: str = "ollama",
             except (OSError, AttributeError):
                 pass
             Log.err(f"{runner} refused the request (HTTP {e.code}){': ' + detail if detail else ''}")
-            if e.code == 404:
-                Log.step(f"the server is up but does not know '{model}' — check the model name"
-                         + (f" (`ollama pull {model}`)" if runner == "ollama" else ""))
+            low = detail.lower()
+            kind = ("unknown-model" if e.code == 404 or "not found" in low
+                    else "overflow" if "context" in low and ("length" in low or "overflow" in low)
+                    else "not-loaded" if "no models loaded" in low else "rejected")
+            fail(kind, f"HTTP {e.code}" + (f": {detail}" if detail else ""))
+            hint = _runner_hint(runner, model, kind)
+            if hint:
+                Log.step(hint)
             return None
         except urllib.error.URLError as e:
+            fail("unreachable", f"cannot reach the local {runner} server at {base} ({e.reason})")
             Log.err(f"cannot reach the local {runner} server at {base} ({e.reason}).")
-            if runner == "ollama":
-                Log.step("start it: `apps install ollama` (or `ollama serve`), then `ollama pull " + model + "`")
-            else:
-                Log.step("open LM Studio → load a model → 'Start Server' (http://localhost:1234)")
+            Log.step(_runner_hint(runner, model, "unreachable"))
+            return None
+        except TimeoutError:
+            fail("timeout", f"{runner} sent nothing for {int(sock_timeout)} s")
+            Log.err(f"{runner} sent nothing for {int(sock_timeout)} s (a cold model load plus a long prompt?)")
+            Log.step("raise PROMETHEUS_LOCAL_TIMEOUT, or load the model first")
             return None
         except (KeyError, IndexError, TypeError, ValueError, OSError,
                 http.client.HTTPException) as e:  # noqa: BLE001 — never crash the chat
             # IndexError/TypeError guard an empty/malformed `choices` array (a server can
             # legitimately return `choices: []`), which would otherwise crash the turn.
+            fail("bad-response", f"unexpected response from {runner}: {e}")
             Log.err(f"unexpected response from {runner}: {e}"); return None
 
     if not JSON_OUT:
@@ -15605,8 +16030,11 @@ def chat_local(model: str, prompt: Optional[str], runner: str = "ollama",
         out = ask([{"role": "user", "content": prompt}])
         if out is None:
             if JSON_OUT:
+                # the REAL reason: a 400, an unknown model or an overflow is not "unreachable"
                 return emit_json({"command": "chat", "ok": False, "mode": "local",
-                                  "error": f"local {runner} server unreachable", "_exit": 1,
+                                  "error": last.get("error") or f"local {runner} server unreachable",
+                                  "error_kind": last.get("error_kind") or "unreachable",
+                                  "runner": runner, "model": model, "_exit": 1,
                                   **_effort_json_block(effort, eff_res)})
             return 1
         if JSON_OUT:
@@ -15637,7 +16065,12 @@ def chat_local(model: str, prompt: Optional[str], runner: str = "ollama",
         history.append({"role": "user", "content": line})
         out = ask(history)
         if out is None:
-            return 1
+            # one failed turn (a timeout, an overflow, a 500) used to END the session and lose
+            # the conversation; drop the unanswered message and keep going
+            history.pop()
+            if last.get("error_kind") == "unreachable":
+                return 1
+            continue
         history.append({"role": "assistant", "content": out})
         print(f"\n{model}> {out}\n")
     return 0
@@ -15645,6 +16078,14 @@ def chat_local(model: str, prompt: Optional[str], runner: str = "ollama",
 
 def cmd_chat(args, osi: OSInfo) -> int:
     """Route to agentic (local) or terminal (paid CLI) chat, enforcing the rule."""
+    # `--tmux` takes an OPTIONAL name, so `--tmux "fix the bug"` swallowed the prompt as the
+    # session name and launched with no prompt at all. A tmux session name is one token; a value
+    # with whitespace (or anything tmux would not take as a name) is the prompt. `--tmux=NAME`
+    # or `--tmux -- "prompt"` stay unambiguous for a one-word prompt.
+    tmux_val = getattr(args, "tmux", None)
+    if tmux_val and not re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", tmux_val):
+        args.message = [tmux_val, *(getattr(args, "message", None) or [])]
+        args.tmux = ""
     prompt = " ".join(args.message).strip() if getattr(args, "message", None) else None
     if prompt == "":          # whitespace-only message == no prompt → interactive, not an empty `-p ""`
         prompt = None
@@ -15697,6 +16138,9 @@ def cmd_chat(args, osi: OSInfo) -> int:
         bypass=bypass, prompt=prompt, cwd=getattr(args, "cwd", None))
     spec = CHAT_CLIS[cli]
     use_tmux = getattr(args, "tmux", None) is not None
+    if getattr(args, "no_tmux", False):
+        # one switch for this process and every child it starts, the CLI's `--no-tmux` twin
+        os.environ["PROMETHEUS_NO_TMUX"] = "1"
     session = (getattr(args, "tmux", None) or f"prom-{cli}") if use_tmux else None
 
     # JSON preview (the GUI parses this to render the settings preview before OPEN)
@@ -15744,10 +16188,15 @@ def cmd_chat(args, osi: OSInfo) -> int:
         except OSError as e:
             Log.err(f"cannot cd to {args.cwd}: {e}"); return 2
     if use_tmux:
-        if not shutil.which("tmux"):
-            Log.err("tmux not found — install tmux or drop --tmux"); return 2
-        _tmux_launch(session, argv, env)   # execs (attach)
-        return 0
+        why = _tmux_compat_reason()
+        if why is None:
+            rc = _tmux_launch(session, argv, env)
+            if rc is not None:
+                return rc
+            why = "tmux could not start the session — compatibility mode"
+        # Used to be a refusal ("tmux not found — install tmux or drop --tmux", exit 2). The argv
+        # is the same either way; without tmux only the detachable wrapper is lost, so open it here.
+        Log.warn(f"{why}: opening the chat in this terminal (no detachable session)")
     Log.ok(f"launching {spec['label']} … (this terminal becomes the chat)")
     os.execvpe(argv[0], argv, {**os.environ, **env})
     return 0  # unreachable after execvpe
@@ -16012,6 +16461,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_chat.add_argument("--replace-system", action="store_true", dest="replace_system", help="terminal mode: REPLACE the system prompt instead of appending")
     p_chat.add_argument("--bypass", action="store_true", help="terminal mode: bypass the CLI's permission prompts (typed-confirm gated)")
     p_chat.add_argument("--tmux", nargs="?", const="", metavar="NAME", help="terminal mode: wrap in a tmux session (detach / leave-PC); optional session NAME")
+    p_chat.add_argument("--no-tmux", action="store_true",
+                        help="tmux compatibility mode: never use tmux, even with --tmux (same as PROMETHEUS_NO_TMUX=1)")
     p_chat.add_argument("--cwd", metavar="DIR", help="terminal mode: working directory for the session")
     p_chat.add_argument("--open", action="store_true", help="terminal mode: actually LAUNCH (omit = preview only — the OPEN button)")
     p_chat.add_argument("message", nargs="*", help="optional prompt for one-shot/headless; omit for an interactive session")

@@ -60,6 +60,7 @@ import { execTimeoutMs, runParsedCommand } from "./exec-runner.js";
 import { type SandboxMode, describeSandbox, planExecSandbox, sandboxHint } from "./exec-sandbox.js";
 import { type FsPreImage, runFsMutateTool } from "./fs-mutate-host.js";
 import { prometheusHome } from "./home.js";
+import { lookPath } from "./host-tool-probe.js";
 import { runMemoryTool } from "./memory-store.js";
 import type { PrivilegedGate, Surface } from "./privileged-gate.js";
 import { type EmbedFn, semanticSearchTool } from "./semantic-index.js";
@@ -894,12 +895,17 @@ async function processList(exec: Exec, args: Record<string, unknown>): Promise<T
   return done(true, [header, ...body].join("\n"), { shown: body.length });
 }
 
-async function whichTool(exec: Exec, args: Record<string, unknown>): Promise<ToolOutcome> {
+async function whichTool(
+  exec: Exec,
+  args: Record<string, unknown>,
+  find: (bin: string) => string | null = (b) => lookPath(b),
+): Promise<ToolOutcome> {
   const name = str(args.name);
   if (!safeToken(name)) return refuse(`refusing a program name that looks like a flag: ${name}`);
-  const w = await exec("which", [name], { timeoutMs: 4000 });
-  if (w.code !== 0 || !w.stdout.trim()) return done(true, `${name}: not installed`);
-  const path = w.stdout.trim().split("\n")[0] ?? "";
+  // A PATH walk, not `which`: `which` is not installed on Arch's base system or in Fedora and
+  // UBI container images, and there this tool answered "not installed" for EVERY program.
+  const path = find(name);
+  if (!path) return done(true, `${name}: not installed`);
   const v = await exec(path, ["--version"], { timeoutMs: 4000 });
   const version = v.code === 0 ? (v.stdout || v.stderr).trim().split("\n")[0] : "";
   return done(true, `${name}: ${path}${version ? `\n  ${version}` : ""}`, { path });

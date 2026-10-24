@@ -125,6 +125,19 @@ export function assessAgentAuth(
     };
   }
   const service = backend.service ?? "cli";
+  // A CLI driven against a LOCAL model server uses no vendor account at all — no subscription,
+  // no key. Classing it by the CLI's login nagged an all-local swarm to "give an API key" and
+  // made a host that cannot confirm decline the run.
+  if (backend.local) {
+    return {
+      agent: agentName,
+      service,
+      mode: "local",
+      automationOk: true,
+      severity: "ok",
+      note: `${service} on a local model (Ollama / LM Studio) — no vendor account or subscription is used`,
+    };
+  }
   const mode = detectAuthMode(service, env);
   // The per-vendor policy decides whether subscription/unknown automation is ok/warn/block.
   const v = automationVerdict(service, mode);

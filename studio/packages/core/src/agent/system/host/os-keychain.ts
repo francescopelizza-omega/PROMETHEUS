@@ -115,9 +115,16 @@ function linuxStore(spawnFn: SecretSpawn): SecretsStore {
         ["store", "--label=Prometheus", "service", service, "account", account],
         secret,
       );
+      if (r.code === 127) {
+        // Not installed is the common case (Ubuntu ships the Secret Service but not this tool),
+        // and asking whether gnome-keyring is running sent people looking in the wrong place.
+        throw new Error(
+          "keychain set failed: secret-tool is not installed (Debian/Ubuntu: libsecret-tools · Fedora/RHEL/Arch: libsecret) — install it, or set the provider's API key as an environment variable instead",
+        );
+      }
       if (r.code !== 0) {
         throw new Error(
-          `keychain set failed (secret-tool exit ${r.code}) — is a Secret Service (gnome-keyring/kwallet) running?`,
+          `keychain set failed (secret-tool exit ${r.code}) — is a Secret Service (gnome-keyring/kwallet) running? Without one, set the provider's API key as an environment variable instead`,
         );
       }
     },

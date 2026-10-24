@@ -20,6 +20,9 @@ import {
   runPrometheus,
 } from "@prometheus/engine-bridge";
 
+import { onboarding } from "@prometheus/core";
+
+import { defaultRequirementsDeps } from "./commands/requirements-cmd.js";
 import type { CliContext, CommandOutcome } from "./context.js";
 import { c, heading, table } from "./render.js";
 
@@ -270,6 +273,8 @@ export interface DoctorDeps {
   ptyHelperPaths: string[];
   /** the ollama daemon base URL. */
   ollamaHost: string;
+  /** the system-package scan `prometheus requirements` runs (git, tmux, bubblewrap…). */
+  systemPackages?: () => onboarding.SysReport;
 }
 
 async function defaultFetchHead(url: string, timeoutMs: number): Promise<boolean> {
@@ -308,12 +313,53 @@ export function defaultDoctorDeps(): DoctorDeps {
     platform: process.platform,
     ptyHelperPaths: defaultPtyHelperPaths(),
     ollamaHost: "http://127.0.0.1:11434",
+    systemPackages: () => {
+      const d = defaultRequirementsDeps();
+      return onboarding.scanSystemPackages({
+        platform: d.platform,
+        osRelease: d.osRelease(),
+        which: d.which,
+        desktop: d.desktop,
+        ostree: d.ostree,
+      });
+    },
   };
 }
 
 /** Build the ordered doctor check list; each check closes over the injected deps. */
 export function buildDoctorChecks(deps: DoctorDeps): DoctorCheck[] {
+  const sys = deps.systemPackages;
   return [
+    ...(sys
+      ? [
+          {
+            id: "system-packages",
+            label: "system packages",
+            async run(): Promise<CheckResult> {
+              // WARN, never fail: every one of these has a working fallback (an archive instead of
+              // a clone, compatibility mode instead of tmux, an unconfined command, logged).
+              const r = sys();
+              if (r.missing.length === 0) {
+                return {
+                  status: "pass",
+                  detail: `${r.rows.map((x) => x.pkg.id).join(", ")} installed`,
+                };
+              }
+              const elevator = r.manager && onboarding.needsRoot(r.manager) ? "sudo" : null;
+              const cmd = r.steps ? onboarding.commandLine(r.steps, elevator) : null;
+              return {
+                status: "warn",
+                detail: `missing: ${r.missing.map((p) => p.id).join(", ")} (Prometheus works without them, with less)`,
+                remedy: cmd
+                  ? `${cmd}   — or \`prometheus requirements\`, which offers to run it`
+                  : r.needsHomebrew
+                    ? "install Homebrew (https://brew.sh), then `prometheus requirements`"
+                    : "`prometheus requirements` shows what to install",
+              };
+            },
+          },
+        ]
+      : []),
     {
       id: "engine",
       label: "engine handshake",

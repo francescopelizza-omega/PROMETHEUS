@@ -27,6 +27,9 @@
  * every signal in this feature funnels through here.
  */
 import { spawn } from "node:child_process";
+import { existsSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
 
 import { safeChildEnv } from "./safe-env.js";
 import { execCapture, probeSystemCommand } from "./system-probe.js";
@@ -148,10 +151,38 @@ export async function modelServerStatus(
   };
 }
 
+/**
+ * Vendor tools that install OUTSIDE every PATH a GUI or detached process inherits: LM Studio's
+ * `lms` lives in `~/.lmstudio/bin` (the app puts it there, and only a shell rc it may or may not
+ * have edited knows), opencode in `~/.opencode/bin`. Before this, a Mac with LM Studio installed
+ * but `lms` off PATH reported the runner "absent", never autostarted it, and offered
+ * `brew install --cask lm-studio` for an app that was already there.
+ */
+export function vendorBinDirs(home: string = homedir()): string[] {
+  return [
+    join(home, ".lmstudio", "bin"),
+    join(home, ".opencode", "bin"),
+    join(home, ".local", "bin"),
+    "/opt/homebrew/bin",
+    "/usr/local/bin",
+  ];
+}
+
+/** `bin` in one of `vendorBinDirs`, when the shell lookup could not find it. */
+export function vendorBin(bin: string, home: string = homedir()): string | undefined {
+  if (bin.includes("/")) return existsSync(bin) ? bin : undefined;
+  for (const dir of vendorBinDirs(home)) {
+    const p = join(dir, bin);
+    if (existsSync(p)) return p;
+  }
+  return undefined;
+}
+
 /** Whether a runner's start command exists on this machine. */
 export async function canStart(argv: readonly string[] | undefined): Promise<boolean> {
   const bin = argv?.[0];
   if (!bin) return false;
+  if (vendorBin(bin)) return true;
   const out = await probeSystemCommand("command", ["-v", bin], { timeoutMs: 2000 });
   if (out !== null) return out.trim().length > 0;
   // `command` is a shell builtin and execFile cannot run it; fall back to `which`.
@@ -182,7 +213,7 @@ export async function whichBin(bin: string | undefined): Promise<string | undefi
     const first = out?.split("\n")[0]?.trim();
     if (first) return first;
   }
-  return undefined;
+  return vendorBin(bin);
 }
 
 export interface StartResult {
@@ -255,8 +286,12 @@ export function ollamaCapsFor(bin: string): NodeJS.ProcessEnv | undefined {
 }
 
 export function startModelServer(argv: readonly string[]): StartResult {
-  const [bin, ...args] = argv;
-  if (!bin) return { ok: false, error: "no start command for this runner" };
+  const [name, ...args] = argv;
+  if (!name) return { ok: false, error: "no start command for this runner" };
+  // a bare name off PATH (`lms` in ~/.lmstudio/bin) is spawned by its absolute path; one ON
+  // PATH stays the one PATH names, so a shadowed second install is not silently preferred
+  const onPath = (process.env.PATH ?? "").split(":").some((d) => d && existsSync(join(d, name)));
+  const bin = name.includes("/") || onPath ? name : (vendorBin(name) ?? name);
   try {
     const child = spawn(bin, args, {
       detached: true,

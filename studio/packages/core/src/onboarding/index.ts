@@ -29,3 +29,23 @@ export {
   suggestModel,
 } from "./doctor.js";
 export { MARKS, renderDoctor, renderGuide, renderRequirement } from "./render.js";
+export type {
+  Distro,
+  DistroFamily,
+  SysFacts,
+  SysManager,
+  SysPackage,
+  SysPackageId,
+  SysReport,
+  SysRow,
+} from "./system-packages.js";
+export {
+  SYSTEM_PACKAGES,
+  commandLine,
+  distroFamily,
+  installSteps,
+  needsRoot,
+  pickManager,
+  readDistro,
+  scanSystemPackages,
+} from "./system-packages.js";

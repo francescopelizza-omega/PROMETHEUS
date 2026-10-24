@@ -667,6 +667,8 @@ export type {
 } from "./model-server.js";
 export {
   canStart,
+  vendorBin,
+  vendorBinDirs,
   whichBin,
   listenersOnPort,
   modelServerStatus,
@@ -770,6 +772,23 @@ export {
   waitForPort,
 } from "./ssh.js";
 
+export type { LmStudioInstance, LmStudioModel, UnloadOutcome } from "./lmstudio.js";
+export {
+  fetchLmStudioModels,
+  isLmStudioChatModel,
+  isLmStudioUnknownRoute,
+  LMSTUDIO_PLAN_CONTEXT,
+  lmStudioPlanContext,
+  lmStudioRoot,
+  lmStudioServedContext,
+  lmsBinary,
+  lmsEstimateBytes,
+  parseLmsEstimate,
+  parseLmStudioModels,
+  rankLmStudioChatModels,
+  ttlSecondsFromKeepAlive,
+  unloadLmStudio,
+} from "./lmstudio.js";
 export type { ResidentModelInfo, RunnerProbe, RunnerStatus } from "./runner-census.js";
 export {
   FALLBACK_RUNNER_PROBES,

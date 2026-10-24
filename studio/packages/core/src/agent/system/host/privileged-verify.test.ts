@@ -15,7 +15,7 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { chmodSync, mkdtempSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -63,7 +63,7 @@ test("a script only root can change runs as it is", () => {
       rootControlled: () => true,
     },
   );
-  assert.deepEqual(r, { argv: [PY, p], mode: "root-owned" });
+  assert.deepEqual(r, { argv: [PY, "-s", p], mode: "root-owned" });
 });
 
 test("python: the loader reads, hashes and runs the approved bytes — a script sees what it always saw", () => {
@@ -154,7 +154,7 @@ test("a directly executed script follows its #! line: sh inline, python through 
     },
   );
   assert.ok("argv" in b && b.mode === "python-loader");
-  assert.deepEqual(b.argv, ["/usr/bin/python3", "-c", PY_LOADER, sha(pyBody), py, "q"]);
+  assert.deepEqual(b.argv, ["/usr/bin/python3", "-s", "-c", PY_LOADER, sha(pyBody), py, "q"]);
   const run = spawnSync(b.argv[0] as string, b.argv.slice(1), { cwd: d, encoding: "utf8" });
   assert.equal(run.status, 0, run.stderr);
   assert.match(run.stdout, /^argv \[.*tool', 'q'\]$/m);
@@ -185,4 +185,86 @@ test("what cannot be verified is refused, with the way out", () => {
   const r3 = verifiedRun(["/bin/sh", big], d, { path: big, sha256: sha(bigBody) }, userOwned);
   assert.ok("refusal" in r3);
   assert.match(r3.refusal, /too large/);
+});
+
+/* ── the interpreter's own start-up (push security review, 2026-10-22) ───────── */
+
+test("the loader drops the current folder BEFORE it imports: a hashlib.py planted there never runs", () => {
+  const d = dir();
+  const marker = join(d, "PLANTED-RAN");
+  writeFileSync(
+    join(d, "hashlib.py"),
+    `open(${JSON.stringify(marker)}, "w").write("x")\nraise SystemExit(0)\n`,
+  );
+  writeFileSync(join(d, "helper.py"), "X = 'sibling import still works'\n");
+  const body = "import helper\nprint(helper.X)\n";
+  const p = join(d, "tool.py");
+  writeFileSync(p, body);
+  const r = verifiedRun([PY, "tool.py"], d, { path: p, sha256: sha(body) }, userOwned);
+  assert.ok("argv" in r && r.mode === "python-loader");
+  const run = spawnSync(r.argv[0] as string, r.argv.slice(1), { cwd: d, encoding: "utf8" });
+  assert.equal(run.status, 0, run.stderr);
+  assert.match(run.stdout, /sibling import still works/);
+  assert.equal(existsSync(marker), false, "the planted module ran before the hash check");
+});
+
+test("python never loads the user's site-packages as root (-s), unless already isolated", () => {
+  const d = dir();
+  const p = join(d, "t.py");
+  writeFileSync(p, PY_SCRIPT);
+  const s = { path: p, sha256: sha(PY_SCRIPT) };
+  const plain = verifiedRun([PY, "t.py"], d, s, userOwned);
+  assert.ok("argv" in plain);
+  assert.deepEqual(plain.argv.slice(0, 3), [PY, "-s", "-c"]);
+  const iso = verifiedRun([PY, "-I", "t.py"], d, s, userOwned);
+  assert.ok("argv" in iso);
+  assert.deepEqual(iso.argv.slice(0, 3), [PY, "-I", "-c"]);
+  const owned = verifiedRun([PY, p], d, s, { rootControlled: () => true });
+  assert.deepEqual(owned, { argv: [PY, "-s", p], mode: "root-owned" });
+});
+
+test("zsh runs with -f (it reads ~/.zshenv even for -c); start-up-file flags are refused", () => {
+  const d = dir();
+  const p = join(d, "x.sh");
+  const body = "echo hi\n";
+  writeFileSync(p, body);
+  const s = { path: p, sha256: sha(body) };
+  const z = verifiedRun(["/bin/zsh", "x.sh"], d, s, userOwned);
+  assert.ok("argv" in z);
+  assert.deepEqual(z.argv, ["/bin/zsh", "-f", "-c", body, p]);
+  for (const flag of ["-l", "--login", "-il", "--rcfile"]) {
+    const r = verifiedRun(["/bin/bash", flag, "x.sh"], d, s, userOwned);
+    assert.ok("refusal" in r, flag);
+    assert.match(r.refusal, /start-up files/);
+  }
+  const sb = join(d, "y.sh");
+  const sbBody = "#!/bin/bash -l\necho hi\n";
+  writeFileSync(sb, sbBody);
+  const viaShebang = verifiedRun(["./y.sh"], d, { path: sb, sha256: sha(sbBody) }, userOwned);
+  assert.ok("refusal" in viaShebang);
+});
+
+test("a #! interpreter inside a temp folder (or the workspace) is refused: whoever replaces it decides what root runs", () => {
+  const d = dir();
+  const p = join(d, "x");
+  const body = `#!${join(d, "python3")}\nprint(1)\n`;
+  writeFileSync(p, body);
+  chmodSync(p, 0o755);
+  const r = verifiedRun(["./x"], d, { path: p, sha256: sha(body) }, userOwned);
+  assert.ok("refusal" in r);
+  assert.match(r.refusal, /folder the agents can write/);
+});
+
+test("other script interpreters are recognised, so their scripts are refused rather than run unhashed", () => {
+  const d = dir();
+  const p = join(d, "x.php");
+  writeFileSync(p, "<?php echo 1;\n");
+  const r = verifiedRun(
+    ["/usr/bin/php", "x.php"],
+    d,
+    { path: p, sha256: sha("<?php echo 1;\n") },
+    userOwned,
+  );
+  assert.ok("refusal" in r);
+  assert.match(r.refusal, /php script/);
 });

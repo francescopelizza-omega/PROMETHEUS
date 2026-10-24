@@ -975,5 +975,103 @@ test("a script only root can change runs as it is", async () => {
   await createPrivilegedGate(
     deps({ calls, approver: approveWith({ decision: "approve" }), rootControlled: () => true }),
   ).requestAndRun({ ...REQ, argv: ["/usr/bin/python3", tool], cwd: dir });
-  assert.deepEqual((calls[0] as SpawnCall).args.slice(4), ["/usr/bin/python3", tool]);
+  assert.deepEqual((calls[0] as SpawnCall).args.slice(4), ["/usr/bin/python3", "-s", tool]);
+});
+
+/* ── fail-open paths closed (push security review, 2026-10-22) ──────────────── */
+
+test("a script the gate cannot pin to one argument is refused, never run unhashed", async () => {
+  const dir = home();
+  writeFileSync(join(dir, "tool.py"), "print(1)\n");
+  const calls: SpawnCall[] = [];
+  const seen: ApprovalView[] = [];
+  const gate = createPrivilegedGate(
+    deps({ calls, approver: approveWith({ decision: "approve" }, seen) }),
+  );
+  // `-W ignore`: the flag's value looked like the operand, no such file, so "no script" ran tool.py
+  const a = await gate.requestAndRun({
+    ...REQ,
+    argv: ["/usr/bin/python3", "-W", "ignore", "tool.py"],
+    cwd: dir,
+  });
+  assert.equal(a.decision, "refused");
+  assert.match(a.reason ?? "", /could not tell which argument/);
+  // `-m` imports from the current folder first
+  const b = await gate.requestAndRun({
+    ...REQ,
+    argv: ["/usr/bin/python3", "-m", "tool"],
+    cwd: dir,
+  });
+  assert.equal(b.decision, "refused");
+  assert.match(b.reason ?? "", /-m/);
+  assert.equal(seen.length, 0);
+  assert.equal(calls.length, 0);
+  // isolated, the current folder is not on sys.path: asked as usual
+  const c = await gate.requestAndRun({
+    ...REQ,
+    argv: ["/usr/bin/python3", "-I", "-m", "json.tool"],
+    cwd: dir,
+  });
+  assert.equal(c.decision, "approved");
+});
+
+test("a bare program name is pinned to the absolute path the human approves; one the user can change is refused", async () => {
+  const calls: SpawnCall[] = [];
+  const seen: ApprovalView[] = [];
+  const pinned = await createPrivilegedGate(
+    deps({
+      calls,
+      approver: approveWith({ decision: "approve" }, seen),
+      resolveProgram: () => "/bin/ls",
+    }),
+  ).requestAndRun({ ...REQ, argv: ["ls", "/var/root"] });
+  assert.equal(seen[0]?.commandLine, "sudo /bin/ls /var/root");
+  assert.deepEqual((calls[0] as SpawnCall).args.slice(-2), ["/bin/ls", "/var/root"]);
+  assert.equal(pinned.decision, "approved");
+
+  const planted = join(home(), "rm");
+  writeFileSync(planted, "#!/bin/sh\n");
+  chmodSync(planted, 0o755);
+  const later: ApprovalView[] = [];
+  const r = await createPrivilegedGate(
+    deps({ approver: approveWith({ decision: "approve" }, later), resolveProgram: () => planted }),
+  ).requestAndRun({ ...REQ, argv: ["rm", "-rf", "/opt/x"] });
+  assert.equal(r.decision, "refused");
+  assert.match(r.reason ?? "", /resolves to .*full path/);
+  assert.equal(later.length, 0);
+});
+
+test("a binary or interpreter in the request's folder is refused: it could be swapped before root starts it", async () => {
+  const dir = home();
+  const bin = join(dir, "tool");
+  writeFileSync(bin, "\u007fELF not really\n");
+  chmodSync(bin, 0o755);
+  writeFileSync(join(dir, "x.py"), "print(1)\n");
+  const seen: ApprovalView[] = [];
+  const gate = createPrivilegedGate(deps({ approver: approveWith({ decision: "approve" }, seen) }));
+  const a = await gate.requestAndRun({ ...REQ, argv: ["./tool", "--fix"], cwd: dir });
+  assert.equal(a.decision, "refused");
+  assert.match(a.reason ?? "", /folder the agents can write/);
+  const b = await gate.requestAndRun({ ...REQ, argv: [bin, "x.py"], cwd: dir });
+  assert.equal(b.decision, "refused");
+  assert.equal(seen.length, 0);
+});
+
+test("terminal mode: a relay interpreter in a folder the agents write is refused", async () => {
+  const { dir, ptyHost, tool } = relayDir();
+  const calls: SpawnCall[] = [];
+  const r = await createPrivilegedGate(
+    deps({
+      calls,
+      passwordVia: "askpass",
+      askpass: async () => "/tmp/prom-askpass/askpass.sh",
+      approver: approveWith({ decision: "approve" }),
+    }),
+  ).requestAndRun(
+    { ...REQ, argv: ["/usr/bin/python3", "-I", tool], cwd: dir },
+    { terminal: { python: join(dir, "python3"), ptyHost, cols: 80, rows: 24, onStart: () => {} } },
+  );
+  assert.equal(r.decision, "refused");
+  assert.match(r.reason ?? "", /relay's interpreter/);
+  assert.equal(calls.length, 0);
 });

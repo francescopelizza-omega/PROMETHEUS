@@ -67,3 +67,22 @@ test("LIVE: a missing binary surfaces as a crash, never throws", async () => {
   assert.notEqual(r.outcome, "ok");
   assert.match(r.stderr, /spawn error|ENOENT/);
 });
+
+test("an ANSWER that explains HTTP 401 or rate limits is an answer, not an auth error or a 429", () => {
+  const answer = `${"The endpoint returns 401 when the token is missing and 429 when you hit the rate limit. ".repeat(6)}`;
+  assert.equal(classifyOutcome({ code: 0, signal: null, stdout: answer, stderr: "" }), "ok");
+  // a short failing reply still says what it says
+  assert.equal(
+    classifyOutcome({ code: 1, signal: null, stdout: "Error: 401 unauthorized", stderr: "" }),
+    "auth_error",
+  );
+  assert.equal(
+    classifyOutcome({ code: 0, signal: null, stdout: "rate limit exceeded", stderr: "" }),
+    "rate_limited",
+  );
+  // stderr is always read
+  assert.equal(
+    classifyOutcome({ code: 0, signal: null, stdout: answer, stderr: "429 Too Many Requests" }),
+    "rate_limited",
+  );
+});

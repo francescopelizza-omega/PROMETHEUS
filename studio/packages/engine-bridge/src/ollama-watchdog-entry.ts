@@ -29,6 +29,7 @@ import {
   nextCriticalStreak,
   ramPctNow,
 } from "./launch-guard.js";
+import { lmsBinary, unloadLmStudio } from "./lmstudio.js";
 import { listenersOnPort, signalPid } from "./model-server.js";
 import { acquireLock, releaseLock } from "./pid-lock.js";
 import { prometheusHome } from "./prom-home.js";
@@ -177,7 +178,18 @@ export async function stopRunner(
   processMatch: string,
   port: number,
   stopCmd: readonly string[] | undefined,
+  opts: { unload?: () => Promise<unknown> } = {},
 ): Promise<void> {
+  // FREE THE WEIGHTS FIRST. `lms server stop` closes LM Studio's port and leaves every loaded
+  // model resident inside the app: the eviction that logged "stopped to prevent a machine-wide
+  // freeze" freed nothing, and then this watchdog exited with the memory still gone.
+  if (opts.unload) {
+    try {
+      await opts.unload();
+    } catch {
+      /* an unload that fails must not stop the stop */
+    }
+  }
   if (stopCmd) {
     await stopViaCommand(stopCmd);
     return;
@@ -198,7 +210,14 @@ async function main(): Promise<void> {
   // every other runner's real spawnWatchdogIfNeeded call passes these explicitly.
   const runnerId = flag("runner-id", processMatch);
   const displayName = flag("display-name", processMatch);
-  const stopCmd = parseStopCmd(flag("stop-cmd", ""));
+  const parsedStop = parseStopCmd(flag("stop-cmd", ""));
+  // `lms` is often not on a detached process's PATH: it lives in the app's ~/.lmstudio/bin
+  const stopCmd =
+    parsedStop?.[0] === "lms" ? [lmsBinary() ?? "lms", ...parsedStop.slice(1)] : parsedStop;
+  const unload =
+    runnerId === "lmstudio"
+      ? () => unloadLmStudio(`http://127.0.0.1:${port}`, { timeoutMs: 15_000 })
+      : undefined;
   const home = prometheusHome();
 
   if (!acquireLock(pidfilePath(home, runnerId))) return; // a live watchdog already owns this runner.
@@ -278,13 +297,13 @@ async function main(): Promise<void> {
         } catch {
           /* a lost notice must never cost the eviction */
         }
-        await stopRunner(processMatch, port, stopCmd);
+        await stopRunner(processMatch, port, stopCmd, unload ? { unload } : {});
         return;
       }
 
       const idleFor = Date.now() - readLastActiveAt(home);
       if (idleFor >= idleMs) {
-        await stopRunner(processMatch, port, stopCmd);
+        await stopRunner(processMatch, port, stopCmd, unload ? { unload } : {});
         return;
       }
     }

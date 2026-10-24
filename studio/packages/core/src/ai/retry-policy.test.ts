@@ -20,8 +20,10 @@ import {
   advisedWaitTooLong,
   describeAiFailure,
   isAbort,
+  isHeadersTimeout,
   isRetryableAiError,
   isRetryableStatus,
+  localRunnerHint,
   parseRetryAfter,
   preflightContext,
   retryDelayMs,
@@ -168,4 +170,43 @@ test("the overflow error carries the numbers a host needs to offer a fix", () =>
   assert.ok(err.overflowTokens > 0);
   // Distinguishable from an HTTP failure, so a host can react differently (offer to compact).
   assert.equal(err instanceof AiHttpError, false);
+});
+
+test("a 300 s headers timeout from a local runner is NOT retried — a retry restarts the load (or loads it twice)", () => {
+  const err = Object.assign(new TypeError("fetch failed"), {
+    cause: Object.assign(new Error("Headers Timeout Error"), { code: "UND_ERR_HEADERS_TIMEOUT" }),
+  });
+  assert.equal(isHeadersTimeout(err), true);
+  assert.equal(isRetryableAiError(err), false);
+  assert.match(describeAiFailure(err), /over 5 minutes .* not retried/);
+  assert.equal(
+    isRetryableAiError(new TypeError("fetch failed")),
+    true,
+    "a plain network blip still retries",
+  );
+});
+
+test("local runner rejections say what to do: overflow, nothing loaded, unknown model", () => {
+  assert.match(
+    localRunnerHint(
+      "The number of tokens to keep from the initial prompt is greater than the context length",
+    ) ?? "",
+    /lms load <model> --context-length/,
+  );
+  assert.match(
+    describeAiFailure(
+      new AiHttpError({
+        endpointId: "local:lmstudio",
+        status: 400,
+        statusText: "Bad Request",
+        detail: '{"error":{"message":"No models loaded. Please load a model"}}',
+      }),
+    ),
+    /no model loaded/,
+  );
+  assert.match(
+    localRunnerHint('{"error":{"type":"model_not_found"}}') ?? "",
+    /does not have that model/,
+  );
+  assert.equal(localRunnerHint("some other 400"), undefined);
 });

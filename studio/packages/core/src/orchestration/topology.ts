@@ -41,6 +41,13 @@ export interface BackendRef {
    * kind:"api" it may carry the API key value (read by the HTTP invoker, never spawned).
    */
   env?: Record<string, string>;
+  /**
+   * kind:"cli" only: drive the vendor CLI (opencode, hermes, aider) against a LOCAL model server
+   * — Ollama or LM Studio — instead of its own cloud login. `model` is the local model id;
+   * `baseUrl` the server (else the session's detected local endpoint). Spec syntax:
+   * `opencode:local:qwen3.6:latest`, `hermes:local:nvidia/nemotron-3-nano-omni`.
+   */
+  local?: boolean;
 }
 
 /** What an agent is allowed to do (least-privilege; anti prompt-injection). */

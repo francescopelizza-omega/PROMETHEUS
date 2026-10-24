@@ -116,3 +116,12 @@ test("authGateVerdict: a subscription claude → block + confirm + cites the cla
   assert.match(v.message, /at your own risk/);
   assert.equal(v.flagged.length, 1);
 });
+
+test("a CLI on a LOCAL model uses no vendor account: ok, no confirmation, no 'give an API key' nag", () => {
+  for (const service of ["opencode", "hermes", "aider"]) {
+    const a = assessAgentAuth("x", { kind: "cli", service, local: true }, {});
+    assert.deepEqual([a.mode, a.severity, a.automationOk], ["local", "ok", true], service);
+  }
+  // the same CLI on its own login is still judged by its vendor's terms
+  assert.notEqual(assessAgentAuth("x", { kind: "cli", service: "opencode" }, {}).mode, "local");
+});

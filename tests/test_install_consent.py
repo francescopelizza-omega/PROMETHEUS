@@ -22,7 +22,7 @@ import unittest
 from pathlib import Path
 
 INSTALL = Path(__file__).resolve().parent.parent / "install.sh"
-FUNCS = ("pkg_name", "pkg_cmd", "root_prefix", "detect_pm", "pkg_install")
+FUNCS = ("pkg_name", "pkg_names", "pkg_cmd", "root_prefix", "detect_pm", "pkg_install")
 
 
 def lift(src: str, name: str) -> str:

@@ -222,6 +222,7 @@ const TWO_WORD: Record<string, Set<string>> = {
 /** Single-word top-level commands (§2 tree). */
 const ONE_WORD = new Set([
   "disk-space",
+  "requirements",
   "scan",
   "superscan",
   "doctor",
@@ -314,7 +315,7 @@ const isFlag = (t: string): boolean => t.startsWith("-");
  * Classification audit — every flag `prometheus` consumes must pick a side:
  *   BOOLEAN (in this set): strict, yes (+alias y), dry-run, force, force-unsafe,
  *     no-gate (+ negation no-strict), verbose, quiet (+alias q), bridge, bypass,
- *     ink, paid, plain, rescan, replace-system, open, summary (diagram terse view),
+ *     ink, paid, plain, no-tmux, rescan, replace-system, open, summary (diagram terse view),
  *     continue (prometheus --continue resumes the newest session, CLI-013).
  *     (json / no-color / help / version are matched EARLIER, before this branch.)
  *   VALUE-TAKING (deliberately absent, so greedy `--key value` still applies):
@@ -360,6 +361,10 @@ const BOOLEAN_FLAGS = new Set<string>([
   "ink",
   "paid",
   "plain",
+  // `--no-tmux`: tmux compatibility mode on request (bin.ts lifts it to PROMETHEUS_NO_TMUX=1)
+  "no-tmux",
+  // `requirements --check`: print the scan, change nothing
+  "check",
   "rescan",
   "replace-system",
   "open",

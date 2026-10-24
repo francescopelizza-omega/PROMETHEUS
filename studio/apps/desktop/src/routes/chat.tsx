@@ -616,7 +616,9 @@ function TerminalChat(): ReactElement {
   const [customModel, setCustomModel] = useState(false);
   const [systemPrompt, setSystemPrompt] = useState("");
   const [bypass, setBypass] = useState(false);
-  const [tmux, setTmux] = useState(false);
+  // No "wrap in tmux" toggle here: it reached the engine's preview and nowhere else — Open runs
+  // `cmd.argv` in the embedded terminal and Copy prints the same argv, so ticking it changed
+  // nothing a user could see or run. Detachable tmux sessions are the CLI's `chat --cli X --tmux`.
   const [prompt, setPrompt] = useState("");
   const [cmd, setCmd] = useState<BuiltCommand | null>(null);
   const [notes, setNotes] = useState<string[]>([]);
@@ -632,7 +634,6 @@ function TerminalChat(): ReactElement {
       model: model.trim() || undefined,
       systemPrompt: systemPrompt.trim() || undefined,
       bypass,
-      tmux: tmux ? true : undefined,
       prompt: prompt.trim() || undefined,
     });
     if (!r.ok || !r.argv) {
@@ -644,7 +645,7 @@ function TerminalChat(): ReactElement {
     const display = [...Object.entries(env).map(([k, v]) => `${k}=${v}`), ...r.argv].join(" ");
     setCmd({ argv: r.argv, env, cwd: r.cwd ?? "~", label: r.label ?? cli, display });
     setNotes(r.notes ?? []);
-  }, [cli, model, systemPrompt, bypass, tmux, prompt]);
+  }, [cli, model, systemPrompt, bypass, prompt]);
 
   const copy = useCallback(() => {
     if (cmd && navigator.clipboard) {
@@ -732,7 +733,6 @@ function TerminalChat(): ReactElement {
             onCheckedChange={setBypass}
             label="bypass permissions (dangerous)"
           />
-          <Checkbox checked={tmux} onCheckedChange={setTmux} label="wrap in tmux (leave-PC)" />
         </div>
         <Textarea
           value={prompt}

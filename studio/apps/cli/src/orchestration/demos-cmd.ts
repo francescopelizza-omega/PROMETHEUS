@@ -16,7 +16,9 @@ import { type AiEndpoint, orchestration as orch } from "@prometheus/core";
 import type { EngineClient } from "@prometheus/engine-bridge";
 
 import { createCliSecretsStore } from "../secrets-backend.js";
+import { resolveTmuxCompat, tmuxCompatNotice } from "../tmux/tmux.js";
 import type { ColorCaps } from "../tui/palette.js";
+import { authGateVerdict } from "./auth-gate.js";
 import { type GateFn, makeInvoker, probeLaunch } from "./backends.js";
 import { LiveBoard, initBoard } from "./demos-status-board.js";
 import { runDemosTmux } from "./demos-tmux.js";
@@ -67,6 +69,49 @@ export interface DemosDeps {
     maxTicks?: number;
     intervalMs?: number;
   };
+  /**
+   * tmux compatibility mode: `null` = tmux is usable for the default windowed run; a string =
+   * it is not, and that line is printed before the SAME swarm runs headless instead. Default:
+   * `defaultDemosTmuxCompat` (injected in tests so the result never depends on the machine).
+   */
+  tmuxCompat?: () => string | null;
+  /** environment the ToS auth gate reads API keys from (default: process.env). */
+  env?: NodeJS.ProcessEnv;
+  /** the windowed (tmux) run (default: `runDemosTmux`; injected in tests). */
+  runTmux?: typeof runDemosTmux;
+}
+
+/**
+ * Can `/demos <goal>` use tmux here? Only a MISSING or switched-off tmux sends the swarm
+ * headless. Being inside tmux already is fine for this feature — it creates its own detached
+ * session and never attaches — so `nested` is not a reason to give up the windows.
+ */
+function defaultDemosTmuxCompat(): string | null {
+  const t = resolveTmuxCompat();
+  if (t.multiplex || t.reason === "nested") return null;
+  return tmuxCompatNotice(t.reason, "running the swarm headless in this terminal");
+}
+
+/**
+ * The ToS auth gate, for BOTH run modes.
+ *
+ * It lived only in the tmux run (`runDemosTmux`), so `/demos --headless` scripted a
+ * subscription-login CLI with no warning at all — while auth-gate.ts's own text says "Running a
+ * swarm IS automated access — headless or tmux alike". With headless now also the automatic
+ * path on every machine without tmux, that gap would have been the default; it is closed here.
+ * Same verdict, same words, same confirmation as the tmux run.
+ */
+async function passAuthGate(topo: OrchestrationTopology, deps: DemosDeps): Promise<boolean> {
+  const verdict = authGateVerdict(topo, deps.env ?? process.env);
+  if (!verdict.needsConfirm) return true;
+  deps.write(verdict.message);
+  const ok = await deps.confirm("Proceed anyway (your account, your risk)?");
+  if (!ok) {
+    deps.write(
+      "Cancelled. Tip: give those agents an API key (e.g. ANTHROPIC_API_KEY) or use local models.",
+    );
+  }
+  return ok;
 }
 
 const TOPOLOGY_FILE = "topology.json";
@@ -132,6 +177,7 @@ async function runSwarm(topo: OrchestrationTopology, goal: string, deps: DemosDe
     );
     return;
   }
+  if (!(await passAuthGate(topo, deps))) return;
   const invoke = makeInvoker({
     client: deps.client,
     ...(deps.endpoint ? { endpoint: deps.endpoint } : {}),
@@ -544,7 +590,15 @@ export async function runDemos(rest: string, deps: DemosDeps): Promise<void> {
     await runSwarm(topo, arg.replace(/^--headless\b\s*/, ""), deps);
     return;
   }
-  await runDemosTmux({
+  // tmux compatibility mode: no usable tmux ⇒ the same swarm, headless, instead of the old
+  // "/demos needs tmux … Install tmux + retry." refusal (which never mentioned --headless).
+  const compat = (deps.tmuxCompat ?? defaultDemosTmuxCompat)();
+  if (compat !== null) {
+    deps.write(compat);
+    await runSwarm(topo, arg, deps);
+    return;
+  }
+  const windowed = await (deps.runTmux ?? runDemosTmux)({
     topology: topo,
     goal: arg,
     home: deps.home,
@@ -554,4 +608,14 @@ export async function runDemos(rest: string, deps: DemosDeps): Promise<void> {
     confirm: deps.confirm,
     ...(deps.cwd ? { cwd: deps.cwd } : {}),
   });
+  // tmux is installed but could not run the windowed swarm (too old, not answering, a window
+  // refused) and launched nothing: the same swarm still runs, headless, here.
+  if (
+    windowed.reason === "no-tmux" ||
+    windowed.reason === "old-tmux" ||
+    windowed.reason === "launch-failed"
+  ) {
+    deps.write("tmux compatibility mode — running the swarm headless in this terminal.");
+    await runSwarm(topo, arg, deps);
+  }
 }

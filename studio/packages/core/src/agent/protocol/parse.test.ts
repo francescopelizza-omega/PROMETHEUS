@@ -597,3 +597,19 @@ test("a 4-backtick fence does not swallow the tool call that follows it", () => 
     0,
   );
 });
+
+test("LM Studio's own [TOOL_REQUEST] format is a call, whole or streamed a byte at a time", () => {
+  const text =
+    'Let me look.\n[TOOL_REQUEST]\n{"name": "list_dir", "arguments": {"path": "."}}\n[END_TOOL_REQUEST]\nDone.';
+  const calls = parseToolCalls(text);
+  assert.deepEqual(
+    calls.map((c) => [c.name, c.args]),
+    [["list_dir", { path: "." }]],
+  );
+  const s = new ToolCallScanner();
+  const events = [...[...text].flatMap((ch) => s.push(ch)), ...s.end()];
+  const prose = events.flatMap((e) => (e.kind === "text" ? [e.text] : [])).join("");
+  assert.equal(events.filter((e) => e.kind === "call").length, 1);
+  assert.ok(!prose.includes("TOOL_REQUEST"), prose);
+  assert.ok(prose.includes("Let me look.") && prose.includes("Done."), prose);
+});

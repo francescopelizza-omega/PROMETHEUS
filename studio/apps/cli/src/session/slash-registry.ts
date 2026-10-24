@@ -470,6 +470,8 @@ export interface SlashCtx {
     count: () => number;
     setCount: (n: number) => void;
     insideTmux: boolean;
+    /** the number the user set with `/agents N`, or null while they have not (optional seam). */
+    explicit?: () => number | null;
     /** the orchestrator's recommended subagent count for a prompt (heuristic). */
     recommend: (prompt: string) => number;
   };
@@ -1928,11 +1930,11 @@ export const SLASH_REGISTRY: readonly SlashCmd[] = Object.freeze([
         ctx.modelPicker?.candidates().find((m) => m.endpoint.locality === "local")?.endpoint
           .contextWindow ?? 262144;
 
+      // EVERY runner on that host, each at its own port: asking only Ollama printed "no model
+      // is loaded right now" while LM Studio held GBs (and never listed LM Studio's models)
       const [snap, census] = await Promise.all([
         localMemorySnapshot().catch(() => null),
-        runnerCensus([{ id: "ollama", baseUrl: root, api: "ollama" }], { timeoutMs: 2000 }).catch(
-          () => [],
-        ),
+        runnerCensus(ai.censusProbesFor(baseUrl ?? root), { timeoutMs: 2000 }).catch(() => []),
       ]);
       if (!snap) {
         ctx.write(c.red("could not read this machine's memory"));
@@ -1983,16 +1985,32 @@ export const SLASH_REGISTRY: readonly SlashCmd[] = Object.freeze([
        */
       const harvested = harvestOllamaLog();
       const ledger = rememberResident(resident, ctxTokens, host);
-      const candidates = await ai
-        .inventoryCandidates(root, ctxTokens, {
-          runner: "ollama",
-          resident,
-          timeoutMs: 4000,
-          observations: ledger,
-          ...(host ? { host } : {}),
-          ...(kvTypeFrom(ledger) ? { kvCacheType: kvTypeFrom(ledger) as ai.KvCacheType } : {}),
-        })
-        .catch(() => [] as ai.ModelCandidate[]);
+      const lmsUp = census.some((r) => r.runner === "lmstudio");
+      const probes = ai.censusProbesFor(baseUrl ?? root);
+      const lmsUrl = probes.find((p) => p.id === "lmstudio")?.baseUrl;
+      const ollamaUrl = probes.find((p) => p.id === "ollama")?.baseUrl ?? root;
+      const [ollamaCandidates, lmsCandidates] = await Promise.all([
+        ai
+          .inventoryCandidates(ollamaUrl, ctxTokens, {
+            runner: "ollama",
+            resident,
+            timeoutMs: 4000,
+            observations: ledger,
+            ...(host ? { host } : {}),
+            ...(kvTypeFrom(ledger) ? { kvCacheType: kvTypeFrom(ledger) as ai.KvCacheType } : {}),
+          })
+          .catch(() => [] as ai.ModelCandidate[]),
+        lmsUp && lmsUrl
+          ? ai
+              .lmStudioCandidates(lmsUrl, ctxTokens, {
+                resident,
+                timeoutMs: 4000,
+                ...(host ? { host } : {}),
+              })
+              .catch(() => [] as ai.ModelCandidate[])
+          : Promise.resolve([] as ai.ModelCandidate[]),
+      ]);
+      const candidates = [...ollamaCandidates, ...lmsCandidates];
       if (harvested.added > 0) {
         ctx.write(
           c.dim(
@@ -2615,7 +2633,7 @@ export const SLASH_REGISTRY: readonly SlashCmd[] = Object.freeze([
     name: "agents",
     aliases: ["subagents", "team"],
     group: "agents",
-    summary: "Show/set the subagent fan-out count (auto-scales under tmux).",
+    summary: "Show/set the subagent fan-out count (sub-agents run in-process; tmux not needed).",
     args: "[n]",
     run: (rest, ctx) => {
       /**
@@ -2638,9 +2656,24 @@ export const SLASH_REGISTRY: readonly SlashCmd[] = Object.freeze([
                 c.dim(` (asked for ${n}; the delegation budget caps a turn at ${MAX_SUBAGENTS})`),
         );
       } else {
+        /**
+         * Without tmux this said "(tmux off — single agent)" next to a 1, which was never true:
+         * sub-agents are `spawn_agent` calls the agent loop runs IN-PROCESS, and until the user
+         * sets a number the cap is the engine default (spawnCapFor), tmux or not. That line is
+         * what made a machine without tmux look like it had lost a feature — so without tmux,
+         * and without an explicit `/agents N`, it now states the cap that is actually in force.
+         */
         const cur = ctx.agents.count();
+        const set = ctx.agents.explicit?.() ?? null;
+        const shown =
+          set === null && !ctx.agents.insideTmux
+            ? `up to ${agent.DEFAULT_MAX_SPAWNS} per turn`
+            : String(set ?? cur);
+        const where = ctx.agents.insideTmux
+          ? c.dim("  (tmux active — auto-scales per prompt)")
+          : c.dim("  (in-process — no tmux needed; the model decides when to delegate)");
         ctx.write(
-          `${c.bold("Orchestrator")}\n  subagents: ${c.bold(String(cur))}${ctx.agents.insideTmux ? c.dim("  (tmux active — auto-scales per prompt)") : c.dim("  (tmux off — single agent)")}\n  ${c.dim(`set with /agents <n> (1–${MAX_SUBAGENTS}). Roster: build · plan · explore · scout.`)}`,
+          `${c.bold("Orchestrator")}\n  subagents: ${c.bold(shown)}${where}\n  ${c.dim(`set with /agents <n> (1–${MAX_SUBAGENTS}). Roster: build · plan · explore · scout.`)}`,
         );
       }
     },
@@ -3190,8 +3223,15 @@ export const SLASH_REGISTRY: readonly SlashCmd[] = Object.freeze([
     summary: "Session status: model, gate, cwd, subagents.",
     run: (_r, ctx) => {
       const t = ctx.tuning();
+      // the same truth `/agents` tells: without tmux and without `/agents N`, the cap in force is
+      // the engine default, in-process — never the display default of 1
+      const set = ctx.agents.explicit?.() ?? null;
+      const subagents =
+        set === null && !ctx.agents.insideTmux
+          ? `up to ${agent.DEFAULT_MAX_SPAWNS} per turn (in-process)`
+          : `${set ?? ctx.agents.count()}${ctx.agents.insideTmux ? " (tmux)" : ""}`;
       ctx.write(
-        `${c.bold("Status")}\n  worker     ${t.model.provider}:${t.model.modelId}\n  gate       ${t.gateMode}\n  think      ${describeThink(ctx)}\n  cwd        ${ctx.cwd()}\n  subagents  ${ctx.agents.count()}${ctx.agents.insideTmux ? " (tmux)" : ""}`,
+        `${c.bold("Status")}\n  worker     ${t.model.provider}:${t.model.modelId}\n  gate       ${t.gateMode}\n  think      ${describeThink(ctx)}\n  cwd        ${ctx.cwd()}\n  subagents  ${subagents}`,
       );
     },
   },

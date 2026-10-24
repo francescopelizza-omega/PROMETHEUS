@@ -114,8 +114,10 @@ function makeSeams(over: Partial<TerminalChatDeps> = {}): {
     },
     runTmux: async (env) => {
       tmux.push(env);
-      return 0;
+      return { code: 0, started: true };
     },
+    // tmux usable — so these tests do not depend on whether the machine running them has it
+    tmuxCompat: async () => null,
     confirm: async (prompt) => {
       prompts.push(prompt);
       return true;
@@ -195,6 +197,36 @@ test("tmux WINS when both --open and --tmux are set (engine precedence mirrored)
 
   assert.equal(tmux.length, 1);
   assert.deepEqual(live, []);
+});
+
+test("tmux compatibility mode: --tmux without a usable tmux opens the chat HERE, with one line", async () => {
+  const { client } = makeFakeClient({ envelope: { tmux: "work", argv: ["claude", "go"] } });
+  const notice = "tmux is not installed — compatibility mode: opening the chat in this terminal.";
+  const { deps, live, tmux, out } = makeSeams({ tmuxCompat: async () => notice });
+
+  const res = await runTerminalChat(makeOpts(client, { tmux: "work" }), deps);
+
+  // it LAUNCHES (exit 0 from the live seam) instead of refusing with exit 2
+  assert.equal(res, 0);
+  assert.deepEqual(tmux, []);
+  assert.equal(live.length, 1);
+  // the exact engine argv, unchanged — only the tmux wrapper is dropped
+  assert.deepEqual(live[0]?.argv, ["claude", "go"]);
+  assert.ok(out.includes(notice), "the user is told why there is no tmux session");
+});
+
+test("tmux compatibility mode keeps the bypass gate: a declined bypass launches nothing", async () => {
+  const { client } = makeFakeClient({ envelope: { tmux: "work", bypass: true } });
+  const { deps, live, tmux } = makeSeams({
+    tmuxCompat: async () => "compat",
+    confirm: async () => false,
+  });
+
+  const res = await runTerminalChat(makeOpts(client, { tmux: "work" }), deps);
+
+  assert.equal(res, 2);
+  assert.deepEqual(live, []);
+  assert.deepEqual(tmux, []);
 });
 
 test("never-force: a bypass LAUNCH type-confirms BEFORE the seam runs", async () => {
@@ -348,4 +380,26 @@ test("the bypass typed-confirm approves ONLY the exact phrase, and never without
     Object.defineProperty(process.stdin, "isTTY", { value: realIsTty, configurable: true });
     process.stdout.write = realWrite;
   }
+});
+
+test("tmux installed but unable to start the session ⇒ the chat opens here instead", async () => {
+  const { client } = makeFakeClient({ envelope: { tmux: "work", argv: ["claude", "go"] } });
+  const tried: ChatTerminalEnvelope[] = [];
+  const { deps, live, out } = makeSeams({
+    runTmux: async (env) => {
+      tried.push(env);
+      return { code: 1, started: false };
+    },
+  });
+
+  const res = await runTerminalChat(makeOpts(client, { tmux: "work" }), deps);
+
+  assert.equal(res, 0);
+  assert.equal(tried.length, 1, "tmux was tried first");
+  assert.equal(live.length, 1, "then the chat opened in this terminal");
+  assert.deepEqual(live[0]?.argv, ["claude", "go"]);
+  assert.ok(
+    out.some((l) => /tmux could not start the session/.test(l)),
+    out.join("\n"),
+  );
 });

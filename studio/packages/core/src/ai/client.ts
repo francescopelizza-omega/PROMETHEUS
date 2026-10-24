@@ -589,7 +589,7 @@ export function createAiClient(
           // Ollama extension, ignored elsewhere: keep the model resident so a multi-round
           // agentic turn does not pay a cold reload between rounds. LOCAL only — a cloud
           // endpoint never receives a non-standard field.
-          ...localKeepAliveField(endpoint.locality),
+          ...localKeepAliveField(endpoint.locality, endpoint.baseUrl),
         },
         opts.effort,
       ),
@@ -603,9 +603,12 @@ export function createAiClient(
      * clearly-impossible. Anything borderline still goes to the endpoint, which is the
      * authority on its own tokenizer.
      */
+    // An UNMEASURED window (the 8192 floor) disables the refusal, exactly as the native
+    // `toolTurn` does: this text path refused LM Studio, VS Code and summariser turns at ~8k
+    // estimated tokens against a number nobody measured.
     const pre = preflightContext({
       estimatedPromptTokens: estimateTextTokens(effMessages.map((m) => m.content)),
-      contextWindow: endpoint.contextWindow,
+      contextWindow: endpoint.contextWindowMeasured === true ? endpoint.contextWindow : 0,
       // A reply needs room too. With no `maxTokens` the reserve was 0, so "it fits" stayed true
       // until the last token of the window and the answer had nowhere to go.
       maxTokens: replyReserveFor(endpoint.contextWindow, opts.maxTokens),

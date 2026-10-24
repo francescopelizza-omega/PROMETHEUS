@@ -137,6 +137,13 @@ const CLI_NATIVE_HELP: Record<string, { synopsis: string; examples: readonly str
       "prometheus disk-space delete ~/old-builds   (a plan; delete inside the TUI: /disk-space delete)",
     ],
   },
+  requirements: {
+    synopsis: "prometheus requirements [--check]",
+    examples: [
+      "prometheus requirements            (scan, show the command for this OS, offer to run it)",
+      "prometheus requirements --check    (scan only; changes nothing)",
+    ],
+  },
   provider: {
     synopsis: "prometheus provider <list | show | connect | status | disconnect | enable-metered>",
     examples: ["prometheus provider list", "prometheus provider connect openai"],
@@ -179,7 +186,8 @@ const CLI_NATIVE_HELP: Record<string, { synopsis: string; examples: readonly str
     examples: ["prometheus app list"],
   },
   session: {
-    synopsis: "prometheus session [--tmux [N]]   (the interactive single-window session)",
+    synopsis:
+      "prometheus session [--tmux [NAME]]   (the interactive session; --tmux NAME = a named multi-window tmux session)",
     examples: ["prometheus session"],
   },
   repl: {
@@ -332,8 +340,9 @@ ${c.bold("USAGE")}
 ${c.bold("INTERACTIVE SESSION")}
   ${c.cyan("prometheus")}            Unified session in ONE window: chat + agent loop + panes
                        (catalog/models/env/security/health), slash + /help
-  ${c.cyan("session")} [--tmux [N]]  Span MANY tmux windows when enabled (--tmux / PROMETHEUS_TMUX=1);
-                       single-window fallback when tmux is absent or disabled
+  ${c.cyan("session")} [--tmux [NAME]]  Span MANY tmux windows when enabled (--tmux / PROMETHEUS_TMUX=1);
+                       tmux is optional: without it (or with --no-tmux) every launch runs in
+                       compatibility mode — one window / this terminal / headless /demos
   ${c.cyan("chat")} --cli <svc>      Terminal chat: PREVIEW the injection-safe launch, then
        [--open|--tmux]   --open a live terminal · --tmux to multiplex (--bypass = typed-confirm)
   ${c.cyan("/setup")}               (in-session) pick + download a free local model (Ollama),
@@ -374,6 +383,7 @@ ${c.dim("Mutating verbs PREVIEW first; re-run with")} ${c.bold("--yes")} ${c.dim
 
 ${c.bold("SYSTEM")}
   ${c.cyan("doctor")} [--bridge]     Health: OS/agents/git/paths (· engine discovery)
+  ${c.cyan("requirements")} [--check]   What this OS still needs (git, tmux, bubblewrap…) + the command, offered
   ${c.cyan("health")}               Engine/scanner runtime posture (banded score + components)
   ${c.cyan("tokens")} [--paid|all|nano]   Token-saving toolkit (terse/caching/repo-map/RAG …) + Gemini Nano
   ${c.cyan("keymap")} list [--preset N]   Keymap presets + conflict report

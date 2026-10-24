@@ -420,3 +420,25 @@ test("with NO roots the inode check is skipped — it cannot index what it was n
   assert.equal(out?.ok, true, "documents the boundary: no roots ⇒ no inode index");
   rmSync(dir, { recursive: true, force: true });
 });
+
+test("which finds a program by walking PATH — it never needs a `which` binary", async () => {
+  // `which` is absent on Arch's base system and in Fedora/UBI containers; asking it made this
+  // tool answer "not installed" for every program there. The exec seam refuses `which` to prove
+  // it is never called; only the found program's own --version runs.
+  const calls: string[] = [];
+  const out = await runSystemTool(
+    "which",
+    { name: "node" },
+    {
+      cwd: process.cwd(),
+      exec: async (cmd) => {
+        calls.push(cmd);
+        if (cmd === "which") return { code: 127, stdout: "", stderr: "which: not found" };
+        return { code: 0, stdout: "v22.0.0\n", stderr: "" };
+      },
+    },
+  );
+  assert.equal(out?.ok, true, out?.summary);
+  assert.ok(!calls.includes("which"), `asked \`which\`: ${calls.join(", ")}`);
+  assert.match(String(out?.summary ?? ""), /node: \//);
+});

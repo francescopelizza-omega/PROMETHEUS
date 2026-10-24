@@ -32,7 +32,14 @@
 import type { ChatTerminalEnvelope } from "@prometheus/engine-bridge";
 
 import { c } from "../render.js";
-import { type PtyBackend, type PtyProcess, resolvePtyBackend } from "./backend.js";
+import {
+  type PtyBackend,
+  type PtyProcess,
+  type PtySpawnOptions,
+  type TerminalRunResult,
+  resolvePtyBackend,
+  runOnThisTerminal,
+} from "./backend.js";
 
 /* ------------------------------------------------------------------------- *
  * Pure builders (NO spawn — unit-tested directly)
@@ -90,6 +97,11 @@ export interface LiveTerminalDeps {
    * Default: deny (false) — a non-interactive host can NEVER satisfy a never-force gate.
    */
   confirm?: (prompt: string, phrase: string) => Promise<boolean>;
+  /**
+   * Run the child on THIS terminal, stdio inherited (default: `runOnThisTerminal`). Used when
+   * the backend could only offer pipes and this process's own stdin/stdout are a terminal.
+   */
+  runOnTerminal?: (opts: PtySpawnOptions) => Promise<TerminalRunResult>;
 }
 
 /**
@@ -193,6 +205,25 @@ export async function runLiveTerminal(
   const [shell, ...args] = env.argv;
   const cols = typeof stdout.columns === "number" ? stdout.columns : 80;
   const rows = typeof stdout.rows === "number" ? stdout.rows : 24;
+
+  // ── no pty to give, but a terminal of our own: the child gets THAT ─────────
+  // The child_process fallback hands the child pipes, and an interactive CLI behind a pipe sees
+  // no terminal (print mode, or a refusal). node-pty is never installed with the CLI, so without
+  // tmux — which used to be the pty — this is the normal case, not an edge. A free terminal on
+  // both ends means nothing needs relaying: hand it over and wait.
+  if (backend.kind === "pipe" && stdin.isTTY === true && stdout.isTTY === true) {
+    const runHere = deps.runOnTerminal ?? ((o: PtySpawnOptions) => runOnThisTerminal(o));
+    const r = await runHere({
+      shell: shell as string,
+      args,
+      cwd: env.cwd,
+      env: childEnv,
+      cols,
+      rows,
+    });
+    if (r.error !== undefined) write(`failed to launch ${c.cyan(env.label)}: ${c.red(r.error)}`);
+    return r.exitCode;
+  }
 
   // ── spawn (the ONLY real side effect; a failure is friendly, not a crash) ────
   let proc: PtyProcess;

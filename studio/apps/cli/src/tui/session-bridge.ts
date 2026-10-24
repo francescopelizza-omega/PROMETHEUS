@@ -190,7 +190,7 @@ import { createSteeringController } from "../session/steering.js";
 import { execVarsFromEnv } from "../session/system-tools.js";
 import { turnSummaryOf } from "../session/turn-summary.js";
 import { createWorkingSet, isPathAllowed } from "../session/working-set.js";
-import { insideTmux } from "../tmux/tmux.js";
+import { insideTmux, tmuxForcedOff } from "../tmux/tmux.js";
 import { probeEnv, runtimeBrewFormula } from "../updates/dispatch-cmd.js";
 import { makeDispatchProbes } from "../updates/dispatch-probes.js";
 import { type BrowseRow, browseRows, installTag } from "../updates/model-actions-cmd.js";
@@ -847,7 +847,8 @@ export async function createSessionBridge(deps: BridgeDeps): Promise<SessionBrid
     void adoptEndpoint(endpoint);
   }
 
-  const orchestrating = insideTmux();
+  // `--no-tmux` inside tmux is compatibility mode too: no "(tmux active)" claims it would not keep
+  const orchestrating = insideTmux() && !tmuxForcedOff();
   let subagentCount = orchestrating ? DEFAULT_SUBAGENTS : 1;
   /**
    * The delegation cap for the CURRENT turn, recomputed per message.
@@ -2528,6 +2529,7 @@ export async function createSessionBridge(deps: BridgeDeps): Promise<SessionBrid
         explicitAgents = n;
       },
       insideTmux: orchestrating,
+      explicit: () => explicitAgents,
       recommend: (prompt) =>
         orchestratorNote(prompt, subagentCount).length > 0 ? subagentCount + 1 : subagentCount,
     },

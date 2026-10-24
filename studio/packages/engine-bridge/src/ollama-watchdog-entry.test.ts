@@ -215,6 +215,28 @@ test("stopRunner: with a stopCmd, uses the graceful command and NEVER signals a 
   );
 });
 
+test("stopRunner: LM Studio's models are UNLOADED before its server stops (the stop alone frees no RAM)", async () => {
+  execCalls.length = 0;
+  signalCalls.length = 0;
+  const order: string[] = [];
+  listenersQueue = [{ processes: [{ pid: 555, command: "Bionic" }] }];
+  await stopRunner("LM Studio", 1234, ["lms", "server", "stop"], {
+    unload: async () => {
+      order.push(`unload (exec so far: ${execCalls.length})`);
+    },
+  });
+  assert.deepEqual(order, ["unload (exec so far: 0)"]);
+  assert.deepEqual(execCalls, [{ command: "lms", args: ["server", "stop"] }]);
+  // an unload that throws still lets the stop happen
+  execCalls.length = 0;
+  await stopRunner("LM Studio", 1234, ["lms", "server", "stop"], {
+    unload: async () => {
+      throw new Error("boom");
+    },
+  });
+  assert.deepEqual(execCalls, [{ command: "lms", args: ["server", "stop"] }]);
+});
+
 test("stopRunner: with NO stopCmd, falls back to the signal-based escalation (Ollama's real path)", async () => {
   execCalls.length = 0;
   signalCalls.length = 0;

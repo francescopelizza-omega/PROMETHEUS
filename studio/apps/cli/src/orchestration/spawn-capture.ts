@@ -98,7 +98,11 @@ export function classifyOutcome(r: {
   requireMarker?: string;
 }): Outcome {
   if (r.killedByTimeout) return "timeout";
-  const blob = `${r.stderr}\n${r.stdout}`;
+  // stdout is the ANSWER on a clean exit: an answer that explains HTTP 401 or rate limits is not
+  // an auth error or a 429, and was being thrown away (auth) or retried three times (429).
+  // stdout still counts when the run failed, or when it is too short to be an answer.
+  const answered = r.code === 0 && !r.signal && r.stdout.trim().length >= 400;
+  const blob = answered ? r.stderr : `${r.stderr}\n${r.stdout}`;
   if (AUTH_RE.test(blob)) return "auth_error";
   if (RATE_RE.test(blob)) return "rate_limited";
   if (r.signal) return "crashed";

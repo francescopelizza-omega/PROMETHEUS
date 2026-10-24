@@ -1059,3 +1059,12 @@ test("one saved request, four models — each gets what IT can do, and the reque
   assert.equal(REQUEST, "xhigh");
   assert.equal(bind({ runtime: "anthropic", modelId: "claude-opus-5" }).applied, "xhigh");
 });
+
+test("LM Studio: the runtime decides — no model-name rule may claim a reasoning knob it drops", () => {
+  // (Qwen3's in-prompt `/think` is the exception, pinned by the test above — it is not a field.)
+  for (const modelId of ["zai-org/glm-4.6", "deepseek/deepseek-v3.2", "ibm/granite-4.0"]) {
+    const { cap, rule } = resolveCapability({ runtime: "lmstudio", modelId, locality: "local" });
+    assert.equal(rule?.id, "lmstudio-ignores", modelId);
+    assert.equal(cap.mechanism, "none", modelId);
+  }
+});

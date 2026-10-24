@@ -27,11 +27,11 @@ import {
   orchestration,
   secrets,
 } from "@prometheus/core";
-import type { EngineClient, LaunchGuardSample } from "@prometheus/engine-bridge";
+import { type EngineClient, type LaunchGuardSample, vendorBin } from "@prometheus/engine-bridge";
 import { launchGuardVerdict, sampleLaunchGuard } from "@prometheus/engine-bridge";
 
 import { KeyedSemaphore, defaultProviderLimit } from "./concurrency.js";
-import { CLI_RECIPES, type CliRecipe, launchFor } from "./recipes.js";
+import { CLI_RECIPES, type CliRecipe, launchFor, localCapableServices } from "./recipes.js";
 import { type SpawnCapture, makeSpawnCapture, redactSecrets } from "./spawn-capture.js";
 
 type InvokeRequest = orchestration.InvokeRequest;
@@ -91,10 +91,17 @@ export interface InvokerDeps {
    * `0` restores the single-sample behaviour.
    */
   launchGuardWaits?: number;
+  /** concurrent requests per LOCAL model server (default 1 — see `makeInvoker`). */
+  serverLimit?: number;
 }
 
-/** Default PATH lookup: is `bin` an executable on $PATH? */
+/** Is `bin` an executable on $PATH, or in a vendor's own bin dir (`~/.opencode/bin`)? */
 function defaultWhich(bin: string): boolean {
+  return onPath(bin) || vendorBin(bin) !== undefined;
+}
+
+/** On $PATH (or an executable path). */
+function onPath(bin: string): boolean {
   if (bin.includes("/")) {
     try {
       accessSync(bin, constants.X_OK);
@@ -277,10 +284,15 @@ function priceCall(
 /** Run a prompt through the engine's local chat (`chat --local <model> <prompt>`). */
 async function engineChat(req: InvokeRequest, deps: InvokerDeps): Promise<string> {
   const model = req.agent.backend.model ?? "default";
+  // the runner that serves this model (by the session endpoint's port), so an LM Studio model
+  // is not sent to the engine's default (Ollama); `--` keeps a prompt starting with "-" a prompt
+  const runner = deps.endpoint ? ai.runnerIdForUrl(deps.endpoint.baseUrl) : undefined;
   const env = (await deps.client.runPrometheus([
     "chat",
     "--local",
     model,
+    ...(runner ? ["--runner", runner] : []),
+    "--",
     req.prompt,
   ])) as unknown as {
     ok?: boolean;
@@ -300,13 +312,26 @@ async function cliInvoke(
 ): Promise<InvokeResult> {
   const service = req.agent.backend.service;
   if (!service) throw new Error(`agent "${req.agent.name}" is a cli backend with no service`);
+  const local = localTargetOf(req.agent, deps);
+  if (req.agent.backend.local && !local) {
+    throw new Error(
+      `${service}: a LOCAL agent needs a local model server — none was detected (start Ollama or LM Studio, or give the agent a baseUrl)`,
+    );
+  }
   const launch = launchFor(
     service,
     redactSecrets(req.prompt),
-    req.agent.backend.model,
+    local?.model ?? req.agent.backend.model,
     mergedRecipes(deps.recipes),
+    local ? { baseUrl: local.baseUrl } : undefined,
   );
-  if (!launch) throw new Error(`no headless recipe for service "${service}"`);
+  if (!launch) {
+    throw new Error(
+      local
+        ? `${service} has no local-model mode Prometheus can drive (local-capable: ${localCapableServices(mergedRecipes(deps.recipes)).join(", ")})`
+        : `no headless recipe for service "${service}"`,
+    );
+  }
 
   // refuse agent-supplied force flags (human-typed only).
   if (launch.args.some((a) => a === "--force" || a === "--force-unsafe"))
@@ -314,7 +339,10 @@ async function cliInvoke(
 
   // resolve the binary (primary then fallbacks).
   const candidates = [launch.bin, ...launch.binFallbacks];
-  const bin = candidates.find((c) => which(c));
+  const found = candidates.find((c) => which(c));
+  // found only in a vendor dir (`~/.opencode/bin`, not on this process's PATH): spawn it by path
+  // (only with the real lookup: an injected `which` owns the answer, as tests do)
+  const bin = found && !deps.which && !onPath(found) ? (vendorBin(found) ?? found) : found;
   if (!bin)
     throw new Error(
       `${service}: none of [${candidates.join(", ")}] found on PATH — install + log it in first (try \`prometheus chat --cli ${service} --open\`)`,
@@ -369,14 +397,26 @@ async function cliInvoke(
 
   let lastDetail = "";
   let lastOutcome = "";
+  const env = { ...(launch.env ?? {}), ...(req.agent.backend.env ?? {}) };
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    // a retry is a NEW launch: re-check the ceiling — the RAM guard SIGTERMs agents under
+    // pressure, which reads as "crashed" (retryable), and relaunching into the same pressure
+    // just gets the agent killed again while the model's weights stay resident
+    if (attempt > 0) {
+      const again = launchGuardVerdict(await launchGuardFn());
+      if (!again.ok) throw new Error(`${service}: temporarily unavailable — ${again.reason}`);
+    }
     const result = await spawn(bin, {
       args: launch.args,
       ...(launch.stdin !== undefined ? { stdin: launch.stdin } : {}),
       timeoutMs: launch.timeoutMs,
+      // A local model prints NOTHING while it loads (20 GB can take minutes) or while it waits
+      // behind another agent on the same server; the 90 s no-output timer killed it as a
+      // non-retryable "timeout" and the agent was lost. The run's own hard timeout still holds.
+      ...(local ? { idleMs: launch.timeoutMs } : {}),
       ...(deps.cwd ? { cwd: deps.cwd } : {}),
-      // per-agent env ADDED to the child (e.g. a dedicated key) — never patches the CLI.
-      ...(req.agent.backend.env ? { env: req.agent.backend.env } : {}),
+      // per-agent env ADDED to the child (a local wiring, a dedicated key) — never patches the CLI.
+      ...(Object.keys(env).length > 0 ? { env } : {}),
     });
     if (result.outcome === "ok" || result.outcome === "empty") {
       return { text: result.stdout.trim() || "(no output)" };
@@ -388,6 +428,39 @@ async function cliInvoke(
     await sleep(Math.round(random() * Math.min(8000, 500 * 2 ** attempt)));
   }
   throw new Error(`${service} ${lastOutcome}: ${lastDetail}`);
+}
+
+/**
+ * Where a CLI agent's LOCAL model lives: its own `baseUrl`, else the session's local endpoint.
+ * Only for an agent marked `local` (or one given a local `baseUrl`): a bare `opencode:<model>`
+ * is the CLI's own provider/model and goes through its own login.
+ */
+function localTargetOf(
+  agent: AgentSpec,
+  deps: InvokerDeps,
+): { baseUrl: string; model: string } | undefined {
+  const b = agent.backend;
+  const ownLocal = b.baseUrl && ai.isLocalUrl(b.baseUrl) ? b.baseUrl : undefined;
+  if (!b.local && !ownLocal) return undefined;
+  const session = deps.endpoint?.locality === "local" ? deps.endpoint : undefined;
+  const baseUrl = b.baseUrl ?? session?.baseUrl;
+  const model = b.model ?? session?.model;
+  return baseUrl && model ? { baseUrl, model } : undefined;
+}
+
+/** The model server an agent's inference lands on, for the one-at-a-time rule; else null. */
+function serverKeyOf(agent: AgentSpec, deps: InvokerDeps): string | null {
+  const b = agent.backend;
+  let url: string | undefined;
+  if (b.kind === "cli") url = localTargetOf(agent, deps)?.baseUrl;
+  else if (b.kind === "local") url = b.baseUrl ?? deps.endpoint?.baseUrl;
+  else if (b.kind === "engine-chat" || b.kind === "in-process") return "server:engine-local";
+  if (!url) return b.kind === "local" ? "server:engine-local" : null;
+  try {
+    return `server:${new URL(url).host}`;
+  } catch {
+    return `server:${url}`;
+  }
 }
 
 /** Merge a partial recipe override over the shipped recipes (so the base set is kept). */
@@ -408,12 +481,26 @@ export function probeLaunch(
 ): { kind: string; service?: string; command: string } {
   const b = agent.backend;
   if (b.kind === "cli" && b.service) {
-    const l = launchFor(b.service, "<your prompt>", b.model, mergedRecipes(recipes));
-    if (!l) return { kind: "cli", service: b.service, command: `(no recipe for "${b.service}")` };
+    const local = b.local ? { baseUrl: b.baseUrl ?? "<the detected local server>" } : undefined;
+    const model = b.model ?? (local ? "<the session's local model>" : undefined);
+    const l = launchFor(b.service, "<your prompt>", model, mergedRecipes(recipes), local);
+    if (!l) {
+      return {
+        kind: "cli",
+        service: b.service,
+        command: local
+          ? `(${b.service} has no local-model mode — local-capable: ${localCapableServices(mergedRecipes(recipes)).join(", ")})`
+          : `(no recipe for "${b.service}")`,
+      };
+    }
+    // the env a local wiring adds is shown by NAME (its value is a generated config, not a secret)
+    const envPrefix = Object.keys(l.env ?? {})
+      .map((k) => `${k}=…`)
+      .join(" ");
     return {
       kind: "cli",
       service: b.service,
-      command: `${l.bin} ${l.args.map(quoteArg).join(" ")}`,
+      command: `${envPrefix ? `${envPrefix} ` : ""}${l.bin} ${l.args.map(quoteArg).join(" ")}`,
     };
   }
   if (b.kind === "local")
@@ -438,20 +525,34 @@ export function makeInvoker(deps: InvokerDeps): BackendInvoker {
   const which = deps.which ?? defaultWhich;
   // a PER-SERVICE concurrency bulkhead so N parallel agents on one vendor can't 429 it.
   const sem = new KeyedSemaphore(deps.providerLimit ?? defaultProviderLimit);
+  /**
+   * ONE request at a time per LOCAL MODEL SERVER — every agent whose inference lands on it
+   * (local, engine-chat, and opencode/hermes/aider driven against it) shares the slot.
+   *
+   * The per-service cap let 3 opencode + 3 hermes + any number of local agents hit one runner
+   * at once with different models. Ollama (capped at one loaded model) then unloaded and
+   * reloaded weights on every switch; LM Studio could hold several JIT models side by side.
+   * Queued agents are not killed for silence (see `idleMs` in `cliInvoke`).
+   */
+  const servers = new KeyedSemaphore(() => deps.serverLimit ?? 1);
+  const onServer = <T>(req: InvokeRequest, fn: () => Promise<T>): Promise<T> => {
+    const key = serverKeyOf(req.agent, deps);
+    return key ? servers.run(key, fn) : fn();
+  };
   return async (req: InvokeRequest): Promise<InvokeResult> => {
     const kind = req.agent.backend.kind;
     switch (kind) {
       case "fake":
         return { text: fakeReply(req) };
       case "local":
-        return { text: await localInvoke(req, deps) };
+        return { text: await onServer(req, () => localInvoke(req, deps)) };
       case "engine-chat":
       case "in-process":
-        return { text: await engineChat(req, deps) };
+        return { text: await onServer(req, () => engineChat(req, deps)) };
       case "cli":
-        // serialize per provider (each vendor has its own rate limit).
+        // serialize per provider (each vendor has its own rate limit), and per local server.
         return sem.run(req.agent.backend.service ?? "cli", () =>
-          cliInvoke(req, deps, spawn, which),
+          onServer(req, () => cliInvoke(req, deps, spawn, which)),
         );
       case "api":
         // own-key OpenAI-compatible API — bulkhead per provider (its own rate limit). The

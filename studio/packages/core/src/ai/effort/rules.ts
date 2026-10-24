@@ -46,7 +46,22 @@ export interface EffortMatch {
   modelIdPrefix?: string;
   modelIdRegex?: string;
   locality?: "local" | "cloud";
+  /**
+   * This runtime drops per-request reasoning FIELDS for every model. A model-name rule whose
+   * mechanism is a body field (GLM `thinking.type`, DeepSeek, Granite, `reasoning_effort`) must
+   * then lose to it — winning on specificity made `/think` report "applied" for a field LM Studio
+   * silently ignored. A mechanism that rides IN THE MESSAGES (Qwen3 `/think`, a system-prompt
+   * line) still reaches the weights and keeps winning. See `resolveCapability`.
+   */
+  dropsBodyFields?: boolean;
 }
+
+/** Mechanisms that travel in the message text, which no server can drop. */
+const IN_BAND: ReadonlySet<string> = new Set([
+  "system-prompt-line",
+  "prompt-soft-switch",
+  "always-on",
+]);
 
 /**
  * How well-evidenced a rule actually is.
@@ -688,7 +703,7 @@ export function builtinRules(): EffortRule[] {
     {
       id: "lmstudio-ignores",
       provenance: "inferred",
-      match: { runtime: "lmstudio" },
+      match: { runtime: "lmstudio", dropsBodyFields: true },
       cap: {
         mechanism: "none",
         supported: [],
@@ -759,6 +774,17 @@ export function resolveCapability(
       bestScore = s;
       best = r;
     }
+  }
+  // A runtime that drops body fields overrides a winner that relies on one (see dropsBodyFields)
+  const dropper = rules.filter((r) => r.match.dropsBodyFields && matches(r.match, ctx)).at(-1);
+  if (
+    dropper &&
+    best &&
+    best !== dropper &&
+    !IN_BAND.has(best.cap.mechanism) &&
+    best.match.runtime !== ctx.runtime
+  ) {
+    best = dropper;
   }
   return best ? { rule: best, cap: normalise(best.cap) } : { rule: null, cap: UNKNOWN_CAPABILITY };
 }

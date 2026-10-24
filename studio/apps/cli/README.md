@@ -74,12 +74,20 @@ A roff **man page** comes from the same registry: `prometheus man > prometheus.1
 
 ```sh
 prometheus                       # bare → unified single-window session (chat + agent loop + panes)
-prometheus session [--tmux [N]]  # span MANY tmux windows when enabled (--tmux / PROMETHEUS_TMUX=1)
+prometheus session [--tmux [NAME]]  # span MANY windows of tmux session NAME when enabled (--tmux / PROMETHEUS_TMUX=1)
 prometheus chat --cli claude [--open|--tmux]   # preview the injection-safe launch, then open a live terminal
+prometheus --no-tmux             # tmux compatibility mode on request (= PROMETHEUS_NO_TMUX=1)
+prometheus requirements          # what this OS still needs (git, tmux, bubblewrap…) + the command; offers to run it through the privileged gate
 ```
 
 A bare `prometheus` on a TTY opens the readline session (catalog / models / env / security / health
 panes + slash + `/help`); without tmux it stays single-window, with tmux enabled it fans out.
+
+**tmux is optional.** Without it (or with `--no-tmux`), Prometheus runs in compatibility mode and
+says so in one line: `--tmux` opens the normal single-window session, `chat --cli X --tmux` opens
+the chat in this terminal, and `/demos <goal>` runs the same swarm headless (with the same ToS
+question for subscription-login agents). Sub-agents run in-process with or without tmux. Inside an
+existing tmux client, `--tmux` uses the current window instead of nesting a second attach.
 
 ## Headless (`run` / `-p`) — one turn, then exit
 

@@ -494,3 +494,107 @@ test("non-TTY stdin: never calls setRawMode (line-buffered fallback, no crash)",
   await run;
   assert.deepEqual(stdin.rawHistory, []); // raw mode never touched
 });
+
+/* ------------------------------------------------------------------ */
+/* No pty to give, but a terminal of our own: the child gets it      */
+/* ------------------------------------------------------------------ */
+
+test("a pipe-only backend + a real terminal ⇒ the child runs ON the terminal, never on pipes", async () => {
+  // Without node-pty the fallback hands the child pipes, and claude/codex/gemini behind a pipe
+  // see no TTY. With tmux gone (compatibility mode) this is the normal path, so it must not
+  // relay: the child gets this process's own terminal.
+  const backend = Object.assign(fakeBackend(), { kind: "pipe" as const });
+  const seen: PtySpawnOptions[] = [];
+  const code = await runLiveTerminal(envelope(), {
+    backend,
+    stdin: fakeStdin(true),
+    stdout: fakeStdout(),
+    signals: fakeSignals(),
+    baseEnv: { PATH: "/usr/bin" },
+    runOnTerminal: async (o) => {
+      seen.push(o);
+      return { exitCode: 7 };
+    },
+  });
+  assert.equal(code, 7);
+  assert.equal(backend.opts, null, "the pipe relay was used");
+  assert.equal(seen.length, 1);
+  assert.equal(seen[0]?.shell, "claude");
+  assert.deepEqual(seen[0]?.args, ["--model", "opus"]);
+  assert.equal(seen[0]?.cwd, "/work/proj");
+  assert.equal(seen[0]?.env.CLAUDE_X, "1");
+});
+
+test("a pipe-only backend with no terminal (piped/CI) keeps the relay", async () => {
+  const backend = Object.assign(fakeBackend(), { kind: "pipe" as const });
+  let handedOver = false;
+  const run = runLiveTerminal(envelope(), {
+    backend,
+    stdin: fakeStdin(false),
+    stdout: fakeStdout(),
+    signals: fakeSignals(),
+    runOnTerminal: async () => {
+      handedOver = true;
+      return { exitCode: 0 };
+    },
+  });
+  await Promise.resolve();
+  backend.proc.emitExit(0);
+  assert.equal(await run, 0);
+  assert.equal(handedOver, false);
+  assert.ok(backend.opts, "the relay spawned the child");
+});
+
+test("a real pty backend keeps the relay even on a terminal", async () => {
+  const backend = Object.assign(fakeBackend(), { kind: "pty" as const });
+  let handedOver = false;
+  const run = runLiveTerminal(envelope(), {
+    backend,
+    stdin: fakeStdin(true),
+    stdout: fakeStdout(),
+    signals: fakeSignals(),
+    runOnTerminal: async () => {
+      handedOver = true;
+      return { exitCode: 0 };
+    },
+  });
+  await Promise.resolve();
+  backend.proc.emitExit(0);
+  assert.equal(await run, 0);
+  assert.equal(handedOver, false);
+});
+
+test("a hand-over that cannot start says so and returns its code", async () => {
+  const lines: string[] = [];
+  const code = await runLiveTerminal(envelope(), {
+    backend: Object.assign(fakeBackend(), { kind: "pipe" as const }),
+    stdin: fakeStdin(true),
+    stdout: fakeStdout(),
+    signals: fakeSignals(),
+    write: (l) => lines.push(l),
+    runOnTerminal: async () => ({ exitCode: 127, error: "spawn claude ENOENT" }),
+  });
+  assert.equal(code, 127);
+  assert.ok(
+    lines.some((l) => l.includes("spawn claude ENOENT")),
+    lines.join("\n"),
+  );
+});
+
+test("the bypass gate still runs before a hand-over (declined ⇒ nothing launched)", async () => {
+  let handedOver = false;
+  const code = await runLiveTerminal(envelope({ bypass: true }), {
+    backend: Object.assign(fakeBackend(), { kind: "pipe" as const }),
+    stdin: fakeStdin(true),
+    stdout: fakeStdout(),
+    signals: fakeSignals(),
+    write: () => {},
+    confirm: async () => false,
+    runOnTerminal: async () => {
+      handedOver = true;
+      return { exitCode: 0 };
+    },
+  });
+  assert.equal(code, 2);
+  assert.equal(handedOver, false);
+});

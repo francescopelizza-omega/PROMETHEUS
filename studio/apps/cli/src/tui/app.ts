@@ -33,6 +33,7 @@ import {
   parseModelsArgs,
 } from "../session/models-wizard.js";
 import type { Backends } from "../session/onboarding.js";
+import { MAX_SUBAGENTS } from "../session/orchestrator.js";
 import { completePath, createPathCycler } from "../session/path-completer.js";
 import {
   findProjectRoot,
@@ -1076,14 +1077,31 @@ export async function launchTui(parsed: ParsedArgs, deps: TuiDeps = {}): Promise
       return;
     }
     if (trimmed === "/agents" || trimmed === "/subagents" || trimmed === "/team") {
-      const current = session.slashCtx.agents.count();
-      openPicker(
-        "Subagent fan-out — pick 1–16",
-        Array.from({ length: 16 }, (_, i) => {
+      /*
+       * Without tmux and without an `/agents N`, the picker marked "1" as current — the same
+       * false "single agent" the text form used to print: sub-agents run in-process and the cap
+       * in force is the engine default. That default is now its own row, and the range is the
+       * real one (`/agents` clamps to MAX_SUBAGENTS; the picker offered 1–16).
+       */
+      const agents = session.slashCtx.agents;
+      const set = agents.explicit?.() ?? null;
+      const current = set ?? agents.count();
+      const auto = set === null && !agents.insideTmux;
+      openPicker(`Subagent fan-out — pick 1–${MAX_SUBAGENTS}`, [
+        ...(auto
+          ? [
+              {
+                label: `auto — up to ${agent.DEFAULT_MAX_SPAWNS} per turn (in-process, no tmux needed)`,
+                current: true,
+                submitText: "/agents",
+              },
+            ]
+          : []),
+        ...Array.from({ length: MAX_SUBAGENTS }, (_, i) => {
           const n = i + 1;
-          return { label: String(n), current: n === current, submitText: `/agents ${n}` };
+          return { label: String(n), current: !auto && n === current, submitText: `/agents ${n}` };
         }),
-      );
+      ]);
       return;
     }
     if (trimmed === "/think" || trimmed === "/effort") {

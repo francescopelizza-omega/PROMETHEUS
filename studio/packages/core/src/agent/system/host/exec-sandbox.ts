@@ -164,6 +164,7 @@
  */
 
 import { existsSync, realpathSync } from "node:fs";
+import { createRequire } from "node:module";
 import { homedir, tmpdir } from "node:os";
 import { join, sep } from "node:path";
 
@@ -361,6 +362,12 @@ export interface SandboxRequest {
   tmpDirs?: readonly string[];
   realpath?: (p: string) => string;
   exists?: (p: string) => boolean;
+  /**
+   * Can this bwrap create a sandbox here? null = yes, else the reason it cannot. Default: the
+   * real probe (`probeBwrap`), but only for a request on the REAL filesystem — a request with
+   * an injected `exists` is a plan computed for inspection, and gets no real spawn.
+   */
+  bwrapWorks?: (bin: string) => string | null;
 }
 
 /** A built, ready-to-apply Seatbelt confinement. */
@@ -498,6 +505,19 @@ export function planExecSandbox(req: SandboxRequest): SandboxPlan {
           "bubblewrap (bwrap) is not installed, so no OS-level confinement is available on this Linux host — install it (e.g. `apt install bubblewrap`) to have run_command confined by the kernel",
       };
     }
+    // A bwrap the kernel will not let create a namespace is no driver at all: every command would
+    // fail at bwrap's own startup, never having run. That is the host's configuration, the same
+    // for every command, so it is the honest-absence case (`none`, logged as "unsandboxed" with
+    // this reason) — not a per-command refusal. A working set that cannot be built (below) is
+    // still a refusal: that one is about THIS command.
+    const works = req.bwrapWorks ?? (req.exists === undefined ? probeBwrap : () => null);
+    const blocked = works(bin);
+    if (blocked !== null) {
+      return {
+        kind: "none",
+        reason: `bubblewrap is installed but this host does not let it create a sandbox (${blocked}) — unprivileged user namespaces are blocked (Ubuntu 24.04+ AppArmor, a container's seccomp, or a hardened kernel), so run_command runs unconfined, as on a host without bwrap. On Ubuntu an AppArmor profile for bwrap that allows \`userns\` restores it.`,
+      };
+    }
     const set = resolveWorkingSet(req, home, realpath);
     if ("error" in set) {
       // FAIL CLOSED: bwrap exists, so this command was going to be confined and now cannot be.
@@ -542,6 +562,52 @@ export function planExecSandbox(req: SandboxRequest): SandboxPlan {
     denied,
     network,
   };
+}
+
+/**
+ * Does `bin` create a sandbox on this host? null when it does; otherwise bwrap's own first line.
+ *
+ * Present is not the same as working. Ubuntu 24.04+ (AppArmor's unprivileged-user-namespace
+ * restriction), Docker's default seccomp profile and hardened kernels refuse the namespace bwrap
+ * needs, and then EVERY confined command failed at bwrap's startup ("bwrap: setting up uid map:
+ * Permission denied") — run_command unusable on exactly the hosts where installing bubblewrap was
+ * the advice. Asked once per process and remembered: the answer is a property of the kernel, not
+ * of any command. A probe that cannot even run (no such file, a timeout) says "works" and leaves
+ * the decision to the real run — only bwrap itself refusing counts as blocked.
+ */
+const bwrapVerdicts = new Map<string, string | null>();
+// `node:child_process` is engine-bridge's EXCLUSIVE static import (C5); a runtime require is the
+// sanctioned escape hatch for a host module that must spawn (see exec-runner.ts).
+const nodeRequire = createRequire(import.meta.url);
+export function probeBwrap(bin: string): string | null {
+  const known = bwrapVerdicts.get(bin);
+  if (known !== undefined) return known;
+  let verdict: string | null = null;
+  try {
+    const { spawnSync } = nodeRequire("node:child_process") as {
+      spawnSync: (
+        cmd: string,
+        args: string[],
+        opts: Record<string, unknown>,
+      ) => { status: number | null; stderr?: string; error?: Error };
+    };
+    const r = spawnSync(bin, ["--ro-bind", "/", "/", "true"], {
+      stdio: ["ignore", "ignore", "pipe"],
+      encoding: "utf8",
+      timeout: 5000,
+    });
+    if (!r.error && r.status !== 0) {
+      const first = (r.stderr ?? "")
+        .split("\n")
+        .find((l) => l.trim() !== "")
+        ?.trim();
+      verdict = first ?? `bwrap exited ${r.status}`;
+    }
+  } catch {
+    verdict = null;
+  }
+  bwrapVerdicts.set(bin, verdict);
+  return verdict;
 }
 
 const writeParam = (i: number): string => `PROM_W${i}`;

@@ -25,6 +25,12 @@
  *    options, shell strings, launchers, pipelines and redirects never reach a prompt.
  *  - **The elevator binary is never looked up on PATH.** A fake `sudo` earlier on PATH would
  *    receive the password. Only fixed system paths, root-owned and not group/other-writable.
+ *  - **Neither is the program.** A bare name is pinned to the absolute path the human sees
+ *    (`pinProgram`) — macOS sudo has no `secure_path` and searched the user's PATH. A program,
+ *    interpreter or terminal relay that lives where the agents write (the request's folder, a
+ *    temp folder) is refused: it could be swapped between the approval and root starting it.
+ *    A script whose argument cannot be pinned (`python3 -W ignore x.py`, `python -m`) is refused
+ *    rather than run unhashed.
  *  - **The password never passes through Prometheus.** In a terminal sudo reads it from the
  *    TTY (the host suspends its own UI first). In a GUI, `sudo -A` runs a fixed askpass helper
  *    (`askpass.ts`) whose answer goes straight to sudo. In TTY mode `SUDO_ASKPASS` is REMOVED
@@ -40,9 +46,16 @@
  */
 
 import { createHash, randomBytes } from "node:crypto";
-import { appendFileSync, mkdirSync, readFileSync, statSync } from "node:fs";
+import {
+  accessSync,
+  appendFileSync,
+  constants as fsConstants,
+  mkdirSync,
+  readFileSync,
+  statSync,
+} from "node:fs";
 import { createRequire } from "node:module";
-import { dirname, isAbsolute, join, resolve as resolvePath } from "node:path";
+import { delimiter, dirname, isAbsolute, join, resolve as resolvePath } from "node:path";
 import { safeChildEnv } from "@prometheus/engine-bridge";
 import { shellQuote } from "../../exec/parse.js";
 import {
@@ -51,7 +64,16 @@ import {
   classifyPrivileged,
 } from "../../exec/privileged.js";
 import { renderElevated } from "../elevated.js";
-import { PY_LOADER, type VerifyMode, trustedBinary, verifiedRun } from "./privileged-verify.js";
+import {
+  PY_LOADER,
+  SCRIPT_INTERPRETERS,
+  type VerifyMode,
+  rootControlled as defaultRootControlled,
+  inAgentFolder,
+  interpreterName,
+  trustedBinary,
+  verifiedRun,
+} from "./privileged-verify.js";
 
 const nodeRequire = createRequire(import.meta.url);
 
@@ -189,6 +211,10 @@ export interface GateDeps {
   resolveElevator?: (e: GateElevator) => string | null;
   /** test seam: is this script's whole path controlled by root (so it may run as it is)? */
   rootControlled?: (path: string) => boolean;
+  /** test seam: where a bare program name resolves (default: the child's PATH, like sudo) */
+  resolveProgram?: (name: string) => string | null;
+  /** test seam: the temp folders agents can write (default: the real ones) */
+  temps?: readonly string[];
   /** test seam */
   spawnImpl?: SpawnFn;
 }
@@ -235,18 +261,6 @@ function defaultResolveElevator(e: GateElevator): string | null {
 
 /* ── scripts ──────────────────────────────────────────────────────────────── */
 
-const INTERPRETERS = new Set([
-  "sh",
-  "bash",
-  "zsh",
-  "dash",
-  "ksh",
-  "python",
-  "perl",
-  "ruby",
-  "node",
-]);
-
 function isFile(p: string): boolean {
   try {
     return statSync(p).isFile();
@@ -255,15 +269,37 @@ function isFile(p: string): boolean {
   }
 }
 
-/** The script a canonical argv runs, if any: `./x.sh`, or `bash x.sh` / `python3 tool.py`. */
-function scriptPathOf(argv: readonly string[], cwd: string): string | null {
+/**
+ * The script a canonical argv runs, if any: `./x.sh`, or `bash x.sh` / `python3 tool.py`.
+ * `{ refusal }` when a script runs but which argument it is cannot be told: returning "no
+ * script" there was FAIL-OPEN — `python3 -W ignore tool.py` took `ignore` for the operand, found
+ * no such file, and ran tool.py unhashed, from whatever bytes it held when root opened it.
+ */
+function scriptPathOf(argv: readonly string[], cwd: string): string | null | { refusal: string } {
   const head = argv[0] ?? "";
-  const name = (head.split("/").pop() ?? "").toLowerCase().replace(/[\d.]+$/, "");
-  if (INTERPRETERS.has(name)) {
-    const operand = argv.slice(1).find((a) => !a.startsWith("-"));
-    if (!operand) return null;
-    const p = resolvePath(cwd, operand);
-    return isFile(p) ? p : null;
+  const name = interpreterName(head);
+  if (SCRIPT_INTERPRETERS.has(name)) {
+    const at = argv.findIndex((a, i) => i > 0 && !a.startsWith("-"));
+    const flags = argv.slice(1, at < 0 ? argv.length : at);
+    if (name === "python" && flags.some((f) => /^-[A-Za-z]*m$/.test(f))) {
+      // `-m` runs a module found on sys.path, whose first entry is the current folder
+      if (!flags.some((f) => /^-[A-Za-z]*[IP][A-Za-z]*$/.test(f))) {
+        return {
+          refusal:
+            "`python -m` imports the module from the current folder first, so its code is not what you reviewed — run the script by its path, or add -I",
+        };
+      }
+      return null;
+    }
+    if (at < 0) return null;
+    const p = resolvePath(cwd, argv[at] as string);
+    if (isFile(p)) return p;
+    if (argv.slice(at + 1).some((a) => !a.startsWith("-") && isFile(resolvePath(cwd, a)))) {
+      return {
+        refusal: `could not tell which argument \`${head}\` runs as its script (\`${argv[at]}\` is not a file, a later one is) — put the script right after the interpreter's own flags`,
+      };
+    }
+    return null;
   }
   if (!head.includes("/")) return null;
   const p = resolvePath(cwd, head);
@@ -294,6 +330,50 @@ function scriptInfo(path: string): ScriptInfo | null {
   } catch {
     return null;
   }
+}
+
+/* ── the program ──────────────────────────────────────────────────────────── */
+
+/** The first executable `name` on `path`, the way sudo (or execvp) would find it. */
+function lookOnPath(name: string, path: string | undefined): string | null {
+  for (const dir of (path ?? "").split(delimiter)) {
+    if (!dir || !isAbsolute(dir)) continue;
+    const candidate = join(dir, name);
+    try {
+      accessSync(candidate, fsConstants.X_OK);
+      if (statSync(candidate).isFile()) return candidate;
+    } catch {
+      /* not here */
+    }
+  }
+  return null;
+}
+
+/**
+ * Name the program by its absolute path, so the human approves the binary that will run.
+ *
+ * A bare name was left for sudo to look up on PATH, and on macOS sudo has no `secure_path`: it
+ * searched the USER's PATH, whose first entries (`~/.local/bin`, `/opt/homebrew/bin`) any
+ * process of the user can write. `rm` approved could run a planted `~/.local/bin/rm` as root.
+ * A bare name that resolves somewhere only root controls is pinned to that path; one that
+ * resolves somewhere else is refused, with the way out (name it by its full path, deliberately).
+ */
+function pinProgram(
+  argv: readonly string[],
+  resolve: (name: string) => string | null,
+  isRootControlled: (p: string) => boolean,
+): { argv: string[] } | { refusal: string } {
+  const head = argv[0] ?? "";
+  if (head.includes("/")) return { argv: [...argv] };
+  const found = resolve(head);
+  // not found: left for the elevator to report ("command not found") — nothing runs either way
+  if (!found) return { argv: [...argv] };
+  if (!isRootControlled(found)) {
+    return {
+      refusal: `\`${head}\` resolves to ${found}, which your account (and so any agent) can change — to run THAT program as root, name it by its full path`,
+    };
+  }
+  return { argv: [found, ...argv.slice(1)] };
 }
 
 /* ── audit ────────────────────────────────────────────────────────────────── */
@@ -378,7 +458,7 @@ export function createPrivilegedGate(deps: GateDeps): PrivilegedGate {
       // a snapshot: what the human is shown, and what the live request is compared against
       const argv = okShape ? [...req.argv] : [];
       const cwd = okShape ? req.cwd : "";
-      const commandLine = `${elevator} ${argv.map(shellQuote).join(" ")}`.trim();
+      let commandLine = `${elevator} ${argv.map(shellQuote).join(" ")}`.trim();
       const why = typeof req.why === "string" ? req.why.trim() : "";
       const base = {
         time: new Date().toISOString(),
@@ -475,26 +555,54 @@ export function createPrivilegedGate(deps: GateDeps): PrivilegedGate {
       if (term && !relay) {
         return finish("refused", { reason: `the terminal relay is unreadable (${term.ptyHost})` });
       }
+      const agentFolder = (p: string): boolean =>
+        inAgentFolder(p, cwd, deps.temps ? { temps: deps.temps } : {});
+      if (term && agentFolder(term.python)) {
+        // the relay decides what sudo is handed: whoever can replace its interpreter decides too
+        return finish("refused", {
+          reason: `the terminal relay's interpreter ${term.python} is in a folder the agents can write`,
+        });
+      }
 
-      const scriptPath = scriptPathOf(argv, cwd);
+      // the binary the human approves is the binary that runs (see pinProgram)
+      const childPath = safeChildEnv().PATH;
+      const resolveProgram = deps.resolveProgram ?? ((n: string) => lookOnPath(n, childPath));
+      const pinned = pinProgram(argv, resolveProgram, defaultRootControlled);
+      if ("refusal" in pinned) return finish("refused", { reason: pinned.refusal });
+      const runArgv = pinned.argv;
+      commandLine = `${elevator} ${runArgv.map(shellQuote).join(" ")}`.trim();
+
+      const found = scriptPathOf(runArgv, cwd);
+      if (found !== null && typeof found === "object") {
+        return finish("refused", { reason: found.refusal });
+      }
+      const scriptPath = found;
+      const program = runArgv[0] ?? "";
+      const isTheScript = scriptPath !== null && resolvePath(cwd, program) === scriptPath;
+      if (!isTheScript && program.includes("/") && agentFolder(program)) {
+        return finish("refused", {
+          reason: `${program} is in a folder the agents can write: it could be replaced between your approval and the moment root starts it — run a copy only root can change`,
+        });
+      }
       const script = scriptPath ? scriptInfo(scriptPath) : null;
       if (scriptPath && !script) {
         return finish("refused", { reason: `the script ${scriptPath} could not be read` });
       }
       // root must run EXACTLY the approved bytes: the file is opened by root only after the
       // password, seconds after the last check here (privileged-verify.ts)
-      const plan = verifiedRun(argv, cwd, script, {
+      const plan = verifiedRun(runArgv, cwd, script, {
         ...(deps.rootControlled ? { rootControlled: deps.rootControlled } : {}),
+        ...(deps.temps ? { temps: deps.temps } : {}),
       });
       if ("refusal" in plan) return finish("refused", { script, reason: plan.refusal });
-      const phrase = catastrophicTarget(argv, deps.userHome);
+      const phrase = catastrophicTarget(runArgv, deps.userHome);
       const execArgs = execArgsFor(elevator, plan.argv, askpassPath !== null);
       const view: ApprovalView = {
         id: randomBytes(8).toString("hex"),
         commandLine,
         execArgv: [binary, ...execArgs],
         elevator,
-        argv: [...argv],
+        argv: [...runArgv],
         cwd,
         surface: req.surface,
         requester: req.requester,
@@ -548,12 +656,23 @@ export function createPrivilegedGate(deps: GateDeps): PrivilegedGate {
       // ── bind the approval, then re-read everything it covered ──
       const token = randomBytes(32).toString("hex");
       approvals.set(token, {
-        digest: digestOf(elevator, argv, cwd, script?.sha256 ?? null),
+        digest: digestOf(elevator, runArgv, cwd, script?.sha256 ?? null),
         expires: Date.now() + TOKEN_TTL_MS,
       });
-      const liveArgv = Array.isArray(req.argv) ? [...req.argv] : [];
-      const liveScriptPath = scriptPathOf(liveArgv, req.cwd);
-      const liveSha = liveScriptPath ? (scriptInfo(liveScriptPath)?.sha256 ?? "unreadable") : null;
+      const livePin = pinProgram(
+        Array.isArray(req.argv) ? [...req.argv] : [],
+        resolveProgram,
+        defaultRootControlled,
+      );
+      const liveArgv = "argv" in livePin ? livePin.argv : ["\u0000refused"];
+      const liveFound = scriptPathOf(liveArgv, req.cwd);
+      const liveScriptPath = typeof liveFound === "string" ? liveFound : null;
+      const liveSha =
+        liveFound !== null && typeof liveFound === "object"
+          ? "ambiguous"
+          : liveScriptPath
+            ? (scriptInfo(liveScriptPath)?.sha256 ?? "unreadable")
+            : null;
       const grant = approvals.get(token);
       approvals.delete(token);
       const liveRelaySha = term ? (scriptInfo(term.ptyHost)?.sha256 ?? "unreadable") : null;

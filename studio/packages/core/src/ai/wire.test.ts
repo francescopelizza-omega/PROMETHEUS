@@ -713,3 +713,14 @@ test("an explicit caller ceiling still wins — this is a default, not an overri
   };
   assert.equal(body.max_tokens, 1000);
 });
+
+test("an error sent as a bare STRING (LM Studio, llama.cpp) is an error, mid-stream and whole", () => {
+  const msg =
+    "The number of tokens to keep from the initial prompt is greater than the context length";
+  assert.deepEqual(OPENAI_WIRE.parse(JSON.stringify({ error: msg })), { error: msg });
+  assert.deepEqual(OPENAI_WIRE.parseWhole(JSON.stringify({ error: msg })), { error: msg });
+  assert.deepEqual(
+    OPENAI_WIRE.parse(JSON.stringify({ error: { message: "boom", type: "server_error" } })),
+    { error: "server_error: boom" },
+  );
+});

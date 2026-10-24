@@ -70,6 +70,7 @@ import {
   describeEngineFailure,
   findRecentEviction,
   readEvictionEvents,
+  unloadLmStudio,
   whichBin,
 } from "@prometheus/engine-bridge";
 
@@ -95,10 +96,12 @@ interface ToolCallAccumulator {
   order: Map<string, number>;
   seen: number;
   wholeSeq: number;
+  /** per-index generation: bumped when a fragment brings a new id to an occupied index. */
+  gen: Map<number, number>;
 }
 
 function newToolCallAccumulator(): ToolCallAccumulator {
-  return { map: new Map(), order: new Map(), seen: 0, wholeSeq: 0 };
+  return { map: new Map(), order: new Map(), seen: 0, wholeSeq: 0, gen: new Map() };
 }
 
 /** Merge one wire fragment into the accumulator, honouring `complete`. */
@@ -106,7 +109,18 @@ function accumulateCall(
   acc: ToolCallAccumulator,
   tc: { index: number; id?: string; name?: string; argsFragment?: string; complete?: boolean },
 ): void {
-  const key = tc.complete === true ? `whole:${acc.wholeSeq++}` : `idx:${tc.index}`;
+  let key = tc.complete === true ? `whole:${acc.wholeSeq++}` : `idx:${tc.index}`;
+  if (tc.complete !== true) {
+    // a NEW id on an index that already holds a call is a new call (see the CLI's callKey):
+    // servers that send each parallel call as `index: 0` merged them into one malformed call
+    const gen = acc.gen.get(tc.index) ?? 0;
+    key = gen === 0 ? key : `${key}#${gen}`;
+    const held = acc.map.get(key)?.id;
+    if (tc.id && held && held !== tc.id) {
+      acc.gen.set(tc.index, gen + 1);
+      key = `idx:${tc.index}#${gen + 1}`;
+    }
+  }
   const cur = acc.map.get(key) ?? { id: "", name: "", arguments: "" };
   if (tc.id) cur.id = tc.id;
   if (tc.name) cur.name = tc.name;
@@ -221,15 +235,27 @@ export async function freeLocalModels(doFetch: typeof fetch = fetch): Promise<vo
   const deadline = setTimeout(() => ac.abort(), 1_500);
   try {
     await Promise.allSettled(
-      entries.flatMap(([origin, models]) =>
-        [...models].map((model) =>
-          doFetch(`${origin}/api/generate`, {
-            method: "POST",
-            headers: { "content-type": "application/json" },
-            body: JSON.stringify({ model, keep_alive: 0 }),
-            signal: ac.signal,
-          }),
-        ),
+      entries.flatMap(([origin, models]): Promise<unknown>[] =>
+        // LM Studio ignores Ollama's `/api/generate` (it answers HTTP 200 + "Unexpected
+        // endpoint"), so quitting freed nothing there: unload its loaded instances by REST.
+        ai.runnerIdForUrl(origin) === "lmstudio"
+          ? [
+              unloadLmStudio(origin, {
+                fetchFn: ((u: string | URL | Request, init?: RequestInit) =>
+                  doFetch(u, { ...init, signal: ac.signal })) as typeof fetch,
+                only: [...models],
+                lms: null,
+                timeoutMs: 1_500,
+              }),
+            ]
+          : [...models].map((model) =>
+              doFetch(`${origin}/api/generate`, {
+                method: "POST",
+                headers: { "content-type": "application/json" },
+                body: JSON.stringify({ model, keep_alive: 0 }),
+                signal: ac.signal,
+              }),
+            ),
       ),
     );
   } catch {
@@ -804,7 +830,7 @@ export async function runAiStream(
     // turn does not pay a cold reload per round. LOCAL only — a cloud endpoint never
     // receives a non-standard field. Recorded in `residentModels` so quitting gives the
     // RAM back rather than leaving it pinned for the next half hour.
-    ...localKeepAliveField(locality),
+    ...localKeepAliveField(locality, req.endpoint.baseUrl),
   };
   if (locality === "local") {
     const origin = originOf(req.endpoint.baseUrl);

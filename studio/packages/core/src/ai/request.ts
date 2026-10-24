@@ -192,7 +192,16 @@ export async function fetchModelWithRetry<R extends ModelResponseLike>(
          * exists for. `userAborted` is the caller's own answer to "was this the human?"; the
          * `??` fallback keeps a caller that has not opted in behaving as before.
          */
-        isEndpointFailure: () => !(opts.userAborted?.() ?? opts.userSignal?.aborted === true),
+        isEndpointFailure: (err) => {
+          if (opts.userAborted?.() ?? opts.userSignal?.aborted === true) return false;
+          // A 4xx is an answer ABOUT THIS REQUEST (context overflow, unknown model, bad
+          // field), not evidence the endpoint is down: five overflow 400s in a row opened the
+          // breaker and the real reason became "circuit open" for 30 s. 408/429 stay counted.
+          if (err instanceof AiHttpError) {
+            return err.status >= 500 || err.status === 408 || err.status === 429;
+          }
+          return true;
+        },
       })
     : run();
 }

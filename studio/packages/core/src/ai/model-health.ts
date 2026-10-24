@@ -26,6 +26,8 @@ export type TransportMode = "native" | "text";
 export type ContextWindowOrigin =
   | "ollama"
   | "ollama-loaded"
+  | "lmstudio"
+  | "lmstudio-loaded"
   | "openai-models"
   | "default"
   | "declared";
@@ -106,6 +108,8 @@ const LOCALITIES: ReadonlySet<string> = new Set(["local", "cloud"]);
 const CONTEXT_WINDOW_ORIGINS: ReadonlySet<string> = new Set([
   "ollama",
   "ollama-loaded",
+  "lmstudio",
+  "lmstudio-loaded",
   "openai-models",
   "default",
   "declared",
@@ -197,6 +201,9 @@ export function describeContextWindow(r: EndpointHealthRecord): string {
   // Saying so is the difference between "my model has 262k" and the 8k actually in force.
   if (r.contextWindowSource === "ollama-loaded") {
     return `${n} tokens (as SERVED by ollama — the model itself allows more; raise OLLAMA_CONTEXT_LENGTH to use it)`;
+  }
+  if (r.contextWindowSource === "lmstudio-loaded") {
+    return `${n} tokens (as LOADED in LM Studio — the model allows more; reload it with a larger context: lms load <model> --context-length N)`;
   }
   return `${n} tokens (measured via ${r.contextWindowSource})`;
 }

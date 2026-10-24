@@ -99,7 +99,7 @@ import { runDemos } from "../orchestration/demos-cmd.js";
 import type { ParsedArgs } from "../parse.js";
 import { bannerCwd, shortCwd } from "../path-display.js";
 import { box, c, defaultColorEnabled, padEnd, visibleLen } from "../render.js";
-import { insideTmux } from "../tmux/tmux.js";
+import { insideTmux, tmuxForcedOff } from "../tmux/tmux.js";
 import { fleetBarLine, fleetLegendLines } from "../tui/fleet-bar.js";
 import { type KeymapResolution, resolveKeymap } from "../tui/keys.js";
 import { detectColorCaps } from "../tui/palette.js";
@@ -982,8 +982,9 @@ export async function launchSession(parsed: ParsedArgs, deps: SessionDeps = {}):
 
   // Orchestrator mode: when we're inside a live tmux session, start with 3 subagents by
   // default; the main agent scales that up per prompt (decideSubagentCount). Outside tmux
-  // it's a single agent. `subagentCount` is the live default the orchestrator scales from.
-  const orchestrating = deps.isTty !== false && insideTmux();
+  // only the announcement is skipped — sub-agents still run in-process under the engine's
+  // cap (spawnCapFor). `subagentCount` is the live default the orchestrator scales from.
+  const orchestrating = deps.isTty !== false && insideTmux() && !tmuxForcedOff();
   let subagentCount = orchestrating ? DEFAULT_SUBAGENTS : 1;
   /** The delegation cap for the CURRENT turn — see the TUI host's twin. */
   let spawnCap = agent.DEFAULT_MAX_SPAWNS;
@@ -2975,6 +2976,7 @@ export async function launchSession(parsed: ParsedArgs, deps: SessionDeps = {}):
         explicitAgents = n;
       },
       insideTmux: orchestrating,
+      explicit: () => explicitAgents,
       recommend: (prompt) =>
         orchestratorNote(prompt, subagentCount).length > 0 ? subagentCount + 1 : subagentCount,
     },

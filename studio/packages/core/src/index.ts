@@ -459,6 +459,7 @@ export {
   portOf as localRunnerPortOf,
   isLocalUrl,
   localKeepAlive,
+  keepAliveSeconds,
   localKeepAliveField,
 } from "./ai/local-runners.js";
 export type { DiscoveredRunner, DiscoverDeps, RunnerState } from "./ai/runner-discovery.js";

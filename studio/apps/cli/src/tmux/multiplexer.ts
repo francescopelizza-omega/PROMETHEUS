@@ -7,10 +7,12 @@
  * (and `prometheus session --tmux NAME`) lands in. Its contract is a single, sharp
  * decision:
  *
- *   - tmux is NOT available, OR the user did not enable it  ⇒  FALL BACK to the
+ *   - tmux is NOT available (missing, or switched off with PROMETHEUS_NO_TMUX=1), OR the
+ *     user did not enable it, OR we are already inside a tmux client  ⇒  FALL BACK to the
  *     P4 single-window session host (`launchSession(parsed)`) and return its code.
  *     A CLI-only box (no tmux binary) still gets the full REPL — degraded, never
- *     crashed.
+ *     crashed. Nested is in the list because `tmux attach` refuses to nest: the session
+ *     the user is in already IS the multiplexer.
  *   - tmux IS available AND enabled  ⇒  build a multi-window LAYOUT (a `main`
  *     window running the REPL, plus on-demand `chat` / `health` / `logs` / `env`
  *     windows), hand it to `runTmux` (idempotent `has-session` guard, then attach).
@@ -36,6 +38,8 @@
  * lays out WINDOWS, it decides nothing about safety (C5). Color flows ONLY through
  * ../render.ts (c.*), which sources its SGR from @prometheus/ui/tokens — no raw hex.
  */
+import { existsSync } from "node:fs";
+
 import { terminal } from "@prometheus/core";
 
 import type { ParsedArgs } from "../parse.js";
@@ -45,9 +49,10 @@ import { c } from "../render.js";
 // cross-unit API). We import the SPEC type + the value seams; the value seams are
 // referenced ONLY inside the default deps (a test that injects fakes never calls
 // them), so nothing real spawns under test.
-import type { TmuxSpec, TmuxWindow } from "./tmux.js";
+import type { TmuxOutcome, TmuxSpec, TmuxWindow } from "./tmux.js";
 import {
-  runTmux as siblingRunTmux,
+  insideTmux as siblingInsideTmux,
+  runTmuxOutcome as siblingRunTmux,
   tmuxAvailable as siblingTmuxAvailable,
   tmuxEnabled as siblingTmuxEnabled,
 } from "./tmux.js";
@@ -67,8 +72,12 @@ export interface TmuxSessionDeps {
   tmuxAvailable?: () => boolean;
   /** Did the user enable tmux for this invocation? (default: sibling `tmuxEnabled`). */
   tmuxEnabled?: (parsed: ParsedArgs) => boolean;
-  /** Run a tmux session from a spec + attach (default: sibling `runTmux`). */
-  runTmux?: (spec: TmuxSpec) => Promise<number>;
+  /** Are we already inside a tmux client? (default: sibling `insideTmux`). */
+  insideTmux?: () => boolean;
+  /** Run a tmux session from a spec + attach (default: sibling `runTmuxOutcome`). */
+  runTmux?: (spec: TmuxSpec) => Promise<TmuxOutcome>;
+  /** How a window runs this Prometheus (default: `selfInvocation()`). */
+  self?: SelfInvocation;
   /** The single-window fallback (default: P4 `launchSession`). */
   launchSession?: (parsed: ParsedArgs) => Promise<number>;
   /** Output sink for the friendly status lines (default: process.stdout). */
@@ -101,6 +110,41 @@ const AUX_WINDOWS: readonly AuxWindow[] = [
 
 /** The main (REPL) window name + its launcher-session stem. */
 export const MAIN_WINDOW = "main";
+
+/** How a tmux window starts this same Prometheus: the command words + the env it needs. */
+export interface SelfInvocation {
+  argv: string[];
+  env?: Record<string, string>;
+}
+
+/** The engine pins and PATH the launcher set up, carried into every window. */
+const CARRIED_ENV = ["PROMETHEUS_PY", "NEMESIS_BIN", "PROMETHEUS_HOME", "PATH"] as const;
+
+/**
+ * How a tmux window runs THIS Prometheus.
+ *
+ * Every window used to run a bare `prometheus`, resolved through the tmux server's PATH. From a
+ * checkout that is not installed (`./bin/prometheus --tmux`) there is no such command: the main
+ * window died at once, took the session with it, and the user was left with nothing. The running
+ * interpreter + its entry script are the same program by construction, so that is what a window
+ * runs. The launcher's engine pins and PATH ride along as an env prefix, because a tmux server
+ * that is already running hands new windows ITS environment, not this process's.
+ *
+ * Falls back to the bare name when the entry script cannot be found (an embedder, a test).
+ */
+export function selfInvocation(
+  proc: { argv: string[]; execPath: string; execArgv: string[]; env: NodeJS.ProcessEnv } = process,
+  exists: (path: string) => boolean = existsSync,
+): SelfInvocation {
+  const entry = proc.argv[1];
+  if (!entry || !exists(entry)) return { argv: ["prometheus"] };
+  const env: Record<string, string> = {};
+  for (const k of CARRIED_ENV) {
+    const v = proc.env[k];
+    if (typeof v === "string" && v !== "") env[k] = v;
+  }
+  return { argv: [proc.execPath, ...proc.execArgv, entry], env };
+}
 
 /** A stable launcher-session id for a window (deterministic — testable). */
 function windowSessionId(name: string): string {
@@ -154,8 +198,15 @@ export function buildLauncherState(cwd: string): LauncherState {
  * shlex-quotes each token); this only assembles discrete token arrays. NO side
  * effects — unit-tested without tmux.
  */
-export function buildSessionLayout(parsed: ParsedArgs): TmuxSpec {
+export function buildSessionLayout(
+  parsed: ParsedArgs,
+  self: SelfInvocation = { argv: ["prometheus"] },
+): TmuxSpec {
   const cwd = parsed.cwd ?? process.cwd();
+  // every window's command starts with THIS Prometheus, not whatever `prometheus` is on PATH
+  const run = (words: readonly string[]): string[] =>
+    words[0] === "prometheus" ? [...self.argv, ...words.slice(1)] : [...words];
+  const env = self.env && Object.keys(self.env).length > 0 ? { env: self.env } : {};
   const session = resolveSessionName(parsed);
 
   const state = buildLauncherState(cwd);
@@ -165,13 +216,15 @@ export function buildSessionLayout(parsed: ParsedArgs): TmuxSpec {
   const auxById = new Map(AUX_WINDOWS.map((w) => [windowSessionId(w.name), w]));
 
   // windows[0] is ALWAYS the main REPL window (the runner's new-session target).
-  const windows: TmuxWindow[] = [{ name: MAIN_WINDOW, argv: ["prometheus", "repl"], cwd }];
+  const windows: TmuxWindow[] = [
+    { name: MAIN_WINDOW, argv: run(["prometheus", "repl"]), cwd, ...env },
+  ];
 
   for (const { sessions } of grouped) {
     for (const s of sessions) {
       const aux = auxById.get(s.id);
       if (!aux) continue; // the `main` launcher session has no aux entry — skip it.
-      windows.push({ name: aux.name, argv: [...aux.argv], cwd });
+      windows.push({ name: aux.name, argv: run(aux.argv), cwd, ...env });
     }
   }
 
@@ -220,28 +273,35 @@ export async function launchTmuxSession(
 
   const available = deps.tmuxAvailable ?? (() => siblingTmuxAvailable());
   const enabled = deps.tmuxEnabled ?? ((p: ParsedArgs) => siblingTmuxEnabled(p));
+  const nested = deps.insideTmux ?? (() => siblingInsideTmux());
   const runTmux = deps.runTmux ?? ((spec: TmuxSpec) => siblingRunTmux(spec));
 
   // 1) decide whether to multiplex. A probe that throws is treated as "no tmux".
   let multiplex = false;
   try {
-    multiplex = Boolean(available()) && Boolean(enabled(parsed));
+    multiplex = Boolean(available()) && Boolean(enabled(parsed)) && !nested();
   } catch {
     multiplex = false; // a broken probe never blocks the user — degrade to single.
   }
 
-  // 2) single-window fallback (tmux absent or disabled).
+  // 2) single-window fallback (tmux absent, disabled, or already the host).
   if (!multiplex) {
     return runSingleWindow(parsed, launchSingle, write);
   }
 
   // 3) multiplex: build the layout + run tmux. On any tmux failure, degrade.
   try {
-    const spec = buildSessionLayout(parsed);
+    const spec = buildSessionLayout(parsed, deps.self ?? selfInvocation());
     write(
       c.dim(`tmux: session "${spec.session}" — main REPL + ${spec.windows.length - 1} window(s).`),
     );
-    return await runTmux(spec);
+    const outcome = await runTmux(spec);
+    if (outcome.started) return outcome.code;
+    // runTmux returns an exit code, never throws, so a tmux that is installed but cannot give
+    // the user a session (an unknown TERM over ssh, a broken server) used to end right here,
+    // on one red line. The single window is always available.
+    write(c.yellow("tmux could not start the session — compatibility mode: single window."));
+    return runSingleWindow(parsed, launchSingle, write);
   } catch (err) {
     write(
       c.yellow(

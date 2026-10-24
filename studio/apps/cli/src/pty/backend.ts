@@ -55,6 +55,13 @@ export interface PtyProcess {
 
 /** The backend the live-terminal spawns through (injectable). */
 export interface PtyBackend {
+  /**
+   * What the child is given: a real pseudo-terminal (`pty`, node-pty) or PIPES (`pipe`, the
+   * child_process fallback). An interactive CLI behind a pipe sees no terminal, so a caller with
+   * a free terminal of its own hands that over instead (`runOnThisTerminal`). Unset = unknown,
+   * treated as a pty.
+   */
+  readonly kind?: "pty" | "pipe";
   spawn(opts: PtySpawnOptions): PtyProcess;
 }
 
@@ -178,6 +185,7 @@ export function nodePtyAvailable(deps?: Pick<PtyBackendDeps, "requireFn">): bool
  */
 function nodePtyBackend(pty: NodePtyModule): PtyBackend {
   return {
+    kind: "pty",
     spawn(opts: PtySpawnOptions): PtyProcess {
       const proc = pty.spawn(opts.shell, opts.args ?? [], {
         cwd: opts.cwd,
@@ -332,6 +340,7 @@ function unavailableChild(): SpawnedChild {
 /** Wrap a spawner as a child_process-backed PtyBackend (the no-native-addon path). */
 function childProcessBackend(spawnFn: SpawnFn): PtyBackend {
   return {
+    kind: "pipe",
     spawn(opts: PtySpawnOptions): PtyProcess {
       const child = spawnFn(opts.shell, opts.args ?? [], {
         cwd: opts.cwd,
@@ -369,4 +378,113 @@ export function resolvePtyBackend(deps?: PtyBackendDeps): PtyBackend {
     if (pty) return nodePtyBackend(pty);
   }
   return childProcessBackend(deps?.spawnFn ?? runtimeSpawn(requireFn));
+}
+
+/* ------------------------------------------------------------------------- *
+ * The child on THIS terminal (stdio inherited) — when the terminal is free
+ * ------------------------------------------------------------------------- */
+
+/** How a child run on this terminal ended: its exit code, and why it never started, if so. */
+export interface TerminalRunResult {
+  exitCode: number;
+  error?: string;
+}
+
+/** The `spawn` shape `runOnThisTerminal` calls — inherited stdio, so no streams to touch. */
+export type InheritSpawnFn = (
+  command: string,
+  args: readonly string[],
+  options: { cwd: string; env: Record<string, string>; stdio: "inherit" },
+) => {
+  on(event: "exit", cb: (code: number | null, signal: NodeJS.Signals | null) => void): void;
+  on(event: "error", cb: (err: Error) => void): void;
+  kill(signal?: NodeJS.Signals | number): boolean;
+};
+
+/** The process-signal surface `runOnThisTerminal` borrows while the child runs. */
+export interface SignalHost {
+  on(signal: NodeJS.Signals, listener: () => void): unknown;
+  off(signal: NodeJS.Signals, listener: () => void): unknown;
+}
+
+const SIGNAL_NUMBERS: Readonly<Record<string, number>> = {
+  SIGHUP: 1,
+  SIGINT: 2,
+  SIGQUIT: 3,
+  SIGKILL: 9,
+  SIGTERM: 15,
+};
+
+/**
+ * Run a child ON this process's own terminal — stdio inherited — and resolve with its exit
+ * code (128 + signal when a signal ended it). Never rejects.
+ *
+ * WHY: without node-pty (it is not a CLI dependency, so an installed or published CLI never has
+ * it) the only relay is the child_process fallback, which hands the child PIPES. An interactive
+ * CLI — claude, codex, gemini — behind a pipe sees no terminal and drops into print mode or
+ * refuses. tmux used to hide that by being the pty; tmux compatibility mode exposed it. When the
+ * caller's terminal is free (a one-shot `prometheus chat --open`, not the full-screen TUI), the
+ * child should simply HAVE that terminal: real isatty, real resize, real job control.
+ *
+ * SIGNALS: Ctrl-C and Ctrl-\ are the CHILD's keys now. The terminal delivers them to the whole
+ * foreground group, and the shared reaper's SIGINT handler would SIGTERM every tracked child and
+ * exit — killing an assistant the user only meant to interrupt. So while the child runs, this
+ * process holds no-op SIGINT/SIGQUIT listeners (which also tell the reaper someone else owns
+ * shutdown) and forwards SIGTERM/SIGHUP to the child, then lets go of all four. The child is
+ * deliberately NOT tracked by the reaper for the same reason; it cannot outlive this function.
+ */
+export function runOnThisTerminal(
+  opts: PtySpawnOptions,
+  deps: { spawnFn?: InheritSpawnFn; requireFn?: RequireFn; signals?: SignalHost } = {},
+): Promise<TerminalRunResult> {
+  let spawnFn = deps.spawnFn;
+  if (!spawnFn) {
+    try {
+      const req = deps.requireFn ?? runtimeRequire();
+      const cp = req?.("node:child_process") as { spawn?: InheritSpawnFn } | undefined;
+      if (typeof cp?.spawn === "function") spawnFn = cp.spawn;
+    } catch {
+      // fall through to the friendly failure below
+    }
+  }
+  if (!spawnFn) return Promise.resolve({ exitCode: 127, error: "child_process unavailable" });
+  const run = spawnFn;
+  const signals: SignalHost = deps.signals ?? (process as unknown as SignalHost);
+  return new Promise<TerminalRunResult>((resolve) => {
+    let child: ReturnType<InheritSpawnFn> | undefined;
+    const ignore = (): void => {};
+    const forward = (sig: NodeJS.Signals) => (): void => {
+      try {
+        child?.kill(sig);
+      } catch {
+        /* already gone */
+      }
+    };
+    const onTerm = forward("SIGTERM");
+    const onHup = forward("SIGHUP");
+    signals.on("SIGINT", ignore);
+    signals.on("SIGQUIT", ignore);
+    signals.on("SIGTERM", onTerm);
+    signals.on("SIGHUP", onHup);
+    let settled = false;
+    const done = (r: TerminalRunResult): void => {
+      if (settled) return;
+      settled = true;
+      signals.off("SIGINT", ignore);
+      signals.off("SIGQUIT", ignore);
+      signals.off("SIGTERM", onTerm);
+      signals.off("SIGHUP", onHup);
+      resolve(r);
+    };
+    try {
+      child = run(opts.shell, opts.args ?? [], { cwd: opts.cwd, env: opts.env, stdio: "inherit" });
+    } catch (err) {
+      done({ exitCode: 127, error: err instanceof Error ? err.message : String(err) });
+      return;
+    }
+    child.on("error", (err) => done({ exitCode: 127, error: err.message }));
+    child.on("exit", (code, signal) =>
+      done({ exitCode: signal ? 128 + (SIGNAL_NUMBERS[signal] ?? 15) : (code ?? 0) }),
+    );
+  });
 }

@@ -39,6 +39,7 @@ import {
 } from "./commands/provider.js";
 import { runRefactor } from "./commands/refactor-cmd.js";
 import { runRepoCommand } from "./commands/repo-cmd.js";
+import { runRequirements } from "./commands/requirements-cmd.js";
 import { routeViaRegistry, specIdFor } from "./commands/route.js";
 import { runScan } from "./commands/scan.js";
 import { runTasksCommand } from "./commands/schedule-cmd.js";
@@ -162,6 +163,8 @@ async function runByKey(path: string[], ctx: CliContext): Promise<CommandOutcome
   if (head === "doctor" && ctx.args.flags.bridge === true) return runDoctorBridge(ctx);
   // `prometheus doctor` → the comprehensive environment health report (CLI-051).
   if (head === "doctor") return runDoctor(ctx);
+  // `prometheus requirements` → what this OS still needs, and the command (offered, gated).
+  if (head === "requirements") return runRequirements(ctx);
   // prom-native (§6): profiles + config read the shared core, no engine call.
   if (head === "profile") return runProfile(path, ctx);
   if (head === "config") return runConfig(path, ctx);

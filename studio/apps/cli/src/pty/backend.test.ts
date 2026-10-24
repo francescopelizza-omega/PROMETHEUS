@@ -20,12 +20,15 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import {
+  type InheritSpawnFn,
   type PtyBackendDeps,
   type RequireFn,
+  type SignalHost,
   type SpawnFn,
   type SpawnedChild,
   nodePtyAvailable,
   resolvePtyBackend,
+  runOnThisTerminal,
 } from "./backend.js";
 
 /* ── a fake node-pty (IPty) the adapter drives ─────────────────────────────── */
@@ -369,4 +372,116 @@ test("the DEFAULT backend — no injected seams — can actually spawn a process
     setTimeout(() => reject(new Error("the default backend never exited")), 10_000).unref?.();
   });
   assert.equal(exit.exitCode, 0, "the default fallback spawner could not run node at all");
+});
+
+/* ── runOnThisTerminal: the child gets this process's own terminal ─────────── */
+
+function fakeSignalHost(): SignalHost & { fire(sig: NodeJS.Signals): void; count(): number } {
+  const ls = new Map<NodeJS.Signals, Set<() => void>>();
+  return {
+    on(sig, l) {
+      if (!ls.has(sig)) ls.set(sig, new Set());
+      ls.get(sig)?.add(l);
+    },
+    off(sig, l) {
+      ls.get(sig)?.delete(l);
+    },
+    fire(sig) {
+      for (const l of ls.get(sig) ?? []) l();
+    },
+    count() {
+      let n = 0;
+      for (const set of ls.values()) n += set.size;
+      return n;
+    },
+  };
+}
+
+function fakeInheritSpawn() {
+  const calls: { command: string; args: readonly string[]; options: Record<string, unknown> }[] =
+    [];
+  const killed: (NodeJS.Signals | number | undefined)[] = [];
+  let exitCb: ((code: number | null, signal: NodeJS.Signals | null) => void) | undefined;
+  const spawnFn: InheritSpawnFn = (command, args, options) => {
+    calls.push({ command, args, options });
+    return {
+      on(event: "exit" | "error", cb: never) {
+        if (event === "exit") exitCb = cb;
+      },
+      kill(sig) {
+        killed.push(sig);
+        return true;
+      },
+    } as ReturnType<InheritSpawnFn>;
+  };
+  return {
+    spawnFn,
+    calls,
+    killed,
+    exit: (c: number | null, s: NodeJS.Signals | null) => exitCb?.(c, s),
+  };
+}
+
+test("runOnThisTerminal inherits stdio and resolves with the child's exit code", async () => {
+  const sp = fakeInheritSpawn();
+  const signals = fakeSignalHost();
+  const run = runOnThisTerminal(
+    { shell: "claude", args: ["--model", "opus"], cwd: "/proj", env: { A: "1" } },
+    { spawnFn: sp.spawnFn, signals },
+  );
+  assert.equal(sp.calls[0]?.command, "claude");
+  assert.deepEqual(sp.calls[0]?.args, ["--model", "opus"]);
+  assert.equal(sp.calls[0]?.options.stdio, "inherit");
+  assert.equal(sp.calls[0]?.options.cwd, "/proj");
+  sp.exit(3, null);
+  assert.deepEqual(await run, { exitCode: 3 });
+});
+
+test("runOnThisTerminal: Ctrl-C is the child's — ignored here; TERM/HUP are forwarded; all released after", async () => {
+  // The shared reaper SIGTERMs every tracked child on SIGINT and exits when it is the only
+  // listener. While the child owns the terminal, a no-op listener keeps both from happening.
+  const sp = fakeInheritSpawn();
+  const signals = fakeSignalHost();
+  const run = runOnThisTerminal(
+    { shell: "codex", cwd: "/", env: {} },
+    { spawnFn: sp.spawnFn, signals },
+  );
+  assert.equal(signals.count(), 4);
+  signals.fire("SIGINT");
+  signals.fire("SIGQUIT");
+  assert.deepEqual(sp.killed, [], "an interrupt must not kill the assistant");
+  signals.fire("SIGTERM");
+  signals.fire("SIGHUP");
+  assert.deepEqual(sp.killed, ["SIGTERM", "SIGHUP"]);
+  sp.exit(null, "SIGTERM");
+  assert.deepEqual(await run, { exitCode: 143 });
+  assert.equal(signals.count(), 0, "listeners leaked past the child");
+});
+
+test("runOnThisTerminal: a spawn that throws is a friendly 127, never a rejection", async () => {
+  const signals = fakeSignalHost();
+  const r = await runOnThisTerminal(
+    { shell: "nope", cwd: "/", env: {} },
+    {
+      spawnFn: () => {
+        throw new Error("spawn nope ENOENT");
+      },
+      signals,
+    },
+  );
+  assert.deepEqual(r, { exitCode: 127, error: "spawn nope ENOENT" });
+  assert.equal(signals.count(), 0);
+});
+
+test("runOnThisTerminal with the DEFAULT spawner really runs a child", async () => {
+  const r = await runOnThisTerminal(
+    {
+      shell: process.execPath,
+      args: ["-e", "process.exit(5)"],
+      cwd: process.cwd(),
+      env: { PATH: process.env.PATH ?? "" },
+    },
+    { signals: fakeSignalHost() },
+  );
+  assert.equal(r.exitCode, 5);
 });
