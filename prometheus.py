@@ -15754,6 +15754,15 @@ def _runner_hint(runner: str, model: str, kind: str) -> str:
         }.get(runner, "the conversation exceeds the model's context — start a new chat")
     if kind == "not-loaded":
         return f"no model is loaded and JIT loading is off — `lms load {model}`"
+    if kind == "load-failed":
+        # Measured 2026-10-29: a cold 24 GB load pushed kernel pressure to "warning" for a moment,
+        # a memory watchdog unloaded the half-loaded model, and LM Studio answered HTTP 400
+        # "Engine protocol startup was aborted". The same request succeeded once the disk cache
+        # was warm. Say what usually causes it instead of a bare "rejected".
+        return ("the server stopped loading the model before it finished — usually memory: a "
+                "memory watchdog unloaded it under pressure, or it does not fit. Retry (a second "
+                "load reads from the warm disk cache); if it repeats, free memory or load it with "
+                f"a smaller context (`lms load {model} --context-length 32768`)")
     return ""
 
 
@@ -15955,6 +15964,7 @@ def chat_local(model: str, prompt: Optional[str], runner: str = "ollama",
                 detail = str(reply["error"])
                 low = detail.lower()
                 kind = ("overflow" if "context" in low and ("length" in low or "overflow" in low)
+                        else "load-failed" if "failed to load model" in low
                         else "not-loaded" if "no models loaded" in low else "server-error")
                 fail(kind, detail)
                 Log.err(f"{runner}: {detail}")
@@ -16001,6 +16011,7 @@ def chat_local(model: str, prompt: Optional[str], runner: str = "ollama",
             low = detail.lower()
             kind = ("unknown-model" if e.code == 404 or "not found" in low
                     else "overflow" if "context" in low and ("length" in low or "overflow" in low)
+                    else "load-failed" if "failed to load model" in low
                     else "not-loaded" if "no models loaded" in low else "rejected")
             fail(kind, f"HTTP {e.code}" + (f": {detail}" if detail else ""))
             hint = _runner_hint(runner, model, kind)

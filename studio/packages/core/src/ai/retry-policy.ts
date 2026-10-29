@@ -186,6 +186,12 @@ export function localRunnerHint(detail: string): string | undefined {
   ) {
     return "the conversation no longer fits the context the model was LOADED with — /compact, or reload the model with a larger context (LM Studio: `lms load <model> --context-length 32768`; Ollama: OLLAMA_CONTEXT_LENGTH)";
   }
+  // LM Studio's 400 when a load is cut short. Measured 2026-10-29: a cold 24 GB load briefly
+  // pushed kernel pressure to "warning", a memory watchdog unloaded the half-loaded model, and
+  // the same request succeeded once the disk cache was warm.
+  if (d.includes("failed to load model")) {
+    return "the server stopped loading the model before it finished — usually memory: a memory watchdog unloaded it under pressure, or it does not fit. Retry (a second load reads from the warm disk cache); if it repeats, free memory or load it with a smaller context (`lms load <model> --context-length 32768`)";
+  }
   if (d.includes("no models loaded")) {
     return "LM Studio has no model loaded and just-in-time loading is off — load one (`lms load <model>`), or turn on JIT loading in LM Studio's server settings";
   }

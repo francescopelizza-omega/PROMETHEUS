@@ -135,6 +135,18 @@ def test_the_JSON_error_says_WHAT_happened_not_unreachable(monkeypatch, capsys):
     assert "unreachable" not in env["error"]
 
 
+def test_a_load_cut_short_is_named_not_just_rejected(monkeypatch, capsys):
+    # the live 400 LM Studio sent when a memory watchdog unloaded the model mid-load (2026-10-29)
+    aborted = {"error": 'Failed to load model "nvidia/nemotron-3-nano-omni". '
+                        "Error: Engine protocol startup was aborted."}
+    with Server({"GET /api/v1/models": (200, V1_MODELS, "application/json"),
+                 "POST /v1/chat/completions": (400, aborted, "application/json")}) as srv:
+        rc, env = run_chat(monkeypatch, capsys, "lmstudio", srv, "nvidia/nemotron-3-nano-omni")
+    assert rc == 1
+    assert env["error_kind"] == "load-failed"
+    assert "memory" in prom._runner_hint("lmstudio", "m", "load-failed")
+
+
 def test_a_reasoning_only_reply_is_not_a_failure(monkeypatch, capsys):
     reply = sse({"choices": [{"delta": {"reasoning_content": "thinking…"}}]},
                 {"choices": [{"delta": {"content": None}, "finish_reason": "stop"}]})

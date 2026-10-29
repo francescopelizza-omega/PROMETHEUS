@@ -208,5 +208,18 @@ test("local runner rejections say what to do: overflow, nothing loaded, unknown 
     localRunnerHint('{"error":{"type":"model_not_found"}}') ?? "",
     /does not have that model/,
   );
+  // the live 400 LM Studio sent when a watchdog unloaded the model mid-load (2026-10-29)
+  assert.match(
+    describeAiFailure(
+      new AiHttpError({
+        endpointId: "local:lmstudio",
+        status: 400,
+        statusText: "Bad Request",
+        detail:
+          'Failed to load model "nvidia/nemotron-3-nano-omni". Error: Engine protocol startup was aborted.',
+      }),
+    ),
+    /stopped loading the model.*memory/,
+  );
   assert.equal(localRunnerHint("some other 400"), undefined);
 });
