@@ -17,6 +17,13 @@ import type { ModelEndpointsResult } from "../../../shared/ipc-contract.js";
 import type { RendererEndpoint } from "./ai-client.js";
 import { fimFamilyOf } from "./fim-cache.js";
 
+/**
+ * Loopback ports that are gateways TO the cloud (FreeLLMAPI on :3001 forwards every prompt to a
+ * free-tier provider). The renderer cannot import core, so this mirrors core's
+ * `LOOPBACK_CLOUD_GATEWAY_PORTS` (ai/remote-hosts.ts); `endpoints.test.ts` pins the two together.
+ */
+export const LOOPBACK_CLOUD_GATEWAY_PORTS: readonly number[] = Object.freeze([3001]);
+
 /** Classify an endpoint base URL as local (free/offline/private) or cloud. */
 export function localityOf(baseUrl: string): "local" | "cloud" {
   try {
@@ -24,6 +31,9 @@ export function localityOf(baseUrl: string): "local" | "cloud" {
     if (u.protocol === "unix:" || u.protocol === "file:") return "local";
     // URL.hostname wraps IPv6 in brackets ("[::1]") — strip them so loopback matches.
     const h = u.hostname.toLowerCase().replace(/^\[|\]$/g, "");
+    const loopback = h === "localhost" || h === "::1" || h === "0.0.0.0" || /^127\./.test(h);
+    // local by address, cloud by data flow: its prompts leave the machine
+    if (loopback && LOOPBACK_CLOUD_GATEWAY_PORTS.includes(Number(u.port))) return "cloud";
     if (h === "localhost" || h === "127.0.0.1" || h === "::1" || h === "0.0.0.0") return "local";
     if (h.endsWith(".local")) return "local";
     return "cloud";

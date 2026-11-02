@@ -114,7 +114,12 @@ export function isHeadersTimeout(err: unknown): boolean {
 
 /** Whether a thrown value is worth trying again. */
 export function isRetryableAiError(err: unknown): boolean {
-  if (err instanceof AiHttpError) return isRetryableStatus(err.status);
+  if (err instanceof AiHttpError) {
+    // A gateway's 503 that means "nothing is configured" is not transient: FreeLLMAPI answers it
+    // when no provider key is usable, and a retry asks again for the same nothing.
+    if (gatewayHint(err.detail)) return false;
+    return isRetryableStatus(err.status);
+  }
   // An abort is the user's decision, never a transient fault.
   if (isAbort(err)) return false;
   // Not transient: see `isHeadersTimeout` — a retry repeats the slow part, or loads it twice.
@@ -174,6 +179,19 @@ export const AI_RETRY_DEFAULTS = Object.freeze({
  * overflows") and "No models loaded" were cut at 200 characters into a generic "rejected",
  * which removed the part that said what to do.
  */
+/**
+ * What a FreeLLMAPI gateway's refusal means, in words. Measured live 2026-10-30 (v0.16.12) with no
+ * provider key added: `503 {"error":{"code":"no_providers_configured","message":"No candidate
+ * model has a configured, usable provider key. …"}}`.
+ */
+export function gatewayHint(detail: string): string | undefined {
+  const d = detail.toLowerCase();
+  if (d.includes("no_providers_configured")) {
+    return "the FreeLLMAPI gateway has no usable provider key — open http://127.0.0.1:3001 → Keys and add one key per provider (Groq, Cerebras, Google AI Studio, …)";
+  }
+  return undefined;
+}
+
 export function localRunnerHint(detail: string): string | undefined {
   const d = detail.toLowerCase();
   if (
@@ -212,7 +230,7 @@ export function describeAiFailure(err: unknown): string {
       return `rate limited by the provider${wait}`;
     }
     if (err.status === 401 || err.status === 403) return "the endpoint rejected the credentials";
-    const known = localRunnerHint(err.detail);
+    const known = gatewayHint(err.detail) ?? localRunnerHint(err.detail);
     if (known) return known;
     if (err.status >= 500) return `the provider had a server error (${err.status})`;
     return `the request was rejected (${err.status}): ${err.detail.slice(0, 200)}`;

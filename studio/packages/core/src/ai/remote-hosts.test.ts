@@ -13,6 +13,7 @@ import {
   findRemoteHost,
   hostOf,
   isDeclaredRemoteHost,
+  isLoopbackCloudGateway,
   isPrivateAddress,
   localityWithRemotes,
   normalizeHost,
@@ -58,6 +59,25 @@ test("the historical behaviour is untouched for everyone who never uses this", (
   // …and a real provider stays cloud, declared hosts or not.
   assert.equal(localityWithRemotes("https://api.anthropic.com", [gpuBox]), "cloud");
   assert.equal(localityWithRemotes("not a url"), "cloud", "an unparseable URL fails closed");
+});
+
+test("a loopback GATEWAY to the cloud is cloud — its prompts leave the machine", () => {
+  // FreeLLMAPI on 127.0.0.1:3001 forwards every request to a free-tier provider. Read from the
+  // address alone it was "local", so a never-send-to-cloud policy let prompts out through it.
+  for (const url of [
+    "http://127.0.0.1:3001/v1",
+    "http://localhost:3001",
+    "http://[::1]:3001/v1",
+    "http://0.0.0.0:3001",
+  ]) {
+    assert.equal(isLoopbackCloudGateway(url), true, url);
+    assert.equal(localityWithRemotes(url), "cloud", url);
+  }
+  // the port alone is not enough: a remote host on 3001 is cloud for the ordinary reason, and
+  // a real local runner is untouched
+  assert.equal(isLoopbackCloudGateway("http://192.168.1.5:3001"), false);
+  assert.equal(localityWithRemotes("http://127.0.0.1:1234/v1"), "local");
+  assert.equal(isLoopbackCloudGateway("garbage"), false);
 });
 
 test("host matching ignores case, port, brackets and a trailing dot", () => {

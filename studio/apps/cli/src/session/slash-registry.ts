@@ -2595,6 +2595,21 @@ export const SLASH_REGISTRY: readonly SlashCmd[] = Object.freeze([
   verb("accounts", "config", "List installed agent CLIs (claude/codex/gemini/…).", {
     verb: "scan",
   }),
+  // The guided FreeLLMAPI procedure (commands/freellmapi-cmd.ts). In-session it renders the
+  // engine's result; `connect` stores the gateway key through the same verified keychain path as
+  // `provider connect`. The gate refuses any release with a CRITICAL advisory, every time.
+  verb(
+    "freellmapi",
+    "models",
+    "FreeLLMAPI free-tier gateway on 127.0.0.1:3001: setup (strict nemesis gate), status, start/stop (RAM-watched), connect.",
+    { args: "[status|setup|check|install|start|stop|connect|uninstall]" },
+  ),
+  verb(
+    "services",
+    "apps",
+    "External services Prometheus runs (self-hosted apps, FreeLLMAPI): RAM vs cap, advisory quarantine, stop.",
+    { args: "[list|stop <name>|cap <name> <MB>]" },
+  ),
   verb("login", "config", "Sign into a paid CLI (launches it).", {
     verb: "chat",
     fixed: ["--cli"],

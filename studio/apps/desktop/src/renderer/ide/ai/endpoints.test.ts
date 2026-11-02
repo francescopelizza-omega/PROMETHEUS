@@ -9,7 +9,14 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { contextWindowOf, localityOf, toEndpoints } from "./endpoints.js";
+import { ai } from "@prometheus/core";
+
+import {
+  LOOPBACK_CLOUD_GATEWAY_PORTS,
+  contextWindowOf,
+  localityOf,
+  toEndpoints,
+} from "./endpoints.js";
 
 test("localityOf: loopback / unix / .local are local, the rest is cloud", () => {
   assert.equal(localityOf("http://localhost:11434"), "local");
@@ -20,6 +27,12 @@ test("localityOf: loopback / unix / .local are local, the rest is cloud", () => 
   assert.equal(localityOf("http://box.local:1234"), "local");
   assert.equal(localityOf("https://api.openai.com"), "cloud");
   assert.equal(localityOf("https://example.com/v1"), "cloud");
+});
+
+test("localityOf: a loopback gateway to the cloud is cloud, same ports as core", () => {
+  assert.equal(localityOf("http://127.0.0.1:3001/v1"), "cloud");
+  assert.equal(localityOf("http://localhost:3001"), "cloud");
+  assert.deepEqual([...LOOPBACK_CLOUD_GATEWAY_PORTS], [...ai.LOOPBACK_CLOUD_GATEWAY_PORTS]);
 });
 
 test("localityOf: an unparseable URL fails safe to cloud", () => {

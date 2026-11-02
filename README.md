@@ -897,6 +897,41 @@ metered open-weight model for its free local pull. A reasoning-effort knob (off 
 high / max) adapts per model and runtime, preferring a live capability probe over guessing from a
 model's name.
 
+### FreeLLMAPI gateway (many free tiers, one key)
+
+[FreeLLMAPI](https://github.com/tashfeenahmed/freellmapi) pools the free tiers of the providers
+whose keys you add to it behind one OpenAI-compatible endpoint on `127.0.0.1:3001`.
+`prometheus freellmapi setup` (or `/freellmapi setup` in a session) is the guided procedure:
+
+1. **Check:** Node 20.18–24 (it refuses Node 25+), git, disk and the port.
+2. **Install:** fetch a pinned release and remove what is never installed (desktop app, docs,
+   tests). Then run nemesis on exactly what remains. **Any CRITICAL advisory refuses the
+   install**, with every advisory and its fixed version listed. There is no `--force`, gate mode
+   or remembered approval that overrides it. Every attempt re-checks against a fresh advisory
+   database, so the install goes through once upstream ships a release without one. The build
+   then runs with every npm lifecycle script off, except the native SQLite addon.
+3. **Start:** it runs on loopback only, which is checked after start. Its RAM cap is 512 MB; it
+   was measured at 85–98 MB idle.
+4. **Dashboard and connect:** add one key per provider in the dashboard, and leave the anonymous
+   rows off. Then `prometheus freellmapi connect` verifies the gateway key and stores it in the
+   keychain, and `/models` → FreeLLMAPI → `auto` selects it.
+
+Its prompts leave your machine, so Prometheus classifies the gateway as **cloud**, even though it
+listens on loopback. A never-send-to-cloud policy blocks it.
+
+**External services watch.** One watcher looks after every long-running process Prometheus starts
+for a third party: a self-hosted app's server, a docker app you enabled, or the gateway.
+
+- **RAM:** a service whose memory stays over its cap for three polls in a row is stopped. A
+  single spike never stops it.
+- **Kernel pressure:** if the kernel reports critical memory pressure, every external service
+  is stopped.
+- **Advisories:** every 6 hours, each service's lockfiles are re-gated. A CRITICAL advisory
+  stops the service and quarantines it until a re-install passes the gate. A scanner error is
+  logged and never stops anything.
+
+`prometheus services` lists every service with its memory against its cap.
+
 ### Exposing PROMETHEUS's own tools outward
 
 `studio/apps/mcp-server` runs the inverse direction of the client above: a real MCP server exposing

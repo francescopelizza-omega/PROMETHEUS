@@ -82,6 +82,9 @@ const ENGINE_SURFACE: readonly PrometheusSubcommand[] = [
   "auto",
   // disk space — the disk_map sidecar behind `prometheus.py disk-space`.
   "disk-space",
+  // FreeLLMAPI gateway + the external-services watch (2026-10-30).
+  "freellmapi",
+  "services",
 ];
 
 /** A FAKE EngineClient: records calls, never spawns. Every method resolves ok. */

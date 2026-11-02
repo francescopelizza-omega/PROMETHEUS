@@ -223,3 +223,17 @@ test("local runner rejections say what to do: overflow, nothing loaded, unknown 
   );
   assert.equal(localRunnerHint("some other 400"), undefined);
 });
+
+test("a gateway with no usable provider key says so, and is not retried", () => {
+  // the live 503 FreeLLMAPI v0.16.12 answered with no provider key added (2026-10-30)
+  const err = new AiHttpError({
+    endpointId: "cloud:freellmapi:auto",
+    status: 503,
+    statusText: "Service Unavailable",
+    detail:
+      '{"error":{"message":"No candidate model has a configured, usable provider key. Add provider API keys in the dashboard.","type":"service_unavailable","code":"no_providers_configured"}}',
+  });
+  assert.equal(isRetryableAiError(err), false, "a retry asks again for the same nothing");
+  assert.match(describeAiFailure(err), /no usable provider key.*127\.0\.0\.1:3001/);
+  assert.equal(isRetryableAiError(httpErr(503)), true, "an ordinary 503 still retries");
+});

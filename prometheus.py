@@ -5090,7 +5090,8 @@ def _run_in(cmd: list[str], cwd: Path, timeout: Optional[int] = None) -> int:
         Log.err(f"command timed out after {e.timeout:.0f}s (killed): {printable}"); return 124
 
 
-def _run_detached(cmd: list[str], cwd: Path, log_path: Path) -> int:
+def _run_detached(cmd: list[str], cwd: Path, log_path: Path,
+                  service: Optional[str] = None, lockfiles=()) -> int:
     """Start a long-running SERVICE and LET IT RUN — don't block, don't terminate it.
 
     For ModelTool.serve_steps (a foreground server that must keep running). The process is
@@ -5098,6 +5099,9 @@ def _run_detached(cmd: list[str], cwd: Path, log_path: Path) -> int:
     exiting; stdin is closed and stdout/stderr tee to `log_path`. Returns 0 once launched
     (we never wait on it). This is the "unless it is necessary to let it run" exception to
     the terminate-the-shell default.
+
+    With `service`, the process is recorded in the external-services registry, so the RAM +
+    advisory watch looks after it and `prometheus services stop <name>` can stop it.
     """
     printable = " ".join(cmd)
     if DRY_RUN:
@@ -5106,9 +5110,13 @@ def _run_detached(cmd: list[str], cwd: Path, log_path: Path) -> int:
     try:
         log_path.parent.mkdir(parents=True, exist_ok=True)
         logf = open(log_path, "ab")                       # child keeps the handle; intentionally not closed here
-        subprocess.Popen(cmd, cwd=str(cwd), stdout=logf, stderr=subprocess.STDOUT,
-                         stdin=subprocess.DEVNULL, start_new_session=True)
+        child = subprocess.Popen(cmd, cwd=str(cwd), stdout=logf, stderr=subprocess.STDOUT,
+                                 stdin=subprocess.DEVNULL, start_new_session=True)
         Log.ok(f"started in background (let it run): {printable}")
+        if service:
+            ent = service_register(service, child.pid, cwd=cwd, log=log_path, lockfiles=lockfiles)
+            Log.step(f"watched: RAM cap {ent['ram_cap_mb']} MB · advisories re-checked every "
+                     f"{SERVICE_ADVISORY_EVERY_S // 3600} h · `prometheus services list`")
         Log.step(f"logs: {log_path}  ·  stop it via the tool's own control (e.g. `models disable <id>` for docker apps)")
         return 0
     except FileNotFoundError:
@@ -5442,8 +5450,10 @@ def _install_into_layout(t: ModelTool, osi: OSInfo, base: Path) -> int:
         # BLOCK ⇒ do not launch, keep the install on disk, exit 1.
         if not _serve_tree_gate_ok(t, lay):
             Log.warn(f"{t.name} live tree blocked by security gate at serve time (install kept on disk)"); return 1
-    for cmd in serve:
-        _run_detached(list(cmd), lay.live, lay.root / f"{t.id}-serve.log")
+    serve_locks = _service_lockfiles(lay.live) if serve else []
+    for i, cmd in enumerate(serve):
+        _run_detached(list(cmd), lay.live, lay.root / f"{t.id}-serve.log",
+                      service=t.id if i == 0 else f"{t.id}-{i}", lockfiles=serve_locks)
 
     versions = man.get("versions", [])
     versions = [v for v in versions if int(v["n"]) != n]
@@ -6504,6 +6514,8 @@ def _service_repo(t: RepoTool, path: Optional[str], on: bool) -> int:
         Log.head(f"{verb} {t.name}")
         rc = run([docker, "start" if on else "stop", t.docker_name], check=False).returncode
         Log.ok(f"{t.name} {'started' if on else 'stopped'}") if rc == 0 else Log.err(f"docker {'start' if on else 'stop'} failed (rc={rc})")
+        if rc == 0:
+            _track_docker_service(t.id, [t.docker_name], on)
         return 0 if rc == 0 else 1
     # compose
     folder = _apps_dir(t.id, path)
@@ -6516,10 +6528,28 @@ def _service_repo(t: RepoTool, path: Optional[str], on: bool) -> int:
     action = ["up", "-d"] if on else ["down"]
     rc = _run_in(pref + action, srcdir)
     if rc == 0:
+        names: list = []
+        if on:
+            try:
+                cp = subprocess.run(pref + ["ps", "--format", "{{.Name}}"], cwd=str(srcdir),
+                                    capture_output=True, text=True, timeout=30, check=False)  # noqa: S603
+                names = (cp.stdout or "").split()
+            except (OSError, subprocess.SubprocessError):
+                names = []
+        _track_docker_service(t.id, names, on and bool(names))
         Log.ok(f"{t.name} {'is up' if on else 'stopped (containers down; data + folder kept)'}")
         if on and t.port:
             Log.step(f"serves on http://localhost:{t.port}")
     return 0 if rc == 0 else 1
+
+
+def _track_docker_service(name: str, containers: list, on: bool) -> None:
+    """Hand a docker app to the external-services watch (RAM cap per app), or take it back."""
+    if on and containers:
+        ent = service_register(name, kind="docker", containers=containers)
+        Log.step(f"watched: RAM cap {ent['ram_cap_mb']} MB · `prometheus services list`")
+    else:
+        service_unregister(name)
 
 
 # ---- uninstall -------------------------------------------------------------
@@ -12011,7 +12041,7 @@ def _maybe_startup_pin_audit(osi: "OSInfo", command: str) -> None:
     in JSON / dry-run / gate-off, and for the audit command itself to avoid recursion."""
     if (JSON_OUT or DRY_RUN or GATE_MODE == "off"
             or command in ("skills", "quarantine", "schedule", "doctor", "describe",
-                           "tutorial", "methods", "chat")):
+                           "tutorial", "methods", "chat", "services")):
         return
     try:
         if _URL_PIN_STARTED.exists():
@@ -16235,6 +16265,1144 @@ class _JsonAwareParser(argparse.ArgumentParser):
         super().error(message)
 
 
+# ============================================================================
+#  SECTION — External services: one registry, one RAM + advisory watch
+# ============================================================================
+# Every long-running process Prometheus starts for a THIRD-PARTY install — a self-hosted app's
+# serve step, a docker app it enables, the FreeLLMAPI gateway — is recorded in
+# services/registry.json, and ONE detached watcher (`prometheus services watch`, started on
+# demand, gone when nothing is left to watch) looks after all of them:
+#
+#   * RAM. A service whose process tree stays above its cap for SERVICE_RAM_STRIKES polls in a
+#     row is stopped. One sample over the line is a spike, not a leak, and never kills.
+#   * Kernel memory pressure CRITICAL for the same number of polls stops every external service:
+#     they are restartable, the user's session is not.
+#   * Advisories. Every SERVICE_ADVISORY_EVERY_S the service's installed lockfiles are re-gated
+#     against a freshly refreshed nemesis DB. A CRITICAL finding stops the service and
+#     QUARANTINES it — `start` refuses until a re-install passes the gate again. A scanner
+#     ERROR never kills: an unverifiable reading is logged and left alone, because killing a
+#     healthy service on a reading nobody could verify is the failure this watch must not have.
+#
+# Signals go only to the pid that was registered AND still has the start time recorded with it
+# (`ps -o lstart=`), so a recycled pid is never hit, and never to pid ≤ 1.
+SERVICES_DIR = PROM_DIR / "services"
+SERVICES_REGISTRY = SERVICES_DIR / "registry.json"
+SERVICES_QUARANTINE = SERVICES_DIR / "quarantine.json"
+SERVICES_CAPS = SERVICES_DIR / "caps.json"
+SERVICES_WATCH_PID = SERVICES_DIR / "watch.pid"
+SERVICES_WATCH_LOG = SERVICES_DIR / "watch.log"
+# Generous on purpose: the cap is a runaway guard, not a budget. A self-hosted app that
+# legitimately uses 800 MB must never be killed for it. `services cap NAME MB` changes one.
+SERVICE_RAM_CAP_MB_DEFAULT = 2048
+SERVICE_DOCKER_RAM_CAP_MB_DEFAULT = 4096
+SERVICE_WATCH_POLL_S = 5.0
+SERVICE_RAM_STRIKES = 3
+SERVICE_PRESSURE_STRIKES = 3
+SERVICE_PRESSURE_CRITICAL = 4          # kern.memorystatus_vm_pressure_level: 1 normal, 2 warn, 4 critical
+SERVICE_ADVISORY_EVERY_S = 6 * 3600
+_SERVICE_LOCKFILES = ("package-lock.json", "npm-shrinkwrap.json", "pnpm-lock.yaml", "yarn.lock",
+                      "requirements.txt", "poetry.lock", "uv.lock", "Pipfile.lock",
+                      "Cargo.lock", "go.sum", "Gemfile.lock", "composer.lock")
+
+
+def _proc_stamp(pid) -> str:
+    """The process's start time as `ps` prints it — together with the pid, its identity. A zombie
+    (exited, not yet reaped) has none: it is gone, and it holds no memory worth watching."""
+    if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 1:
+        return ""
+    try:
+        cp = subprocess.run(["ps", "-o", "stat=,lstart=", "-p", str(pid)], capture_output=True,
+                            text=True, timeout=5, check=False)  # noqa: S603 — fixed argv
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    parts = (cp.stdout or "").split()
+    if not parts or parts[0].startswith("Z"):
+        return ""
+    return " ".join(parts[1:])
+
+
+def _svc_read(path: Path) -> dict:
+    return _read_json(path)
+
+
+def _svc_write(path: Path, data: dict) -> None:
+    if DRY_RUN:
+        return
+    _write_json_atomic(path, data)
+    try:
+        os.chmod(path, 0o600)
+    except OSError:
+        pass
+
+
+def _svc_log(msg: str) -> None:
+    try:
+        SERVICES_DIR.mkdir(parents=True, exist_ok=True)
+        with open(SERVICES_WATCH_LOG, "a", encoding="utf-8") as fh:
+            fh.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {msg}\n")
+    except OSError:
+        pass
+
+
+def _service_lockfiles(root: Path, depth: int = 2) -> list[Path]:
+    """The dependency lockfiles under `root` (two levels deep) — what the advisory re-check reads."""
+    out: list[Path] = []
+    try:
+        base = Path(root)
+        for name in _SERVICE_LOCKFILES:
+            out += [p for p in base.glob(name) if p.is_file()]
+            for d in range(1, depth + 1):
+                out += [p for p in base.glob("/".join(["*"] * d) + "/" + name)
+                        if p.is_file() and "node_modules" not in p.parts]
+    except OSError:
+        return out
+    return sorted(set(out))
+
+
+def _service_cap_mb(name: str, kind: str = "process", default: Optional[int] = None) -> int:
+    """The RAM cap: `services cap` override > PROMETHEUS_SERVICE_RAM_MB > the caller's default."""
+    caps = _svc_read(SERVICES_CAPS)
+    if isinstance(caps.get(name), int):
+        return int(caps[name])
+    env = (os.environ.get("PROMETHEUS_SERVICE_RAM_MB") or "").strip()
+    if env.isdigit():
+        return int(env)
+    if default is not None:
+        return int(default)
+    return SERVICE_DOCKER_RAM_CAP_MB_DEFAULT if kind == "docker" else SERVICE_RAM_CAP_MB_DEFAULT
+
+
+def service_register(name: str, pid: Optional[int] = None, *, cwd: Optional[Path] = None,
+                     log: Optional[Path] = None, ram_cap_mb: Optional[int] = None,
+                     lockfiles=(), port: Optional[int] = None, kind: str = "process",
+                     containers=(), advisory_checked: bool = False) -> dict:
+    """Record one external service and make sure the watcher is running."""
+    entry = {
+        "name": name, "kind": kind, "pid": pid,
+        "stamp": _proc_stamp(pid) if kind == "process" else "",
+        "cwd": str(cwd or ""), "log": str(log or ""),
+        "ram_cap_mb": _service_cap_mb(name, kind, ram_cap_mb),
+        "lockfiles": [str(p) for p in lockfiles], "port": port,
+        "containers": [str(c) for c in containers],
+        "registered_at": time.time(),
+        "advisory_checked_at": time.time() if advisory_checked else 0,
+    }
+    if DRY_RUN:
+        return entry
+    reg = _svc_read(SERVICES_REGISTRY)
+    reg[name] = entry
+    _svc_write(SERVICES_REGISTRY, reg)
+    _ensure_service_watcher()
+    return entry
+
+
+def service_unregister(name: str) -> None:
+    reg = _svc_read(SERVICES_REGISTRY)
+    if name in reg:
+        del reg[name]
+        _svc_write(SERVICES_REGISTRY, reg)
+
+
+def service_quarantine(name: str) -> Optional[dict]:
+    q = _svc_read(SERVICES_QUARANTINE).get(name)
+    return q if isinstance(q, dict) else None
+
+
+def quarantine_service(name: str, reason: str, details: list) -> None:
+    q = _svc_read(SERVICES_QUARANTINE)
+    q[name] = {"reason": reason, "details": list(details)[:20],
+               "at": time.strftime("%Y-%m-%dT%H:%M:%S")}
+    _svc_write(SERVICES_QUARANTINE, q)
+
+
+def clear_quarantine(name: str) -> None:
+    q = _svc_read(SERVICES_QUARANTINE)
+    if name in q:
+        del q[name]
+        _svc_write(SERVICES_QUARANTINE, q)
+
+
+def _ps_table() -> dict:
+    """pid → (ppid, rss_kb) for every process, from ONE `ps` call."""
+    try:
+        cp = subprocess.run(["ps", "-A", "-o", "pid=,ppid=,rss="], capture_output=True,
+                            text=True, timeout=10, check=False)  # noqa: S603 — fixed argv
+    except (OSError, subprocess.SubprocessError):
+        return {}
+    out: dict = {}
+    for line in (cp.stdout or "").splitlines():
+        parts = line.split()
+        if len(parts) == 3 and all(p.isdigit() for p in parts):
+            out[int(parts[0])] = (int(parts[1]), int(parts[2]))
+    return out
+
+
+def _tree_rss_kb(pid, table: dict) -> int:
+    """RSS of `pid` and every descendant — a server's workers count against its cap."""
+    kids: dict = {}
+    for p, (pp, _rss) in table.items():
+        kids.setdefault(pp, []).append(p)
+    total, seen, stack = 0, set(), [pid]
+    while stack:
+        p = stack.pop()
+        if p in seen or p not in table:
+            continue
+        seen.add(p)
+        total += table[p][1]
+        stack.extend(kids.get(p, ()))
+    return total
+
+
+def _docker_names_running(names) -> set:
+    docker = _docker_bin()
+    if not docker or not names:
+        return set()
+    try:
+        cp = subprocess.run([docker, "ps", "--format", "{{.Names}}"], capture_output=True,
+                            text=True, timeout=15, check=False)  # noqa: S603
+    except (OSError, subprocess.SubprocessError):
+        return set()
+    return set((cp.stdout or "").split()) & set(names)
+
+
+def _docker_mem_mb(names) -> dict:
+    """container → MiB from `docker stats --no-stream` (e.g. "85.3MiB / 7.66GiB")."""
+    docker = _docker_bin()
+    if not docker or not names:
+        return {}
+    try:
+        cp = subprocess.run([docker, "stats", "--no-stream", "--format", "{{.Name}}\t{{.MemUsage}}",
+                             *names], capture_output=True, text=True, timeout=30, check=False)  # noqa: S603
+    except (OSError, subprocess.SubprocessError):
+        return {}
+    scale = {"b": 1 / 1048576, "kib": 1 / 1024, "kb": 1 / 1024, "mib": 1, "mb": 1,
+             "gib": 1024, "gb": 1024, "tib": 1048576, "tb": 1048576}
+    out: dict = {}
+    for line in (cp.stdout or "").splitlines():
+        name, _, usage = line.partition("\t")
+        m = re.match(r"\s*([\d.]+)\s*([A-Za-z]+)", usage)
+        if m and m.group(2).lower() in scale:
+            out[name.strip()] = float(m.group(1)) * scale[m.group(2).lower()]
+    return out
+
+
+def _svc_alive(entry: dict) -> bool:
+    if entry.get("kind") == "docker":
+        return bool(_docker_names_running(entry.get("containers") or []))
+    pid = entry.get("pid")
+    stamp = entry.get("stamp") or ""
+    return bool(stamp) and _proc_stamp(pid) == stamp
+
+
+def _svc_rss_mb(entry: dict, table: dict, dmem: dict) -> float:
+    if entry.get("kind") == "docker":
+        return sum(dmem.get(c, 0.0) for c in entry.get("containers") or [])
+    return _tree_rss_kb(entry.get("pid"), table) / 1024
+
+
+def _ram_strike(rss_mb: float, cap_mb: int, strikes: int) -> tuple:
+    """(strikes after this sample, stop now?). Over the cap adds a strike, at or under it clears
+    them; only SERVICE_RAM_STRIKES in a row stop the service. A cap ≤ 0 means "not RAM-watched"."""
+    if cap_mb <= 0:
+        return 0, False
+    if rss_mb > cap_mb:
+        strikes += 1
+        return strikes, strikes >= SERVICE_RAM_STRIKES
+    return 0, False
+
+
+def _kernel_pressure() -> Optional[int]:
+    if platform.system() != "Darwin":
+        return None
+    try:
+        cp = subprocess.run(["sysctl", "-n", "kern.memorystatus_vm_pressure_level"],
+                            capture_output=True, text=True, timeout=5, check=False)  # noqa: S603
+        return int((cp.stdout or "").strip())
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return None
+
+
+def _svc_stop(entry: dict, reason: str) -> bool:
+    """SIGTERM the service's process group, SIGKILL it after 8 s; docker: `docker stop`."""
+    import signal as _signal
+    name = entry.get("name", "?")
+    if entry.get("kind") == "docker":
+        docker = _docker_bin()
+        names = entry.get("containers") or []
+        if not (docker and names):
+            return False
+        subprocess.run([docker, "stop", *names], capture_output=True, timeout=120, check=False)  # noqa: S603
+        _svc_log(f"STOP {name} (docker {', '.join(names)}): {reason}")
+        return True
+    pid = entry.get("pid")
+    stamp = entry.get("stamp") or ""
+    if not isinstance(pid, int) or pid <= 1 or pid == os.getpid():
+        return False
+    if not stamp or _proc_stamp(pid) != stamp:
+        return False        # already gone, or the pid now belongs to another process — leave it
+
+    def _sig(s) -> None:
+        try:
+            if os.getpgid(pid) == pid:
+                os.killpg(pid, s)
+            else:
+                os.kill(pid, s)
+        except (ProcessLookupError, PermissionError):
+            pass
+
+    _sig(_signal.SIGTERM)
+    deadline = time.monotonic() + 8.0
+    while time.monotonic() < deadline:
+        if _proc_stamp(pid) != stamp:
+            break
+        time.sleep(0.25)
+    else:
+        _sig(_signal.SIGKILL)
+    _svc_log(f"STOP {name} (pid {pid}): {reason}")
+    return True
+
+
+def _critical_findings(v: dict) -> list:
+    """Every CRITICAL finding a gate verdict names, as one readable line each."""
+    out: list = []
+    for f in v.get("top_findings") or []:
+        if str(f.get("severity", "")).upper() == "CRITICAL":
+            what = f.get("snippet") or f.get("rule") or f.get("rule_id") or "CRITICAL finding"
+            out.append(f"{what} — {os.path.basename(str(f.get('path') or ''))}")
+    n = int((v.get("severity_counts") or {}).get("CRITICAL") or 0)
+    seen: set = set()
+    out = [x for x in out if not (x in seen or seen.add(x))]
+    if n > len(out):
+        out.append(f"(+{n - len(out)} more CRITICAL finding(s) in the full report)" if out
+                   else f"{n} CRITICAL finding(s)")
+    return out
+
+
+def _service_gate_decision(v: dict) -> tuple:
+    """(install?, why, critical lines) for an EXTERNAL service. Stricter than `enforce_gate`:
+    any CRITICAL finding, a BLOCK, or a scan that could not run refuses — and there is no
+    --force, no PROMETHEUS_GATE=warn|off and no remembered approval that turns it into a yes.
+    A WARN with no CRITICAL left installs, and its HIGH findings are shown, not hidden."""
+    verdict = str(v.get("verdict") or "error")
+    crit = _critical_findings(v)
+    if verdict == "error":
+        return False, f"nemesis could not vet it ({v.get('error') or 'scanner error'}) — fail-closed", crit
+    if crit:
+        return False, f"{len(crit)} CRITICAL finding(s) — the release is not safe to install", crit
+    if verdict == "block":
+        reasons = "; ".join(str(r) for r in (v.get("blocking_reasons") or [])[:4]) or "blocked"
+        return False, f"nemesis BLOCKs it: {reasons}", crit
+    if verdict == "warn":
+        return True, "no CRITICAL finding — HIGH/MEDIUM findings remain (shown above)", crit
+    return True, "nemesis ALLOW", crit
+
+
+def _svc_advisory_scan(entry: dict) -> tuple:
+    """('ok' | 'critical' | 'unverified', reasons) for a service's installed lockfiles."""
+    reasons: list = []
+    unverified = False
+    for lf in entry.get("lockfiles") or []:
+        if not os.path.isfile(lf):
+            continue
+        v = nemesis_gate(lf)
+        if v.get("verdict") == "error":
+            unverified = True
+            continue
+        reasons += _critical_findings(v)
+    if reasons:
+        return "critical", reasons
+    return ("unverified" if unverified else "ok"), []
+
+
+def _svc_mark_checked(name: str) -> None:
+    reg = _svc_read(SERVICES_REGISTRY)
+    if name in reg:
+        reg[name]["advisory_checked_at"] = time.time()
+        _svc_write(SERVICES_REGISTRY, reg)
+
+
+def watch_services(once: bool = False, poll_s: float = SERVICE_WATCH_POLL_S) -> int:
+    """The watcher loop. Returns when nothing has been left to watch for two polls."""
+    strikes: dict = {}
+    p_strikes = 0
+    idle = 0
+    last_sample = 0.0
+    while True:
+        reg = _svc_read(SERVICES_REGISTRY)
+        live = {n: e for n, e in reg.items() if isinstance(e, dict) and _svc_alive(e)}
+        for gone in set(reg) - set(live):
+            _svc_log(f"GONE {gone}: exited on its own — no longer watched")
+            service_unregister(gone)
+            strikes.pop(gone, None)
+        if live:
+            idle = 0
+            table = _ps_table()
+            dmem = _docker_mem_mb([c for e in live.values() if e.get("kind") == "docker"
+                                   for c in e.get("containers") or []])
+            pressure = _kernel_pressure()
+            p_strikes = p_strikes + 1 if (pressure or 0) >= SERVICE_PRESSURE_CRITICAL else 0
+            if p_strikes >= SERVICE_PRESSURE_STRIKES:
+                for name, e in live.items():
+                    _svc_stop(e, f"kernel memory pressure CRITICAL for {p_strikes} polls")
+                    service_unregister(name)
+                p_strikes = 0
+                live = {}
+            for name, e in live.items():
+                cap = int(e.get("ram_cap_mb") or 0)
+                rss = _svc_rss_mb(e, table, dmem)
+                strikes[name], stop = _ram_strike(rss, cap, strikes.get(name, 0))
+                if stop:
+                    _svc_stop(e, f"RAM {rss:.0f} MB stayed over its {cap} MB cap for "
+                                 f"{SERVICE_RAM_STRIKES} polls")
+                    service_unregister(name)
+                    strikes.pop(name, None)
+                    continue
+                if time.time() - float(e.get("advisory_checked_at") or 0) >= SERVICE_ADVISORY_EVERY_S:
+                    state, reasons = _svc_advisory_scan(e)
+                    _svc_mark_checked(name)
+                    if state == "critical":
+                        _svc_stop(e, "CRITICAL advisory: " + "; ".join(reasons[:3]))
+                        quarantine_service(name, "critical-advisory", reasons)
+                        service_unregister(name)
+                    elif state == "unverified":
+                        _svc_log(f"WARN {name}: advisory re-check could not run (scanner error) "
+                                 f"— nothing done on an unverified reading")
+            if time.time() - last_sample >= 60:
+                last_sample = time.time()
+                parts = [f"{n}={_svc_rss_mb(e, table, dmem):.0f}/{e.get('ram_cap_mb')}MB"
+                         for n, e in live.items()]
+                _svc_log(f"SAMPLE pressure={pressure} " + " ".join(parts))
+        else:
+            idle += 1
+        if once or idle >= 2:
+            return 0
+        time.sleep(poll_s)
+
+
+def _ensure_service_watcher() -> None:
+    """Start the detached watcher unless one is already running (PROMETHEUS_SERVICE_WATCH=off
+    skips it — tests, and a user who runs `services watch` under their own supervisor)."""
+    if DRY_RUN or (os.environ.get("PROMETHEUS_SERVICE_WATCH") or "").lower() in ("0", "off", "false", "no"):
+        return
+    cur = _svc_read(SERVICES_WATCH_PID)
+    if cur.get("stamp") and _proc_stamp(cur.get("pid")) == cur.get("stamp"):
+        return
+    try:
+        SERVICES_DIR.mkdir(parents=True, exist_ok=True)
+        logf = open(SERVICES_WATCH_LOG, "ab")          # the child keeps the handle
+        p = subprocess.Popen([sys.executable, os.path.abspath(__file__), "services", "watch"],
+                             stdin=subprocess.DEVNULL, stdout=logf, stderr=subprocess.STDOUT,
+                             start_new_session=True)  # noqa: S603 — fixed argv, no shell
+        _svc_write(SERVICES_WATCH_PID, {"pid": p.pid, "stamp": _proc_stamp(p.pid)})
+    except OSError as e:
+        Log.warn(f"could not start the service watcher ({e}) — run `prometheus services watch`")
+
+
+def _services_rows() -> list:
+    reg = _svc_read(SERVICES_REGISTRY)
+    quar = _svc_read(SERVICES_QUARANTINE)
+    table = _ps_table()
+    docker_names = [c for e in reg.values() if isinstance(e, dict) and e.get("kind") == "docker"
+                    for c in e.get("containers") or []]
+    dmem = _docker_mem_mb(docker_names)
+    rows = []
+    for name, e in sorted(reg.items()):
+        if not isinstance(e, dict):
+            continue
+        alive = _svc_alive(e)
+        rows.append({"name": name, "kind": e.get("kind"), "pid": e.get("pid"),
+                     "running": alive, "rss_mb": round(_svc_rss_mb(e, table, dmem), 1) if alive else 0,
+                     "ram_cap_mb": e.get("ram_cap_mb"), "port": e.get("port"),
+                     "advisory_checked_at": e.get("advisory_checked_at") or None,
+                     "quarantined": quar.get(name)})
+    for name, q in sorted(quar.items()):
+        if name not in reg:
+            rows.append({"name": name, "running": False, "quarantined": q})
+    return rows
+
+
+def cmd_services(args, osi: "OSInfo") -> int:
+    action = getattr(args, "action", None) or "list"
+    if action == "watch":
+        cur = _svc_read(SERVICES_WATCH_PID)
+        if (cur.get("pid") != os.getpid() and cur.get("stamp")
+                and _proc_stamp(cur.get("pid")) == cur.get("stamp")):
+            Log.info(f"a service watcher is already running (pid {cur.get('pid')})")
+            return 0
+        _svc_write(SERVICES_WATCH_PID, {"pid": os.getpid(), "stamp": _proc_stamp(os.getpid())})
+        _svc_log(f"WATCH start (pid {os.getpid()}, poll {SERVICE_WATCH_POLL_S:.0f}s)")
+        rc = watch_services(once=bool(getattr(args, "once", False)))
+        _svc_log("WATCH end — nothing left to watch")
+        return rc
+    if action == "cap":
+        name, mb = getattr(args, "name", None), getattr(args, "mb", None)
+        if not name or mb is None or not str(mb).isdigit():
+            Log.err("usage: services cap NAME MB   (0 = do not RAM-watch NAME)")
+            return 2
+        caps = _svc_read(SERVICES_CAPS)
+        caps[name] = int(mb)
+        _svc_write(SERVICES_CAPS, caps)
+        reg = _svc_read(SERVICES_REGISTRY)
+        if name in reg:
+            reg[name]["ram_cap_mb"] = int(mb)
+            _svc_write(SERVICES_REGISTRY, reg)
+        if JSON_OUT:
+            return emit_json({"command": "services", "action": "cap", "ok": True, "name": name, "ram_cap_mb": int(mb)})
+        Log.ok(f"{name}: RAM cap {mb} MB")
+        return 0
+    if action == "stop":
+        name = getattr(args, "name", None)
+        e = _svc_read(SERVICES_REGISTRY).get(name or "")
+        if not e:
+            Log.err(f"no running external service named {name!r} — see `prometheus services list`")
+            return 2
+        stopped = _svc_stop(e, "stopped by the user")
+        service_unregister(name)
+        if JSON_OUT:
+            return emit_json({"command": "services", "action": "stop", "ok": True, "name": name, "stopped": stopped})
+        Log.ok(f"{name} stopped") if stopped else Log.info(f"{name} was not running")
+        return 0
+    rows = _services_rows()
+    if JSON_OUT:
+        return emit_json({"command": "services", "action": "list", "ok": True, "services": rows,
+                          "watcher": _svc_read(SERVICES_WATCH_PID) or None})
+    Log.head("External services (RAM + advisory watch)")
+    if not rows:
+        Log.info("none — nothing Prometheus installed is running")
+        return 0
+    for r in rows:
+        q = r.get("quarantined")
+        state = ("QUARANTINED: " + str(q.get("reason"))) if q else ("running" if r.get("running") else "stopped")
+        mem = f"{r.get('rss_mb')}/{r.get('ram_cap_mb')} MB" if r.get("running") else ""
+        print(f"  {r['name']:<16} {state:<34} {mem}", file=Log.STREAM)
+    Log.step(f"log: {SERVICES_WATCH_LOG}")
+    return 0
+
+
+# ============================================================================
+#  SECTION — FreeLLMAPI: a free-tier gateway, installed only through the gate
+# ============================================================================
+# github.com/tashfeenahmed/freellmapi pools many providers' free tiers behind one
+# OpenAI-compatible /v1 on 127.0.0.1:3001. Assessed 2026-10-30 against v0.16.12:
+#   * the source is clean — no dropper, no exfiltration; but its lockfile pins dependencies with
+#     CRITICAL advisories (zod 3.x CVE-2023-54404, fixed only in zod 4.6.6; proxy-addr; …), so
+#     the gate refuses it. Every `install` re-runs the gate on a fresh clone against a fresh
+#     advisory DB; the day upstream ships a release with no CRITICAL left, it installs.
+#   * run natively it binds `::` (every interface); Prometheus forces HOST=127.0.0.1 and checks
+#     the listener after start.
+#   * measured 85–98 MB RSS idle, 0 % CPU, one loopback socket, 434 MB on disk after pruning.
+#   * it is LOCAL by address but CLOUD by data flow: prompts leave the machine. Core classifies
+#     it as cloud (see ai/remote-hosts.ts), so a never-send-to-cloud policy blocks it.
+FREELLMAPI_REPO = "https://github.com/tashfeenahmed/freellmapi.git"
+FREELLMAPI_REF = "v0.16.12"
+FREELLMAPI_PORT = 3001
+FREELLMAPI_ROOT = SERVICES_DIR / "freellmapi"
+FREELLMAPI_RAM_CAP_MB = 512
+FREELLMAPI_NODE_MIN = (20, 18)
+FREELLMAPI_NODE_MAX = (25, 0)          # exclusive: its `engines` field refuses Node 25+
+# Never installed, so never gated and never kept: the Electron app, docs, tests, its own
+# agent-setup CLI (Prometheus does that part itself). The gate scans what will be on disk.
+FREELLMAPI_NOT_INSTALLED = ("desktop", "docs", "examples", "repo-assets", ".github", ".claude",
+                            "cli", "docker")
+_FREELLMAPI_TEST_DIRS = ("__tests__", "__snapshots__", "e2e")
+_FREELLMAPI_TEST_FILE = re.compile(r"(\.test\.|\.spec\.|^README.*\.md$)", re.I)
+# Platforms that route WITHOUT an account. Kilo documents that free prompts are logged for
+# training; none of them says who serves the model. Prometheus's own free rotation excludes them.
+FREELLMAPI_ANON_PLATFORMS = ("kilo", "llm7", "ovh", "aihorde")
+
+
+def _freellmapi_paths(root: Optional[Path] = None) -> dict:
+    r = Path(root or FREELLMAPI_ROOT)
+    return {"root": r, "app": r / "app", "data": r / "data", "logs": r / "logs",
+            "env": r / "freellmapi.env", "manifest": r / "manifest.json",
+            "db": r / "data" / "freellmapi.db"}
+
+
+def _node_version(node: str) -> Optional[tuple]:
+    try:
+        cp = subprocess.run([node, "-v"], capture_output=True, text=True, timeout=10, check=False)  # noqa: S603
+    except (OSError, subprocess.SubprocessError):
+        return None
+    m = re.match(r"v(\d+)\.(\d+)\.(\d+)", (cp.stdout or "").strip())
+    return tuple(int(x) for x in m.groups()) if m else None
+
+
+def _node_candidates() -> list:
+    seen: set = set()
+    out: list = []
+
+    def add(p: Optional[str]) -> None:
+        if p and os.path.isfile(p) and os.access(p, os.X_OK):
+            rp = os.path.realpath(p)
+            if rp not in seen:
+                seen.add(rp)
+                out.append(p)
+
+    add(shutil.which("node"))
+    for pre in ("/opt/homebrew/opt", "/usr/local/opt"):
+        for v in ("22", "24", "20"):
+            add(f"{pre}/node@{v}/bin/node")
+    for pat in ("~/.nvm/versions/node/v2*/bin/node",
+                "~/.local/share/fnm/node-versions/v2*/installation/bin/node"):
+        for p in sorted(_glob(os.path.expanduser(pat)), reverse=True):
+            add(p)
+    add(os.path.expanduser("~/.volta/bin/node"))
+    return out
+
+
+def _freellmapi_node(candidates: Optional[list] = None) -> Optional[tuple]:
+    """(node path, "vX.Y.Z") inside FreeLLMAPI's engines range — Node 22 LTS first, then newest."""
+    best = None
+    for path in (candidates if candidates is not None else _node_candidates()):
+        v = _node_version(path)
+        if not v or not (FREELLMAPI_NODE_MIN <= v[:2] < FREELLMAPI_NODE_MAX):
+            continue
+        rank = (v[0] == 22, v)
+        if best is None or rank > best[0]:
+            best = (rank, path, v)
+    return (best[1], "v%d.%d.%d" % best[2]) if best else None
+
+
+def _freellmapi_prune(stage: Path) -> int:
+    """Delete what is never installed BEFORE the gate, so the gate scans exactly what stays."""
+    n = 0
+    for d in FREELLMAPI_NOT_INSTALLED:
+        p = stage / d
+        if p.is_dir() and not p.is_symlink():
+            shutil.rmtree(p, ignore_errors=True)
+            n += 1
+    for dirpath, dirnames, filenames in os.walk(stage):
+        if ".git" in Path(dirpath).parts:
+            continue
+        for d in list(dirnames):
+            if d in _FREELLMAPI_TEST_DIRS:
+                shutil.rmtree(Path(dirpath) / d, ignore_errors=True)
+                dirnames.remove(d)
+                n += 1
+        for f in filenames:
+            if _FREELLMAPI_TEST_FILE.search(f):
+                try:
+                    (Path(dirpath) / f).unlink()
+                    n += 1
+                except OSError:
+                    pass
+    return n
+
+
+_SECRETISH_ENV = re.compile(r"(KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|AUTH|COOKIE|SESSION)", re.I)
+
+
+def _third_party_env(node: Optional[str] = None) -> dict:
+    """The environment a third-party build or server gets: no secret-looking variable of the
+    user's (it stores its own keys), no NODE_ENV leaking in, the chosen Node first on PATH."""
+    env = {k: v for k, v in os.environ.items()
+           if not _SECRETISH_ENV.search(k) and k not in ("NODE_ENV", "NODE_OPTIONS")}
+    if node:
+        env["PATH"] = os.path.dirname(node) + os.pathsep + env.get("PATH", "/usr/bin:/bin")
+    env["npm_config_update_notifier"] = "false"
+    env["npm_config_fund"] = "false"
+    return env
+
+
+def _freellmapi_env_file(paths: dict) -> Path:
+    """Create the server's env file once (0600). The ENCRYPTION_KEY in it decrypts every provider
+    key FreeLLMAPI stores, so it is generated once and never rotated by a re-install."""
+    import secrets as _secrets
+    envp = paths["env"]
+    if envp.exists() or DRY_RUN:
+        return envp
+    paths["data"].mkdir(parents=True, exist_ok=True)
+    os.chmod(paths["data"], 0o700)
+    body = "\n".join([
+        "# FreeLLMAPI server settings, written by Prometheus. HOST and PORT are forced at start.",
+        f"ENCRYPTION_KEY={_secrets.token_hex(32)}",
+        f"FREEAPI_DB_PATH={paths['db']}",
+        f"FREEAPI_DB_BACKUP_PATH={paths['data'] / 'freellmapi.db.backup'}",
+        "FREEAPI_DB_DIR_HARDENING=1",
+        # its release check phones GitHub; Prometheus's own /updates covers it
+        "FREELLMAPI_UPDATE_CHECK=off",
+        # key health checks every 15 min instead of 5: a third of the background traffic
+        "HEALTH_CHECK_INTERVAL_MS=900000",
+        "REQUEST_ANALYTICS_RETENTION_DAYS=30",
+        "REQUEST_ANALYTICS_MAX_ROWS=20000",
+        "# CATALOG_SYNC_DISABLED=1   # uncomment to stop the twice-daily signed model-list fetch",
+        "",
+    ])
+    envp.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(str(envp), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        fh.write(body)
+    return envp
+
+
+def _read_env_file(p: Path) -> dict:
+    out: dict = {}
+    try:
+        for line in p.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if line and not line.startswith("#") and "=" in line:
+                k, _, v = line.partition("=")
+                out[k.strip()] = v.strip()
+    except OSError:
+        pass
+    return out
+
+
+def _freellmapi_server_env(paths: dict, node: str) -> dict:
+    env = _third_party_env(node)
+    env.update(_read_env_file(paths["env"]))
+    env.update({"HOST": "127.0.0.1", "PORT": str(FREELLMAPI_PORT), "NODE_ENV": "production",
+                "FREEAPI_DB_PATH": str(paths["db"])})
+    return env
+
+
+def _http_get(url: str, timeout: float = 3.0, headers: Optional[dict] = None) -> tuple:
+    """(status, body) — status 0 when nothing answered."""
+    req = urllib.request.Request(url, headers=headers or {})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:  # noqa: S310 — loopback URL we built
+            return r.status, r.read(2_000_000).decode("utf-8", "replace")
+    except urllib.error.HTTPError as e:
+        return e.code, (e.read(4000) or b"").decode("utf-8", "replace")
+    except (urllib.error.URLError, OSError, ValueError):
+        return 0, ""
+
+
+def _port_listeners(port: int) -> list:
+    """[(pid, address)] listening on TCP `port`, from lsof."""
+    try:
+        cp = subprocess.run(["lsof", "-nP", f"-iTCP:{port}", "-sTCP:LISTEN", "-F", "pn"],
+                            capture_output=True, text=True, timeout=10, check=False)  # noqa: S603
+    except (OSError, subprocess.SubprocessError):
+        return []
+    out, pid = [], None
+    for line in (cp.stdout or "").splitlines():
+        if line.startswith("p") and line[1:].isdigit():
+            pid = int(line[1:])
+        elif line.startswith("n") and pid is not None:
+            out.append((pid, line[1:]))
+    return out
+
+
+def _loopback_only(addrs: list) -> bool:
+    def host(a: str) -> str:
+        return a.rsplit(":", 1)[0].strip("[]")
+    return bool(addrs) and all(host(a) in ("127.0.0.1", "::1", "localhost") for a in addrs)
+
+
+def _freellmapi_db_read(db: Path, sql: str, params: tuple = ()) -> list:
+    """Read-only query of FreeLLMAPI's own SQLite file (never written by Prometheus)."""
+    import sqlite3
+    if not db.is_file():
+        return []
+    try:
+        con = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=2)
+        try:
+            return list(con.execute(sql, params))
+        finally:
+            con.close()
+    except sqlite3.Error:
+        return []
+
+
+def _freellmapi_unified_key(paths: dict) -> str:
+    rows = _freellmapi_db_read(paths["db"], "SELECT value FROM settings WHERE key = 'unified_api_key'")
+    return str(rows[0][0]) if rows and rows[0][0] else ""
+
+
+def _freellmapi_key_summary(paths: dict) -> dict:
+    """Which providers have keys — and the two things to warn about: anonymous rows, and several
+    accounts at one provider (opening extra accounts to dodge a quota breaks most providers' terms)."""
+    rows = _freellmapi_db_read(paths["db"], "SELECT platform, COUNT(*) FROM api_keys WHERE enabled = 1 GROUP BY platform")
+    platforms = {str(p): int(n) for p, n in rows}
+    return {"platforms": platforms,
+            "anonymous": sorted(p for p in platforms if p in FREELLMAPI_ANON_PLATFORMS),
+            "several_keys": sorted(p for p, n in platforms.items() if n > 1)}
+
+
+def _freellmapi_status(paths: Optional[dict] = None) -> dict:
+    paths = paths or _freellmapi_paths()
+    man = _read_json(paths["manifest"])
+    entry = _svc_read(SERVICES_REGISTRY).get("freellmapi") or {}
+    running = bool(entry) and _svc_alive(entry)
+    listeners = _port_listeners(FREELLMAPI_PORT)
+    ping, _ = _http_get(f"http://127.0.0.1:{FREELLMAPI_PORT}/api/ping", 2.0)
+    st = {
+        "installed": bool(man) and (paths["app"] / "server" / "dist" / "index.js").is_file(),
+        "ref": man.get("ref"), "commit": man.get("commit"), "installed_at": man.get("installed_at"),
+        "gate": man.get("gate"), "node": man.get("node"),
+        "running": running, "pid": entry.get("pid") if running else None,
+        "rss_mb": round(_tree_rss_kb(entry.get("pid"), _ps_table()) / 1024, 1) if running else 0,
+        "ram_cap_mb": entry.get("ram_cap_mb"),
+        "answering": ping == 200,
+        "listeners": [a for _, a in listeners],
+        "loopback_only": _loopback_only([a for _, a in listeners]) if listeners else None,
+        "foreign_listener": bool(listeners) and not running,
+        "quarantined": service_quarantine("freellmapi"),
+        "url": f"http://127.0.0.1:{FREELLMAPI_PORT}",
+        "base_url": f"http://127.0.0.1:{FREELLMAPI_PORT}/v1",
+        "keys": _freellmapi_key_summary(paths),
+        "has_unified_key": bool(_freellmapi_unified_key(paths)),
+        "root": str(paths["root"]),
+    }
+    return st
+
+
+def _freellmapi_check() -> dict:
+    node = _freellmapi_node()
+    npm = os.path.join(os.path.dirname(node[0]), "npm") if node else None
+    try:
+        free_gb = round(shutil.disk_usage(str(PROM_DIR if PROM_DIR.exists() else Path.home())).free / 1e9, 1)
+    except OSError:
+        free_gb = None
+    listeners = _port_listeners(FREELLMAPI_PORT)
+    ours = _svc_read(SERVICES_REGISTRY).get("freellmapi") or {}
+    return {
+        "node": node[0] if node else None, "node_version": node[1] if node else None,
+        "npm": npm if npm and os.path.isfile(npm) else None,
+        "git": shutil.which("git"),
+        "disk_free_gb": free_gb,
+        "port_free": not listeners or any(pid == ours.get("pid") for pid, _ in listeners),
+        "ok": bool(node and npm and os.path.isfile(npm) and shutil.which("git")
+                   and (free_gb is None or free_gb >= 1.5)),
+        "fix_node": None if node else (
+            "install Node 22 LTS — macOS: `brew install node@22` · Linux: your package manager "
+            "or nvm (`nvm install 22`). FreeLLMAPI refuses Node 25+, and Prometheus does not "
+            "change your default node."),
+    }
+
+
+def _freellmapi_install(ref: str, paths: dict) -> dict:
+    """Clone → prune → strict gate → build. Returns a result dict; nothing is installed unless
+    the gate says yes, and a refusal leaves any existing install untouched."""
+    chk = _freellmapi_check()
+    if not chk["ok"]:
+        return {"ok": False, "stage": "check", "check": chk,
+                "error": chk.get("fix_node") or "missing prerequisite (node/npm/git/1.5 GB disk)"}
+    paths["root"].mkdir(parents=True, exist_ok=True)
+    stage = paths["root"] / f".stage-{int(time.time())}"
+    try:
+        env = _third_party_env()
+        env["GIT_TERMINAL_PROMPT"] = "0"
+        Log.step(f"fetch {FREELLMAPI_REPO} @ {ref}")
+        cp = subprocess.run(["git", "clone", "--quiet", "--depth", "1", "--branch", ref, "--",
+                             FREELLMAPI_REPO, str(stage)], env=env, capture_output=True, text=True,
+                            timeout=300, check=False)  # noqa: S603 — fixed argv
+        if cp.returncode != 0:
+            return {"ok": False, "stage": "fetch", "error": (cp.stderr or cp.stdout or "git clone failed").strip()[-400:]}
+        commit = subprocess.run(["git", "-C", str(stage), "rev-parse", "HEAD"], capture_output=True,
+                                text=True, timeout=30, check=False).stdout.strip()
+        shutil.rmtree(stage / ".git", ignore_errors=True)
+        pruned = _freellmapi_prune(stage)
+        Log.step(f"removed {pruned} path(s) that are never installed (desktop app, docs, tests, its CLI)")
+        Log.step("nemesis gate — strict: any CRITICAL finding refuses, no override")
+        v = nemesis_gate(str(stage))
+        ok, why, crit = _service_gate_decision(v)
+        _gate_audit("freellmapi", f"{FREELLMAPI_REPO}@{ref}", v,
+                    decision="proceed" if ok else "refuse")
+        gate = {"verdict": v.get("verdict"), "risk_score": v.get("risk_score"),
+                "severity_counts": v.get("severity_counts"), "why": why, "critical": crit,
+                "blocking_reasons": [str(r).replace(str(stage) + "/", "") for r in (v.get("blocking_reasons") or [])][:8],
+                "high": [f.get("snippet") or f.get("rule_id") for f in (v.get("top_findings") or [])
+                         if str(f.get("severity")).upper() == "HIGH"][:8]}
+        if not ok:
+            return {"ok": False, "stage": "gate", "ref": ref, "commit": commit, "gate": gate, "error": why}
+        node = chk["node"]
+        npm = chk["npm"]
+        paths["logs"].mkdir(parents=True, exist_ok=True)
+        build_log = paths["logs"] / "install.log"
+        benv = _third_party_env(node)
+        steps = [
+            ([npm, "ci", "--ignore-scripts", "--no-audit", "--no-fund"],
+             "dependencies — every lifecycle script OFF"),
+            # the ONE install script run: the native SQLite addon, a package the gate just saw in
+            # the lockfile (its script fetches the prebuilt binary for that exact version)
+            ([npm, "rebuild", "better-sqlite3"], "better-sqlite3 native addon"),
+            ([npm, "run", "build", "-w", "server"], "build the server"),
+            ([npm, "run", "build", "-w", "client"], "build the dashboard"),
+            ([npm, "prune", "--omit=dev", "--ignore-scripts", "--no-audit", "--no-fund"],
+             "drop build-only packages"),
+        ]
+        with open(build_log, "ab") as lf:
+            for argv, what in steps:
+                Log.step(what)
+                try:
+                    rc = subprocess.run(argv, cwd=str(stage), env=benv, stdin=subprocess.DEVNULL,
+                                        stdout=lf, stderr=subprocess.STDOUT, timeout=1200,
+                                        check=False).returncode  # noqa: S603 — fixed argv
+                except subprocess.TimeoutExpired:
+                    rc = 124
+                if rc != 0:
+                    return {"ok": False, "stage": "build", "error": f"`{' '.join(argv[1:])}` failed (rc {rc}) — see {build_log}",
+                            "gate": gate}
+        was = _svc_read(SERVICES_REGISTRY).get("freellmapi")
+        if was:
+            _svc_stop(was, "replaced by a new install")
+            service_unregister("freellmapi")
+        old = paths["root"] / "app.prev"
+        if paths["app"].exists():
+            shutil.rmtree(old, ignore_errors=True)
+            paths["app"].rename(old)
+        stage.rename(paths["app"])
+        shutil.rmtree(old, ignore_errors=True)
+        _freellmapi_env_file(paths)
+        clear_quarantine("freellmapi")          # a release that passed the gate again
+        man = {"ref": ref, "commit": commit, "installed_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+               "node": chk["node_version"], "gate": {k: gate[k] for k in ("verdict", "risk_score", "severity_counts")}}
+        _write_json_atomic(paths["manifest"], man)
+        return {"ok": True, "stage": "done", "ref": ref, "commit": commit, "gate": gate,
+                "size": _human_size_dir(paths["app"])}
+    finally:
+        if stage.exists():
+            shutil.rmtree(stage, ignore_errors=True)
+        with contextlib.suppress(OSError):
+            paths["root"].rmdir()                 # only when a refusal left it empty
+
+
+def _freellmapi_start(paths: dict) -> dict:
+    q = service_quarantine("freellmapi")
+    if q:
+        return {"ok": False, "error": f"quarantined since {q.get('at')}: {q.get('reason')} — "
+                                      f"{'; '.join(q.get('details') or [])[:300]}. "
+                                      f"Re-install (it re-runs the gate) once upstream fixes it."}
+    st = _freellmapi_status(paths)
+    if not st["installed"]:
+        return {"ok": False, "error": "not installed — `prometheus freellmapi install`"}
+    if st["running"] and st["answering"]:
+        return {"ok": True, "already": True, "pid": st["pid"], "url": st["url"]}
+    if st["foreign_listener"]:
+        return {"ok": False, "error": f"port {FREELLMAPI_PORT} is held by another process "
+                                      f"({', '.join(st['listeners'])}) — not starting a second server"}
+    lock = paths["app"] / "package-lock.json"
+    Log.step("advisory re-check of the installed lockfile (fresh nemesis DB)")
+    state, reasons = _svc_advisory_scan({"lockfiles": [str(lock)]})
+    if state == "critical":
+        quarantine_service("freellmapi", "critical-advisory", reasons)
+        return {"ok": False, "error": "a CRITICAL advisory now affects the installed release — "
+                                      "quarantined, not started: " + "; ".join(reasons[:3])}
+    node = _freellmapi_node()
+    if not node:
+        return {"ok": False, "error": _freellmapi_check()["fix_node"]}
+    paths["logs"].mkdir(parents=True, exist_ok=True)
+    log = paths["logs"] / "server.log"
+    logf = open(log, "ab")                      # the child keeps the handle
+    p = subprocess.Popen([node[0], "server/dist/index.js"], cwd=str(paths["app"]),
+                         env=_freellmapi_server_env(paths, node[0]), stdin=subprocess.DEVNULL,
+                         stdout=logf, stderr=subprocess.STDOUT, start_new_session=True)  # noqa: S603
+    entry = service_register("freellmapi", p.pid, cwd=paths["app"], log=log,
+                             ram_cap_mb=FREELLMAPI_RAM_CAP_MB, lockfiles=[lock],
+                             port=FREELLMAPI_PORT, advisory_checked=(state == "ok"))
+    deadline = time.monotonic() + 40
+    while time.monotonic() < deadline:
+        if p.poll() is not None:
+            service_unregister("freellmapi")
+            return {"ok": False, "error": f"the server exited during start (rc {p.returncode}) — see {log}"}
+        code, _ = _http_get(f"http://127.0.0.1:{FREELLMAPI_PORT}/api/ping", 1.0)
+        if code == 200:
+            break
+        time.sleep(0.5)
+    else:
+        _svc_stop(entry, "did not answer within 40 s")
+        service_unregister("freellmapi")
+        return {"ok": False, "error": f"no answer on port {FREELLMAPI_PORT} within 40 s — see {log}"}
+    addrs = [a for pid, a in _port_listeners(FREELLMAPI_PORT) if pid == p.pid]
+    if addrs and not _loopback_only(addrs):
+        _svc_stop(entry, f"listened beyond loopback: {', '.join(addrs)}")
+        service_unregister("freellmapi")
+        return {"ok": False, "error": f"it listened on {', '.join(addrs)} — stopped: Prometheus only "
+                                      f"runs it on 127.0.0.1"}
+    return {"ok": True, "pid": p.pid, "url": f"http://127.0.0.1:{FREELLMAPI_PORT}",
+            "ram_cap_mb": entry.get("ram_cap_mb"), "log": str(log)}
+
+
+def _freellmapi_print_status(st: dict) -> None:
+    Log.head("FreeLLMAPI — free-tier gateway")
+    q = st.get("quarantined")
+    if q:
+        Log.err(f"QUARANTINED ({q.get('at')}): {q.get('reason')}")
+        for d in (q.get("details") or [])[:5]:
+            Log.step(str(d))
+    if not st["installed"]:
+        Log.info("not installed — `prometheus freellmapi setup` walks through it")
+    else:
+        Log.ok(f"installed {st.get('ref')} ({str(st.get('commit') or '')[:10]}) · node {st.get('node')} · "
+               f"gate {((st.get('gate') or {}).get('verdict') or '?').upper()}")
+    if st["running"]:
+        Log.ok(f"running pid {st['pid']} · {st['rss_mb']} MB of a {st.get('ram_cap_mb')} MB cap · "
+               f"{'loopback only' if st.get('loopback_only') else 'LISTENER: ' + ', '.join(st['listeners'])}")
+        Log.step(f"dashboard {st['url']}  ·  API {st['base_url']}")
+    elif st.get("foreign_listener"):
+        Log.warn(f"something else listens on port {FREELLMAPI_PORT}: {', '.join(st['listeners'])}")
+    elif st["installed"]:
+        Log.info("stopped — `prometheus freellmapi start`")
+    keys = st.get("keys") or {}
+    if keys.get("platforms"):
+        Log.step("provider keys: " + ", ".join(f"{p}×{n}" for p, n in sorted(keys["platforms"].items())))
+    if keys.get("anonymous"):
+        Log.warn("anonymous rows enabled (" + ", ".join(keys["anonymous"]) + "): requests route with no "
+                 "account, and Kilo logs free prompts for training — disable them on the Keys page "
+                 "unless that is what you want")
+    if keys.get("several_keys"):
+        Log.warn("several keys for " + ", ".join(keys["several_keys"]) + ": one account per provider — "
+                 "extra accounts to stretch a free quota break most providers' terms")
+
+
+def _freellmapi_print_gate(res: dict) -> None:
+    g = res.get("gate") or {}
+    if not g:
+        return
+    counts = g.get("severity_counts") or {}
+    Log.step(f"verdict {str(g.get('verdict')).upper()} · risk {g.get('risk_score')}/100 · "
+             + " ".join(f"{k}={v}" for k, v in counts.items() if v))
+    for c in g.get("critical") or []:
+        # Log.STREAM, not Log.err's stderr: the reasons must print in order with the steps
+        print(f"    {Log._c('CRITICAL', 'red')} {c}", file=Log.STREAM)
+    for r in g.get("blocking_reasons") or []:
+        if "SCA-OSV-CRITICAL" not in str(r):
+            Log.step(f"  blocks: {r}")
+    for h in (g.get("high") or [])[:5]:
+        Log.warn(f"  HIGH {h}")
+
+
+def _freellmapi_guide_lines(st: dict) -> list:
+    return [
+        f"1. open {st['url']} in a browser ON THIS MACHINE and create the dashboard account",
+        "2. Keys page → add ONE key per provider you have (Groq, Cerebras, Google AI Studio, "
+        "Mistral, OpenRouter, NVIDIA, …) — one account per provider",
+        "3. leave the 'no key required' rows (Kilo, LLM7, OVH, AI Horde) OFF: they route "
+        "anonymously and Kilo logs free prompts for training",
+        "4. `prometheus freellmapi connect` — stores the gateway key in the keychain",
+        "5. `/models` → FreeLLMAPI → `auto` (the gateway picks a healthy free model per request)",
+    ]
+
+
+def cmd_freellmapi(args, osi: "OSInfo") -> int:
+    action = getattr(args, "action", None) or "status"
+    paths = _freellmapi_paths()
+    ref = getattr(args, "ref", None) or FREELLMAPI_REF
+
+    def done(obj: dict) -> int:
+        obj = {"command": "freellmapi", "action": action, **obj}
+        if JSON_OUT:
+            return emit_json({**obj, "_exit": 0 if obj.get("ok") else 2})
+        return 0 if obj.get("ok") else 2
+
+    if action == "check":
+        chk = _freellmapi_check()
+        if not JSON_OUT:
+            Log.head("FreeLLMAPI — prerequisites")
+            (Log.ok if chk["node"] else Log.err)(f"node {chk['node_version'] or 'none in range 20.18–24.x'}"
+                                                 + (f" ({chk['node']})" if chk["node"] else ""))
+            if chk.get("fix_node"):
+                Log.step(chk["fix_node"])
+            (Log.ok if chk["git"] else Log.err)(f"git {chk['git'] or 'missing'}")
+            Log.ok(f"disk {chk['disk_free_gb']} GB free (needs ~1.5 GB while building, 0.45 GB after)")
+            (Log.ok if chk["port_free"] else Log.warn)(f"port {FREELLMAPI_PORT} {'free' if chk['port_free'] else 'in use'}")
+        return done({"ok": chk["ok"], "check": chk})
+
+    if action == "status":
+        st = _freellmapi_status(paths)
+        if not JSON_OUT:
+            _freellmapi_print_status(st)
+        return done({"ok": True, "status": st})
+
+    if action in ("install", "setup"):
+        if not JSON_OUT:
+            Log.head(f"FreeLLMAPI — {'guided setup' if action == 'setup' else 'install'} ({ref})")
+        st = _freellmapi_status(paths)
+        if action == "install" or not st["installed"] or st.get("quarantined"):
+            res = _freellmapi_install(ref, paths)
+            if not JSON_OUT:
+                _freellmapi_print_gate(res)
+                if not res["ok"]:
+                    Log.err(f"NOT installed — {res.get('error')}")
+                    if res.get("stage") == "gate":
+                        Log.step("Prometheus re-checks on every install attempt, against a fresh "
+                                 "advisory database. It installs once upstream ships a release "
+                                 "with no CRITICAL finding — nothing to override, nothing to remember.")
+                    if res.get("stage") == "check" and res.get("check", {}).get("fix_node"):
+                        Log.step(res["check"]["fix_node"])
+                else:
+                    Log.ok(f"installed {res['ref']} ({res['commit'][:10]}) · {res.get('size')}")
+            if not res["ok"] or action == "install":
+                return done(res)
+        started = _freellmapi_start(paths)
+        st = _freellmapi_status(paths)
+        if not JSON_OUT:
+            if started["ok"]:
+                Log.ok(f"running on {started['url']} (loopback only) · RAM cap "
+                       f"{started.get('ram_cap_mb', st.get('ram_cap_mb'))} MB · watched")
+                Log.head("Next steps")
+                for line in _freellmapi_guide_lines(st):
+                    Log.step(line)
+            else:
+                Log.err(f"not started — {started.get('error')}")
+        return done({"ok": started["ok"], "start": started, "status": st,
+                     "next": _freellmapi_guide_lines(st) if started["ok"] else []})
+
+    if action == "start":
+        res = _freellmapi_start(paths)
+        if not JSON_OUT:
+            if res["ok"]:
+                Log.ok(f"FreeLLMAPI {'already ' if res.get('already') else ''}running on {res['url']} (loopback only)")
+            else:
+                Log.err(f"not started — {res.get('error')}")
+        return done(res)
+
+    if action == "stop":
+        e = _svc_read(SERVICES_REGISTRY).get("freellmapi")
+        stopped = bool(e) and _svc_stop(e, "stopped by the user")
+        if e:
+            service_unregister("freellmapi")
+        if not JSON_OUT:
+            Log.ok("FreeLLMAPI stopped") if stopped else Log.info("FreeLLMAPI was not running (from Prometheus)")
+        return done({"ok": True, "stopped": stopped})
+
+    if action == "key":
+        # Machine channel only: the CLI's `freellmapi connect` reads it and stores it in the
+        # keychain after verifying it. A human run never prints the secret.
+        key = _freellmapi_unified_key(paths)
+        if not JSON_OUT:
+            if key:
+                Log.ok(f"gateway key present ({key[:15]}…) — `prometheus freellmapi connect` stores it")
+            else:
+                Log.err("no gateway key yet — start FreeLLMAPI once (`prometheus freellmapi start`)")
+            return 0 if key else 2
+        return done({"ok": bool(key), "key": key, "base_url": f"http://127.0.0.1:{FREELLMAPI_PORT}/v1",
+                     **({} if key else {"error": "no gateway key yet — start FreeLLMAPI once"})})
+
+    if action == "uninstall":
+        if not paths["root"].exists():
+            Log.info("nothing to remove")
+            return done({"ok": True, "removed": False})
+        keep = bool(getattr(args, "keep_data", False))
+        if not JSON_OUT and not ASSUME_YES:
+            what = "the app (data + keys kept)" if keep else "the app AND its data — every provider key stored in it"
+            if not _confirm(f"Delete FreeLLMAPI: {what} ({_human_size_dir(paths['root'])})?"):
+                return done({"ok": False, "error": "declined"})
+        elif JSON_OUT and not ASSUME_YES:
+            return done({"ok": False, "error": "uninstall deletes data — pass --yes"})
+        e = _svc_read(SERVICES_REGISTRY).get("freellmapi")
+        if e:
+            _svc_stop(e, "uninstall")
+            service_unregister("freellmapi")
+        if keep:
+            for k in ("app", "logs"):
+                _rmtree(paths[k])
+            _rmtree(paths["root"] / "app.prev")
+            if paths["manifest"].exists() and not DRY_RUN:
+                paths["manifest"].unlink()
+        else:
+            _rmtree(paths["root"])
+        clear_quarantine("freellmapi")
+        if not JSON_OUT:
+            Log.ok("FreeLLMAPI removed" + (" (data kept)" if keep else ""))
+        return done({"ok": True, "removed": True, "kept_data": keep})
+
+    Log.err(f"unknown action {action!r}")
+    return done({"ok": False, "error": f"unknown action {action!r}"})
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = _JsonAwareParser(
         prog=f"{SCRIPT_NAME}.py",
@@ -16448,6 +17616,24 @@ def build_parser() -> argparse.ArgumentParser:
     p_la = sub.add_parser("localai", help="audit every AI repo (paid-API vs free-local) + a catalog of OPEN-SOURCE models (gpt-oss/qwen3/llama3 local · Kimi K2/DeepSeek/GLM served) + the exact recipe to re-point a PAID API at a free/open OpenAI-compatible model")
     p_la.add_argument("action", nargs="?", choices=["audit", "list", "models", "endpoints", "show", "model"], default="audit")
     p_la.add_argument("tool", nargs="?", help="show: AI tool id (see `localai audit`)  ·  model: open-model id (see `localai models`)")
+
+    # FreeLLMAPI — the free-tier gateway, installed only through the strict nemesis gate
+    p_fl = sub.add_parser("freellmapi", help="FreeLLMAPI free-tier gateway (127.0.0.1:3001): guided setup, "
+                                             "strict-gated install (any CRITICAL advisory refuses), start/stop "
+                                             "under the RAM + advisory watch, status, connect")
+    p_fl.add_argument("action", nargs="?", default="status",
+                      choices=["status", "check", "setup", "install", "start", "stop", "key", "uninstall"])
+    p_fl.add_argument("--ref", metavar="TAG", help=f"release tag to install (default {FREELLMAPI_REF})")
+    p_fl.add_argument("--keep-data", action="store_true", dest="keep_data",
+                      help="uninstall: keep the database (provider keys) and the env file")
+
+    # External services — the RAM + advisory watch over everything Prometheus runs for a 3rd party
+    p_sv = sub.add_parser("services", help="external services Prometheus runs (self-hosted apps, FreeLLMAPI): "
+                                           "list with RAM vs cap, stop, set a cap, or run the watch")
+    p_sv.add_argument("action", nargs="?", default="list", choices=["list", "stop", "cap", "watch"])
+    p_sv.add_argument("name", nargs="?", help="stop/cap: the service name (see `services list`)")
+    p_sv.add_argument("mb", nargs="?", help="cap: RAM cap in MB (0 = not RAM-watched)")
+    p_sv.add_argument("--once", action="store_true", help="watch: one pass, then exit")
 
     # 9th functionality — CHAT: agentic local (free, on-device) OR terminal chat for paid CLIs
     p_chat = sub.add_parser("chat", help="9th functionality: agentic LOCAL chat (free) OR terminal chat for paid CLIs (claude/codex/gemini/cursor/opencode) — preview→OPEN, system-prompt, bypass, tmux")
@@ -16725,7 +17911,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     # self-heal the opt-in auto-maintenance schedule on ANY command (cheap: only acts
     # if the user enabled it AND the launchd/cron entry was purged). Skip for the
     # schedule command itself (it manages the entry directly, incl. --auto-off).
-    if args.command != "schedule":
+    if args.command not in ("schedule", "services"):   # the detached watcher stays lean
         _ensure_auto_schedule(osi)
     dispatch = {
         "wizard": cmd_wizard,
@@ -16756,6 +17942,8 @@ def main(argv: Optional[list[str]] = None) -> int:
         "apps": cmd_apps,
         "worldsim": cmd_worldsim,
         "localai": cmd_localai,
+        "freellmapi": cmd_freellmapi,
+        "services": cmd_services,
         "chat": cmd_chat,
         "describe": cmd_describe,
         "tutorial": cmd_tutorial,

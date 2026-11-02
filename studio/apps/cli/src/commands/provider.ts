@@ -286,7 +286,8 @@ function maskedReadKey(): Promise<string> {
   });
 }
 
-const defaultProviderIo = (): ProviderIoDeps => ({
+/** The real IO (keychain, fetch, masked prompt) — exported so `freellmapi connect` can swap only `readKey`. */
+export const defaultProviderIo = (): ProviderIoDeps => ({
   secrets: createCliSecretsStore(),
   fetch: globalFetch,
   readKey: maskedReadKey,

@@ -128,7 +128,11 @@ export type PrometheusSubcommand =
   // one-command full safe maintenance (feeds + audit + integrate green skills).
   | "auto"
   // disk space: the disk_map sidecar (mounts/map/levels/largest files/delete plan).
-  | "disk-space";
+  | "disk-space"
+  // FreeLLMAPI free-tier gateway: strict-gated install, start/stop under the services watch.
+  | "freellmapi"
+  // the RAM + advisory watch over every external service Prometheus runs.
+  | "services";
 
 /** The canonical nemesis verb set (probed `nemesis --help`, 1.12.x). */
 export type NemesisVerb =
@@ -1373,6 +1377,55 @@ export const COMMAND_SPECS: readonly CommandSpec[] = Object.freeze([
     description:
       "Audit AI repos (paid-API vs free-local) + catalog of open models + the re-point recipe.",
     subcommand: "localai",
+  }),
+  managerSpec({
+    id: "freellmapi",
+    title: "FreeLLMAPI free-tier gateway",
+    group: "models",
+    description:
+      "Self-hosted gateway pooling providers' free tiers on 127.0.0.1:3001. setup/install run the " +
+      "strict nemesis gate (any CRITICAL advisory refuses, no override); start/stop under the RAM + " +
+      "advisory watch; status; key (machine channel, for `freellmapi connect`).",
+    subcommand: "freellmapi",
+    argsSchema: {
+      positionals: [
+        {
+          name: "action",
+          kind: "positional",
+          type: "enum",
+          required: false,
+          // prometheus.py's own `p_fl.add_argument("action", choices=…)`
+          choices: ["status", "check", "setup", "install", "start", "stop", "key", "uninstall"],
+        },
+      ],
+      flags: [
+        { name: "ref", kind: "flag", type: "string" },
+        { name: "keep-data", kind: "flag", type: "boolean" },
+      ],
+    },
+    flagForward: ["ref", "keep-data"],
+  }),
+  managerSpec({
+    id: "services",
+    title: "External services watch",
+    group: "system",
+    description:
+      "Every long-running process Prometheus runs for a third party (self-hosted apps, FreeLLMAPI): " +
+      "RAM vs cap, advisory re-checks, quarantine. list / stop NAME / cap NAME MB / watch.",
+    subcommand: "services",
+    argsSchema: {
+      positionals: [
+        {
+          name: "action",
+          kind: "positional",
+          type: "enum",
+          required: false,
+          choices: ["list", "stop", "cap", "watch"],
+        },
+        { name: "name", kind: "positional", type: "string", required: false },
+        { name: "mb", kind: "positional", type: "string", required: false },
+      ],
+    },
   }),
 
   /* ---- repos / vault ([[06]]) ------------------------------------------ */

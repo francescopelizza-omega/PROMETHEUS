@@ -344,8 +344,18 @@ def _build_rules() -> list[Rule]:
              "Uses the macOS `security` tool to extract Keychain secrets.",
              "Remove. Repo install steps should never read the Keychain.",
              flags=I),
+        # The source side used to be ANY mention of `process.env`, so a single named setting with
+        # a URL default — `process.env.PREMIUM_SITE_URL ?? 'https://…'` — read as "env dump POSTed
+        # to network" and HIGH-blocked a clean package forever (FreeLLMAPI, 2026-10-30). It now
+        # fires on what the rule names: the WHOLE environment (`JSON.stringify(process.env)`,
+        # `dict(os.environ)`), a secret-named variable (`process.env.GITHUB_TOKEN`,
+        # `os.environ.get("AWS_SECRET_ACCESS_KEY")`), or printenv / /proc/self/environ.
         Rule("EXFIL-003", "env dump POSTed to network", "exfiltration", "HIGH",
-             r"(process\.env|os\.environ|printenv|/proc/self/environ)\b[^\n]{0,200}?(fetch|axios|requests\.(post|get)|urllib|curl|http)",
+             r"(?:(?:process\.env|os\.environ)\b(?!\s*(?:\.|\?\.|\[))"
+             r"|(?:process\.env|os\.environ)\s*(?:\.get\(\s*['\"]|\[\s*['\"]|\??\.)\s*"
+             r"\w*(?:token|key|secret|passw|pwd|cred|auth|session|cookie)\w*"
+             r"|printenv\b|/proc/self/environ\b)"
+             r"[^\n]{0,200}?(fetch|axios|requests\.(post|get)|urllib|curl|http)",
              "Serialises environment variables (tokens, secrets) and sends them out.",
              "Remove the network send; rotate any exposed secrets.",
              flags=I),
@@ -941,6 +951,25 @@ _FILE_UNSCAN_RULE = Rule(
     # still works, rather than by malware block_score.
     action="report", klass="container", flags=0,
 )
+def _is_nul_bearing_text(raw: bytes, ext: str) -> bool:
+    """A text-extension payload that is strict UTF-8 with only a trace of NULs (≤ 64, and no
+    more than 4 or 1 byte in 200, whichever is larger). Real binaries — executables, images,
+    archives renamed `.js` — are dense with NULs or fail strict UTF-8, so they stay binary and
+    stay a reported blind spot."""
+    if not (ext in _SOURCE_EXT or ext in _DOC_EXTS or ext in _URL_CTX_CONFIG_EXTS):
+        return False
+    if any(raw.startswith(m) for m in _EXE_MAGIC):
+        return False
+    nul = raw.count(b"\x00")
+    if nul > 64 or nul > max(4, len(raw) // 200):
+        return False
+    try:
+        raw.decode("utf-8", errors="strict")
+    except UnicodeDecodeError:
+        return False
+    return True
+
+
 _ARC_LINK_ESC_RULE = Rule(
     "ARC-LINK-ESCAPE", "Link escapes the archive tree", "archive", "CRITICAL", "",
     "An archive member is a link whose target escapes the extraction tree or points "
@@ -2508,6 +2537,13 @@ class Scanner:
 
         is_binary = b"\x00" in head
         ext = os.path.splitext(name)[1].lower()
+        if is_binary and _is_nul_bearing_text(raw, ext):
+            # A NUL INSIDE text (a tuple separator in a template literal) used to switch every
+            # text detector off and report the file as a blind spot, which blocked a clean
+            # package outright (FreeLLMAPI, 2026-10-30). Valid UTF-8 with a trace of NULs is
+            # text: run the detectors on it. That inspects MORE than before — the old path
+            # skipped the contents entirely — so a NUL can still not be used to hide anything.
+            is_binary = False
 
         # 2) embedded executable magic
         exe_hit = False

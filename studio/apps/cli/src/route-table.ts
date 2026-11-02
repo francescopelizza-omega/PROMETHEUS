@@ -29,6 +29,10 @@ export const RECOGNIZED_VERBS: readonly string[] = [
   // `prometheus requirements` (`commands/requirements-cmd.ts`) — the install-time requirements
   // scan for this OS, from the CLI, with the offer to run the package command through the gate.
   "requirements",
+  // `prometheus freellmapi …` (`commands/freellmapi-cmd.ts`) — the guided free-tier gateway
+  // procedure; `services` — the RAM + advisory watch over every external service.
+  "freellmapi",
+  "services",
   "scan",
   "superscan",
   "doctor",

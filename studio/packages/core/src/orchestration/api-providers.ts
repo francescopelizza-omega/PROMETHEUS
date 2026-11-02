@@ -502,6 +502,28 @@ export const API_PROVIDERS: readonly ApiProvider[] = Object.freeze([
     note: "EU-hosted (France). Works anonymously at a low rate; an access token raises the limit.",
     dataRegion: "EU",
   },
+  {
+    // A self-hosted GATEWAY, not a vendor: FreeLLMAPI (github.com/tashfeenahmed/freellmapi) pools
+    // the free tiers of the providers whose keys YOU add to it behind one /v1 on loopback, and
+    // picks a healthy model per request (`auto`). Local by address, cloud by data flow — every
+    // prompt leaves the machine — so `ai/remote-hosts.ts` classifies this URL as cloud.
+    // `prometheus freellmapi setup` installs and starts it (strict nemesis gate, RAM-watched);
+    // `prometheus freellmapi connect` stores the gateway's own key under this id.
+    id: "freellmapi",
+    label: "FreeLLMAPI gateway (self-hosted)",
+    baseUrl: "http://127.0.0.1:3001/v1",
+    apiKeyEnv: ["FREELLMAPI_API_KEY"],
+    defaultModel: "auto",
+    models: ["auto"],
+    // `auto` can land on any routed model; the smallest windows it routes to are ~32K. Over-stating
+    // would trade a compaction for a mid-turn 400 from whichever provider it picked.
+    contextWindow: 32_768,
+    automation: "allowed",
+    confidence: "verify",
+    tosUrl: "https://github.com/tashfeenahmed/freellmapi",
+    note: "Free tiers of many providers behind one key, on 127.0.0.1:3001. Each request goes to whichever provider it routes to, under that provider's terms. Add one key per provider.",
+    dataRegion: "global",
+  },
 ]);
 
 const BY_ID = new Map<string, ApiProvider>(API_PROVIDERS.map((p) => [p.id, p]));

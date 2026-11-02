@@ -378,6 +378,8 @@ ${c.bold("ENVIRONMENTS · MODELS · REPOS · PRIVACY")}
   ${c.cyan("metadata")} <inspect|scrub|edit|timestomp> <file>   file-metadata privacy
   ${c.cyan("disk-space")} [map|levels|files|mounts|delete|cleanup] [PATH]   disk usage (TUI: full explorer)
   ${c.cyan("provider list")}        Inference providers (Tier-A free/local first)
+  ${c.cyan("freellmapi")} <setup|status|start|stop|connect>   Free-tier gateway (127.0.0.1:3001), strict-gated install
+  ${c.cyan("services")} [list|stop|cap]   External services Prometheus runs: RAM vs cap, advisory quarantine
 
 ${c.dim("Mutating verbs PREVIEW first; re-run with")} ${c.bold("--yes")} ${c.dim("to execute (--force overrides a BLOCK).")}
 

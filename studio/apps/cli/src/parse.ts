@@ -164,6 +164,18 @@ const TWO_WORD: Record<string, Set<string>> = {
   ]),
   metadata: new Set(["inspect", "scrub", "edit", "timestomp"]),
   "disk-space": new Set(["map", "levels", "files", "mounts", "delete", "cleanup", "help"]),
+  freellmapi: new Set([
+    "status",
+    "check",
+    "setup",
+    "install",
+    "start",
+    "stop",
+    "connect",
+    "uninstall",
+    "help",
+  ]),
+  services: new Set(["list", "stop", "cap", "watch"]),
   app: new Set([
     "list",
     "installed",
@@ -223,6 +235,8 @@ const TWO_WORD: Record<string, Set<string>> = {
 const ONE_WORD = new Set([
   "disk-space",
   "requirements",
+  "freellmapi",
+  "services",
   "scan",
   "superscan",
   "doctor",

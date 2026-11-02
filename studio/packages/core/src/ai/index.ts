@@ -266,8 +266,10 @@ export {
   findRemoteHost,
   hostOf,
   isDeclaredRemoteHost,
+  isLoopbackCloudGateway,
   isPrivateAddress,
   localityWithRemotes,
+  LOOPBACK_CLOUD_GATEWAY_PORTS,
   normalizeHost,
   warnings as remoteHostWarnings,
 } from "./remote-hosts.js";

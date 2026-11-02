@@ -139,12 +139,35 @@ export function findRemoteHost(
 }
 
 /**
+ * Loopback ports that are GATEWAYS to the cloud: local by address, cloud by data flow.
+ *
+ * FreeLLMAPI listens on 127.0.0.1:3001 and forwards every prompt to a free-tier provider on the
+ * internet. Read from the URL alone it was "local", so a never-send-to-cloud policy let prompts
+ * through it and out. Matching is by loopback host AND port, and it errs toward "cloud": an
+ * unrelated local server on 3001 is refused under a local-only policy — a visible refusal —
+ * rather than a gateway's traffic being waved through as private.
+ */
+export const LOOPBACK_CLOUD_GATEWAY_PORTS: readonly number[] = Object.freeze([3001]);
+
+/** Is `baseUrl` a loopback cloud gateway (see LOOPBACK_CLOUD_GATEWAY_PORTS)? */
+export function isLoopbackCloudGateway(baseUrl: string): boolean {
+  try {
+    const u = new URL(baseUrl);
+    const h = normalizeHost(u.hostname);
+    const loopback = h === "localhost" || h === "::1" || h === "0.0.0.0" || /^127\./.test(h);
+    const port = Number(u.port || (u.protocol === "https:" ? 443 : 80));
+    return loopback && LOOPBACK_CLOUD_GATEWAY_PORTS.includes(port);
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Locality for the EGRESS decision, with the allowlist taken into account.
  *
- * Identical to the historical `localityOfUrl` in every case except one: a host the user
- * declared as their own resolves to `"local"`. Loopback stays local, everything undeclared
- * stays `"cloud"` — the default is unchanged, so a user who never touches this feature sees
- * exactly the behaviour they saw before.
+ * Identical to the historical `localityOfUrl` in every case except two: a host the user
+ * declared as their own resolves to `"local"`, and a loopback cloud GATEWAY (above) resolves to
+ * `"cloud"`. Other loopback stays local, everything undeclared stays `"cloud"`.
  */
 export function localityWithRemotes(
   baseUrl: string,
@@ -153,6 +176,7 @@ export function localityWithRemotes(
   try {
     const u = new URL(baseUrl);
     if (u.protocol === "unix:" || u.protocol === "file:") return "local";
+    if (isLoopbackCloudGateway(baseUrl)) return "cloud";
     const h = normalizeHost(u.hostname);
     if (h === "localhost" || h === "127.0.0.1" || h === "::1" || h === "0.0.0.0") return "local";
     if (/^127\./.test(h)) return "local";

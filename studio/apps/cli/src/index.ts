@@ -15,6 +15,7 @@ import { runDiskSpaceCommand } from "./commands/disk-space-cmd.js";
  * testable.
  */
 import { runEnvCommand } from "./commands/env-cmd.js";
+import { defaultFreellmapiDeps, runFreellmapiCommand } from "./commands/freellmapi-cmd.js";
 import { runGate } from "./commands/gate.js";
 import { runGeneric, runManagerFamily } from "./commands/generic.js";
 import { runHealth } from "./commands/health.js";
@@ -96,7 +97,7 @@ export async function dispatch(
   }
 
   try {
-    return await runByKey(parsed.command, ctx);
+    return await runByKey(parsed.command, ctx, opts?.client !== undefined);
   } catch (err) {
     const out = outcomeFromError(err);
     if (ctx.json && out.json === undefined) out.json = { ok: false };
@@ -156,7 +157,11 @@ function replStub(path: string[]): CommandOutcome {
   };
 }
 
-async function runByKey(path: string[], ctx: CliContext): Promise<CommandOutcome> {
+async function runByKey(
+  path: string[],
+  ctx: CliContext,
+  inSession = false,
+): Promise<CommandOutcome> {
   const k = key(path);
   const head = path[0];
   // doctor --bridge (engine-discovery check, §8) before the generic doctor.
@@ -165,6 +170,11 @@ async function runByKey(path: string[], ctx: CliContext): Promise<CommandOutcome
   if (head === "doctor") return runDoctor(ctx);
   // `prometheus requirements` → what this OS still needs, and the command (offered, gated).
   if (head === "requirements") return runRequirements(ctx);
+  // `prometheus freellmapi …` → the guided gateway procedure. A session injects its own client
+  // (`inSession`): there the engine's result is rendered rather than handing the terminal to a
+  // child that would fight the session for it.
+  if (head === "freellmapi") return runFreellmapiCommand(ctx, defaultFreellmapiDeps(!inSession));
+  if (head === "services") return runManagerFamily("services", ctx);
   // prom-native (§6): profiles + config read the shared core, no engine call.
   if (head === "profile") return runProfile(path, ctx);
   if (head === "config") return runConfig(path, ctx);
