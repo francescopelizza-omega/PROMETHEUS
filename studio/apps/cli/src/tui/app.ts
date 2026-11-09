@@ -27,7 +27,9 @@ import { loadSettings, prometheusHome } from "../home.js";
 import type { ParsedArgs } from "../parse.js";
 import { defaultColorEnabled } from "../render.js";
 import { readSavedAuthLevel } from "../session/authorisation-store.js";
+import type { ModelsHost } from "../session/models-host.js";
 import {
+  browserLayerFor,
   buildStep as buildModelsStep,
   overlayItems,
   parseModelsArgs,
@@ -41,7 +43,7 @@ import {
   recordPathUse,
 } from "../session/path-frecency-store.js";
 import { SLASH_REGISTRY } from "../session/slash-registry.js";
-import { installTag } from "../updates/model-actions-cmd.js";
+import { installSlash } from "../updates/model-actions-cmd.js";
 import type { AcItem } from "./autocomplete.js";
 import {
   type ModalView,
@@ -56,6 +58,13 @@ import { openInvokeOverlay } from "./invoke-overlay.js";
 import { type KeyEvent, decodeKeys } from "./keys.js";
 import { type ListOverlayItem, openListOverlay } from "./list-overlay.js";
 import { createMarkdownRenderer } from "./markdown.js";
+import {
+  type BrowserState,
+  browserFits,
+  onBrowserKey,
+  openBrowser,
+  renderBrowser,
+} from "./model-browser.js";
 import { OverlaySession } from "./overlay-session.js";
 import { type ColorCaps, type Role, detectColorCaps, paint, paintDuration } from "./palette.js";
 import { workingLine } from "./quantum-verbs.js";
@@ -112,6 +121,8 @@ export interface TuiDeps {
    */
   configHome?: string;
   backends?: Backends;
+  /** test seam: the `/models` host (default: the real one, built by the session bridge). */
+  modelsHost?: ModelsHost;
 }
 
 /** The slash registry projected into autocomplete items. */
@@ -323,6 +334,12 @@ export async function launchTui(parsed: ParsedArgs, deps: TuiDeps = {}): Promise
   let overlay: OverlaySession | null = null;
   /** bridge output that arrived while the overlay owned the screen — printed when it steps aside */
   let overlayHeld: string[] = [];
+  /**
+   * The full-screen `/model` browser, when open. It owns the ALTERNATE screen: the chrome is
+   * not painted, session output is held (like an overlay program's), resizes repaint it, and
+   * every exit path leaves the alternate screen.
+   */
+  let fullView: BrowserState | null = null;
   let resolveExit: ((code: number) => void) | null = null;
   /**
    * Set once `finish()` has handed the terminal back. A turn still in flight at that moment (a
@@ -338,7 +355,8 @@ export async function launchTui(parsed: ParsedArgs, deps: TuiDeps = {}): Promise
   let lastFrame: ReturnType<typeof renderFrame> | null = null;
   /** `slack` = extra rows to climb before erasing; only `onResize` passes it (see `reflowSlack`). */
   function render(slack = 0): void {
-    if (modal || !entered || handover.suspended || overlay?.state === "attached") return;
+    if (modal || !entered || handover.suspended || overlay?.state === "attached" || fullView)
+      return;
     lastFrame = renderFrame({
       state,
       status: session.statusModel(),
@@ -424,6 +442,7 @@ export async function launchTui(parsed: ParsedArgs, deps: TuiDeps = {}): Promise
   const bridge = await createSessionBridge({
     parsed,
     ...(deps.configHome !== undefined ? { configHome: deps.configHome } : {}),
+    ...(deps.modelsHost ? { modelsHost: deps.modelsHost } : {}),
     write: (text) => {
       // while a child owns the terminal, plain lines — there is no chrome to print above
       if (handover.suspended) {
@@ -431,7 +450,7 @@ export async function launchTui(parsed: ParsedArgs, deps: TuiDeps = {}): Promise
         return;
       }
       // never paint over a program the human is looking at — print it when the overlay steps aside
-      if (overlay?.state === "attached") {
+      if (overlay?.state === "attached" || fullView) {
         overlayHeld.push(text);
         return;
       }
@@ -599,6 +618,11 @@ export async function launchTui(parsed: ParsedArgs, deps: TuiDeps = {}): Promise
   function restore(): void {
     if (!entered) return;
     entered = false;
+    // the browser's alternate screen must never outlive the session
+    if (fullView) {
+      fullView = null;
+      safeWrite("\x1b[?1049l");
+    }
     // a program left running over (or behind) the TUI ends with the session
     if (overlay && overlay.state !== "exited") {
       overlay.terminate();
@@ -723,6 +747,10 @@ export async function launchTui(parsed: ParsedArgs, deps: TuiDeps = {}): Promise
     size = { cols: stdout.columns ?? 80, rows: stdout.rows ?? 24 };
     if (overlay?.state === "attached") {
       overlay.resize();
+      return;
+    }
+    if (fullView) {
+      paintFullView();
       return;
     }
     // CLI-064: a resize while a modal is open must repaint the MODAL region (the chrome stays
@@ -1023,12 +1051,89 @@ export async function launchTui(parsed: ParsedArgs, deps: TuiDeps = {}): Promise
     scheduleRender();
   }
 
+  /** Paint the browser on the alternate screen: home, then every line cleared to its end. */
+  function paintFullView(): void {
+    if (!fullView) return;
+    const lines = renderBrowser(fullView, size.cols, size.rows, caps);
+    // no trailing newline: a newline on the last row would scroll the alternate screen
+    safeWrite(`\x1b[H${lines.map((l) => `${l}\x1b[0m\x1b[K`).join("\r\n")}`);
+  }
+
+  function browserHandler(k: KeyEvent): void {
+    if (!fullView) {
+      handler = mainHandler;
+      return;
+    }
+    const r = onBrowserKey(fullView, k, size.cols);
+    fullView = r.state;
+    if (r.action.type === "close") closeFullView();
+    else if (r.action.type === "pick") closeFullView(r.action.text);
+    else paintFullView();
+  }
+
+  function closeFullView(pick?: string): void {
+    fullView = null;
+    handler = mainHandler;
+    safeWrite("\x1b[?1049l");
+    renderer.reset();
+    const held = overlayHeld;
+    overlayHeld = [];
+    for (const t of held) renderer.printAbove(renderPaneText(t));
+    // a pick re-enters the normal composer path, exactly as if it had been typed — every
+    // confirmation, download consent and nemesis gate runs inline, on the normal screen
+    if (pick) dispatch([{ type: "submit", text: pick }]);
+    else scheduleRender();
+  }
+
+  /**
+   * `/model` opens the full-screen browser: layers (by RAM tier, serving now, cloud, servers) │
+   * models │ details. False when the terminal is too small or there is no models host — the
+   * caller then uses the inline picker.
+   */
+  async function openModelBrowser(start?: string): Promise<boolean> {
+    if (!browserFits(size.cols, size.rows) || modal || overlay?.state === "attached") return false;
+    renderer.printAbove(paint("measuring this machine and the model catalogue…", "muted", caps));
+    const data = await session.modelBrowser(start).catch((e: unknown) => {
+      // say WHY the full-screen browser is not opening, instead of silently falling back
+      renderer.printAbove(
+        paint(
+          `model browser unavailable (${e instanceof Error ? e.message : String(e)}) — showing the list instead`,
+          "muted",
+          caps,
+        ),
+      );
+      return undefined;
+    });
+    // a modal opened while the catalogue was being measured owns the screen: never steal its
+    // handler (its promise would never settle)
+    if (!data || !entered || modal) return false;
+    renderer.clear();
+    fullView = openBrowser(data);
+    handler = browserHandler;
+    safeWrite("\x1b[?1049h\x1b[?25l\x1b[2J");
+    paintFullView();
+    return true;
+  }
+
   async function handleSubmit(text: string): Promise<void> {
     const trimmed = text.trim();
     // bare pick-a-thing commands open a real arrow-nav overlay instead of their numbered/static
     // fallback (CLI-1xx) — `/agents 4`, `/think high`, `/model <id>` and every non-TTY host keep
     // their existing typed-argument behavior unchanged; only the ARGUMENT-LESS form is special-
     // cased here, exactly like `/invoke` below.
+    /**
+     * `/server` — the DEFAULT LOCAL MODEL SERVER, as an arrow-nav dropdown: server name on the
+     * left, what it is doing now and what it is for on the right; Ollama unless the user picks
+     * another. Picking submits `/server <id>`, which saves it and switches to that server when
+     * it is serving a model. (`/server <id>` typed directly skips the picker.)
+     */
+    if (trimmed === "/server") {
+      const items = await session.serverItems();
+      if (items.length > 0) {
+        openPicker("Default local server — Ollama unless you pick another", items);
+        return;
+      }
+    }
     /**
      * `/updates catalog [query]` — the model browser, as an arrow-nav overlay.
      *
@@ -1068,7 +1173,7 @@ export async function launchTui(parsed: ParsedArgs, deps: TuiDeps = {}): Promise
             .split(/\s{2,}/)
             .slice(0, 2)
             .join(" · "),
-          submitText: r.command ? `/updates pull ${installTag(r.entry)}` : "",
+          submitText: r.command ? installSlash(r.entry) : "",
           body: r.body,
           ...(r.blocked ? { disabled: r.blocked } : {}),
           ...(r.entry.installed ? { current: true } : {}),
@@ -1165,6 +1270,7 @@ export async function launchTui(parsed: ParsedArgs, deps: TuiDeps = {}): Promise
       );
       return;
     }
+    if (trimmed === "/model" && (await openModelBrowser())) return;
     if (trimmed === "/model" || trimmed === "/worker") {
       const candidates = session.slashCtx.modelPicker?.candidates() ?? [];
       if (candidates.length === 0) {
@@ -1198,6 +1304,21 @@ export async function launchTui(parsed: ParsedArgs, deps: TuiDeps = {}): Promise
      */
     if ((trimmed === "/models" || trimmed.startsWith("/models ")) && session.slashCtx.models) {
       const args = parseModelsArgs(trimmed.slice("/models".length));
+      // the same full-screen browser, opened on the layer the word names (`/models free` …)
+      const word = (trimmed.slice("/models".length).trim().split(/\s+/)[0] ?? "").toLowerCase();
+      const isServers = word === "servers" || word === "server";
+      if (
+        (args.kind === "step" || isServers) &&
+        (await openModelBrowser(
+          isServers
+            ? browserLayerFor("servers", false)
+            : args.kind === "step"
+              ? browserLayerFor(args.step, args.showAll)
+              : undefined,
+        ))
+      ) {
+        return;
+      }
       if (args.kind === "step") {
         const step = await buildModelsStep(session.slashCtx.models, args.step, args.showAll);
         if (step.intro.length > 0) {
@@ -1380,9 +1501,17 @@ export async function launchTui(parsed: ParsedArgs, deps: TuiDeps = {}): Promise
    */
   let modalQueue: Promise<unknown> = Promise.resolve();
   function queueModal<T>(open: () => Promise<T>, onExit: T): Promise<T> {
+    // A modal never opens UNDER the full-screen model browser: it took over the handler and
+    // drew on the alternate screen, and when it closed `fullView` was still set — render()
+    // painted nothing, output piled up in overlayHeld, keys went to an invisible composer and
+    // nothing could close the browser (a /background agent's confirm hit exactly this).
+    const show = (): Promise<T> => {
+      if (fullView) closeFullView();
+      return open();
+    };
     const turn = modalQueue.then(
-      () => (exited ? onExit : open()),
-      () => (exited ? onExit : open()),
+      () => (exited ? onExit : show()),
+      () => (exited ? onExit : show()),
     );
     modalQueue = turn.catch(() => undefined);
     return turn;

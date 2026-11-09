@@ -89,8 +89,9 @@ test("hasTrustedVerdict never matches a DIFFERENT HEAD (tree changed → re-scan
 test("runGate: TRUSTED at HEAD → ALLOW, no fresh scan ran", async () => {
   let scanned = false;
   const res = await runGate(
-    { workspaceRoot: "/proj/ws", head: HEAD },
+    { workspaceRoot: "/proj/ws" },
     {
+      resolveHead: async () => HEAD,
       readTrusted: () => [
         {
           key: `ws@editor#git:${HEAD}`,
@@ -110,6 +111,32 @@ test("runGate: TRUSTED at HEAD → ALLOW, no fresh scan ran", async () => {
   assert.equal(res.mayLaunch, true);
   assert.equal(res.trusted, true);
   assert.equal(scanned, false, "a trusted workspace is NOT re-scanned");
+});
+
+test("runGate: a HEAD the RENDERER claims is ignored — main resolves it from disk", async () => {
+  let scanned = false;
+  const res = await runGate(
+    { workspaceRoot: "/proj/ws", head: HEAD },
+    {
+      resolveHead: async () => "c".repeat(40),
+      readTrusted: () => [
+        {
+          key: `ws@editor#git:${HEAD}`,
+          name: "ws",
+          agent: "editor",
+          ident: `git:${HEAD}`,
+          verdict: "allow",
+        },
+      ],
+      runGate: async () => {
+        scanned = true;
+        return verdict("block");
+      },
+    },
+  );
+  assert.equal(res.trusted, false, "a stale trusted sha named by the renderer was honoured");
+  assert.equal(scanned, true);
+  assert.equal(res.decision, "block");
 });
 
 test("runGate: UNTRUSTED + allow verdict → ALLOW (fresh scan ran)", async () => {

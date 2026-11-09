@@ -147,7 +147,7 @@ import { applyInDirective, createOutputDir } from "../session/in.js";
 import { type McpSession, openMcpSession, withMcpTools } from "../session/mcp-session.js";
 import { admitEndpoint, setRemoteHostLookup } from "../session/model-admission-host.js";
 import { modelCandidates, resolveModelCandidate } from "../session/model-candidates.js";
-import { createModelsHost, readModelChoice } from "../session/models-host.js";
+import { type ModelsHost, createModelsHost, readModelChoice } from "../session/models-host.js";
 import {
   type Backends,
   backendSummary,
@@ -168,8 +168,11 @@ import {
 import { makeTerminalApprover } from "../session/privileged-prompt.js";
 import type { OverlayLaunch } from "./overlay-session.js";
 export type { OverlayLaunch } from "./overlay-session.js";
+import { loadDefaultServer, saveDefaultServer } from "../session/default-server-setting.js";
+import { buildModelBrowser } from "../session/model-browser-data.js";
 import { loadRemoteHosts } from "../session/remote-hosts-store.js";
 import { applyRepoMapVerb, makeRepoMapState, repoMapStats } from "../session/repo-map-state.js";
+import { serverOverlayItems, serverRows } from "../session/server-cmd.js";
 import { maybeStopServicesOnExit } from "../session/service-shutdown.js";
 import { newSessionId } from "../session/session-id.js";
 import {
@@ -193,7 +196,12 @@ import { createWorkingSet, isPathAllowed } from "../session/working-set.js";
 import { insideTmux, tmuxForcedOff } from "../tmux/tmux.js";
 import { probeEnv, runtimeBrewFormula } from "../updates/dispatch-cmd.js";
 import { makeDispatchProbes } from "../updates/dispatch-probes.js";
-import { type BrowseRow, browseRows, installTag } from "../updates/model-actions-cmd.js";
+import {
+  type BrowseRow,
+  browseRows,
+  defaultOllamaDiscard,
+  defaultOllamaGate,
+} from "../updates/model-actions-cmd.js";
 import { type StepRunner, makeStepRunner } from "../updates/run-step.js";
 import { runUpdates, updatesStartupNotice } from "../updates/updates-cmd.js";
 import { copyReplyStatus, lastAssistantReply } from "./clipboard.js";
@@ -201,6 +209,8 @@ import { fleetLegendLines } from "./fleet-bar.js";
 import { CODE_STATE, detectLanguage, highlightLine, isHighlightable } from "./highlight.js";
 import type { InvokeItem } from "./invoke-overlay.js";
 import { type KeymapResolution, resolveKeymap } from "./keys.js";
+import type { ListOverlayItem } from "./list-overlay.js";
+import type { BrowserData } from "./model-browser.js";
 import { type ColorCaps, type Role, paint, spanHighlight } from "./palette.js";
 import type { StatusModel } from "./status.js";
 
@@ -366,6 +376,8 @@ function renderDiffCard(
 
 export interface BridgeDeps {
   parsed: ParsedArgs;
+  /** test seam: the `/models` host (default: built here from this session's backends). */
+  modelsHost?: ModelsHost;
   /** print a line ABOVE the chrome (renderer.printAbove). */
   write: (text: string) => void;
   /** in-TUI yes/no modal (never-force: default deny). */
@@ -506,6 +518,13 @@ export interface SessionBridge {
    * cursor. The caller prints a line first so a slow network is visible rather than a freeze.
    */
   catalogRows: (query: string) => Promise<BrowseRow[]>;
+  /** the `/server` picker's rows (default local model server), current one marked. */
+  serverItems: () => Promise<ListOverlayItem[]>;
+  /**
+   * Everything the full-screen `/model` browser shows, measured once (undefined when this
+   * session has no models host). Awaited before the browser opens, like `catalogRows`.
+   */
+  modelBrowser: (start?: string) => Promise<BrowserData | undefined>;
   /** dispatch the overlay's pick+args through the SAME nemesis-gated install path (CLI-059). */
   invokeInstall: (name: string, args: string) => Promise<void>;
   /**
@@ -524,7 +543,6 @@ export async function createSessionBridge(deps: BridgeDeps): Promise<SessionBrid
   const home = deps.home ?? prometheusHome();
   const tokenToggles = readTokenToggles(); // CLI-088: session-scoped token-economy toggles, read once
   ensureHomeTree(home);
-  process.env.PROMETHEUS_MODELS_DIR = resolveCategory("open_models", home);
 
   // Connect the configured MCP servers so their tools join this session's catalog. Fail-soft,
   // and free when nothing is configured — `openMcpSession` starts no process in that case.
@@ -654,7 +672,10 @@ export async function createSessionBridge(deps: BridgeDeps): Promise<SessionBrid
   let idleTimeoutMsSetting = loadIdleTimeoutMs(home);
 
   const backends: Backends =
-    deps.backends ?? (await detectBackends({ client }).catch(() => emptyBackends()));
+    deps.backends ??
+    (await detectBackends({ client, preferredRunner: loadDefaultServer(home) }).catch(() =>
+      emptyBackends(),
+    ));
   let endpoint: AiEndpoint | undefined = backends.localEndpoint;
   /**
    * The in-flight context-window/capability probe, if one was kicked off below — awaited
@@ -799,19 +820,22 @@ export async function createSessionBridge(deps: BridgeDeps): Promise<SessionBrid
   });
   const resolveKey = createKeyResolver();
   // `/models` — identical to the readline host's block (see `session/models-host.ts`).
-  const modelsHost = createModelsHost({
-    home,
-    client,
-    backends,
-    cloudEndpoints,
-    keychainProviders: cloudKeys,
-    adoptEndpoint: async (next, model) => {
-      state = repl.reduce(state, { type: "tune", patch: { model } });
-      await adoptEndpoint(next);
-    },
-    activeId: () => endpoint?.id,
-    notify: (line) => deps.write(c.dim(line)),
-  });
+  const modelsHost =
+    deps.modelsHost ??
+    createModelsHost({
+      migrateOnStart: true,
+      home,
+      client,
+      backends,
+      cloudEndpoints,
+      keychainProviders: cloudKeys,
+      adoptEndpoint: async (next, model) => {
+        state = repl.reduce(state, { type: "tune", patch: { model } });
+        await adoptEndpoint(next);
+      },
+      activeId: () => endpoint?.id,
+      notify: (line) => deps.write(c.dim(line)),
+    });
   const savedPick = readModelChoice(home);
   const restored = modelsHost.restore(savedPick);
   const pickHint = modelsHost.restoreHint(savedPick);
@@ -1417,7 +1441,11 @@ export async function createSessionBridge(deps: BridgeDeps): Promise<SessionBrid
     // auto-approves: `web_fetch` was auto-running two levels below the "network allowed"
     // rung its own `openWorldHint` asks for. Reads must classify as `read` (A1) on their
     // annotation, not by accident of which array they happen to live in.
-    const tool = agent.exposedTools(state.tuning.tools).find((t) => t.name === call.name);
+    // MCP tools included: they are merged per turn (below), so a lookup in `state.tuning` alone
+    // resolved every `mcp__*` call to no annotations.
+    const tool = agent
+      .exposedTools(withMcpTools(state.tuning, mcp?.tools() ?? []).tools)
+      .find((t) => t.name === call.name);
     // plan mode is a read-only DENY override, orthogonal to the autonomy scale.
     if (permMode === "plan") {
       if (agent.decideToolForMode("plan", tool?.annotations) === "allow") return true;
@@ -1924,7 +1952,6 @@ export async function createSessionBridge(deps: BridgeDeps): Promise<SessionBrid
   const runHostSetup = async (): Promise<void> => {
     const r = await runSetup({ client, write, ask: askText, askPath: askFolder, home });
     if (r.endpoint) {
-      process.env.PROMETHEUS_MODELS_DIR = resolveCategory("open_models", home);
       state = repl.reduce(state, {
         type: "tune",
         patch: { model: { provider: "ollama", modelId: r.endpoint.model ?? "" } },
@@ -1938,7 +1965,6 @@ export async function createSessionBridge(deps: BridgeDeps): Promise<SessionBrid
   };
   const runHostPaths = async (): Promise<void> => {
     await runPathsWizard({ client, write, ask: askText, askPath: askFolder, home });
-    process.env.PROMETHEUS_MODELS_DIR = resolveCategory("open_models", home);
   };
 
   /**
@@ -2343,6 +2369,9 @@ export async function createSessionBridge(deps: BridgeDeps): Promise<SessionBrid
             ask: (prompt) => slashCtx.ask(prompt),
             getAuthLevel: () => slashCtx.getAuthLevel(),
             signal: () => slashSignal,
+            // every pull from /updates is scanned before it counts (removed on a block)
+            gate: defaultOllamaGate,
+            discard: defaultOllamaDiscard,
           },
           /**
            * What "update everything" runs with — see updates/dispatch-cmd.ts for what it will and
@@ -2359,6 +2388,8 @@ export async function createSessionBridge(deps: BridgeDeps): Promise<SessionBrid
               }),
             ),
             pull: pullModel,
+            gate: defaultOllamaGate,
+            discard: defaultOllamaDiscard,
             audit: (entry) => appendExecAudit(home, entry),
             freeDiskBytes: () => diskInfo(ollamaModelsDir())?.freeBytes,
             runtimeFormula: () => runtimeBrewFormula(),
@@ -2724,6 +2755,11 @@ export async function createSessionBridge(deps: BridgeDeps): Promise<SessionBrid
         idleTimeoutMsSetting = ms;
         saveIdleTimeoutMs(home, ms);
       },
+    },
+    // `/server` — the persisted default local model server (Ollama unless the user picks another)
+    defaultServerSetting: {
+      get: () => loadDefaultServer(home),
+      set: (id) => saveDefaultServer(id, home),
     },
     // /cd — see `changeProjectDirectory`'s own header for the full rotation semantics.
     changeProjectDirectory: (dir, opts) => changeProjectDirectory(dir, opts),
@@ -3097,6 +3133,14 @@ export async function createSessionBridge(deps: BridgeDeps): Promise<SessionBrid
      * nothing — the command it hands back is `/updates pull`, which has its own confirmation
      * and its own authorisation gate.
      */
+    serverItems: async (): Promise<ListOverlayItem[]> =>
+      serverOverlayItems(await serverRows(slashCtx).catch(() => [])),
+    modelBrowser: async (start?: string): Promise<BrowserData | undefined> => {
+      const host = slashCtx.models;
+      if (!host) return undefined;
+      const servers = await serverRows(slashCtx).catch(() => []);
+      return buildModelBrowser(host, { servers, ...(start ? { start } : {}) });
+    },
     catalogRows: async (query: string): Promise<BrowseRow[]> => {
       try {
         const r = await searchHuggingFace({ query, limit: 40 });

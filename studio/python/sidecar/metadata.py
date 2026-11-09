@@ -219,27 +219,55 @@ def v_inspect(argv: Sequence[str]) -> int:
     return emit("inspect", **_inspect_payload(path))
 
 
+# exiftool's own bookkeeping, not metadata: file name/size/dates, MIME, line counts, derived values.
+# No scrub can remove them, so they must not count as "tags left behind".
+_PSEUDO_GROUPS = ("ExifTool:", "System:", "File:", "Composite:")
+
+
+def _content_tag_count(tags: Dict[str, str]) -> int:
+    """How many REMOVABLE metadata tags `tags` holds (exiftool pseudo-groups excluded)."""
+    return sum(1 for k in tags if not k.startswith(_PSEUDO_GROUPS))
+
+
 def _strip_to_copy(src: str, tmp: str) -> bool:
     """Strip metadata from `src` into the fresh copy `tmp`. Returns True on success."""
     shutil.copy2(src, tmp)
     if _EXIFTOOL:
         try:
-            subprocess.run(
+            cp = subprocess.run(
                 [_EXIFTOOL, "-all=", "-XMP:all=", "-IPTC:all=", "-overwrite_original", tmp],
                 capture_output=True, text=True, timeout=120, check=False,
             )
         except (OSError, subprocess.SubprocessError) as exc:
             log(f"exiftool scrub failed: {exc}")
             return False
+        # The exit status was ignored: an exiftool that refused the file ("unsupported", a
+        # read-only format, a corrupt header) left every tag in place and the scrub still
+        # reported success.
+        if cp.returncode != 0:
+            err = (cp.stderr or "").strip()
+            # "Writing of TXT files is not yet supported": exiftool has no WRITER for this type,
+            # which is the same as having no content tool for it — the xattr scrub below still
+            # applies, and the verification in `v_scrub` still refuses a file whose CONTENT tags
+            # survived. Any other failure is a failure.
+            if "not yet supported" not in err and "not supported" not in err:
+                log(f"exiftool scrub failed (exit {cp.returncode}): {err[-200:]}")
+                return False
     else:
         mime = _mime(src)
         if mime.startswith("image/") and Image is not None:
             try:
                 with Image.open(tmp) as im:
-                    data = list(im.getdata())
+                    im.load()
+                    fmt = im.format
+                    # pixels only: `paste` copies no info/EXIF/ICC/text chunks. The old
+                    # `list(im.getdata())` built a Python list of every pixel — gigabytes for a
+                    # large photo — and a palette image lost its palette.
                     clean = Image.new(im.mode, im.size)
-                    clean.putdata(data)
-                    clean.save(tmp)
+                    clean.paste(im)
+                    if im.mode == "P" and im.getpalette():
+                        clean.putpalette(im.getpalette())
+                clean.save(tmp, format=fmt)
             except Exception as exc:  # noqa: BLE001
                 log(f"PIL scrub failed: {exc}")
                 return False
@@ -290,14 +318,21 @@ def v_scrub(argv: Sequence[str]) -> int:
         # PLAN ONLY — never mutate without the typed confirm (C5).
         return emit("scrub", planned=True, file=path, before={"tagCount": before["tagCount"], "tags": before["tags"], "xattrs": before["xattrs"]},
                     note="re-run with --confirm to erase the metadata")
-    tmp_fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), prefix=".prom-meta-")
+    # keep the original EXTENSION: tools that pick a format from the name (PIL's `save`, exiftool's
+    # writer) failed on an extension-less temp file
+    tmp_fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), prefix=".prom-meta-",
+                                   suffix=os.path.splitext(path)[1])
     os.close(tmp_fd)
     try:
         if not _strip_to_copy(path, tmp):
             os.unlink(tmp)
             return fail("scrub", "metadata strip failed — original left intact")
         after = _inspect_payload(tmp)
-        if after["tagCount"] > before["tagCount"]:
+        # `>` let an unchanged file through ("0 removed" and scrubbed:true): a file that HAD
+        # tags must come back with fewer, or the scrub did not happen.
+        had = _content_tag_count(before["tags"])
+        left = _content_tag_count(after["tags"])
+        if left > had or (had > 0 and left >= had):
             os.unlink(tmp)
             return fail("scrub", "verification failed (tags not reduced) — original left intact")
         # atomic replace (same dir → same filesystem)
@@ -334,7 +369,10 @@ def v_edit(argv: Sequence[str]) -> int:
     if "--confirm" not in argv:
         return emit("edit", planned=True, file=path, field=field, value=value,
                     note="re-run with --confirm to write the field")
-    tmp_fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), prefix=".prom-meta-")
+    # keep the original EXTENSION: tools that pick a format from the name (PIL's `save`, exiftool's
+    # writer) failed on an extension-less temp file
+    tmp_fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), prefix=".prom-meta-",
+                                   suffix=os.path.splitext(path)[1])
     os.close(tmp_fd)
     try:
         shutil.copy2(path, tmp)

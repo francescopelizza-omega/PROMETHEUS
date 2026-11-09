@@ -28,7 +28,39 @@ import { cliProfiles } from "@prometheus/core";
 import { describeEngineFailure } from "@prometheus/engine-bridge";
 import { ipcMain } from "electron";
 
+import {
+  DEFAULT_AUTH_LEVEL,
+  MAX_AUTH_LEVEL,
+  authLevelMeta,
+  authLevelName,
+} from "@prometheus/core/agent-authorization";
+
 import { type AuthLevelResult, IPC } from "../shared/ipc-contract.js";
+
+/** The production consent: a native dialog naming both levels. Fails CLOSED. */
+async function nativeApproveRaise(from: number, to: number): Promise<boolean> {
+  try {
+    const electron = (await import("electron")) as unknown as {
+      dialog?: { showMessageBox: (o: unknown) => Promise<{ response: number }> };
+    };
+    if (!electron.dialog) return false;
+    const meta = authLevelMeta(to);
+    const r = await electron.dialog.showMessageBox({
+      type: "warning",
+      buttons: ["Cancel", "Raise"],
+      defaultId: 0,
+      cancelId: 0,
+      noLink: true,
+      message: `Raise the agent's autonomy from A${from} to A${to} (${meta.name})?`,
+      detail:
+        "The agent will run more without asking you — in Studio and in `prometheus` on the " +
+        "terminal, which shares this setting.",
+    });
+    return r.response === 1;
+  } catch {
+    return false;
+  }
+}
 
 // `errString` was a LOCAL copy here, one of twenty across main/*.ts, and every copy returned
 // `e.message` alone — discarding `EngineError.stderrTail`, which is where the engine puts the
@@ -42,8 +74,21 @@ const errString = describeEngineFailure;
  * `home` is the OS home, injected for tests; production omits it and the store resolves the one
  * Prometheus home ($PROMETHEUS_HOME, else `~/.prometheus`).
  */
-export function registerAuthLevelIpcHandlers(opts: { home?: string } = {}): () => void {
+export function registerAuthLevelIpcHandlers(
+  opts: {
+    home?: string;
+    /**
+     * Native consent for RAISING the saved level. The saved level is the ceiling every main-side
+     * check clamps the renderer's claim to (agent:systemTool's ladder and sandbox, the cloud-model
+     * refusal) and the level the CLI starts at — so a renderer that could raise it with a bare
+     * IPC call could lift every one of those clamps at once. Lowering never asks. Injected for
+     * tests; production shows Electron's dialog.
+     */
+    approveRaise?: (from: number, to: number) => Promise<boolean>;
+  } = {},
+): () => void {
   const { home } = opts;
+  const approveRaise = opts.approveRaise ?? nativeApproveRaise;
 
   ipcMain.handle(IPC.authLevelGet, async (): Promise<AuthLevelResult> => {
     try {
@@ -70,6 +115,17 @@ export function registerAuthLevelIpcHandlers(opts: { home?: string } = {}): () =
       // permission-mode dial syncs the live level without calling it, exactly as Shift-Tab does
       // in the terminal, because mode→level is lossy and persisting the derived value is what
       // destroyed the operator's explicit choice on the CLI side.
+      const current = cliProfiles.readSavedAuthLevel(home) ?? DEFAULT_AUTH_LEVEL;
+      const wanted = Math.max(0, Math.min(Math.trunc(level), MAX_AUTH_LEVEL));
+      if (wanted > current && !(await approveRaise(current, wanted))) {
+        return {
+          ok: false,
+          level: cliProfiles.readSavedAuthLevel(home),
+          path: cliProfiles.authLevelPath(home),
+          declined: true,
+          error: `raising the autonomy level to ${authLevelName(wanted)} was not confirmed`,
+        };
+      }
       cliProfiles.saveAuthLevel(level, home);
       return {
         ok: true,

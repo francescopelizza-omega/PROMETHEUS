@@ -99,7 +99,7 @@ function tabStyle(activeTab: boolean): CSSProperties {
     borderBottom: `2px solid ${activeTab ? "var(--accent)" : "transparent"}`,
     color: activeTab ? "var(--text-primary)" : "var(--text-muted)",
     cursor: "pointer",
-    fontSize: 11,
+    fontSize: 12,
     fontWeight: activeTab ? 600 : 400,
     padding: "2px 1px",
     textTransform: "uppercase",
@@ -239,6 +239,8 @@ export function RightRail({
         <button
           type="button"
           onClick={() => onModeChange("agent")}
+          // a two-way MODE switch: say which one is on (it was only an underline colour)
+          aria-pressed={mode === "agent"}
           style={{
             ...tabStyle(mode === "agent"),
             fontSize: 12.5,
@@ -254,7 +256,7 @@ export function RightRail({
           <span
             title={sessionLabel}
             style={{
-              fontSize: 11,
+              fontSize: 12,
               padding: "1px 8px",
               borderRadius: "var(--radius-md)",
               background: "var(--bg-active)",
@@ -273,6 +275,8 @@ export function RightRail({
         <button
           type="button"
           onClick={() => onModeChange("inspector")}
+          // a two-way MODE switch: say which one is on (it was only an underline colour)
+          aria-pressed={mode === "inspector"}
           style={tabStyle(mode === "inspector")}
         >
           Inspector

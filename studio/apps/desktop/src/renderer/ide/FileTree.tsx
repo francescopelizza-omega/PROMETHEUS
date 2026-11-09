@@ -457,7 +457,7 @@ export function FileTree({ root }: { root: string }): ReactElement {
               }}
             />
             {crudError && (
-              <div style={{ color: "var(--danger)", marginTop: 6, fontSize: "0.72rem" }}>
+              <div style={{ color: "var(--danger)", marginTop: 6, fontSize: "0.75rem" }}>
                 {crudError}
               </div>
             )}

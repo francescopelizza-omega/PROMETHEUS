@@ -650,7 +650,7 @@ export type { DiskToolPaths } from "./disk-space.js";
 
 // the curated child-process env (strips linker/loader/interpreter hijack vars) — reused
 // by the IDE's gated command-exec host so it spawns with the same hardening as nemesis.
-export { safeChildEnv, isHijackEnvKey } from "./safe-env.js";
+export { agentChildEnv, isHijackEnvKey, isSecretEnvKey, safeChildEnv } from "./safe-env.js";
 export {
   probeSystemCommand,
   execCapture,

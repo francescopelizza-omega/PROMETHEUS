@@ -78,7 +78,8 @@ const flag = (description?: string): FieldSpec => ({
   description,
 });
 
-/** The 14 ported tools — VERBATIM names/annotations/argv from the reused server. */
+/** The 14 ported tools — VERBATIM names/annotations/argv from the reused server — plus six
+ *  read-only views (doctor, harden, describe, tutorial, methods, disk_space). */
 export const PROMETHEUS_TOOLS: ToolDef[] = [
   {
     name: "prometheus_scan",
@@ -123,7 +124,7 @@ export const PROMETHEUS_TOOLS: ToolDef[] = [
       "caveats, install targets and selectable components.",
     schema: { name: req("registry plugin name (see prometheus_list)") },
     annotations: RO,
-    toArgv: (a) => ["info", s(a.name)],
+    toArgv: (a) => ["info", "--", s(a.name)],
   },
   {
     name: "prometheus_where",
@@ -131,7 +132,7 @@ export const PROMETHEUS_TOOLS: ToolDef[] = [
     description: "Show which detected agents currently have a given plugin installed.",
     schema: { name: req("registry plugin name") },
     annotations: RO,
-    toArgv: (a) => ["where", s(a.name)],
+    toArgv: (a) => ["where", "--", s(a.name)],
   },
   {
     name: "prometheus_status",
@@ -139,7 +140,7 @@ export const PROMETHEUS_TOOLS: ToolDef[] = [
     description: "Per-agent enabled/installed/disabled/muted/absent/missing state for one plugin.",
     schema: { name: req("registry plugin name") },
     annotations: RO,
-    toArgv: (a) => ["status", s(a.name)],
+    toArgv: (a) => ["status", "--", s(a.name)],
   },
   {
     name: "prometheus_audit",
@@ -149,7 +150,7 @@ export const PROMETHEUS_TOOLS: ToolDef[] = [
       "Read-only: scans, never installs. A high/critical worst_verdict is an error.",
     schema: { name: req("registry plugin name") },
     annotations: RO,
-    toArgv: (a) => ["audit", s(a.name)],
+    toArgv: (a) => ["audit", "--", s(a.name)],
   },
   {
     name: "prometheus_matrix",
@@ -174,6 +175,79 @@ export const PROMETHEUS_TOOLS: ToolDef[] = [
     schema: {},
     annotations: RO,
     toArgv: () => ["vault"],
+  },
+  // Read-only views the plugin server already offered and this catalogue lacked (2026-11-02
+  // audit): an external client of `prometheus-mcp` could not run a doctor, a posture audit or a
+  // disk-space view. All of them only read; ids are `--`-guarded so one starting with "-" is
+  // never parsed as an engine flag.
+  {
+    name: "prometheus_doctor",
+    title: "Setup check",
+    description: "Check this machine's Prometheus setup: engine, Python, nemesis, runners, PATH.",
+    schema: {},
+    annotations: { ...RO },
+    toArgv: () => ["doctor"],
+  },
+  {
+    name: "prometheus_harden",
+    title: "Machine posture audit",
+    description:
+      "Read-only security posture of THIS machine: firewall, SSH, disk encryption, listeners.",
+    schema: {},
+    annotations: { ...RO },
+    toArgv: () => ["harden"],
+  },
+  {
+    name: "prometheus_describe",
+    title: "Describe a catalog id",
+    description: "Rich card for any catalog id; omit the id for the whole catalog index.",
+    schema: { id: optStr("catalog id (plugin / app / model tool / open model)") },
+    annotations: RO,
+    toArgv: (a) => ["describe", ...(a.id ? ["--", s(a.id)] : [])],
+  },
+  {
+    name: "prometheus_tutorial",
+    title: "How to use a catalog item",
+    description: "Step-by-step usage for one catalog id.",
+    schema: { id: optStr("catalog id") },
+    annotations: RO,
+    toArgv: (a) => ["tutorial", ...(a.id ? ["--", s(a.id)] : [])],
+  },
+  {
+    name: "prometheus_methods",
+    title: "Install methods",
+    description:
+      "The install methods available for one catalog id, and which this machine supports.",
+    schema: { id: optStr("catalog id") },
+    annotations: RO,
+    toArgv: (a) => ["methods", ...(a.id ? ["--", s(a.id)] : [])],
+  },
+  {
+    name: "prometheus_disk_space",
+    title: "Disk space (read-only)",
+    description:
+      "Where the disk went: mounts, a size map, du-style levels or the largest files under a " +
+      "folder. Read-only — no delete, no root, ever, over MCP.",
+    schema: {
+      action: {
+        type: "enum",
+        required: true,
+        enum: ["mounts", "map", "levels", "files"],
+        description: "which view",
+      },
+      path: optStr("folder to measure (absolute or ~; default ~)"),
+    },
+    annotations: RO,
+    toArgv: (a) => {
+      // no action = the harmless mounts view (the runner requires one; this is belt and braces)
+      const action = a.action === undefined ? "mounts" : s(a.action);
+      const verb = { mounts: "mounts", map: "map", levels: "levels", files: "largest-files" }[
+        action as "mounts" | "map" | "levels" | "files"
+      ];
+      if (!verb) throw new Error(`unsupported disk-space action: ${action}`);
+      if (verb === "mounts") return ["disk-space", "mounts"];
+      return ["disk-space", verb, "--", a.path ? s(a.path) : "~"];
+    },
   },
   {
     name: "prometheus_install",

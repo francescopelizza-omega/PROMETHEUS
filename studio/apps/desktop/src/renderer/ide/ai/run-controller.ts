@@ -30,7 +30,7 @@ import { personaDeny, personaSystemPrompt } from "@prometheus/core/agent-files";
 import type { ConfirmResult, Thread, ToolCall, ToolOutcome } from "@prometheus/core/agent-loop";
 import { runAgentTurn } from "@prometheus/core/agent-loop";
 import { ScopedPermissionStore, withRememberedGrants } from "@prometheus/core/agent-permissions";
-import { allMcpToolDefs, isMcpToolName } from "@prometheus/core/agent-protocol";
+import { allMcpToolDefs, isMcpToolName, mcpToolName } from "@prometheus/core/agent-protocol";
 import {
   canAsk,
   initialQuestionBudget,
@@ -44,6 +44,7 @@ import {
   isSubagentRole,
   runSubagent,
 } from "@prometheus/core/agent-subagent";
+import { HOST_DISPATCH_TOOLS } from "@prometheus/core/agent-system";
 import { TodoStore, runTodoTool, todoSummary } from "@prometheus/core/agent-todo";
 import type { ToolDef } from "@prometheus/core/agent-tools";
 import { exposedTools } from "@prometheus/core/agent-tools";
@@ -365,6 +366,18 @@ class AgentRunController {
         if (done) this.approvedCommand.delete(sid); // claimed or stale, it is spent either way
         const replay = claimCardResult(done, name);
         if (replay) return replay;
+        // Reaching here without a card means either the ladder auto-approved the call or a
+        // REMEMBERED GRANT did (`withRememberedGrants` answers before the card is shown). For
+        // the second, tell main a human's standing decision approved this exact call, so its
+        // own ladder does not ask again in a native dialog (main/agent-approvals.ts).
+        const ann = HOST_DISPATCH_TOOLS.find((t) => t.name === name)?.annotations;
+        const approval =
+          deps.root && !autoApprovesToolCall({ name, args } as ToolCall, ann)
+            ? await deps.ide
+                ?.approveToolCall?.({ name, args })
+                .then((x) => (x.ok ? x.token : undefined))
+                .catch(() => undefined)
+            : undefined;
         const r = deps.root
           ? await deps.ide?.systemTool({
               name,
@@ -375,6 +388,7 @@ class AgentRunController {
               // denies the network at every level. Read here (not captured) for the same
               // reason the tuning is: the pill can move mid-turn.
               authLevel: useAuthorisationStore.getState().level,
+              ...(approval ? { approval } : {}),
             })
           : undefined;
         return r ?? { ok: false, summary: `"${name}" is unavailable in this environment` };
@@ -479,6 +493,8 @@ class AgentRunController {
             onCanaryTripped: (info) => {
               void deps.ide?.canaryTrip?.(info);
             },
+            // the TURN's signal: Stop must stop a delegated batch too, not only the parent
+            signal: deps.signal,
           });
           deps.onToolNote(`⤶ sub-agent done (${out.toolCalls} tool call(s))`);
           return { ok: out.ok, summary: out.text };
@@ -511,7 +527,29 @@ class AgentRunController {
        */
       /** One MCP tool call, forwarded to the server main holds the transport for. */
       mcpTool: async (serverId, tool, args) => {
-        const r = await deps.mcp?.agentCall({ serverId, tool, args });
+        const name = mcpToolName(serverId, tool);
+        // The human's card already ran this exact call (AgentPane) — replay its result. Without
+        // this the approved call ran TWICE: once from the card, once here.
+        const done = this.approvedCommand.get(sid);
+        if (done) this.approvedCommand.delete(sid);
+        const replay = claimCardResult(done, name);
+        if (replay) return replay;
+        // No card ⇒ the ladder or a REMEMBERED GRANT approved it. For a grant, tell main a
+        // human's standing decision covers this exact call (main/agent-approvals.ts).
+        const ann = exposedTools(tuning.tools).find((t) => t.name === name)?.annotations;
+        const approval = !autoApprovesToolCall({ name, args } as ToolCall, ann)
+          ? await deps.ide
+              ?.approveToolCall?.({ name, args })
+              .then((x) => (x.ok ? x.token : undefined))
+              .catch(() => undefined)
+          : undefined;
+        const r = await deps.mcp?.agentCall({
+          serverId,
+          tool,
+          args,
+          authLevel: useAuthorisationStore.getState().level,
+          ...(approval ? { approval } : {}),
+        });
         return r ?? { ok: false, summary: `MCP server "${serverId}" is unavailable` };
       },
       askUser: async (args) => {

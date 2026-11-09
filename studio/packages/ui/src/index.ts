@@ -100,7 +100,7 @@ export type { CostLightProps, CostTier } from "./components/CostLight.js";
 // §9 overlay contract: the shared focus trap + Escape handler every modal composes.
 export { useFocusTrap, clampToViewport } from "./components/primitives/overlay.js";
 export type { FocusTrapOptions } from "./components/primitives/overlay.js";
-export { useAnchoredLayer } from "./components/primitives/anchor.js";
+export { anchoredEdge, useAnchoredLayer } from "./components/primitives/anchor.js";
 export type {
   AnchoredLayerBox,
   AnchoredLayerOptions,

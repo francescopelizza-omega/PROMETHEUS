@@ -14,10 +14,10 @@ import { type KeyboardEvent, type ReactNode, useId, useMemo, useRef, useState } 
 import { createPortal } from "react-dom";
 import { Z } from "../../tokens/layers.js";
 import { Input } from "./Input.js";
-import { useAnchoredLayer } from "./anchor.js";
+import { anchoredEdge, useAnchoredLayer } from "./anchor.js";
 import { filterItems } from "./filter.js";
 import { menuKeyHandler, useDismiss } from "./overlay.js";
-import { fs, FOCUS_RING, rad, sp, v } from "./styles.js";
+import { fs, FOCUS_RING, isKeyboardFocus, rad, sp, v } from "./styles.js";
 
 export interface SelectOption {
   value: string;
@@ -207,14 +207,31 @@ export function Select({
           outline: "none",
         }}
         onFocus={(e) => {
-          e.currentTarget.style.boxShadow = FOCUS_RING;
+          if (isKeyboardFocus(e.currentTarget)) e.currentTarget.style.boxShadow = FOCUS_RING;
         }}
         onBlur={(e) => {
           e.currentTarget.style.boxShadow = "none";
         }}
+        // the full text of a truncated label (only when it IS text — a label may be a node)
+        title={
+          typeof (selected?.label ?? placeholder) === "string"
+            ? ((selected?.label ?? placeholder) as string)
+            : undefined
+        }
       >
-        <span>{selected?.label ?? placeholder}</span>
-        <span aria-hidden="true" style={{ color: v("text-secondary") }}>
+        {/* a long label used to push the chevron out of the trigger (or wrap it to a second
+            line inside a 36px box): it truncates, and the full text is the title */}
+        <span
+          style={{
+            minWidth: 0,
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+            whiteSpace: "nowrap",
+          }}
+        >
+          {selected?.label ?? placeholder}
+        </span>
+        <span aria-hidden="true" style={{ color: v("text-secondary"), flexShrink: 0 }}>
           ▾
         </span>
       </button>
@@ -226,7 +243,7 @@ export function Select({
             style={{
               position: "fixed",
               left: box.left,
-              top: box.top,
+              ...anchoredEdge(box),
               width: box.width,
               zIndex: Z.dropdown,
             }}
@@ -338,7 +355,7 @@ export function Combobox({
             style={{
               position: "fixed",
               left: box.left,
-              top: box.top,
+              ...anchoredEdge(box),
               width: box.width,
               zIndex: Z.dropdown,
             }}

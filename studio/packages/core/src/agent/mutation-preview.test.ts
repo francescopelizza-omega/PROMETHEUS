@@ -219,3 +219,15 @@ test("renderMutationPreview is bounded — a huge delete cannot flood the termin
   assert.ok(lines.length < 40, `expected a bounded render, got ${lines.length} lines`);
   assert.ok(lines.join("\n").includes("more lines removed"));
 });
+
+test("memory_write is previewed with the note it will plant in every future session", () => {
+  const p = previewMutation(
+    { name: "memory_write", args: { name: "deploy", description: "d", body: "run x first" } },
+    (x) => x,
+    { readText: () => null, stat: () => null, list: () => [] } as never,
+  );
+  assert.ok(p);
+  assert.match(p?.headline ?? "", /every future session/);
+  const ch = p?.changes[0];
+  assert.ok(ch && ch.kind === "edit" && ch.newText.includes("run x first"));
+});

@@ -3,14 +3,12 @@
 /**
  * main/ide/exec-screen.ts — re-export of core's layer 6 (full_wrapper_compose Phase 6).
  *
- * The patterns MOVED to `@prometheus/core/agent-exec` so the CLI and Studio screen commands
- * with one list instead of two that drift. This file stays as the import site `ide-ipc.ts`
- * already uses.
- *
- * Note what promoting it did NOT do: `ide:exec` still spawns a real `shell -c <command>`,
- * and a denylist over a shell string cannot hold (`${IFS}sudo`, `$(echo … | base64 -d)`,
- * `eval "$X"` all walk past it). The fix for that is the rest of Phase 6 — Studio dispatching
- * core's `run_command`, which parses and spawns each program directly with no shell at all.
+ * STATUS (verified 2026-11-02): `ide:exec` no longer exists — no IPC channel, no handler, no
+ * preload method. Studio runs commands through `agent:systemTool` → core's `run_command`,
+ * which parses and spawns each program directly with no shell (main/ide-ipc.ts). Nothing in
+ * production imports this file; it remains only as the stable import site its own test pins.
+ * Do not reintroduce a `shell -c` executor behind this denylist: a regex over a shell string
+ * cannot hold (`${IFS}sudo`, `$(echo … | base64 -d)`, `eval "$X"` all walk past it).
  */
 export {
   type CommandScreen,

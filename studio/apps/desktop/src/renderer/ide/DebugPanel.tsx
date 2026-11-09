@@ -307,7 +307,7 @@ function TreeNode({
       setOpen(false);
     }
   };
-  const mono = { fontSize: "0.72rem", fontFamily: "var(--font-mono, monospace)" } as const;
+  const mono = { fontSize: "0.75rem", fontFamily: "var(--font-mono, monospace)" } as const;
   return (
     <div style={{ paddingLeft: depth === 0 ? 0 : 12 }}>
       <div style={{ ...mono, display: "flex", gap: 4, alignItems: "center", padding: "1px 0" }}>
@@ -454,7 +454,7 @@ const inputStyle = {
   border: "1px solid var(--border-subtle)",
   borderRadius: 4,
   padding: "2px 6px",
-  fontSize: "0.7rem",
+  fontSize: "0.75rem",
   fontFamily: "var(--font-mono, monospace)",
 } as const;
 
@@ -510,7 +510,7 @@ function BreakpointRow({
             padding: 0,
             cursor: "pointer",
             textAlign: "left",
-            fontSize: "0.72rem",
+            fontSize: "0.75rem",
             fontFamily: "var(--font-mono, monospace)",
             color: bp.enabled ? "var(--text-primary)" : "var(--text-secondary)",
           }}
@@ -543,7 +543,7 @@ function BreakpointRow({
             border: "none",
             color: editing ? "var(--accent)" : "var(--text-secondary)",
             cursor: "pointer",
-            fontSize: "0.72rem",
+            fontSize: "0.75rem",
           }}
         >
           ✎
@@ -557,7 +557,7 @@ function BreakpointRow({
             border: "none",
             color: "var(--text-secondary)",
             cursor: "pointer",
-            fontSize: "0.72rem",
+            fontSize: "0.75rem",
           }}
         >
           ✕
@@ -567,7 +567,7 @@ function BreakpointRow({
         <div
           style={{
             marginLeft: 24,
-            fontSize: "0.68rem",
+            fontSize: "0.75rem",
             fontFamily: "var(--font-mono, monospace)",
             color: "var(--text-secondary)",
           }}
@@ -599,7 +599,7 @@ function BreakpointRow({
             style={inputStyle}
           />
           {isLogpoint(bp) && !logpointsSupported && (
-            <span style={{ fontSize: "0.66rem", color: "var(--warn)" }}>
+            <span style={{ fontSize: "0.75rem", color: "var(--warn)" }}>
               this adapter doesn't support logpoints — it will stop instead of logging
             </span>
           )}
@@ -1325,7 +1325,7 @@ export function DebugPanel(): ReactElement {
       {importCandidates && (
         <Panel title="Import run configurations" elevation="e1">
           {importCandidates.length === 0 ? (
-            <p style={{ margin: 0, color: "var(--text-secondary)", fontSize: "0.74rem" }}>
+            <p style={{ margin: 0, color: "var(--text-secondary)", fontSize: "0.75rem" }}>
               No foreign run configurations found (.vscode/launch.json,
               .idea/runConfigurations/*.xml) — or everything is already imported.
             </p>
@@ -1339,7 +1339,7 @@ export function DebugPanel(): ReactElement {
                       display: "flex",
                       alignItems: "center",
                       gap: 6,
-                      fontSize: "0.72rem",
+                      fontSize: "0.75rem",
                       fontFamily: "var(--font-mono, monospace)",
                     }}
                   >
@@ -1374,7 +1374,7 @@ export function DebugPanel(): ReactElement {
                         border: "1px solid var(--border-subtle)",
                         borderRadius: 3,
                         padding: "0 4px",
-                        fontSize: "0.64rem",
+                        fontSize: "0.75rem",
                         color: c.source === "vscode" ? "var(--accent)" : "var(--warn)",
                       }}
                     >
@@ -1413,7 +1413,7 @@ export function DebugPanel(): ReactElement {
           {importError && (
             <p
               role="alert"
-              style={{ margin: "6px 0 0", color: "var(--danger)", fontSize: "0.72rem" }}
+              style={{ margin: "6px 0 0", color: "var(--danger)", fontSize: "0.75rem" }}
             >
               {importError}
             </p>
@@ -1434,7 +1434,7 @@ export function DebugPanel(): ReactElement {
                 border: "1px solid var(--border-subtle)",
                 borderRadius: 4,
                 padding: "2px 4px",
-                fontSize: "0.72rem",
+                fontSize: "0.75rem",
               }}
             >
               <option value="python">python</option>
@@ -1471,7 +1471,7 @@ export function DebugPanel(): ReactElement {
           <p
             style={{
               margin: "6px 0 0",
-              fontSize: "0.68rem",
+              fontSize: "0.75rem",
               color: "var(--text-secondary)",
             }}
           >
@@ -1484,7 +1484,7 @@ export function DebugPanel(): ReactElement {
 
       {pendingRemoteAttach && (
         <Panel title="Confirm remote debug attach" elevation="e2">
-          <p role="alert" style={{ margin: "0 0 6px", color: "var(--warn)", fontSize: "0.74rem" }}>
+          <p role="alert" style={{ margin: "0 0 6px", color: "var(--warn)", fontSize: "0.75rem" }}>
             Attaching to{" "}
             <strong>
               {pendingHost}:{pendingPort}
@@ -1528,7 +1528,7 @@ export function DebugPanel(): ReactElement {
           {runError && (
             <p
               role="alert"
-              style={{ margin: "0 0 4px", color: "var(--danger)", fontSize: "0.72rem" }}
+              style={{ margin: "0 0 4px", color: "var(--danger)", fontSize: "0.75rem" }}
             >
               {runError}
             </p>
@@ -1540,7 +1540,7 @@ export function DebugPanel(): ReactElement {
                 margin: 0,
                 maxHeight: 160,
                 overflow: "auto",
-                fontSize: "0.7rem",
+                fontSize: "0.75rem",
                 fontFamily: "var(--font-mono, monospace)",
                 whiteSpace: "pre-wrap",
                 color: "var(--text-primary)",
@@ -1553,7 +1553,7 @@ export function DebugPanel(): ReactElement {
             <p
               style={{
                 margin: "4px 0 0",
-                fontSize: "0.72rem",
+                fontSize: "0.75rem",
                 color: runExit.killed
                   ? "var(--warn)"
                   : runExit.exitCode === 0
@@ -1630,7 +1630,7 @@ export function DebugPanel(): ReactElement {
             style={{
               margin: "4px 0 0",
               color: "var(--text-secondary)",
-              fontSize: "0.72rem",
+              fontSize: "0.75rem",
             }}
           >
             {(gate ?? runGateVerdict)?.reason}
@@ -1667,7 +1667,7 @@ export function DebugPanel(): ReactElement {
               </div>
               {installNeedsConfirm && (
                 <div style={{ marginTop: 6 }}>
-                  <p style={{ margin: 0, color: "var(--warn)", fontSize: "0.72rem" }}>
+                  <p style={{ margin: 0, color: "var(--warn)", fontSize: "0.75rem" }}>
                     {installError}
                   </p>
                   <Button
@@ -1685,7 +1685,7 @@ export function DebugPanel(): ReactElement {
                   style={{
                     margin: "4px 0 0",
                     color: "var(--danger)",
-                    fontSize: "0.72rem",
+                    fontSize: "0.75rem",
                   }}
                 >
                   {installError}
@@ -1697,7 +1697,7 @@ export function DebugPanel(): ReactElement {
               style={{
                 margin: "4px 0 0",
                 color: "var(--text-secondary)",
-                fontSize: "0.72rem",
+                fontSize: "0.75rem",
               }}
             >
               Automatic install isn't available for "{adapterStatus.type}" yet — install its adapter
@@ -1740,7 +1740,7 @@ export function DebugPanel(): ReactElement {
                     padding: "1px 4px",
                     cursor: "pointer",
                     textAlign: "left",
-                    fontSize: "0.72rem",
+                    fontSize: "0.75rem",
                     fontFamily: "var(--font-mono, monospace)",
                     color: "var(--text-primary)",
                   }}
@@ -1795,7 +1795,7 @@ export function DebugPanel(): ReactElement {
                     padding: "1px 4px",
                     cursor: "pointer",
                     textAlign: "left",
-                    fontSize: "0.72rem",
+                    fontSize: "0.75rem",
                     fontFamily: "var(--font-mono, monospace)",
                     color: "var(--text-primary)",
                   }}
@@ -1862,7 +1862,7 @@ export function DebugPanel(): ReactElement {
                 border: "none",
                 color: "var(--text-secondary)",
                 cursor: paused ? "pointer" : "default",
-                fontSize: "0.72rem",
+                fontSize: "0.75rem",
                 padding: 0,
               }}
             >
@@ -1886,7 +1886,7 @@ export function DebugPanel(): ReactElement {
               border: "1px solid var(--border-subtle)",
               borderRadius: 4,
               padding: "2px 6px",
-              fontSize: "0.72rem",
+              fontSize: "0.75rem",
               fontFamily: "var(--font-mono, monospace)",
             }}
           />
@@ -1899,7 +1899,7 @@ export function DebugPanel(): ReactElement {
               borderRadius: 4,
               color: "var(--text-secondary)",
               cursor: "pointer",
-              fontSize: "0.72rem",
+              fontSize: "0.75rem",
               padding: "2px 8px",
             }}
           >
@@ -1917,7 +1917,7 @@ export function DebugPanel(): ReactElement {
                   display: "flex",
                   alignItems: "center",
                   gap: 6,
-                  fontSize: "0.72rem",
+                  fontSize: "0.75rem",
                   fontFamily: "var(--font-mono, monospace)",
                 }}
               >
@@ -1940,7 +1940,7 @@ export function DebugPanel(): ReactElement {
                     border: "none",
                     color: "var(--text-secondary)",
                     cursor: "pointer",
-                    fontSize: "0.72rem",
+                    fontSize: "0.75rem",
                   }}
                 >
                   ✕
@@ -1969,7 +1969,7 @@ export function DebugPanel(): ReactElement {
               border: "1px solid var(--border-subtle)",
               borderRadius: 4,
               padding: "2px 6px",
-              fontSize: "0.72rem",
+              fontSize: "0.75rem",
               fontFamily: "var(--font-mono, monospace)",
             }}
           />
@@ -1984,7 +1984,7 @@ export function DebugPanel(): ReactElement {
               borderRadius: 4,
               color: "var(--text-secondary)",
               cursor: "pointer",
-              fontSize: "0.72rem",
+              fontSize: "0.75rem",
               padding: "2px 8px",
             }}
           >
@@ -1998,7 +1998,7 @@ export function DebugPanel(): ReactElement {
               role="alert"
               style={{
                 margin: 0,
-                fontSize: "0.72rem",
+                fontSize: "0.75rem",
                 fontFamily: "var(--font-mono, monospace)",
                 color: "var(--danger)",
               }}
@@ -2040,7 +2040,7 @@ export function DebugPanel(): ReactElement {
                     display: "flex",
                     alignItems: "center",
                     gap: 6,
-                    fontSize: "0.72rem",
+                    fontSize: "0.75rem",
                   }}
                 >
                   <input

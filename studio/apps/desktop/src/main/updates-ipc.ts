@@ -32,6 +32,7 @@
  */
 import { updates as u } from "@prometheus/core";
 import { DEFAULT_CONTEXT_WINDOW } from "@prometheus/core";
+import { prometheusHome } from "@prometheus/core/agent-system-host";
 import {
   checkUpdates,
   fetchOllamaTags,
@@ -205,12 +206,17 @@ function projectModels(report: u.UpdateReport) {
  *
  * `home` and `promVersion` are injected so tests never touch the real Prometheus home.
  */
+/** A forced ("Check now") sweep runs at most this often. */
+const FORCE_FLOOR_MS = 30_000;
+
 export function registerUpdatesIpcHandlers(opts: {
   home?: string;
   promVersion?: string;
   /** test seam — the checker (default the real throttled one). */
   check?: typeof checkUpdates;
 }): () => void {
+  let inflight: ReturnType<typeof checkUpdates> | undefined;
+  let lastForcedAt = 0;
   ipcMain.handle(IPC.updatesCheck, async (_e, arg: unknown): Promise<UpdatesReportResult> => {
     const empty = {
       conflicts: [],
@@ -232,14 +238,34 @@ export function registerUpdatesIpcHandlers(opts: {
        * "Check now" button means; everything else — which managers to run, which URLs to fetch,
        * which argv to build — is decided in core from its own frozen tables.
        */
-      const force = a.force === true;
+      const now = Date.now();
+      // "Check now" skips the 6-hour throttle, but not EVERY throttle: a double click (or a
+      // loop) ran overlapping sweeps whose package-manager probes block main. One check at a
+      // time — concurrent callers share it — and a forced check at most every 30 s.
+      const force = a.force === true && now - lastForcedAt >= FORCE_FLOOR_MS;
+      if (force) lastForcedAt = now;
       const run = opts.check ?? checkUpdates;
-      const { report, fromCache } = await run({
-        home: opts.home ?? process.env.PROMETHEUS_HOME ?? "",
-        promVersion: opts.promVersion ?? "0.0.0",
-        force,
-        serverVersions: await serverVersions(),
-      });
+      const pending =
+        inflight ??
+        (async () =>
+          run({
+            // The Prometheus home (the CLI's too, so both share one throttle cache). `""` made
+            // the state path RELATIVE to the process cwd — `/` for a Finder launch, so the cache
+            // was never written and every unforced check ran the full sweep.
+            home: opts.home ?? prometheusHome(),
+            promVersion: opts.promVersion ?? "0.0.0",
+            force,
+            serverVersions: await serverVersions(),
+          }))();
+      if (!inflight) {
+        inflight = pending;
+        void pending
+          .finally(() => {
+            if (inflight === pending) inflight = undefined;
+          })
+          .catch(() => undefined);
+      }
+      const { report, fromCache } = await pending;
       return {
         ok: true,
         checkedAt: report.checkedAt,
@@ -379,11 +405,13 @@ export function registerModelCatalogIpcHandlers(
   };
 }
 
-/** `hf.co/<repo>` — ollama's own supported form, so no conversion and no scraping is involved. */
+/**
+ * What a row hands the install step: the registry tag for a pull, or — for a HuggingFace GGUF
+ * repo — the REPO for the gated hug (`model:hugOllama`). Never `hf.co/<repo>`: that went
+ * through `ollama pull` unscanned, and the engine and sidecar refuse it now.
+ */
 function catalogTag(entry: u.CatalogEntry): string {
   if (entry.route.kind === "ollama-tag") return entry.route.tag;
-  if (entry.route.kind === "ollama-hf") {
-    return `hf.co/${entry.route.repo}${entry.route.quant ? `:${entry.route.quant}` : ""}`;
-  }
+  if (entry.route.kind === "ollama-hf") return entry.route.repo;
   return entry.name;
 }

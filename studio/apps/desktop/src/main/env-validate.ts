@@ -66,7 +66,11 @@ const PKG_SPEC = z
   // NOTE: `<` and `>` are NOT forbidden — pip version operators (>=, <=, !=)
   // use them and engine-bridge spawns with shell:false, so they are inert as
   // argv. We DO block shell-substitution / command-chaining metacharacters.
-  .regex(/^[^;&|`$(){}\\]*$/, "spec contains forbidden shell characters");
+  .regex(/^[^;&|`$(){}\\]*$/, "spec contains forbidden shell characters")
+  // No leading `-`: a spec is a package, never a flag. `["evilpkg","--confirm","--force"]` used
+  // to switch the sidecar's override flags on (it tests flags by membership in argv), turning a
+  // nemesis BLOCK into an install without the force/confirmForce pairing main enforces.
+  .refine((v) => !v.startsWith("-"), "a package spec cannot start with '-'");
 
 /** A filesystem path (requirements.txt / environment.yml / export target). */
 const PATH = z

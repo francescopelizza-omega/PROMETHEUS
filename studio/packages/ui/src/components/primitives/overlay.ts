@@ -34,6 +34,9 @@ export interface FocusTrapOptions {
   skipInitialFocus?: boolean;
 }
 
+/** Open focus traps, innermost last — see `useFocusTrap`'s keydown guard. */
+const TRAP_STACK: object[] = [];
+
 /**
  * Trap Tab focus inside `containerRef` while `active`, and call `onClose` on Escape.
  * Restores focus to the previously-focused element on unmount/deactivate (08 §7).
@@ -77,6 +80,8 @@ export function useFocusTrap(
     const doc = container?.ownerDocument;
     if (!container || !doc) return;
 
+    const token = {};
+    TRAP_STACK.push(token);
     const previouslyFocused = doc.activeElement as HTMLElement | null;
     /**
      * Focusables that are actually REACHABLE. `offsetParent === null` means the element
@@ -92,6 +97,15 @@ export function useFocusTrap(
     if (!skipInitialFocus) (reachable()[0] ?? container).focus?.();
 
     function onKeyDown(e: globalThis.KeyboardEvent): void {
+      // Only the TOPMOST open trap answers. Every trap listens on the document, so Escape used
+      // to close every stacked layer at once (Settings AND the setup wizard opened from it —
+      // whose Escape also recorded "skipped").
+      if (TRAP_STACK[TRAP_STACK.length - 1] !== token) return;
+      // A trap inside a display:none subtree (a route kept mounted but hidden) must not hold
+      // the keyboard: it swallowed every Tab in the app until Escape. `getClientRects()` is
+      // empty only for an unrendered box — unlike `offsetParent`, which is null for any
+      // position:fixed overlay too.
+      if (container!.getClientRects().length === 0) return;
       if (e.key === "Escape") {
         e.stopPropagation();
         onCloseRef.current();
@@ -123,6 +137,8 @@ export function useFocusTrap(
     doc.addEventListener("keydown", onKeyDown, true);
     return () => {
       doc.removeEventListener("keydown", onKeyDown, true);
+      const at = TRAP_STACK.lastIndexOf(token);
+      if (at >= 0) TRAP_STACK.splice(at, 1);
       // Only if it is still IN the document — restoring focus to a node that unmounted
       // while the overlay was open throws focus to <body> and loses the user's place.
       if (previouslyFocused && doc.contains(previouslyFocused)) previouslyFocused.focus?.();

@@ -351,7 +351,33 @@ export function previewMutation(
   if (call.name === "apply_patch") return previewPatch(args, abs, io);
   if (call.name === "delete_file") return previewDelete(args, abs, io);
   if (call.name === "move_file") return previewMove(args, abs, io);
+  if (call.name === "memory_write") return previewMemory(args);
   return null;
+}
+
+/**
+ * `memory_write` — the note itself. It is read back into the system prompt of every future
+ * session in this project, so the human must see the words before approving, not a bare
+ * "run tool memory_write?".
+ */
+function previewMemory(args: Record<string, unknown>): MutationPreview {
+  const name = typeof args.name === "string" ? args.name : "";
+  const body = typeof args.body === "string" ? args.body : "";
+  const description = typeof args.description === "string" ? args.description : "";
+  return {
+    tool: "memory_write",
+    headline: `remember "${name || "(unnamed)"}" in project memory — read by every future session`,
+    changes: [
+      {
+        kind: "edit",
+        path: `memory:${name}`,
+        oldText: "",
+        newText: description ? `${description}\n\n${body}` : body,
+        note: "replaces any note with the same name",
+      },
+    ],
+    willFail: !name || !body,
+  };
 }
 
 /**

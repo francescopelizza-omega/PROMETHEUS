@@ -12,7 +12,7 @@
  *
  * Node/Electron main only (spawns git + touches disk) — never importable into the renderer.
  */
-import { readFileSync, writeFileSync } from "node:fs";
+import { lstatSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { describeEngineFailure } from "@prometheus/engine-bridge";
 
@@ -61,6 +61,25 @@ export interface SettingsSyncIpcOptions {
   git?: GitHost;
 }
 
+/**
+ * The bundle must be a plain file of sane size, or absent. A pulled repo is someone else's
+ * content: `prometheus-settings.json` as a symlink to `~/.zshrc` made the next Push overwrite
+ * that file with JSON, and a link to `/dev/zero` or a FIFO hung main on the read.
+ */
+const MAX_BUNDLE_BYTES = 1024 * 1024;
+export function notARegularBundle(file: string): string | null {
+  let st: ReturnType<typeof lstatSync>;
+  try {
+    st = lstatSync(file);
+  } catch {
+    return null; // absent — the push creates it, the pull reports it missing
+  }
+  if (st.isSymbolicLink()) return `${BUNDLE_FILE} is a symlink — refusing to follow it`;
+  if (!st.isFile()) return `${BUNDLE_FILE} is not a regular file`;
+  if (st.size > MAX_BUNDLE_BYTES) return `${BUNDLE_FILE} is too large (${st.size} bytes)`;
+  return null;
+}
+
 /** Register the `settings-sync:*` handlers; returns a disposer. */
 export function registerSettingsSyncIpcHandlers(opts: SettingsSyncIpcOptions): () => void {
   const git = opts.git ?? new GitHost();
@@ -69,11 +88,12 @@ export function registerSettingsSyncIpcHandlers(opts: SettingsSyncIpcOptions): (
   function guardedRepo(dir: unknown): string | { error: string } {
     if (typeof dir !== "string" || !dir.trim()) return { error: "a repo directory is required" };
     try {
-      assertNotSensitivePath(dir.startsWith("file://") ? dir : `file://${dir}`);
+      // a plain path, not `file://${dir}`: as a URL, a `?` or `#` in the directory name became a
+      // delimiter and the guard checked a different path from the one used below
+      return assertNotSensitivePath(dir);
     } catch (e) {
       return { error: errString(e) };
     }
-    return dir;
   }
 
   ipcMain.handle(IPC.settingsSyncPush, async (_e, arg: unknown): Promise<SettingsSyncResult> => {
@@ -91,10 +111,24 @@ export function registerSettingsSyncIpcHandlers(opts: SettingsSyncIpcOptions): (
         connectors: readConnectors(opts.mcpStorePath),
       });
       const file = join(repo, BUNDLE_FILE);
+      const why = notARegularBundle(file);
+      if (why) return { ok: false, error: why };
+      // Never commit someone else's work: `git commit -m` commits the WHOLE index, so changes a
+      // user had staged in that repo were committed under our message and pushed.
+      const st = await git.status(repo);
+      const others = (st.staged ?? []).filter((f) => f.path !== BUNDLE_FILE);
+      if (others.length > 0) {
+        return {
+          ok: false,
+          error: `that repository has other staged changes (${others.length}) — commit or unstage them first`,
+        };
+      }
       writeFileSync(file, serializeBundle(bundle));
       const staged = await git.stage(repo, [file]);
       if (!staged.ok) return { ok: false, error: staged.error ?? "git add failed" };
-      const committed = await git.commit(repo, "chore: sync Prometheus Studio settings");
+      const committed = await git.commit(repo, "chore: sync Prometheus Studio settings", {
+        paths: [BUNDLE_FILE],
+      });
       // an empty commit (nothing changed) is not a failure — still try to push.
       const pushed = await git.push(repo);
       if (!pushed.ok) {
@@ -120,8 +154,11 @@ export function registerSettingsSyncIpcHandlers(opts: SettingsSyncIpcOptions): (
         const pulled = await git.pull(repo);
         if (!pulled.ok) return { ok: false, error: pulled.error ?? "git pull failed" };
         let text: string;
+        const file = join(repo, BUNDLE_FILE);
+        const why = notARegularBundle(file);
+        if (why) return { ok: false, error: why };
         try {
-          text = readFileSync(join(repo, BUNDLE_FILE), "utf8");
+          text = readFileSync(file, "utf8");
         } catch {
           return { ok: false, error: "no prometheus-settings.json in the repo" };
         }

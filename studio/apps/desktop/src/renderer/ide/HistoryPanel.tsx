@@ -47,7 +47,7 @@ const paneStyle: CSSProperties = {
   margin: 0,
   padding: "var(--space-3, 6px)",
   fontFamily: "var(--font-mono)",
-  fontSize: "0.72rem",
+  fontSize: "0.75rem",
   whiteSpace: "pre-wrap",
   background: "var(--bg-inset)",
   border: "1px solid var(--border-subtle)",
@@ -249,7 +249,7 @@ export function HistoryPanel({
                   gap: 6,
                   padding: "var(--space-2, 4px) var(--space-3, 6px)",
                   color: "var(--text-secondary)",
-                  fontSize: "0.72rem",
+                  fontSize: "0.75rem",
                 }}
               >
                 <span style={{ flex: 1 }}>revision</span>

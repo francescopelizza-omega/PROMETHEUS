@@ -237,7 +237,7 @@ export function EnvPicker({
                       color: "var(--text-secondary)",
                       cursor: "pointer",
                       fontFamily: "var(--font-ui)",
-                      fontSize: "0.72rem",
+                      fontSize: "0.75rem",
                       fontWeight: 600,
                       paddingBlock: "var(--space-1, 2px)",
                       paddingInline: "var(--space-3, 6px)",

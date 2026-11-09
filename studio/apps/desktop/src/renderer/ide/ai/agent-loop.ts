@@ -23,6 +23,8 @@
 import { AGENT_TOOL_DISCIPLINE } from "@prometheus/core/agent-loop";
 import type { EffortResolution } from "@prometheus/core/ai-effort";
 import type {
+  AgentApproveToolCallRequest,
+  AgentApproveToolCallResult,
   AgentCanaryTripRequest,
   AgentCanaryTripResult,
   AgentEngineToolRequest,
@@ -437,6 +439,8 @@ export interface AgentLoopDeps {
   };
   ide?: {
     systemTool(req: AgentSystemToolRequest): Promise<AgentSystemToolResult>;
+    /** mint main's single-use approval for one exact call a human approved */
+    approveToolCall?(req: AgentApproveToolCallRequest): Promise<AgentApproveToolCallResult>;
     /** run one `prometheus_*` verb through the engine (no cwd — the verbs are machine-global). */
     engineTool(req: AgentEngineToolRequest): Promise<AgentSystemToolResult>;
     /** the persisted "don't ask again" grants, shared on disk with the CLI. */

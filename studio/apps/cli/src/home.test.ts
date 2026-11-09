@@ -16,6 +16,7 @@ import {
   loadPaths,
   loadSettings,
   markFirstRunDone,
+  modelStoresHere,
   prometheusHome,
   resolveCategory,
   saveSettings,
@@ -55,15 +56,32 @@ test("ensureHomeTree creates the full subdir tree (idempotent)", () => {
 test("resolveCategory: default under home, then an override after setCategory", () => {
   const home = tmpHome();
   ensureHomeTree(home);
-  assert.equal(resolveCategory("open_models", home), join(home, "open_models"));
   assert.equal(resolveCategory("videos", home), join(home, "downloads/videos"));
 
-  const custom = join(tmpHome(), "big-disk", "models");
-  const abs = setCategory("open_models", custom, home);
+  const custom = join(tmpHome(), "big-disk", "videos");
+  const abs = setCategory("videos", custom, home);
   assert.equal(abs, custom);
-  assert.equal(resolveCategory("open_models", home), custom); // override wins
-  assert.equal(loadPaths(home).open_models, custom); // persisted
+  assert.equal(resolveCategory("videos", home), custom); // override wins
+  assert.equal(loadPaths(home).videos, custom); // persisted
   assert.ok(existsSync(custom)); // dir created
+});
+
+test("no model folder of Prometheus's own: models live in each runtime's store", () => {
+  // `open_models/` (and an unused cache/hf) used to be created here and exported as
+  // PROMETHEUS_MODELS_DIR — it only ever collected duplicates of the runtimes' own copies
+  assert.ok(!HOME_TREE.includes("open_models"));
+  assert.ok(!HOME_TREE.includes("cache/hf"));
+  const home = tmpHome();
+  const stores = modelStoresHere({}, home);
+  const dirs = Object.fromEntries(stores.map((s) => [s.id, s.dir]));
+  assert.equal(dirs.ollama, join(home, ".ollama", "models"));
+  assert.equal(dirs.lmstudio, join(home, ".lmstudio", "models"));
+  assert.equal(dirs.hf, join(home, ".cache", "huggingface", "hub"));
+  assert.ok(stores.every((s) => !s.dir.includes(".prometheus")));
+  // the user's own choices are honoured, never overridden
+  const moved = modelStoresHere({ OLLAMA_MODELS: "/big/ollama", HF_HOME: "/big/hf" }, home);
+  assert.equal(moved.find((s) => s.id === "ollama")?.dir, "/big/ollama");
+  assert.equal(moved.find((s) => s.id === "hf")?.dir, join("/big/hf", "hub"));
 });
 
 test("settings: save/load + first-run marker", () => {
@@ -88,5 +106,35 @@ test("diskInfo returns positive free/total for a real path (or null)", () => {
   if (di !== null) {
     assert.ok(di.freeBytes > 0);
     assert.ok(di.totalBytes >= di.freeBytes);
+  }
+});
+
+test("saveSettings never destroys an unparseable settings.json — it keeps it aside", async () => {
+  const {
+    mkdtempSync,
+    readdirSync,
+    readFileSync: rf,
+    rmSync,
+    writeFileSync: wf,
+    mkdirSync: md,
+  } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join: j } = await import("node:path");
+  const { saveSettings, loadSettings } = await import("./home.js");
+  const home = mkdtempSync(j(tmpdir(), "prom-cli-settings-"));
+  const errWrite = process.stderr.write.bind(process.stderr);
+  process.stderr.write = (() => true) as typeof process.stderr.write;
+  try {
+    md(j(home, "config"), { recursive: true });
+    const broken = '{ "hooks": { "PreToolUse": [] }, }';
+    wf(j(home, "config", "settings.json"), broken);
+    saveSettings({ timeoutSeconds: 30 }, home);
+    const kept = readdirSync(j(home, "config")).find((f) => f.startsWith("settings.json.corrupt-"));
+    assert.ok(kept, "the user's unreadable file was kept");
+    assert.equal(rf(j(home, "config", kept as string), "utf8"), broken);
+    assert.deepEqual(loadSettings(home), { timeoutSeconds: 30 });
+  } finally {
+    process.stderr.write = errWrite;
+    rmSync(home, { recursive: true, force: true });
   }
 });

@@ -120,7 +120,7 @@ function HwSummary({
             color: "var(--text-secondary)",
             borderRadius: "var(--radius-sm, 4px)",
             padding: "1px 7px",
-            fontSize: "0.74rem",
+            fontSize: "0.75rem",
             cursor: "pointer",
           }}
         >
@@ -172,16 +172,16 @@ function ModelRow({
               alignItems: "center",
             }}
           >
-            <span style={{ color: "var(--text-secondary)", fontSize: "0.74rem" }}>
+            <span style={{ color: "var(--text-secondary)", fontSize: "0.75rem" }}>
               {inert(m.license) || "—"}
             </span>
             {typeof m.downloads === "number" && (
-              <span style={{ color: "var(--text-secondary)", fontSize: "0.74rem" }}>
+              <span style={{ color: "var(--text-secondary)", fontSize: "0.75rem" }}>
                 ⭳ {formatCount(m.downloads)}
               </span>
             )}
             {typeof m.likes === "number" && (
-              <span style={{ color: "var(--text-secondary)", fontSize: "0.74rem" }}>
+              <span style={{ color: "var(--text-secondary)", fontSize: "0.75rem" }}>
                 ★ {formatCount(m.likes)}
               </span>
             )}
@@ -220,7 +220,7 @@ function ModelRow({
               display: "flex",
               alignItems: "center",
               gap: "var(--space-2, 4px)",
-              fontSize: "0.74rem",
+              fontSize: "0.75rem",
               marginTop: "2px",
               color: resourceColor(m.resource),
             }}
@@ -336,19 +336,29 @@ export function ModelHub({
       ) : (
         <div
           style={{
-            display: "grid",
-            gridTemplateColumns: "180px minmax(0, 1fr)",
+            // wraps: the modality column moves ABOVE the results on a narrow pane instead of
+            // squeezing them (a fixed 180px + 1fr grid never collapsed)
+            display: "flex",
+            flexWrap: "wrap",
             gap: "var(--space-8, 16px)",
-            alignItems: "start",
+            alignItems: "flex-start",
           }}
         >
           {/* ── modality sidebar (§10) ─────────────────────────────────────── */}
-          <aside style={{ display: "flex", flexDirection: "column", gap: "var(--space-4, 8px)" }}>
+          <aside
+            style={{
+              display: "flex",
+              flexDirection: "column",
+              gap: "var(--space-4, 8px)",
+              flex: "1 1 160px",
+              maxWidth: 220,
+            }}
+          >
             <div style={{ display: "flex", flexDirection: "column", gap: "2px" }}>
               <span
                 style={{
                   color: "var(--text-secondary)",
-                  fontSize: "0.72rem",
+                  fontSize: "0.75rem",
                   textTransform: "uppercase",
                   letterSpacing: "0.04em",
                   marginBottom: "2px",
@@ -388,7 +398,7 @@ export function ModelHub({
                 <span
                   style={{
                     color: "var(--text-secondary)",
-                    fontSize: "0.72rem",
+                    fontSize: "0.75rem",
                     textTransform: "uppercase",
                     letterSpacing: "0.04em",
                   }}
@@ -401,7 +411,15 @@ export function ModelHub({
           </aside>
 
           {/* ── main column: search + result list + fit panel ─────────────── */}
-          <section style={{ display: "flex", flexDirection: "column", gap: "var(--space-4, 8px)" }}>
+          <section
+            style={{
+              display: "flex",
+              flexDirection: "column",
+              gap: "var(--space-4, 8px)",
+              flex: "999 1 360px",
+              minWidth: 0,
+            }}
+          >
             {tab === "discover" && (
               <form
                 onSubmit={(e) => {

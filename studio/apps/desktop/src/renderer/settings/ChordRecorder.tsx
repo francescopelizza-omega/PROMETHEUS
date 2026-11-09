@@ -63,6 +63,7 @@ export function ChordRecorder({ platform, onCommit, onCancel }: ChordRecorderPro
   const onCancelRef = useRef(onCancel);
   onCommitRef.current = onCommit;
   onCancelRef.current = onCancel;
+  const rootRef = useRef<HTMLOutputElement | null>(null);
 
   useEffect(() => {
     const handler = (e: KeyboardEvent): void => {
@@ -92,12 +93,21 @@ export function ChordRecorder({ platform, onCommit, onCancel }: ChordRecorderPro
         setPending(chord);
       }
     };
+    // Clicking anywhere else ends the recording. With nothing listening for that, a click into
+    // "Search keymap" left every keystroke swallowed by this capture handler until Esc.
+    const onDown = (e: MouseEvent): void => {
+      if (!rootRef.current?.contains(e.target as Node)) onCancelRef.current();
+    };
     window.addEventListener("keydown", handler, true); // capture phase
-    return () => window.removeEventListener("keydown", handler, true);
+    window.addEventListener("mousedown", onDown, true);
+    return () => {
+      window.removeEventListener("keydown", handler, true);
+      window.removeEventListener("mousedown", onDown, true);
+    };
   }, [plat]);
 
   return (
-    <output style={pill} aria-live="polite" aria-label="Recording shortcut">
+    <output ref={rootRef} style={pill} aria-live="polite" aria-label="Recording shortcut">
       <span style={{ color: pending ? "var(--text-primary)" : "var(--text-secondary)" }}>
         {pending ? formatKeys(pending) : "press keys…"}
       </span>

@@ -124,7 +124,7 @@ export function DocsRoute(): ReactElement {
           <span
             style={{
               fontFamily: "var(--font-mono)",
-              fontSize: 11,
+              fontSize: 12,
               color: "var(--text-muted)",
               whiteSpace: "nowrap", // §7
             }}
@@ -197,7 +197,7 @@ export function DocsRoute(): ReactElement {
                     style={{
                       flex: 1,
                       minWidth: 0, // §7
-                      fontSize: "0.68rem",
+                      fontSize: "0.75rem",
                       color: "var(--text-muted)",
                       overflow: "hidden",
                       textOverflow: "ellipsis",
@@ -305,7 +305,7 @@ function EngineTab({
             style={{
               textTransform: "uppercase",
               letterSpacing: "0.06em",
-              fontSize: "0.72rem",
+              fontSize: "0.75rem",
               color: "var(--text-secondary)",
               margin: "0 0 4px",
             }}
@@ -380,7 +380,7 @@ function CheatSheetTab({
           }}
         >
           <span style={{ flex: 1 }}>{r.title}</span>
-          <span style={{ color: "var(--text-secondary)", fontSize: "0.72rem" }}>{r.category}</span>
+          <span style={{ color: "var(--text-secondary)", fontSize: "0.75rem" }}>{r.category}</span>
           <kbd
             style={{
               fontFamily: "var(--font-mono)",
@@ -443,7 +443,7 @@ function TutorialsTab({
                       background: "transparent",
                       color: "var(--accent)",
                       cursor: "pointer",
-                      fontSize: "0.68rem",
+                      fontSize: "0.75rem",
                     }}
                   >
                     ▸ run

@@ -288,6 +288,9 @@ export async function runUpdates(rest: string, deps: UpdatesDeps): Promise<u.Upd
         confirm: async () => false,
         ask: async () => "",
         getAuthLevel: () => 0,
+        // no actions surface: nothing is pulled here, so nothing is scanned or removed
+        gate: async () => ({ ok: false, error: "this surface cannot scan models" }),
+        discard: async () => undefined,
       }),
       write: deps.write,
       ...deps.browse,
@@ -305,6 +308,9 @@ export async function runUpdates(rest: string, deps: UpdatesDeps): Promise<u.Upd
         confirm: async () => false,
         ask: async () => "",
         getAuthLevel: () => 0,
+        // no actions surface: nothing is pulled here, so nothing is scanned or removed
+        gate: async () => ({ ok: false, error: "this surface cannot scan models" }),
+        discard: async () => undefined,
       }),
       write: deps.write,
     });

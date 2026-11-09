@@ -117,10 +117,46 @@ def parse(argv: Sequence[str], values: Sequence[str], flags: Sequence[str]) -> T
 
 
 def as_path(text: str) -> str:
-    """A user-supplied path → absolute, symlinks NOT resolved (deleting a link must hit the link)."""
+    """A user-supplied path → absolute, with every PARENT folder's symlinks resolved and the
+    final component left alone (deleting a link must delete the link, not its target).
+
+    Resolving only the last component used to let `~/x -> /private/etc` turn `~/x/hosts` into
+    a LOW-risk "cache" delete: the system-folder, home and mount protections compare paths
+    textually, and `~/x/hosts` is not textually under `/etc`. Every protection now sees the
+    real location.
+    """
     if text.startswith("hex:"):
         text = os.fsdecode(bytes.fromhex(text[4:]))
-    return os.path.abspath(os.path.expanduser(text))
+    p = os.path.abspath(os.path.expanduser(text))
+    parent, base = os.path.split(p)
+    if not base:                      # "/" itself
+        return p
+    return os.path.join(os.path.realpath(parent), base)
+
+
+def identity_protected(tool, ctx, p: str) -> Optional[str]:
+    """Protection judged on the REAL file: a home folder (or one containing one) reached through
+    a symlinked parent. `path_protected` compares text, and `as_path` canonicalises the item while
+    the home paths it compares against may themselves sit behind a link (/home -> /data/home)."""
+    try:
+        rp = os.path.realpath(p)
+        homes = [os.path.realpath(str(h)) for _, h in ctx.user_homes()] + [
+            os.path.realpath(str(ctx.real_home))]
+    except Exception:  # noqa: BLE001 — unreadable passwd db: fall back to the textual checks
+        return None
+    for h in homes:
+        if rp == h:
+            return "a user's home folder"
+        if h.startswith(rp.rstrip("/") + "/"):
+            return "contains a user's home folder"
+    return None
+
+
+def parent_unchanged(p: str) -> bool:
+    """True while `p`'s parent still resolves to itself — i.e. no folder on the way has been
+    swapped for a symlink since `as_path` canonicalised it."""
+    parent = os.path.dirname(p)
+    return os.path.realpath(parent) == parent
 
 
 def jpath(p: str) -> Dict[str, str]:
@@ -161,7 +197,11 @@ def not_root(command: str) -> Optional[int]:
 
 def context(tool):
     # its own log would land in ~/.cache/disk_space — a sidecar run writes nothing of its own
-    return tool.Context(log_path=os.devnull)
+    ctx = tool.Context(log_path=os.devnull)
+    # every path this sidecar acts on went through `as_path` (parents canonical), so deletes walk
+    # the parent exactly as given and refuse any component that has become a symlink since
+    ctx.canonical_paths = True
+    return ctx
 
 
 def scan_map(tool, root: str, opts: Dict[str, str]):
@@ -384,7 +424,7 @@ def plan_delete(tool, ctx, paths: List[str], mode: str) -> Dict[str, Any]:
             item["protected"] = "does not exist"
             items.append(item)
             continue
-        item["protected"] = tool.path_protected(ctx, None, p)
+        item["protected"] = tool.path_protected(ctx, None, p) or identity_protected(tool, ctx, p)
         if item["protected"]:
             # never measured: a refused path is not going anywhere, and "/" or a home folder
             # would mean walking the whole disk just to say no
@@ -405,8 +445,14 @@ def plan_delete(tool, ctx, paths: List[str], mode: str) -> Dict[str, Any]:
         if worst is None or tool.RISK_ORDER.get(risk, 0) > tool.RISK_ORDER.get(worst, 0):
             worst = risk
         items.append(item)
-    requires = worst == tool.RISK_HIGH or (mode == "permanent" and total >= BIG_PERMANENT_DELETE)
-    return {"items": items, "worstRisk": worst, "total": total, "requiresPhrase": bool(requires)}
+    # A size the walk could not finish is a LOWER bound. Comparing it with the big-delete
+    # threshold let a 100 GiB tree of small files that measured "only" 8 GiB in 15 s be deleted
+    # permanently without the phrase — so an unmeasured permanent delete always asks.
+    unmeasured = any(it.get("sizeAtLeast") for it in items)
+    requires = (worst == tool.RISK_HIGH
+                or (mode == "permanent" and (total >= BIG_PERMANENT_DELETE or unmeasured)))
+    return {"items": items, "worstRisk": worst, "total": total, "requiresPhrase": bool(requires),
+            **({"totalAtLeast": True} if unmeasured else {})}
 
 
 def execute_delete(tool, ctx, paths: List[str], mode: str) -> List[Dict[str, Any]]:
@@ -416,8 +462,10 @@ def execute_delete(tool, ctx, paths: List[str], mode: str) -> List[Dict[str, Any
         r: Dict[str, Any] = {**jpath(p), "ok": False}
         if not os.path.lexists(p):
             r["msg"] = "does not exist"
+        elif not parent_unchanged(p):
+            r["msg"] = "refused: a folder on the way became a symlink after the plan"
         else:
-            reason = tool.path_protected(ctx, None, p)
+            reason = tool.path_protected(ctx, None, p) or identity_protected(tool, ctx, p)
             if reason:
                 r["msg"] = f"refused: {reason}"
             else:
@@ -433,12 +481,21 @@ def v_delete(argv: List[str]) -> int:
     refused = not_root(cmd)
     if refused is not None:
         return refused
-    opts, pos = parse(argv, [], ["--trash", "--permanent", "--confirm", "--ack-high-risk"])
+    opts, pos = parse(argv, [], ["--trash", "--permanent", "--confirm", "--ack-high-risk",
+                                 "--canonical"])
     if "--trash" in opts and "--permanent" in opts:
         return fail(cmd, "choose --trash or --permanent, not both")
     if not pos:
         return fail(cmd, "expected one or more PATHs")
     mode = "permanent" if "--permanent" in opts else "trash"
+    if "--canonical" in opts:
+        # The caller passes the EXACT paths a human approved (a plan's own output). Re-resolving
+        # them would silently follow a folder swapped for a symlink since; refuse instead.
+        for raw in pos:
+            ap = os.path.abspath(os.path.expanduser(raw))
+            if ap != "/" and not parent_unchanged(ap):
+                return fail(cmd, f"refused: a folder above {ap} is now a symlink — re-plan the "
+                                 "delete", path=ap)
     paths = [as_path(p) for p in pos]
     tool = load_tool()
     ctx = context(tool)

@@ -126,7 +126,7 @@ export function BookmarksPanel({ onNavigate, onClose }: BookmarksPanelProps): Re
                 style={{
                   color: "var(--text-secondary)",
                   fontFamily: "var(--font-mono)",
-                  fontSize: "0.72rem",
+                  fontSize: "0.75rem",
                   padding: "var(--space-1, 2px) var(--space-3, 6px)",
                 }}
                 title={uri}
@@ -157,7 +157,7 @@ export function BookmarksPanel({ onNavigate, onClose }: BookmarksPanelProps): Re
                       border: "1px solid var(--border-strong)",
                       color: b.mnemonic === undefined ? "var(--text-secondary)" : "var(--accent)",
                       fontFamily: "var(--font-mono)",
-                      fontSize: "0.72rem",
+                      fontSize: "0.75rem",
                     }}
                   >
                     {b.mnemonic ?? "•"}

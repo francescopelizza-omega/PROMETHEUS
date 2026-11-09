@@ -29,6 +29,7 @@ import { dirname, join } from "node:path";
 import { type FetchLike, ai, discoverRunners, orchestration, secrets } from "@prometheus/core";
 import { createCliSecretsStore, prometheusHome } from "@prometheus/core/agent-system-host";
 import { fetchOllamaTags } from "@prometheus/core/updates-live";
+import { createModelHubClient, vendorBin } from "@prometheus/engine-bridge";
 
 import type {
   ModelWizardChooseResult,
@@ -39,6 +40,39 @@ import type {
   ModelWizardStepResult,
   WizardEndpoint,
 } from "../shared/ipc-contract.js";
+import { hasBinOn, runtimeInstalled } from "./runtime-steps.js";
+
+/**
+ * The least free space among the runtimes' model stores (Ollama, LM Studio, the Hugging Face
+ * cache, llama.cpp's cache) — where a pick's download will actually land. `{}` when none of
+ * them can be measured.
+ */
+function freeDiskForModels(env: Readonly<Record<string, string | undefined>>): {
+  freeDiskBytes?: number;
+  freeDiskBytesByStore?: Partial<Record<string, number>>;
+} {
+  // core's one reader (pointer, legacy home, LM Studio's own folder setting) — measured per
+  // store, so a pick is checked against the store it will actually write to
+  const byStore = ai.freeBytesByStore(
+    ai.modelStoresOnThisMachine(env, os.homedir(), process.platform),
+  );
+  const all = Object.values(byStore).filter((v): v is number => typeof v === "number");
+  return all.length === 0 ? {} : { freeDiskBytes: Math.min(...all), freeDiskBytesByStore: byStore };
+}
+
+/** The default local server from the SHARED settings.json (fail-soft → Ollama). */
+function defaultServerFromFile(home: string): string {
+  try {
+    return ai.defaultServerFrom(
+      JSON.parse(readFileSync(join(home, "config", "settings.json"), "utf8")) as Record<
+        string,
+        unknown
+      >,
+    );
+  } catch {
+    return ai.DEFAULT_SERVER;
+  }
+}
 
 const STEP_IDS = new Set<ai.WizardStepId>(["root", "cloud", "local", "free", "paid", "rotation"]);
 
@@ -51,6 +85,14 @@ export interface ModelWizardDeps {
   machine?: () => ai.MachineProfile;
   ollamaTags?: () => Promise<{ name: string }[]>;
   served?: () => Promise<{ runner: string; model: string }[]>;
+  /** which serving runtimes are installed (default: PATH + vendor dirs). */
+  runtimeInstalled?: () => { llamacpp: boolean; lmstudio: boolean };
+  /** the user's default local server (default: the shared settings.json, else Ollama). */
+  defaultServer?: () => string;
+  /** nemesis over an installed Ollama tag (modelhub `ollama-gate`). Run before a local Ollama
+   *  pick is adopted: a pull whose WARN acceptance failed, or whose scan errored, left the model
+   *  on disk, and the next pick saw it "installed" and adopted it unscanned. */
+  verifyOllama?: (tag: string) => Promise<{ ok: boolean; error?: string }>;
 }
 
 /* ------------------------------------------------------------------------- *
@@ -121,6 +163,9 @@ export function createModelWizard(deps: ModelWizardDeps = {}) {
       totalMemBytes: os.totalmem(),
       platform: process.platform,
       arch: process.arch,
+      // free disk where a download lands — the runtimes' own stores (Prometheus keeps no
+      // model folder). It used to be left out, so every disk check in the app was skipped.
+      ...freeDiskForModels(env),
     });
 
   const served = async (): Promise<{ runner: string; model: string }[]> => {
@@ -180,6 +225,18 @@ export function createModelWizard(deps: ModelWizardDeps = {}) {
       // The renderer installs Ollama through the existing `model:installRunner`, which knows
       // itself whether it is installed; "serving or has models" is the evidence available here.
       ollamaInstalled: ollamaServing,
+      // What a `@llamacpp` / `@lmstudio` pick needs: install the runtime only when it is missing.
+      runtimeInstalled: (
+        deps.runtimeInstalled ??
+        (() => runtimeInstalled((b) => hasBinOn(b, process.env.PATH, (x) => vendorBin(x))))
+      )(),
+      runtimeServing: {
+        llamacpp: live.some((s) => s.runner === "llamacpp"),
+        lmstudio: live.some((s) => s.runner === "lmstudio"),
+      },
+      // `/server` / Settings → Default Local Server: a local pick that names no runtime is
+      // prepared for it (read per plan, so a change in either surface applies immediately)
+      defaultServer: (deps.defaultServer ?? (() => defaultServerFromFile(home)))(),
     };
   }
 
@@ -341,6 +398,16 @@ export function createModelWizard(deps: ModelWizardDeps = {}) {
       let model = typeof o.model === "string" && o.model ? o.model : undefined;
       if (model !== undefined && !MODEL_ID.test(model))
         return { ok: false, error: "not a model id" };
+      if (ref.section === "local" && deps.verifyOllama) {
+        const entry = ai.findLocalModel(ref.id);
+        // the runtime the pick is served on is MAIN's own plan, never a renderer claim
+        const runtime = ref.runtime ?? ai.preparePlan(ref, await context()).runtime ?? "ollama";
+        if (entry && runtime === "ollama") {
+          const v = await deps.verifyOllama(ai.localOllamaTag(entry));
+          if (!v.ok)
+            return { ok: false, error: `not adopted: ${v.error ?? "nemesis could not verify it"}` };
+        }
+      }
       if (ref.section === "local" || ref.section === "served") {
         saveChoice(ai.formatRef(ref));
         return { ok: true, label: ref.section === "served" ? ref.model : ref.id };
@@ -447,7 +514,11 @@ export function createModelWizard(deps: ModelWizardDeps = {}) {
 /** The process-wide instance `ai-ipc.ts` and the handlers share. */
 let shared: ReturnType<typeof createModelWizard> | undefined;
 export function modelWizard(): ReturnType<typeof createModelWizard> {
-  shared = shared ?? createModelWizard();
+  shared =
+    shared ??
+    createModelWizard({
+      verifyOllama: (tag) => createModelHubClient().ollamaGate({ tag }),
+    });
   return shared;
 }
 

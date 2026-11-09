@@ -33,6 +33,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 REPO_PY = HERE / "repo.py"
 sys.path.insert(0, str(HERE))
+import _test_stores  # noqa: E402,F401 — every model store is a temp dir
 import repo as repomod  # noqa: E402
 import nemesis_gate  # noqa: E402
 
@@ -345,3 +346,67 @@ class RealLocalCloneTests(RepoStoreBase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+# --------------------------------------------------------------------------- #
+# 2026-11-03 audit: symlinks, the default branch, shallow pin/branch.
+# --------------------------------------------------------------------------- #
+
+class RestageAndCheckoutTests(RepoStoreBase):
+    def test_restage_copies_a_symlink_as_a_link_not_its_target(self) -> None:
+        live = Path(tempfile.mkdtemp(prefix="repo-live-"))
+        secret_dir = Path(tempfile.mkdtemp(prefix="repo-secret-"))
+        try:
+            (secret_dir / "id_rsa").write_text("PRIVATE", encoding="utf-8")
+            (live / "README.md").write_text("x", encoding="utf-8")
+            os.symlink(secret_dir, live / "notes")
+            stage = repomod._restage_from_live({"localPath": str(live)}, "acme__demo")
+            assert stage is not None
+            self.assertTrue((stage / "notes").is_symlink(), "the link was followed and its target copied")
+            shutil.rmtree(stage, ignore_errors=True)
+        finally:
+            shutil.rmtree(live, ignore_errors=True)
+            shutil.rmtree(secret_dir, ignore_errors=True)
+
+    @unittest.skipUnless(shutil.which("git"), "git not installed")
+    def test_clone_follows_the_remote_default_branch_and_pin_fetches_a_deep_commit(self) -> None:
+        git = shutil.which("git") or "git"
+        origin = Path(tempfile.mkdtemp(prefix="repo-origin-"))
+        dest = Path(tempfile.mkdtemp(prefix="repo-dest-")) / "c"
+        env = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@x",
+               "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@x"}
+        try:
+            run = lambda *a: subprocess.run([git, "-C", str(origin), *a], env=env,  # noqa: E731
+                                            capture_output=True, text=True, check=True)
+            run("init", "-q", "-b", "master")
+            (origin / "a.txt").write_text("1", encoding="utf-8")
+            run("add", "a.txt"); run("commit", "-qm", "one")
+            first = run("rev-parse", "HEAD").stdout.strip()
+            (origin / "a.txt").write_text("2", encoding="utf-8")
+            run("commit", "-qam", "two")
+            run("branch", "dev")
+            run("config", "uploadpack.allowReachableSHA1InWant", "true")
+            url = f"file://{origin}"
+            p = repomod._run_git(repomod._git_clone_argv(git, url, str(dest), None))
+            self.assertEqual(p.returncode, 0, p.stderr)
+            self.assertEqual(repomod._head_branch(git, dest), "master",
+                             "no --branch must clone the remote's default, not 'main'")
+            cp = repomod._checkout_pin(git, dest, first)
+            self.assertEqual(cp.returncode, 0, f"pin to a non-tip commit failed: {cp.stderr}")
+            cb = repomod._checkout_branch(git, dest, "dev")
+            self.assertEqual(cb.returncode, 0, f"switch to an un-cloned branch failed: {cb.stderr}")
+        finally:
+            shutil.rmtree(origin, ignore_errors=True)
+            shutil.rmtree(dest.parent, ignore_errors=True)
+
+
+class StagedOutsideRootTests(RepoStoreBase):
+    def test_a_staged_dir_outside_the_stage_root_is_copied_never_moved(self) -> None:
+        src = self._stage({"README.md": _CLEAN_README})
+        try:
+            obj, _e, _code = run_verb({"PROMETHEUS_REPOS_HOME": self.home}, "clone",
+                                      "--url", "https://github.com/acme/demo", "--staged", str(src))
+            self.assertTrue((src / "README.md").is_file(),
+                            "the caller's directory was moved into the repo store")
+        finally:
+            shutil.rmtree(src, ignore_errors=True)

@@ -133,9 +133,19 @@ test("stage-engine.mjs stages the sidecars + disk_space.py where packagedEngineE
     assert.ok(!names.includes("__pycache__"), "no bytecode caches shipped");
     const tools = readdirSync(join(sidecar, "..", "tools")).sort();
     assert.deepEqual(tools, ["disk_space.py", "pty_host.py"]);
-    // prometheus.py's cmd_disk_space resolves the sidecar relative to its own path
+    // prometheus.py resolves every sidecar (disk_map included) relative to its own path
     const source = readFileSync(join(STUDIO, "..", "prometheus.py"), "utf8");
-    assert.ok(source.includes('parent / "studio" / "python" / "sidecar" / "disk_map.py"'));
+    assert.ok(
+      source.includes(
+        '_SIDECAR_DIR = Path(__file__).resolve().parent / "studio" / "python" / "sidecar"',
+      ),
+    );
+    assert.ok(source.includes('_relay_sidecar("disk_map"'));
+    // modelhub reads its catalogue relative to the sidecar: <engine>/studio/config/open-models.json
+    const catalog = JSON.parse(
+      readFileSync(join(sidecar, "..", "..", "config", "open-models.json"), "utf8"),
+    );
+    assert.ok(catalog.models.length > 0, "the model catalogue is staged and non-empty");
     const engine = join(res, "engine", "prometheus.py");
     assert.equal(env.PROMETHEUS_PY, engine);
     assert.ok(existsSync(join(dirname(engine), "studio", "python", "sidecar", "disk_map.py")));

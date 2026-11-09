@@ -232,16 +232,15 @@ export async function runGate(
   }
 
   // 1) trusted at this HEAD? → skip the scan.
-  // The request rarely carries `head` (no renderer sends it), so resolve it here — without a
-  // sha the trust lookup below cannot match anything and the fast path is dead.
+  // HEAD is ALWAYS resolved here, from the repo on disk. A `head` in the request is the
+  // RENDERER's claim, and honouring it let a renderer name a sha that was trusted last week and
+  // skip the scan of whatever is checked out now. No sha resolved → no trust can match → scan.
   const readTrusted = opts.readTrusted ?? (() => listTrusted());
-  let ident = id;
-  if (!ident.head) {
-    const resolved = await (opts.resolveHead ?? defaultResolveHead)(workspaceRoot).catch(
-      () => undefined,
-    );
-    if (resolved) ident = { ...id, head: resolved };
-  }
+  const resolved = await (opts.resolveHead ?? defaultResolveHead)(workspaceRoot).catch(
+    () => undefined,
+  );
+  const { head: _claimed, ...rest } = id;
+  const ident: typeof id = resolved ? { ...rest, head: resolved } : rest;
   let trustEntry: TrustedSource | undefined;
   try {
     trustEntry = hasTrustedVerdict(ident, readTrusted());
@@ -256,7 +255,7 @@ export async function runGate(
       trusted: true,
       workspaceRoot,
       trustEntry,
-      reason: `trusted verdict bound to HEAD ${id.head ?? "?"} (no re-scan)`,
+      reason: `trusted verdict bound to HEAD ${ident.head ?? "?"} (no re-scan)`,
     };
   }
 

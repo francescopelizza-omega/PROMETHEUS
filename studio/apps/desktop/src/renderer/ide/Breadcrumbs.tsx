@@ -190,7 +190,7 @@ export function Breadcrumbs({ group }: { group: number }): ReactElement | null {
     border: "none",
     padding: "0 2px",
     fontFamily: "var(--font-mono, ui-monospace, monospace)",
-    fontSize: "0.72rem",
+    fontSize: "0.75rem",
     overflow: "hidden",
     textOverflow: "ellipsis",
     minWidth: 0, // flex/grid floor — without it the ellipsis is unreachable
@@ -219,7 +219,7 @@ export function Breadcrumbs({ group }: { group: number }): ReactElement | null {
           // biome-ignore lint/suspicious/noArrayIndexKey: path segments are positional
           <span key={`p${i}`} style={{ display: "flex", alignItems: "center", gap: 2 }}>
             {i > 0 && (
-              <span style={{ color: "var(--text-secondary)", fontSize: "0.7rem" }}>{SEP}</span>
+              <span style={{ color: "var(--text-secondary)", fontSize: "0.75rem" }}>{SEP}</span>
             )}
             <span
               style={{
@@ -235,8 +235,8 @@ export function Breadcrumbs({ group }: { group: number }): ReactElement | null {
       {trail.map((s, i) => (
         // biome-ignore lint/suspicious/noArrayIndexKey: symbol trail is positional
         <span key={`s${i}`} style={{ display: "flex", alignItems: "center", gap: 2 }}>
-          <span style={{ color: "var(--text-secondary)", fontSize: "0.7rem" }}>{SEP}</span>
-          <span style={{ color: "var(--accent)", fontSize: "0.7rem" }}>{kindGlyph(s.kind)}</span>
+          <span style={{ color: "var(--text-secondary)", fontSize: "0.75rem" }}>{SEP}</span>
+          <span style={{ color: "var(--accent)", fontSize: "0.75rem" }}>{kindGlyph(s.kind)}</span>
           <button
             type="button"
             onClick={() => jump(s)}

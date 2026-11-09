@@ -14,6 +14,7 @@
  */
 
 import { normalizeKeys } from "@prometheus/core/keymap";
+import { isMacHost } from "../platform.js";
 
 /** A settings-tree row as the renderer receives it (mirrors main's SettingsRowView —
  *  itself a mirror of core's SettingsNode + resolved (value, layer) provenance). */
@@ -44,6 +45,22 @@ export interface SettingsNodeView {
 
 /** The editable UI scope tabs (APP-058): default (read-only) ← user (global) ← project. */
 export type SettingsUiScope = "default" | "user" | "project";
+
+/**
+ * Drop tree nodes that lead nowhere: a node with no persisted value (`schemaKey`) and no
+ * children that survive the same rule. About fifteen PyCharm-parity pages (Menus & Toolbars,
+ * Inspections, File Watchers, …) existed only as titles, and selecting one said "pick a leaf
+ * node" — on a leaf. Pages that gain a value or children reappear automatically.
+ */
+export function pruneDeadLeaves(nodes: readonly SettingsNodeView[]): SettingsNodeView[] {
+  const out: SettingsNodeView[] = [];
+  for (const n of nodes) {
+    const kids = n.children ? pruneDeadLeaves(n.children) : [];
+    if (!n.schemaKey && kids.length === 0) continue;
+    out.push(n.children ? { ...n, children: kids } : n);
+  }
+  return out;
+}
 
 /** Flatten a node tree depth-first (parents before children). */
 export function flattenNodes(nodes: readonly SettingsNodeView[]): SettingsNodeView[] {
@@ -92,17 +109,33 @@ const GLYPH: Record<string, string> = {
   backspace: "⌫",
 };
 
-/** Pretty-print one chord segment with platform glyphs (⌘⇧⌥…). */
-function prettySegment(seg: string): string {
-  return seg
-    .split("+")
-    .map((p) => GLYPH[p.toLowerCase()] ?? p.toUpperCase())
-    .join("");
+/** Off macOS the modifiers are WORDS ("Ctrl+Shift+P"): ⌘ and ⌥ are keys those keyboards lack,
+ *  and `mod`/`cmd` mean Ctrl there. */
+const WORD: Record<string, string> = {
+  cmd: "Ctrl",
+  mod: "Ctrl",
+  meta: "Win",
+  ctrl: "Ctrl",
+  alt: "Alt",
+  shift: "Shift",
+};
+
+/** Pretty-print one chord segment with platform glyphs (⌘⇧⌥… on macOS, words elsewhere). */
+function prettySegment(seg: string, mac: boolean): string {
+  const parts = seg.split("+");
+  if (mac) return parts.map((p) => GLYPH[p.toLowerCase()] ?? p.toUpperCase()).join("");
+  return parts
+    .map((p) => WORD[p.toLowerCase()] ?? GLYPH[p.toLowerCase()] ?? p.toUpperCase())
+    .join("+");
 }
 
 /** Render a key string (incl. chords) with glyphs, e.g. "cmd+shift+p" → "⌘⇧P". */
-export function formatKeys(keys: string): string {
-  return keys.trim().split(/\s+/).map(prettySegment).join(" ");
+export function formatKeys(keys: string, mac: boolean = isMacHost()): string {
+  return keys
+    .trim()
+    .split(/\s+/)
+    .map((seg) => prettySegment(seg, mac))
+    .join(" ");
 }
 
 /** A keybinding row as the renderer receives it (mirrors core KeyBinding). */

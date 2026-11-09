@@ -50,7 +50,7 @@ export function FormatPage(): ReactElement {
   }, [workspaceRoot]);
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: "var(--space-5, 10px)" }}>
+    <div style={{ display: "flex", flexDirection: "column", gap: "var(--space-4, 8px)" }}>
       <Panel title="Format on Save" elevation="e1">
         <label style={rowStyle}>
           <input
@@ -73,7 +73,7 @@ export function FormatPage(): ReactElement {
         <p
           style={{
             margin: "var(--space-2, 4px) 0 0",
-            fontSize: "0.72rem",
+            fontSize: "0.75rem",
             color: "var(--text-secondary)",
           }}
         >
@@ -86,7 +86,7 @@ export function FormatPage(): ReactElement {
         <p
           style={{
             margin: "0 0 var(--space-2, 4px)",
-            fontSize: "0.72rem",
+            fontSize: "0.75rem",
             color: "var(--text-secondary)",
           }}
         >

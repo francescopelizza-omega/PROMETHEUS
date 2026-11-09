@@ -1,3 +1,4 @@
+import { isAbsolute } from "node:path";
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Francesco Pelizza
 /**
@@ -29,7 +30,12 @@ import {
   type ScheduleRemoveResult,
   type ScheduleUpsertResult,
 } from "../shared/ipc-contract.js";
-import { loadSchedules, removeScheduledTask, upsertTask } from "./schedule-store.js";
+import {
+  loadSchedules,
+  loadSchedulesForWrite,
+  removeScheduledTask,
+  upsertTask,
+} from "./schedule-store.js";
 
 type ScheduledTask = coreAgent.ScheduledTask;
 
@@ -68,11 +74,85 @@ function validateScheduledTask(arg: unknown): { task: ScheduledTask } | { error:
   if (typeof a.autonomy !== "string" || !VALID_AUTONOMY.has(a.autonomy)) {
     return { error: 'autonomy must be one of "readonly", "edits", or "commands"' };
   }
-  return { task: arg as ScheduledTask };
+  if (a.id.length > 128 || a.name.length > 200 || a.task.length > 8000) {
+    return { error: "id, name or task is too long" };
+  }
+  if (
+    a.cwd !== undefined &&
+    (typeof a.cwd !== "string" || !isAbsolute(a.cwd) || a.cwd.length > 4096)
+  ) {
+    return { error: "cwd must be an absolute path" };
+  }
+  // REBUILT from the known fields, never `arg as ScheduledTask`: run history (`lastRunIso`,
+  // `lastResult`) and the creation stamp are main's to keep, and nothing else rides along.
+  return {
+    task: {
+      id: a.id,
+      name: a.name,
+      cronExpr: a.cronExpr,
+      task: a.task,
+      ...(typeof a.cwd === "string" ? { cwd: a.cwd } : {}),
+      autonomy: a.autonomy as ScheduledTask["autonomy"],
+      enabled: a.enabled !== false,
+      createdIso:
+        typeof a.createdIso === "string" && !Number.isNaN(Date.parse(a.createdIso))
+          ? a.createdIso
+          : new Date().toISOString(),
+    },
+  };
+}
+
+/**
+ * Does saving `next` need the human's native OK? A task that may edit files or run commands
+ * executes later, UNATTENDED, from the user's cron — so creating one, or changing what it does,
+ * where, how often or how much it may do, is confirmed in main. The renderer's form is not the
+ * consent: any renderer could post this IPC.
+ */
+export function scheduleNeedsConsent(
+  prev: ScheduledTask | undefined,
+  next: ScheduledTask,
+): boolean {
+  if (next.autonomy === "readonly") return false;
+  if (!next.enabled) return false;
+  if (!prev) return true;
+  return (
+    prev.task !== next.task ||
+    prev.cwd !== next.cwd ||
+    prev.cronExpr !== next.cronExpr ||
+    prev.autonomy !== next.autonomy ||
+    !prev.enabled
+  );
+}
+
+async function nativeConfirmSchedule(t: ScheduledTask): Promise<boolean> {
+  try {
+    const electron = (await import("electron")) as unknown as {
+      dialog?: { showMessageBox: (o: unknown) => Promise<{ response: number }> };
+    };
+    if (!electron.dialog) return false;
+    const r = await electron.dialog.showMessageBox({
+      type: "warning",
+      buttons: ["Cancel", "Schedule it"],
+      defaultId: 0,
+      cancelId: 0,
+      noLink: true,
+      message: `Let "${t.name.slice(0, 80)}" run unattended with ${t.autonomy} autonomy?`,
+      detail:
+        `When: ${t.cronExpr}\nWhere: ${t.cwd ?? "(the scheduler's directory)"}\n\n` +
+        `${t.task.slice(0, 1200)}\n\nIt will run from your cron, with nobody watching.`,
+    });
+    return r.response === 1;
+  } catch {
+    return false;
+  }
 }
 
 /** Register the `schedule:*` handlers. Returns a disposer (mirrors sibling IPC modules). */
-export function registerScheduleIpcHandlers(globalPath: string): () => void {
+export function registerScheduleIpcHandlers(
+  globalPath: string,
+  opts: { confirm?: (task: ScheduledTask) => Promise<boolean> } = {},
+): () => void {
+  const confirm = opts.confirm ?? nativeConfirmSchedule;
   ipcMain.handle(IPC.scheduleList, async (_e): Promise<ScheduleListResult> => {
     try {
       return { ok: true, store: await loadSchedules(globalPath) };
@@ -87,7 +167,18 @@ export function registerScheduleIpcHandlers(globalPath: string): () => void {
       return { ok: false, error: validated.error };
     }
     try {
-      await upsertTask(globalPath, validated.task);
+      const prev = (await loadSchedulesForWrite(globalPath))[validated.task.id];
+      const next: ScheduledTask = {
+        ...validated.task,
+        // history and birth date are the store's, not the caller's
+        ...(prev?.createdIso ? { createdIso: prev.createdIso } : {}),
+        ...(prev?.lastRunIso ? { lastRunIso: prev.lastRunIso } : {}),
+        ...(prev?.lastResult ? { lastResult: prev.lastResult } : {}),
+      };
+      if (scheduleNeedsConsent(prev, next) && !(await confirm(next))) {
+        return { ok: false, error: "not scheduled — you did not confirm it" };
+      }
+      await upsertTask(globalPath, next);
       return { ok: true };
     } catch (e) {
       return { ok: false, error: errString(e) };

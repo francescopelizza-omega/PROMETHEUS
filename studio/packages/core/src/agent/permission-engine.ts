@@ -90,12 +90,22 @@ export function shellWords(command: string): string[] {
  * a `*` token matches any single arg; a trailing `*` matches any remaining args. Exact
  * tokens must match. ("git push *" matches ["git","push","origin","main"].)
  */
+/**
+ * Marks a boundary between commands (`;`, `&&`, `|`) or a redirect in a flattened argv. No
+ * wildcard ever matches it, so `bash:git push *` cannot stretch over `; curl … | sh`.
+ */
+export const BASH_SEPARATOR = "\u0000";
+
 export function matchBashPattern(pattern: string, argv: readonly string[]): boolean {
   const pat = shellWords(pattern);
   for (let i = 0; i < pat.length; i++) {
     const tok = pat[i];
-    if (tok === "*" && i === pat.length - 1) return true; // trailing * = match the rest
+    if (tok === "*" && i === pat.length - 1) {
+      // trailing * = match the rest — but never across a command boundary
+      return !argv.slice(i).includes(BASH_SEPARATOR);
+    }
     if (i >= argv.length) return false;
+    if (argv[i] === BASH_SEPARATOR) return false;
     if (tok === "*") continue; // single-arg wildcard
     if (tok !== argv[i]) return false;
   }

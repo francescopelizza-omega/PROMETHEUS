@@ -53,11 +53,18 @@ export interface FeasibilityVerdict {
   suggestSmaller: boolean;
 }
 
-/** Headroom fraction of total RAM usable for weights+kv+overhead, by machine size. */
-function headroom(ramGb: number): number {
-  if (ramGb <= 16) return 0.7;
-  if (ramGb <= 32) return 0.75;
-  return 0.8;
+/**
+ * Share of a machine's RAM a model may take (weights + KV + overhead). ONE table, the same the
+ * catalogue builder uses to assign `min_ram_gb` (`python/tools/build_model_catalog.py`
+ * `headroom`): the OS and apps cost a roughly fixed few GB, so the share grows with the machine.
+ * It used to be a second, different table (0.70/0.75/0.80) compared against a footprint rebuilt
+ * as `min_ram × 0.72`, so a model on a machine of exactly its own tier scored 1.03 and was
+ * refused — about 160 catalogue models on every 8–16 GB machine.
+ */
+export function headroom(ramGb: number): number {
+  if (ramGb <= 32) return 0.72;
+  if (ramGb <= 64) return 0.8;
+  return 0.85;
 }
 
 /**
@@ -70,8 +77,10 @@ export function assessFeasibility(demand: DemandInput, machine: MachineInput): F
   // The primary budget: a real discrete GPU competes on VRAM; otherwise CPU/unified on RAM.
   const gpuBudget = machine.unified ? ramBudget : machine.vramGb * 0.92;
   const budget = Math.max(ramBudget, gpuBudget);
-  // The model's short-context footprint ≈ min_ram_gb · headroom (back out the raw GiB).
-  const footprint = demand.minRamGb * 0.72;
+  // The model's short-context footprint, backed out of its tier exactly as the builder assigned
+  // it: min_ram_gb = the smallest tier T with footprint ≤ T · headroom(T). So on a machine of
+  // exactly its tier the ratio is ≤ 1 (tight at worst), never a refusal.
+  const footprint = demand.minRamGb * headroom(demand.minRamGb);
 
   const ratio = budget > 0 ? footprint / budget : Number.POSITIVE_INFINITY;
   const suggestions: StretchSuggestion[] = [];

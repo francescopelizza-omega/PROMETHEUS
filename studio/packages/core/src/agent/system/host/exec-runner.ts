@@ -10,7 +10,7 @@
  *   - `spawn(argv[0], argv.slice(1), {shell:false})` per stage, `stdout → stdin` wired
  *     between them. A shell is never involved, so the `|` the model wrote is implemented by
  *     us rather than interpreted by anything.
- *   - Hardened env via `safeChildEnv()`, and the process gets its own GROUP so a timeout
+ *   - Hardened env via `agentChildEnv()` (hijack vars AND credentials stripped), and the process gets its own GROUP so a timeout
  *     kills grandchildren too.
  *   - Every child is registered with the orphan-guard, with `command` matching what
  *     `ps -o command=` prints — the post-mortem sweep refuses to reap anything it cannot
@@ -27,7 +27,7 @@ import { createRequire } from "node:module";
 // aliased: the plain name is shadowed by the Promise executor's own `resolve` in this scope.
 import { resolve as resolvePath } from "node:path";
 
-import { safeChildEnv } from "@prometheus/engine-bridge";
+import { agentChildEnv } from "@prometheus/engine-bridge";
 import type { ParsedCommand, Stage } from "../../exec/index.js";
 
 import { type SandboxPlan, sandboxArgv } from "./exec-sandbox.js";
@@ -46,9 +46,14 @@ interface SpawnLike {
     opts: Record<string, unknown>,
   ): {
     pid?: number;
-    stdout: { on(e: "data", cb: (c: Buffer) => void): void } | null;
+    stdout: { on(e: "data", cb: (c: Buffer) => void): void; destroy?(): void } | null;
     stderr: { on(e: "data", cb: (c: Buffer) => void): void } | null;
-    stdin: { end(): void; write(c: Buffer): void } | null;
+    stdin: {
+      end(): void;
+      write(c: Buffer): void;
+      on?(e: "error", cb: (err: unknown) => void): void;
+      destroyed?: boolean;
+    } | null;
     on(e: "error" | "close", cb: (a?: unknown, b?: unknown) => void): void;
     kill(sig?: string): void;
   };
@@ -218,11 +223,22 @@ async function runOnePipeline(
   const result = await new Promise<number>((resolve) => {
     let settled = false;
     const timers: ReturnType<typeof setTimeout>[] = [];
+    // children that have exited: never signalled again (their pgid may already be recycled)
+    const closed = new Set<unknown>();
+    let onAbortRef: (() => void) | undefined;
     const finish = (code: number): void => {
       if (settled) return;
       settled = true;
       for (const t of timers) clearTimeout(t);
+      // The turn-wide signal outlives this pipeline. Left registered, ESC late in a long turn
+      // re-ran every finished command's onAbort — SIGTERM, then SIGKILL, to pgids that had
+      // exited minutes ago — and past ten commands Node printed MaxListenersExceededWarning
+      // into the raw-mode TUI.
+      if (onAbortRef) opts.signal?.removeEventListener("abort", onAbortRef);
       resolve(code);
+    };
+    const signalLive = (c: (typeof children)[number], sig: string): void => {
+      if (!closed.has(c)) killGroup(c, sig);
     };
 
     const procs = stages.map((stage, idx) => {
@@ -283,7 +299,8 @@ async function runOnePipeline(
         child = spawn(argv[0] as string, argv.slice(1), {
           cwd: opts.cwd,
           shell: false,
-          env: safeChildEnv(),
+          // Credentials stripped: the agent chose this command, and its output goes to the model.
+          env: agentChildEnv(),
           // own process group: a timeout must be able to kill grandchildren too
           detached: true,
           stdio: [
@@ -344,8 +361,23 @@ async function runOnePipeline(
     for (let i = 0; i < procs.length - 1; i++) {
       const from = procs[i]?.child;
       const to = procs[i + 1]?.child;
-      from?.stdout?.on("data", (c) => to?.stdin?.write(c));
-      from?.on("close", () => to?.stdin?.end());
+      // A downstream stage that exits early (`head`, `grep -q`) closes its stdin; the next chunk
+      // written there raised EPIPE with no listener — an uncaughtException that killed the whole
+      // TUI session ("Prometheus crashed: write EPIPE") on `git log | head -5`.
+      to?.stdin?.on?.("error", () => {});
+      from?.stdout?.on("data", (c) => {
+        if (to?.stdin && !to.stdin.destroyed) to.stdin.write(c);
+      });
+      from?.on("close", () => {
+        if (to?.stdin && !to.stdin.destroyed) to.stdin.end();
+      });
+      // …and the upstream gets what a shell gives it: SIGPIPE. `yes | head -1` otherwise kept
+      // `yes` running until the timeout and reported exit 124 for a pipeline that had finished.
+      to?.on("close", () => {
+        if (!from || closed.has(from)) return;
+        from.stdout?.destroy?.();
+        signalLive(from, "SIGPIPE");
+      });
     }
 
     // capture the LAST stage's stdout (unless it was redirected to a file)
@@ -370,6 +402,7 @@ async function runOnePipeline(
         if (--remaining === 0) finish(lastCode);
       });
       p.child.on("close", (code) => {
+        closed.add(p.child);
         if (p.isLast) lastCode = typeof code === "number" ? code : 0;
         if (--remaining === 0) finish(lastCode);
       });
@@ -380,25 +413,32 @@ async function runOnePipeline(
     const onAbort = (): void => {
       // Latched BEFORE the kill, so the `close` handler that fires next cannot settle the
       // pipeline as a clean exit before the deferred `finish(130)` ever runs.
+      if (settled) return;
       aborted = true;
-      for (const c of children) killGroup(c, "SIGTERM");
-      setTimeout(() => {
-        for (const c of children) killGroup(c, "SIGKILL");
+      for (const c of children) signalLive(c, "SIGTERM");
+      // tracked, so a pipeline that closes during the grace period clears it in finish()
+      const grace = setTimeout(() => {
+        for (const c of children) signalLive(c, "SIGKILL");
         finish(130);
-      }, KILL_GRACE_MS).unref?.();
+      }, KILL_GRACE_MS);
+      grace.unref?.();
+      timers.push(grace);
     };
     if (opts.signal) {
+      onAbortRef = onAbort;
       if (opts.signal.aborted) onAbort();
       else opts.signal.addEventListener("abort", onAbort, { once: true });
     }
 
     const killTimer = setTimeout(() => {
       timedOut = true;
-      for (const c of children) killGroup(c, "SIGTERM");
-      setTimeout(() => {
-        for (const c of children) killGroup(c, "SIGKILL");
+      for (const c of children) signalLive(c, "SIGTERM");
+      const grace = setTimeout(() => {
+        for (const c of children) signalLive(c, "SIGKILL");
         finish(124);
-      }, KILL_GRACE_MS).unref?.();
+      }, KILL_GRACE_MS);
+      grace.unref?.();
+      timers.push(grace);
     }, timeoutMs);
 
     // The timer is cleared in `finish()` — i.e. when the LAST stage closes. Clearing it on

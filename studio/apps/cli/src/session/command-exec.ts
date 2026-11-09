@@ -76,9 +76,19 @@ const MUTATING_VERBS = new Set([
  */
 const PENTEST_MUTATING_ACTIONS = new Set(["destroy", "build", "run", "shell"]);
 
+/**
+ * disk-space's destructive actions, as (family, action) pairs for the same reason: "delete" and
+ * "cleanup" are ordinary words elsewhere. A disk delete is a PLAN unless --confirm, but once
+ * confirmed it removes files — the typed-confirm guard has to cover it like any other mutation.
+ */
+const DISK_MUTATING_ACTIONS = new Set(["delete", "cleanup"]);
+
 /** Does this parsed command path mutate state (drives the §4 force guard)? */
 function isMutating(path: readonly string[]): boolean {
   if (path[0] === "pentest" && path[1] !== undefined && PENTEST_MUTATING_ACTIONS.has(path[1])) {
+    return true;
+  }
+  if (path[0] === "disk-space" && path[1] !== undefined && DISK_MUTATING_ACTIONS.has(path[1])) {
     return true;
   }
   return path.some((p) => MUTATING_VERBS.has(p));

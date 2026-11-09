@@ -35,6 +35,7 @@ import { openExternally, openFolderInWorkspace } from "../renderer/open-resource
 
 import { DecisionOverlay } from "../renderer/shell/DecisionOverlay.js";
 import { ForceGate, useForceGate } from "../renderer/shell/ForceGate.js";
+import { errorText, notify } from "../renderer/stores/toasts.js";
 import type {
   RepoCloneResult,
   RepoGateSummary,
@@ -113,7 +114,7 @@ export function ReposRoute(): ReactElement {
   /** Route a clone/update/pin/branch outcome (file 06 §3.1). `kind` records which
    *  operation produced it so the verdict sheet re-runs the correct mutation. */
   const onResult = useCallback(
-    (res: RepoCloneResult, kind: PendingGate["kind"]): void => {
+    (res: RepoCloneResult, kind: PendingGate["kind"], scannedBranch?: string): void => {
       if (res.forcedDanger) {
         setBanner({
           id: res.id ?? res.url ?? "repo",
@@ -134,13 +135,22 @@ export function ReposRoute(): ReactElement {
           kind,
           ...(res.id ? { id: res.id } : {}),
           ...(res.url ? { url: res.url } : {}),
-          // carry the typed branch so Proceed re-clones the SAME branch (was dropped).
-          ...(kind === "clone" && branch ? { branch } : {}),
+          // the branch that was actually SCANNED — the one this clone ran with, not whatever
+          // the field says now (it can be edited during a 10-60 s clone)
+          ...(kind === "clone" && scannedBranch ? { branch: scannedBranch } : {}),
+        });
+      } else if (!res.ok) {
+        // a refusal with no verdict (dirty tree, network, bad id) used to change nothing on
+        // screen at all
+        notify({
+          tone: "danger",
+          title: `${kind === "clone" ? "Clone" : kind === "update" ? "Update" : "Repository"} failed`,
+          description: res.error ?? res.message ?? "the engine refused it",
         });
       }
       refetch();
     },
-    [refetch, branch],
+    [refetch],
   );
 
   const clone = useMutation({
@@ -160,14 +170,17 @@ export function ReposRoute(): ReactElement {
         setUrl("");
         setBranch("");
       }
-      onResult({ ...res, url: res.url ?? vars.url }, "clone");
+      onResult({ ...res, url: res.url ?? vars.url }, "clone", vars.branch);
     },
+    onError: (e) => notify({ tone: "danger", title: "Clone failed", description: errorText(e) }),
   });
 
   const update = useMutation({
     mutationFn: (vars: { id: string; force: boolean }) =>
       repoApi().update(vars.id, { force: vars.force, confirmForce: vars.force }),
     onSuccess: (res, vars) => onResult({ ...res, id: res.id ?? vars.id }, "update"),
+    onError: (e, vars) =>
+      notify({ tone: "danger", title: `Update failed: ${vars.id}`, description: errorText(e) }),
   });
 
   const rescan = useMutation({
@@ -175,14 +188,25 @@ export function ReposRoute(): ReactElement {
     onSuccess: (res, id) => {
       if (res.gate && res.gate.verdict !== "allow") {
         setPendingGate({ gate: res.gate, id, kind: "rescan" });
+      } else if (!res.ok) {
+        notify({ tone: "danger", title: `Rescan failed: ${id}`, description: res.error ?? "" });
       }
       refetch();
     },
+    onError: (e, id) =>
+      notify({ tone: "danger", title: `Rescan failed: ${id}`, description: errorText(e) }),
   });
 
   const remove = useMutation({
     mutationFn: (id: string) => repoApi().remove(id),
-    onSuccess: () => refetch(),
+    onSuccess: (res, id) => {
+      if (!res.ok) {
+        notify({ tone: "danger", title: `Remove failed: ${id}`, description: res.error ?? "" });
+      }
+      refetch();
+    },
+    onError: (e, id) =>
+      notify({ tone: "danger", title: `Remove failed: ${id}`, description: errorText(e) }),
   });
 
   return (
@@ -232,6 +256,7 @@ export function ReposRoute(): ReactElement {
           <input
             ref={urlRef}
             placeholder="https://github.com/owner/repo.git"
+            aria-label="Repository URL"
             value={url}
             onChange={(e) => setUrl(e.target.value)}
             style={{
@@ -245,6 +270,7 @@ export function ReposRoute(): ReactElement {
           />
           <input
             placeholder="branch (optional)"
+            aria-label="Branch (optional)"
             value={branch}
             onChange={(e) => setBranch(e.target.value)}
             style={{
@@ -360,7 +386,7 @@ export function ReposRoute(): ReactElement {
                       style={{
                         display: "block",
                         fontFamily: "var(--font-mono)",
-                        fontSize: "0.68rem",
+                        fontSize: "0.75rem",
                         color: "var(--text-muted)",
                         overflow: "hidden",
                         textOverflow: "ellipsis",
@@ -397,7 +423,7 @@ export function ReposRoute(): ReactElement {
                     style={{
                       flex: "none",
                       fontFamily: "var(--font-mono)",
-                      fontSize: "0.68rem",
+                      fontSize: "0.75rem",
                       color: cellVar(sync.role),
                       whiteSpace: "nowrap", // §7
                     }}
@@ -407,7 +433,7 @@ export function ReposRoute(): ReactElement {
                   <span
                     style={{
                       flex: "none",
-                      fontSize: "0.7rem",
+                      fontSize: "0.75rem",
                       fontWeight: 600,
                       color: cellVar(scan.role),
                       whiteSpace: "nowrap", // §7

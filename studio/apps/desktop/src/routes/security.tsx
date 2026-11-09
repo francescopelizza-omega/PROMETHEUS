@@ -52,6 +52,7 @@ import { useScan } from "../renderer/query/hooks.js";
 import { DecisionOverlay } from "../renderer/shell/DecisionOverlay.js";
 import { ForceGate, useForceGate } from "../renderer/shell/ForceGate.js";
 import { useSecurityStore } from "../renderer/stores/features.js";
+import { errorText, notify } from "../renderer/stores/toasts.js";
 import type {
   GateResult,
   ProviderRow,
@@ -211,10 +212,17 @@ export function SecurityRoute(): ReactElement {
       // the typed confirm has already been satisfied by the time we get here
       setUrlRestoreTarget(null);
       try {
-        await window.prometheus.security.urlAudit({ op: "restore", vault });
+        const r = (await window.prometheus.security.urlAudit({ op: "restore", vault })) as {
+          ok?: boolean;
+          error?: string;
+        };
+        // the user typed RESTORE; a refusal must say so, not vanish into the next audit
+        if (r && r.ok === false) {
+          notify({ tone: "danger", title: "Restore failed", description: r.error ?? vault });
+        }
         await runUrlAudit(false);
-      } catch {
-        /* restore failure surfaces on the next audit */
+      } catch (e) {
+        notify({ tone: "danger", title: "Restore failed", description: errorText(e) });
       }
     },
     [runUrlAudit],
@@ -428,10 +436,25 @@ export function SecurityRoute(): ReactElement {
   const revokeTrust = useCallback(
     async (key: string) => {
       try {
-        await window.prometheus.security.trust({ op: "revoke", name: key });
+        const r = (await window.prometheus.security.trust({ op: "revoke", name: key })) as {
+          ok?: boolean;
+          error?: string;
+        };
+        // a failed revoke leaves the source TRUSTED — that must never be silent
+        if (r && r.ok === false) {
+          notify({
+            tone: "danger",
+            title: `Could not revoke trust: ${key}`,
+            description: r.error ?? "it is still trusted",
+          });
+        }
         await loadTrustDb();
-      } catch {
-        /* non-fatal */
+      } catch (e) {
+        notify({
+          tone: "danger",
+          title: `Could not revoke trust: ${key}`,
+          description: errorText(e),
+        });
       }
     },
     [loadTrustDb],
@@ -691,6 +714,21 @@ export function SecurityRoute(): ReactElement {
     loadQuarantine,
   ]);
 
+  // An action handed over by another route (editor palette "Security: Gate Workspace"):
+  // prefill the target, then run the gate once the state has settled.
+  const [pendingGate, setPendingGate] = useState(false);
+  useEffect(() => {
+    const onAction = (ev: Event): void => {
+      const d = (ev as CustomEvent<{ action?: string; target?: string }>).detail;
+      if (d?.target) {
+        setTarget(d.target);
+        if (d.action === "gate.runWorkspaceScan") setPendingGate(true);
+      }
+    };
+    window.addEventListener("prometheus:security-action", onAction);
+    return () => window.removeEventListener("prometheus:security-action", onAction);
+  }, []);
+
   const runGate = useCallback(async () => {
     const t = target.trim();
     if (!t || gating) return;
@@ -723,6 +761,14 @@ export function SecurityRoute(): ReactElement {
       void loadTrustDb();
     }
   }, [target, gating, setVerdict, loadTrustDb]);
+
+  // run the gate requested by another route once its target has been applied
+  useEffect(() => {
+    if (pendingGate && target.trim() && !gating) {
+      setPendingGate(false);
+      void runGate();
+    }
+  }, [pendingGate, target, gating, runGate]);
 
   const tierACount = providers.filter((p) => p.tier === "A").length;
   // §4: the banner's pills and the verdict-history rows are both folds over the gate-audit
@@ -802,7 +848,16 @@ export function SecurityRoute(): ReactElement {
             fontSize: 14,
           }}
         >
-          🛡
+          {/* an SVG in currentColor, so it takes the banner's role tint; the 🛡 emoji drew
+              in its own fixed colours whatever the verdict said */}
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+            <path
+              d="M12 3 4.5 6v5.5c0 4.6 3.1 8.6 7.5 9.5 4.4-.9 7.5-4.9 7.5-9.5V6L12 3Z"
+              stroke="currentColor"
+              strokeWidth="1.8"
+              strokeLinejoin="round"
+            />
+          </svg>
         </span>
         <div style={{ flex: 1, minWidth: 200 }}>
           <div
@@ -842,7 +897,7 @@ export function SecurityRoute(): ReactElement {
                 border: `1px solid color-mix(in srgb, ${color} 30%, transparent)`,
                 color,
                 fontFamily: "var(--font-mono)",
-                fontSize: 11,
+                fontSize: 12,
                 fontWeight: 700,
                 whiteSpace: "nowrap", // §7
               }}
@@ -856,9 +911,10 @@ export function SecurityRoute(): ReactElement {
 
       <Panel title="Nemesis scan" elevation="e1">
         <p style={{ marginTop: 0, color: "var(--text-secondary)", fontSize: "0.85rem" }}>
-          FREE threat scan (backdoors / malware / supply-chain / code threats) of any path, git URL,
-          or owner/repo — the same fail-closed nemesis verdict the install gate uses, and the same
-          scan as the CLI <code>/nemesis</code>. A missing or timed-out scanner blocks (C5).
+          Scan any path, git URL or owner/repo for backdoors, malware, supply-chain and code threats
+          — free, offline, and the same fail-closed verdict the install gate uses (the CLI runs it
+          as <code>/nemesis</code>). If the scanner is missing or times out, the result is a block,
+          never a pass.
         </p>
         <form
           onSubmit={(e) => {
@@ -1048,7 +1104,7 @@ export function SecurityRoute(): ReactElement {
                     style={{
                       color: "var(--text-secondary)",
                       fontFamily: "var(--font-mono)",
-                      fontSize: "0.72rem",
+                      fontSize: "0.75rem",
                       overflow: "hidden",
                       textOverflow: "ellipsis",
                       minWidth: 0, // flex/grid floor — without it the ellipsis is unreachable
@@ -1126,7 +1182,7 @@ export function SecurityRoute(): ReactElement {
                       border: "1px solid var(--danger)",
                     }}
                   >
-                    <div style={{ fontFamily: "var(--font-mono)", fontSize: "0.72rem" }}>
+                    <div style={{ fontFamily: "var(--font-mono)", fontSize: "0.75rem" }}>
                       ☠ {q.original} · [{q.verdict}]{q.first_seen ? " · first-seen" : ""}
                       {q.restored_blessed ? " · blessed restored" : ""}
                     </div>
@@ -1150,7 +1206,7 @@ export function SecurityRoute(): ReactElement {
           style={{
             marginTop: "var(--space-4, 8px)",
             color: "var(--text-secondary)",
-            fontSize: "0.72rem",
+            fontSize: "0.75rem",
           }}
         >
           Defence-in-depth, not a guarantee: a zero-day rug-pull from a previously-clean,
@@ -1260,7 +1316,7 @@ export function SecurityRoute(): ReactElement {
                     style={{
                       color: "var(--text-secondary)",
                       fontFamily: "var(--font-mono)",
-                      fontSize: "0.72rem",
+                      fontSize: "0.75rem",
                     }}
                   >
                     {f.path}
@@ -1318,7 +1374,7 @@ export function SecurityRoute(): ReactElement {
                 alignItems: "center",
                 gap: 6,
                 color: "var(--text-secondary)",
-                fontSize: "0.72rem",
+                fontSize: "0.75rem",
                 marginBottom: "var(--space-2, 4px)",
                 minWidth: 0,
               }}
@@ -1414,7 +1470,7 @@ export function SecurityRoute(): ReactElement {
           style={{
             display: "flex",
             gap: "var(--space-3, 6px)",
-            marginTop: "var(--space-5, 12px)",
+            marginTop: "var(--space-6, 12px)",
           }}
         >
           <input
@@ -1446,7 +1502,7 @@ export function SecurityRoute(): ReactElement {
               margin: "4px 0 0",
               color: "var(--text-secondary)",
               fontFamily: "var(--font-mono)",
-              fontSize: "0.72rem",
+              fontSize: "0.75rem",
               overflow: "hidden",
               textOverflow: "ellipsis",
               minWidth: 0, // flex/grid floor — without it the ellipsis is unreachable
@@ -1540,7 +1596,7 @@ export function SecurityRoute(): ReactElement {
                 whiteSpace: "pre-wrap",
                 wordBreak: "break-word",
                 fontFamily: "var(--font-mono)",
-                fontSize: "0.72rem",
+                fontSize: "0.75rem",
                 color: "var(--text-secondary)",
               }}
             >
@@ -1587,7 +1643,7 @@ export function SecurityRoute(): ReactElement {
                 borderRadius: "var(--radius-md, 6px)",
                 color: signedLogOpen ? "var(--text-title)" : "var(--text-secondary)",
                 cursor: "pointer",
-                fontSize: "0.72rem",
+                fontSize: "0.75rem",
                 padding: "2px 8px",
                 whiteSpace: "nowrap", // §7
               }}
@@ -1671,7 +1727,7 @@ export function SecurityRoute(): ReactElement {
                     <span
                       style={{
                         flex: "none",
-                        fontSize: "0.7rem",
+                        fontSize: "0.75rem",
                         color: "var(--text-muted)",
                         whiteSpace: "nowrap",
                       }}
@@ -1681,7 +1737,7 @@ export function SecurityRoute(): ReactElement {
                     <span
                       style={{
                         flex: "none",
-                        fontSize: "0.7rem",
+                        fontSize: "0.75rem",
                         color: row.findings === "clean" ? "var(--text-muted)" : color,
                         whiteSpace: "nowrap",
                       }}
@@ -1694,7 +1750,7 @@ export function SecurityRoute(): ReactElement {
                         width: 30,
                         textAlign: "right",
                         fontFamily: "var(--font-mono)",
-                        fontSize: "0.68rem",
+                        fontSize: "0.75rem",
                         color: "var(--text-muted)",
                         whiteSpace: "nowrap",
                       }}

@@ -15,7 +15,13 @@ import { IPC, type ModelLmstudioStartResult } from "../shared/ipc-contract.js";
 /** Register `model:lmstudioStart`. Returns a disposer (mirrors sibling IPC modules). */
 export function registerLmstudioIpc(): () => void {
   ipcMain.handle(IPC.modelLmstudioStart, async (): Promise<ModelLmstudioStartResult> => {
-    const result = await ai.ensureLmStudioRunning({});
+    let result: Awaited<ReturnType<typeof ai.ensureLmStudioRunning>>;
+    try {
+      result = await ai.ensureLmStudioRunning({});
+    } catch {
+      // a throw used to reject the invoke instead of answering in the contract's own vocabulary
+      return { started: false, ok: false, reason: "start-failed" };
+    }
     return {
       started: result.started,
       ok: result.endpoint !== undefined,

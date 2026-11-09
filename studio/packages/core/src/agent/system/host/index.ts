@@ -243,5 +243,9 @@ export {
 // needs both — the probe answers "is it here", the manifest answers "what is it for" and
 // "which package installs it" — and having to reach a different subpath for the second half is
 // how a surface ends up showing a found/missing list with no way to act on a missing row.
-export { HOST_TOOLS, renderHostToolManifest } from "../../host-tools.js";
+export {
+  HOST_TOOLS,
+  externalToolDefaultsFrom,
+  renderHostToolManifest,
+} from "../../host-tools.js";
 export type { HostTool, HostToolStatus } from "../../host-tools.js";

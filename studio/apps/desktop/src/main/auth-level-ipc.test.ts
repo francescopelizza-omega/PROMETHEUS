@@ -82,7 +82,7 @@ test("authLevel:get reports 'never set' as null, not as the default", async () =
 
 test("authLevel:set writes the SAME file the CLI reads, and get reads it back", async () => {
   const home = tmp("prom-authipc-rt-");
-  const dispose = registerAuthLevelIpcHandlers({ home });
+  const dispose = registerAuthLevelIpcHandlers({ home, approveRaise: async () => true });
   try {
     const set = (await fakeIpcMain.invoke(IPC.authLevelSet, { level: 6 })) as AuthLevelResult;
     assert.equal(set.ok, true);
@@ -156,4 +156,40 @@ test("dispose removes both channels, so a window teardown leaves no handler behi
   assert.equal(fakeIpcMain.handledChannels().has(IPC.authLevelSet), false);
   // re-registering must not throw ("a second handler for …") — the app does this on relaunch
   registerAuthLevelIpcHandlers({ home })();
+});
+
+test("RAISING the saved level needs main's native consent; lowering never asks", async () => {
+  const home = tmp("prom-authipc-raise-");
+  const asked: Array<[number, number]> = [];
+  let answer = false;
+  const dispose = registerAuthLevelIpcHandlers({
+    home,
+    approveRaise: async (from, to) => {
+      asked.push([from, to]);
+      return answer;
+    },
+  });
+  try {
+    // a renderer asking for A7 with nobody confirming: refused, nothing written
+    const no = (await fakeIpcMain.invoke(IPC.authLevelSet, { level: 7 })) as AuthLevelResult;
+    assert.equal(no.ok, false);
+    assert.equal(no.declined, true);
+    assert.equal(no.level, null, "the file was not written");
+    assert.deepEqual(asked, [[1, 7]]);
+
+    answer = true;
+    const yes = (await fakeIpcMain.invoke(IPC.authLevelSet, { level: 5 })) as AuthLevelResult;
+    assert.equal(yes.ok, true);
+    assert.equal(yes.level, 5);
+
+    // lowering, and re-saving the same level, never prompt
+    answer = false;
+    const down = (await fakeIpcMain.invoke(IPC.authLevelSet, { level: 2 })) as AuthLevelResult;
+    assert.equal(down.level, 2);
+    const same = (await fakeIpcMain.invoke(IPC.authLevelSet, { level: 2 })) as AuthLevelResult;
+    assert.equal(same.level, 2);
+    assert.equal(asked.length, 2);
+  } finally {
+    dispose();
+  }
 });

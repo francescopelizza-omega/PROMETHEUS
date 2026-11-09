@@ -195,6 +195,36 @@ export const EXTERNAL_TOOL_CHOICES: Readonly<Record<string, readonly string[]>> 
   videoContainer: ["mp4", "mkv", "webm"],
 });
 
+/**
+ * The per-tool defaults from flat dotted settings keys (`tools.externalTools.<key>`), over the
+ * shipped ones. A value outside its allowed set or range is IGNORED, not passed through: this
+ * becomes prompt text, and `validateSettings` does not run at load time. ONE parser for every
+ * surface — the CLI and the desktop main process both call it, so the Settings page drives the
+ * same manifest wherever the agent runs.
+ */
+export function externalToolDefaultsFrom(
+  raw: Readonly<Record<string, unknown>>,
+): ExternalToolDefaults {
+  const d: Record<string, unknown> = { ...DEFAULT_EXTERNAL_TOOLS };
+  const str = (k: keyof ExternalToolDefaults, allowed?: readonly string[]): void => {
+    const v = raw[`tools.externalTools.${k}`];
+    if (typeof v === "string" && v.trim() && (!allowed || allowed.includes(v))) d[k] = v;
+  };
+  const num = (k: keyof ExternalToolDefaults, min: number, max: number): void => {
+    const v = raw[`tools.externalTools.${k}`];
+    if (typeof v === "number" && Number.isFinite(v) && v >= min && v <= max) d[k] = v;
+  };
+  str("imageFormat", EXTERNAL_TOOL_CHOICES.imageFormat);
+  str("imageResizeFilter", EXTERNAL_TOOL_CHOICES.imageResizeFilter);
+  str("videoContainer", EXTERNAL_TOOL_CHOICES.videoContainer);
+  str("ocrLang");
+  str("ytdlpFormat");
+  num("imageQuality", 1, 100);
+  num("pdfDpi", 1, 2400);
+  num("videoMaxHeight", 0, 8192);
+  return d as unknown as ExternalToolDefaults;
+}
+
 /** One line of defaults for the manifest. Compact on purpose — it is prompt text, not a table. */
 export function renderToolDefaults(d: ExternalToolDefaults): string {
   const height = d.videoMaxHeight > 0 ? `max ${d.videoMaxHeight}p` : "no height cap";

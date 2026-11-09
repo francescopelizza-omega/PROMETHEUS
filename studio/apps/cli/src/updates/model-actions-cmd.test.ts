@@ -38,6 +38,9 @@ function harness(
     },
     getAuthLevel: () => 7,
     pull: (async () => ({ ok: true, error: "", aborted: false })) as never,
+    // a fake gate: no test may spawn the engine and scan a real model store
+    gate: (async () => ({ ok: true })) as never,
+    discard: (async () => undefined) as never,
     remove: (async () => ({ ok: true, error: "" })) as never,
     loaded: (async () => []) as never,
     localManifest: (() => [{ digest: "sha256:a", size: 3e9 }]) as never,
@@ -284,4 +287,33 @@ test("bytes render with one decimal, so 22.6 GB does not read as 23 GB", () => {
   assert.equal(gb(22_621_314_161), "22.6 GB");
   assert.equal(gb(3e9), "3.0 GB");
   assert.equal(gb(0), "0.0 GB");
+});
+
+test("/updates pull: hf.co and host tags are refused before anything is asked or pulled", async () => {
+  for (const tag of ["hf.co/someone/evil-GGUF:Q4_K_M", "registry.x.io/a/b", "Bad Tag"]) {
+    const h = harness();
+    assert.equal(await runPull(tag, h.deps), false, tag);
+    assert.deepEqual(h.asked, [], tag);
+  }
+});
+
+test("/updates pull: the pulled model is scanned; a WARN needs the typed tag, else it is REMOVED", async () => {
+  for (const [typed, ok] of [
+    ["", false],
+    ["x:1", true],
+  ] as const) {
+    const h = harness({ confirms: [true], answers: [typed] });
+    const discarded: string[] = [];
+    h.deps.gate = (async (_t: string, accept: boolean) =>
+      accept ? { ok: true } : { ok: false, needs_confirm: true, error: "WARN" }) as never;
+    h.deps.discard = (async (t: string) => {
+      discarded.push(t);
+    }) as never;
+    assert.equal(await runPull("x:1", h.deps), ok, typed);
+    assert.deepEqual(discarded, ok ? [] : ["x:1"]);
+  }
+  const h = harness({ confirms: [true] });
+  h.deps.gate = (async () => ({ ok: false, error: "nemesis BLOCKED x:1" })) as never;
+  assert.equal(await runPull("x:1", h.deps), false);
+  assert.match(h.plain(), /BLOCKED/);
 });

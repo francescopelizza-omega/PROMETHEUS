@@ -57,7 +57,7 @@ const inputStyle = {
   border: "1px solid var(--border-subtle)",
   borderRadius: 4,
   padding: "2px 6px",
-  fontSize: "0.72rem",
+  fontSize: "0.75rem",
   fontFamily: mono,
 };
 
@@ -144,7 +144,7 @@ export function RunConfigEditor({
   // a div wrapper (not <label>): the control is a dynamic child biome can't
   // statically pair, and every input carries its own aria-label already.
   const field = (label: string, node: ReactElement): ReactElement => (
-    <div style={{ display: "block", marginBottom: 6, fontSize: "0.72rem", color: secondary }}>
+    <div style={{ display: "block", marginBottom: 6, fontSize: "0.75rem", color: secondary }}>
       <span style={{ display: "block", marginBottom: 2 }}>{label}</span>
       {node}
     </div>
@@ -199,7 +199,7 @@ export function RunConfigEditor({
         </Button>
       </div>
       {error && !form && (
-        <p role="alert" style={{ margin: "4px 0 0", color: "var(--danger)", fontSize: "0.72rem" }}>
+        <p role="alert" style={{ margin: "4px 0 0", color: "var(--danger)", fontSize: "0.75rem" }}>
           {error}
         </p>
       )}
@@ -258,7 +258,7 @@ export function RunConfigEditor({
                 onChange={(e) => setForm({ ...form, argsText: e.target.value })}
               />,
             )}
-            <div style={{ marginBottom: 6, fontSize: "0.72rem", color: secondary }}>
+            <div style={{ marginBottom: 6, fontSize: "0.75rem", color: secondary }}>
               <span style={{ display: "block", marginBottom: 2 }}>Environment</span>
               {form.envRows.map((row, i) => (
                 // biome-ignore lint/suspicious/noArrayIndexKey: rows are positional editors
@@ -333,14 +333,14 @@ export function RunConfigEditor({
                   onChange={(e) => setForm({ ...form, python: e.target.value })}
                 />,
               )}
-            <p style={{ margin: "0 0 6px", fontSize: "0.68rem", color: secondary }}>
+            <p style={{ margin: "0 0 6px", fontSize: "0.75rem", color: secondary }}>
               Saving rewrites .vscode/launch.json as plain JSON — JSONC comments are not preserved.
               Configs you didn't edit round-trip untouched.
             </p>
             {error && (
               <p
                 role="alert"
-                style={{ margin: "0 0 6px", color: "var(--danger)", fontSize: "0.72rem" }}
+                style={{ margin: "0 0 6px", color: "var(--danger)", fontSize: "0.75rem" }}
               >
                 {error}
               </p>

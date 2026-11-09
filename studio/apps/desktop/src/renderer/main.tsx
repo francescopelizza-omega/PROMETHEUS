@@ -84,6 +84,7 @@ import { createQueryClient } from "./query/client.js";
 import { ErrorBoundary } from "./shell/ErrorBoundary.js";
 import { ThemeProvider } from "./shell/index.js";
 import { hydrateAuthLevel } from "./stores/authorisation.js";
+import { errorText, notify } from "./stores/toasts.js";
 
 const container = document.getElementById("root");
 if (!container) {
@@ -96,8 +97,19 @@ if (!container) {
 // <ErrorBoundary> handle the user-facing cases; this catches the rest.
 window.addEventListener("unhandledrejection", (e) => {
   // eslint-disable-next-line no-console
-  console.warn("[renderer] unhandled promise rejection (swallowed):", e.reason);
+  console.warn("[renderer] unhandled promise rejection:", e.reason);
   e.preventDefault();
+  // Swallowing it silently is how failed actions looked like no-ops. Say something — once per
+  // distinct message (the toast queue de-duplicates) — except for deliberate cancellations.
+  const reason = e.reason as { name?: unknown } | undefined;
+  if (reason && (reason.name === "AbortError" || reason.name === "CancelledError")) return;
+  const text = errorText(e.reason);
+  notify({
+    key: `unhandled:${text}`,
+    tone: "warn",
+    title: "A background action failed",
+    description: text,
+  });
 });
 window.addEventListener("error", (e) => {
   // eslint-disable-next-line no-console

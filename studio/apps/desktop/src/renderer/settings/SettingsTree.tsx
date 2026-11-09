@@ -59,7 +59,7 @@ function Row({
           style={{
             color: "var(--accent)",
             fontFamily: "var(--font-mono)",
-            fontSize: "0.7rem",
+            fontSize: "0.75rem",
             textTransform: "uppercase",
           }}
         >

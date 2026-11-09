@@ -11,6 +11,10 @@
  *   - VERSION.json    { engine, studioBuilt, builtAt }
  *   - studio/config/effort-capabilities.builtin.json  (the engine READS this at runtime)
  *   - studio/config/providers.config.json             (Studio main reads it: bundledConfigPath)
+ *   - studio/config/open-models.json                  (the modelhub sidecar's catalogue —
+ *                                                      `model.search`/`stage-hf` read it RELATIVE
+ *                                                      to the sidecar, so a packaged build without
+ *                                                      it had an empty model catalogue)
  *   - studio/python/sidecar/*.py                      (every sidecar; no tests, no caches)
  *   - studio/python/tools/{disk_space.py,pty_host.py} (`/disk-space` and its PTY relay)
  *
@@ -61,6 +65,7 @@ const SRC = {
    */
   effortTable: join(studio, "config", "effort-capabilities.builtin.json"),
   providers: join(studio, "config", "providers.config.json"),
+  openModels: join(studio, "config", "open-models.json"),
   sidecars: join(studio, "python", "sidecar"),
   tools: join(studio, "python", "tools"),
 };
@@ -117,6 +122,7 @@ const effortOut = join(out, "studio", "config", "effort-capabilities.builtin.jso
 mkdirSync(dirname(effortOut), { recursive: true });
 copyFileSync(SRC.effortTable, effortOut);
 copyFileSync(SRC.providers, join(dirname(effortOut), "providers.config.json"));
+copyFileSync(SRC.openModels, join(dirname(effortOut), "open-models.json"));
 
 const sidecarOut = join(out, "studio", "python", "sidecar");
 const toolsOut = join(out, "studio", "python", "tools");
@@ -156,6 +162,14 @@ console.log(
   `  prometheus.py + nemesis + VERSION.json (engine ${version.engine}, build ${version.studioBuilt})`,
 );
 console.log(`  studio/config/effort-capabilities.builtin.json (${stagedRules} rules)`);
+const stagedModels =
+  JSON.parse(readFileSync(join(dirname(effortOut), "open-models.json"), "utf8")).models?.length ??
+  0;
+if (stagedModels === 0) {
+  console.error("stage-engine: open-models.json staged with 0 models — run build_model_catalog.py");
+  process.exit(1);
+}
+console.log(`  studio/config/open-models.json (${stagedModels} models)`);
 console.log(
   `  studio/python/sidecar (${sidecars.length} sidecars) + tools (${SHIPPED_TOOLS.join(", ")})`,
 );

@@ -65,7 +65,7 @@ function Item({ item }: { item: StatusItem }): ReactElement {
     // §7: the bar is 11px mono. A `tone` (a semantic var NAME) tints the whole entry.
     color: item.tone ? `var(${item.tone})` : "var(--text-muted)",
     fontFamily: "var(--font-mono)",
-    fontSize: 11,
+    fontSize: 12,
     cursor: interactive ? "pointer" : "default",
     lineHeight: 1,
     whiteSpace: "nowrap",
@@ -91,6 +91,9 @@ function Item({ item }: { item: StatusItem }): ReactElement {
         onClick={item.onClick}
         title={item.title}
         aria-label={item.ariaLabel}
+        // a popover this entry opens can recognise its own trigger (and not re-open on the
+        // click that closed it)
+        data-status-id={item.id}
         style={st}
       >
         {body}

@@ -68,12 +68,35 @@ test("destructive prometheus_sync REQUIRES confirm — no confirm ⇒ never buil
   assert.throws(() => sync?.toArgv({ skill: "x", confirm: false }), /confirm-required/);
   // with confirm:true it builds the guarded argv.
   assert.deepEqual(sync?.toArgv({ skill: "myskill", confirm: true }), ["sync", "--", "myskill"]);
+  // options precede the `--` guard — after it argparse reads "--to" as a positional and the
+  // engine answered "unrecognized arguments: --to all" (2026-11-02 audit).
   assert.deepEqual(sync?.toArgv({ skill: "s", to: "all", confirm: true }), [
     "sync",
+    "--to=all",
     "--",
     "s",
-    "--to",
-    "all",
+  ]);
+});
+
+test("every name-taking tool guards the name and keeps its options before `--`", () => {
+  for (const t of ["prometheus_info", "prometheus_where", "prometheus_status", "prometheus_audit"]) {
+    const argv = byName(t)?.toArgv({ name: "-h" }) ?? [];
+    assert.deepEqual(argv.slice(-2), ["--", "-h"], t);
+  }
+  assert.deepEqual(
+    byName("prometheus_install")?.toArgv({ name: "-x", only: "a", dryRun: true }),
+    ["--dry-run", "install", "--only=a", "--", "-x"],
+  );
+  assert.deepEqual(
+    byName("prometheus_uninstall")?.toArgv({ name: "p", only: "b", dryRun: false, yes: true }),
+    ["--yes", "uninstall", "--only=b", "--", "p"],
+  );
+  assert.deepEqual(byName("prometheus_enable")?.toArgv({ name: "p", component: "mcp" }), [
+    "enable",
+    "--component",
+    "mcp",
+    "--",
+    "p",
   ]);
 });
 
@@ -85,11 +108,13 @@ test("option-injection: positional targets are `--`-guarded so `-`-leading ids c
     "--",
     "-x",
   ]);
-  assert.deepEqual(byName("prometheus_models")?.toArgv({ action: "status", tool: "-evil" }), [
+  // `models` takes its tool BEFORE options (argparse < 3.13): a "-"-leading id is refused
+  assert.throws(() => byName("prometheus_models")?.toArgv({ action: "status", tool: "-evil" }));
+  assert.deepEqual(byName("prometheus_models")?.toArgv({ action: "config", tool: "flashattention" }), [
     "models",
-    "status",
-    "--",
-    "-evil",
+    "config",
+    "flashattention",
+    "--show",
   ]);
 });
 
@@ -105,7 +130,17 @@ test("enum subactions build positionally (the model can't invent argv)", () => {
   ]);
 });
 
-test("no NEW tool can express --force (mirror of the loop.ts never-force invariant)", () => {
+test("no tool can express --force: a tool argument is never the user's consent", () => {
+  for (const t of TOOLS) {
+    assert.ok(!("force" in (t.schema ?? {})), `${t.name} must not expose a force field`);
+    let argv: string[] = [];
+    try {
+      argv = t.toArgv({ name: "x", dryRun: false, yes: true, force: true });
+    } catch {
+      continue; // needs other arguments; the schema check above still covers it
+    }
+    assert.ok(!argv.includes("--force"), `${t.name} must never emit --force`);
+  }
   for (const n of NEW_TOOLS) {
     const t = byName(n);
     assert.ok(t);

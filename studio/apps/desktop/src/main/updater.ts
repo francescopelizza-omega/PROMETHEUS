@@ -17,7 +17,7 @@
  * feature). The renderer shows a non-modal toast (file 08) and calls the IPC handlers.
  */
 import { AUTO_DOWNLOAD, AUTO_INSTALL } from "@prometheus/core";
-import { type BrowserWindow, ipcMain } from "electron";
+import { type BrowserWindow, dialog, ipcMain } from "electron";
 
 import { IPC_UPDATE, IPC_UPDATE_EVENTS } from "../shared/ipc-contract.js";
 
@@ -115,8 +115,19 @@ export async function registerUpdater(window: BrowserWindow, channel = "latest")
       return { ok: false, error: e instanceof Error ? e.message : String(e) };
     }
   });
-  ipcMain.handle(IPC_UPDATE.install, () => {
+  ipcMain.handle(IPC_UPDATE.install, async () => {
     try {
+      // Quitting closes every window and any unsaved buffer with it. The renderer's button is
+      // a request; the restart happens only after the human confirms it natively, here.
+      const r = await dialog.showMessageBox({
+        type: "question",
+        buttons: ["Later", "Restart and install"],
+        defaultId: 1,
+        cancelId: 0,
+        message: "Restart Prometheus to install the update?",
+        detail: "Save your work first — open windows close when the app restarts.",
+      });
+      if (r.response !== 1) return { ok: false, error: "declined" };
       autoUpdater.quitAndInstall();
       return { ok: true };
     } catch (e) {

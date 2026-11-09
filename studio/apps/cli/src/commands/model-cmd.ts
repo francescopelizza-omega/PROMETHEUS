@@ -23,7 +23,7 @@
  */
 import { readFileSync } from "node:fs";
 
-import { stretch } from "@prometheus/core";
+import { ai, stretch } from "@prometheus/core";
 
 import {
   type ServeLiveStatus,
@@ -778,7 +778,9 @@ export async function runModelCommand(
         const steps: string[] = [];
         if (!isLocal && target === "ollama") {
           steps.push(
-            `ollama pull hf.co/${source}  (Ollama's own HF passthrough — no local download)`,
+            `download the ${quant.toUpperCase()} GGUF of ${source} from Hugging Face (sha256-pinned to a revision)`,
+            "scan it with nemesis; admit it only on an allow",
+            "import the admitted file into Ollama as prometheus/<id>",
           );
         } else {
           if (!isLocal) steps.push(`fetch ${source} from Hugging Face (via the \`hf\` CLI)`);
@@ -809,35 +811,62 @@ export async function runModelCommand(
       const blocked = forceBlocked(ctx, "model hug");
       if (blocked) return blocked;
 
-      // FAST PATH: Ollama + an HF repo → Ollama's OWN HF-hosted-GGUF passthrough.
-      // Zero local download, zero duplication — Ollama fetches and stores the
-      // bytes itself; Prometheus never touches them.
+      // FAST PATH: Ollama + an HF GGUF repo → the GATED import. This used to be
+      // `ollama pull hf.co/<repo>`: Ollama fetched an arbitrary uploader's file and the
+      // registry's trust was claimed for it, with no scan. Now the sidecar picks the GGUF for
+      // the quant, pins the revision, verifies Hugging Face's sha256, admits it only when
+      // nemesis allows it, and imports the admitted file into Ollama.
       if (!isLocal && target === "ollama") {
+        const hugArgs = [
+          "hug-ollama",
+          "--id",
+          modelId,
+          "--repo",
+          source,
+          "--quant",
+          quant.toUpperCase(),
+        ];
         const probe = deps.probeRunner ?? defaultSidecarDeps.probeRunner!;
         if (!(await probe("ollama"))) {
-          return offerRunnerInstall(
-            ctx,
-            deps,
-            {
-              base: ["pull", "--id", modelId, "--tag", `hf.co/${source}`],
-              command: "model hug",
-            },
-            "model",
-          );
+          return offerRunnerInstall(ctx, deps, { base: hugArgs, command: "model hug" }, "model");
         }
         return runMutation(ctx, {
           command: "model hug",
           script: SCRIPT,
-          base: ["pull", "--id", modelId, "--tag", `hf.co/${source}`],
-          note: `ollama pull hf.co/${source} → served at the ollama OpenAI-compatible endpoint`,
+          base: hugArgs,
+          note: `${source} → nemesis-gated download → served by Ollama as prometheus/<id>`,
           deps,
           confirm: false,
+          // the download + scan + import of a multi-GB file
+          timeoutMs: 12 * 60 * 60 * 1000,
         });
       }
 
       // Everything else needs the raw weights locally: fetch (if HF) → convert → install.
       let srcDir = source;
-      if (!isLocal) {
+      if (!isLocal && target === "vllm") {
+        // vLLM serves the HF snapshot itself, so it comes through the GATED snapshot download:
+        // sha256-verified, nemesis-scanned and placed in the Hugging Face cache, which is what
+        // `install-target vllm` requires (an admitted directory). The fetch-hf scratch copy it
+        // used to get could never be admitted, so this path always failed.
+        const staged = await deps.runSidecar(SCRIPT, [
+          "stage-hf",
+          `--id=${modelId}`,
+          `--repo=${source}`,
+          ...ai.SNAPSHOT_INCLUDES.map((g) => `--include=${g}`),
+          "--place=hf",
+        ]);
+        if (staged.ok === false || typeof staged.local_path !== "string") {
+          return {
+            text: c.red(
+              `model hug: ${staged.error ?? staged.message ?? "the gated download failed"}`,
+            ),
+            json: staged,
+            exitCode: 2,
+          };
+        }
+        srcDir = staged.local_path;
+      } else if (!isLocal) {
         let fetchEnv = await deps.runSidecar(SCRIPT, ["fetch-hf", "--repo", source]);
         if (fetchEnv.ok === false && fetchEnv.installable) {
           const inst = await deps.runSidecar(SCRIPT, ["install-hf-cli"]);

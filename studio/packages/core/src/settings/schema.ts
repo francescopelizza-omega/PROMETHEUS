@@ -104,6 +104,9 @@ export interface Settings extends ExternalToolSettings, RemoteHostSettings, Lang
    * OFF by default, same "never silently flipped" posture as `telemetryEnabled`.
    */
   "completion.pathFrecency"?: boolean;
+  /** the default local model server (`/server` / Settings → AI & Agents). Flat key — see the
+   *  note on ExternalToolSettings about the CLI's shallow saveSettings. */
+  "localModels.defaultServer"?: "ollama" | "lmstudio" | "llamacpp" | "mlx" | "vllm";
   /** extension-contributed keys (open) — also carries the `format.lang.<id>` booleans. */
   [key: string]: unknown;
 }
@@ -178,6 +181,7 @@ export const DEFAULT_SETTINGS: Settings = {
   autoApprove: true,
   telemetryEnabled: false, // §8: OFF by default — explicit, never upgraded by the validator
   "completion.pathFrecency": false, // OFF by default — explicit, never upgraded by the validator
+  "localModels.defaultServer": "ollama", // `/server` — Ollama unless the user picks another
   updateChannel: "latest",
   "format.onSave": false,
   "format.optimizeImportsOnSave": false,
@@ -268,6 +272,12 @@ export function validateSettings(value: unknown): Settings {
         break;
       case "budget.unpricedPolicy":
         if (v === "block" || v === "warn") out["budget.unpricedPolicy"] = v;
+        break;
+      case "localModels.defaultServer":
+        // an unknown server is DROPPED (→ Ollama), never kept: a typo must not leave the
+        // session with no server it will start or adopt
+        if (v === "ollama" || v === "lmstudio" || v === "llamacpp" || v === "mlx" || v === "vllm")
+          out["localModels.defaultServer"] = v;
         break;
       case "ai.effort":
         // Validated against the ladder: a typo'd tier that survived as a bare string would

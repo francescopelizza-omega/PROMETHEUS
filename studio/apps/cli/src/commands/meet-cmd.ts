@@ -19,7 +19,7 @@
  * — the CLI's own `/repomap` already defaults OFF for exactly this reason ("the first turn in a
  * huge repo never pays an unexpected full walk").
  */
-import { readFileSync, readdirSync, statSync } from "node:fs";
+import { lstatSync, readFileSync, readdirSync, statSync } from "node:fs";
 
 import { tokenEconomy } from "@prometheus/core";
 
@@ -36,8 +36,19 @@ function nodeRepoFs(): tokenEconomy.RepoFs {
         isDirectory: d.isDirectory(),
         isSymlink: d.isSymbolicLink(),
       })),
-    readFile: (p) => readFileSync(p, "utf8"),
-    statSize: (p) => statSync(p).size,
+    // REGULAR files only, never followed through a link: a hostile repo's `.gitignore` (or any
+    // file) as a FIFO or a link to /dev/zero blocked this synchronous read forever — the whole
+    // process froze on "Meet your codebase". A non-regular entry reads as empty and sizes as
+    // "too big", so the walker's own size gate skips it.
+    readFile: (p) => {
+      const st = lstatSync(p);
+      if (!st.isFile() || st.size > 4 * 1024 * 1024) return "";
+      return readFileSync(p, "utf8");
+    },
+    statSize: (p) => {
+      const st = lstatSync(p);
+      return st.isFile() ? st.size : Number.MAX_SAFE_INTEGER;
+    },
   };
 }
 

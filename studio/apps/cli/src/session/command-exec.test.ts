@@ -222,6 +222,24 @@ test("never-force: pentest's destroy/build/run/shell now hard-block under a forc
   }
 });
 
+test("never-force: a confirmed disk-space delete/cleanup is a mutation like any other", async () => {
+  const prev = process.env.PROM_ALLOW_FORCE;
+  // biome-ignore lint/performance/noDelete: ensure the override env is truly unset for the test
+  delete process.env.PROM_ALLOW_FORCE;
+  try {
+    for (const action of ["delete", "cleanup"]) {
+      const { client, calls } = makeFakeClient();
+      const { ctx, prompts } = makeCtx(client, { confirm: true, profile: "ci" });
+      const out = await execVerb(["disk-space", action, "/tmp/x", "--force"], ctx);
+      assert.equal(out.exitCode, 2, action);
+      assert.equal(prompts.length, 0, action);
+      assert.deepEqual(calls, [], action);
+    }
+  } finally {
+    if (prev !== undefined) process.env.PROM_ALLOW_FORCE = prev;
+  }
+});
+
 test("crash-free: an engine error renders a friendly outcome (no throw)", async () => {
   const { client } = makeFakeClient({ installThrows: true });
   const { ctx } = makeCtx(client, { confirm: true });

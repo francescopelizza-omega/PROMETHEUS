@@ -146,6 +146,17 @@ const PANE_SLASH: Readonly<Record<string, PaneId>> = Object.freeze({
   skills: "skills",
 });
 
+/** The verb that renders the same view as a pane, for hosts with no pane projector. */
+const PANE_FALLBACK_VERB: Readonly<Record<string, readonly string[]>> = Object.freeze({
+  app: ["apps"],
+  scan: ["scan"],
+  superscan: ["superscan"],
+  matrix: ["matrix"],
+  doctor: ["doctor"],
+  vault: ["vault"],
+  worldsim: ["worldsim"],
+});
+
 /**
  * Action slashes that map to a parity-registry VERB id (run via execVerb). The
  * slash NAME and the CommandSpec ID differ for the nemesis gate: the slash is
@@ -234,6 +245,17 @@ export async function execSlash(name: string, rest: string, ctx: SessionCtx): Pr
     // the host just prints + records activePane).
     const pane = PANE_SLASH[name];
     if (pane) {
+      // Neither host injects `renderPane` (the pane model needs engine data a sync
+      // projector cannot fetch), so a pane slash that reached this branch printed only
+      // "(<pane> pane)". Every pane name but `/app` is owned by the host slash registry and
+      // never gets here; when one does, run the verb that produces the same view instead.
+      const fallback = PANE_FALLBACK_VERB[name];
+      if (!ctx.renderPane && fallback && ctx.execVerb) {
+        return {
+          kind: "verb",
+          outcome: await ctx.execVerb([...fallback, ...splitArgs(rest)], ctx),
+        };
+      }
       return paneResult(pane, ctx);
     }
 

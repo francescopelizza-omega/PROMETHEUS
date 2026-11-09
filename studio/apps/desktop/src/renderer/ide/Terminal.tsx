@@ -336,6 +336,9 @@ export function Terminal({
         ...(shell ? { shell } : {}),
       });
       if (disposed) {
+        // unmounted while the spawn was in flight: the shell exists in MAIN with nobody
+        // attached — kill it, or it lives until the app quits
+        if (spawned.ok && spawned.ptyId) api.ptyKill(spawned.ptyId);
         term.dispose();
         return;
       }

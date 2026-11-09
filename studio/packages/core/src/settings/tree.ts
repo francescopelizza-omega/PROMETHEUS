@@ -112,8 +112,9 @@ export const SETTINGS_TREE: readonly SettingsNode[] = Object.freeze([
       node("editor.general", "General", "Editor", "07", "page", {
         searchTerms: ["caret", "scroll", "soft-wrap", "minimap"],
       }),
+      // No schemaKey: nothing ever read `editor.font` — the real font settings live in the
+      // dedicated Fonts page (ide/fonts/store). A key here let users edit a value with no effect.
       node("editor.font", "Font", "Editor", "08", "page", {
-        schemaKey: "editor.font",
         searchTerms: ["family", "size", "ligatures", "JetBrains Mono"],
       }),
       node("editor.colorScheme", "Color Scheme", "Editor", "13", "color", {
@@ -308,6 +309,27 @@ export const SETTINGS_TREE: readonly SettingsNode[] = Object.freeze([
         // written at all. Both of these keys were exactly that until now.
         schemaKey: "ai.effort",
         searchTerms: ["effort", "think", "reasoning", "tier", "thinking", "depth", "budget"],
+      }),
+      node("ai-agents.defaultServer", "Default Local Server", "AI & Agents", "11", "select", {
+        // the terminal's `/server`; the same key in the shared settings.json. Ollama by default.
+        schemaKey: "localModels.defaultServer",
+        options: [
+          { value: "ollama", label: "Ollama (default)" },
+          { value: "lmstudio", label: "LM Studio" },
+          { value: "llamacpp", label: "llama.cpp (llama-server)" },
+          { value: "mlx", label: "MLX-LM (Apple Silicon)" },
+          { value: "vllm", label: "vLLM" },
+        ],
+        searchTerms: [
+          "server",
+          "runner",
+          "local",
+          "ollama",
+          "lm studio",
+          "llama.cpp",
+          "mlx",
+          "vllm",
+        ],
       }),
       node("ai-agents.effortForce", "Force Reasoning Effort", "AI & Agents", "11", "toggle", {
         // Off by default, and it re-opens the failure `ai/effort` exists to close — a forwarded

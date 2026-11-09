@@ -277,7 +277,9 @@ def _replace_verb(argv: Sequence[str]) -> int:
         # line. A destructive on-disk edit to the wrong place, reported as a success.
         for entry in plan:
             try:
-                with open(entry["file"], "r", encoding="utf-8") as fh:
+                # newline="" keeps the file's own line endings: universal-newline reading
+                # rewrote every CRLF file as LF, a whole-file diff for a one-line codemod
+                with open(entry["file"], "r", encoding="utf-8", newline="") as fh:
                     text = fh.read()
                 changed = False
                 for edit in entry["edits"]:
@@ -300,10 +302,29 @@ def _replace_verb(argv: Sequence[str]) -> int:
                     text = text[:found] + edit["new"] + text[found + len(old_text):]
                     changed = True
                 if changed:
-                    with open(entry["file"], "w", encoding="utf-8") as fh:
-                        fh.write(text)
+                    # temp + rename: `open(f, "w")` truncated FIRST, so a full disk mid-write
+                    # left a 0-byte source file
+                    target = entry["file"]
+                    tmp = f"{target}.prom-tmp-{os.getpid()}"
+                    try:
+                        with open(tmp, "w", encoding="utf-8", newline="") as fh:
+                            fh.write(text)
+                        try:
+                            os.chmod(tmp, os.stat(target).st_mode & 0o7777)
+                        except OSError:
+                            pass
+                        os.replace(tmp, target)
+                    except OSError:
+                        try:
+                            os.unlink(tmp)
+                        except OSError:
+                            pass
+                        raise
                     written += 1
-            except OSError:
+            except OSError as exc:
+                # reported, not swallowed: the envelope must not imply the file was handled
+                skipped.append({"file": entry["file"], "line": None,
+                                "reason": f"could not write: {exc}"})
                 continue
 
     return env.emit("replace", plan=plan, count=count, written=written,

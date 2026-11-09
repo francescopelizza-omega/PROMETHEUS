@@ -496,6 +496,36 @@ export function createRendererLlmClient(opts: RendererLlmOptions): LLMClient {
 }
 
 /**
+ * The external-tool manifest — which helper programs this machine has and the user's defaults
+ * for them — rendered by main from the SAME source the CLI's agent uses. Re-read at the start of
+ * EVERY turn: main renders it fresh from the live Settings → External Tools defaults (only the
+ * PATH probe is cached there), and a once-per-window fetch froze a default the user changed
+ * mid-session out of every later turn. A failed read keeps the last good manifest; a bridge
+ * that does not offer it leaves the agent running without one, as before.
+ */
+let hostToolsManifest: string | undefined;
+let hostToolsInFlight: Promise<void> | undefined;
+export function primeHostToolsManifest(): Promise<void> {
+  if (hostToolsInFlight) return hostToolsInFlight;
+  const api = (
+    globalThis as {
+      prometheus?: { ai?: { hostTools?: () => Promise<{ ok: boolean; manifest?: string }> } };
+    }
+  ).prometheus?.ai;
+  hostToolsInFlight = (api?.hostTools?.() ?? Promise.resolve(undefined))
+    .then((r) => {
+      if (r?.ok) hostToolsManifest = r.manifest;
+    })
+    .catch(() => {
+      /* keep the last good manifest */
+    })
+    .finally(() => {
+      hostToolsInFlight = undefined;
+    });
+  return hostToolsInFlight;
+}
+
+/**
  * Merge the tool preamble into the outgoing system message.
  *
  * The pane's own prompt (`AGENT_PANE_SYSTEM`, plus any project rules `AgentPane` appends)
@@ -538,6 +568,7 @@ function withPreamble(
     // is unused and `opts.effort` — the resolved `EffortResolution` the caller already computed
     // via `@prometheus/core/ai-effort`'s `resolveEffort` — never reached this ctx at all.
     ...(effort ? { effortTier: effort.requested, effortMechanism: effort.mechanism } : {}),
+    ...(hostToolsManifest ? { hostTools: hostToolsManifest } : {}),
     tools,
   };
   const assembled = assemblePreamble(
@@ -1070,6 +1101,7 @@ export async function runCoreAgentTurn(
   sinks: CoreAgentSinks,
 ): Promise<void> {
   let streamed = false;
+  await primeHostToolsManifest();
   for await (const ev of runAgentTurn(thread, tuning, {
     llm,
     runTool,

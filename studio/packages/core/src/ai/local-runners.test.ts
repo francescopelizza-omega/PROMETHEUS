@@ -217,3 +217,10 @@ test("isLocalUrl rejects a remote host", () => {
 test("isLocalUrl returns false for an unparsable URL rather than throwing", () => {
   assert.equal(isLocalUrl("not a url"), false);
 });
+
+test("a llama-server URL on 9931 (its v0.7+ default) maps to llama.cpp, not to ollama", async () => {
+  const { runnerForBaseUrl } = await import("./local-runners.js");
+  const { runnerIdForUrl } = await import("./lmstudio-models.js");
+  assert.equal(runnerForBaseUrl("http://127.0.0.1:9931/v1", {})?.id, "llamacpp");
+  assert.equal(runnerIdForUrl("http://127.0.0.1:9931/v1", {}), "llamacpp");
+});

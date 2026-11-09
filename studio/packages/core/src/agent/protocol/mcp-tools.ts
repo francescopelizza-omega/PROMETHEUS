@@ -178,13 +178,47 @@ export function mcpToolDefs(cfg: McpServerConfig): ToolDef[] {
     title: d.title ?? d.name,
     description: describe(d, cfg.label),
     schema: mcpInputSchemaToToolSchema(d.inputSchema),
-    // Carried through UNCHANGED. `autoApprovable` fails safe on unknown annotations, and
-    // inventing a `readOnlyHint` for a server that declared none would quietly undo that.
-    annotations: d.annotations ?? {},
+    annotations: ladderAnnotations(cfg, d),
     toArgv: () => {
       throw new Error(`${d.name} is served by an MCP server, not by prometheus.py`);
     },
   }));
+}
+
+/**
+ * The annotations the AUTONOMY LADDER sees for a discovered tool.
+ *
+ * A server's annotations are its own claim about itself. `readOnlyHint: true` from a server
+ * nobody has vetted is exactly as trustworthy as the server — and it used to map straight to
+ * the `read` category, which A1 auto-approves. Absent annotations (`{}`) fell through to
+ * `config`, which A3 auto-approves. Either way, code running in another process, written by
+ * someone else, ran with no prompt at a low rung.
+ *
+ * So every MCP tool is `openWorldHint` (category `install`: auto only from the network rung
+ * up) and `destructiveHint` unless the server says otherwise — EXCEPT a tool the user listed
+ * in that server's `autoApprove` AND the server marks read-only: there the user has vouched
+ * for it, and the read rung applies.
+ */
+export function ladderAnnotations(
+  cfg: Pick<McpServerConfig, "autoApprove">,
+  d: Pick<McpToolDescriptor, "name" | "annotations">,
+): NonNullable<ToolDef["annotations"]> {
+  const declared = d.annotations ?? {};
+  const vouched = (cfg.autoApprove ?? []).includes(d.name);
+  if (
+    vouched &&
+    declared.readOnlyHint === true &&
+    declared.openWorldHint !== true &&
+    declared.destructiveHint !== true
+  ) {
+    return { ...declared, readOnlyHint: true };
+  }
+  return {
+    ...declared,
+    readOnlyHint: false,
+    openWorldHint: true,
+    destructiveHint: declared.destructiveHint ?? true,
+  };
 }
 
 /** Every ready server's tools, flattened — what a host passes as `tools.extra`. */

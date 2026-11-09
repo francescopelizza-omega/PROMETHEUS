@@ -15,7 +15,13 @@ import { IPC, type ModelOllamaStartResult } from "../shared/ipc-contract.js";
 /** Register `model:ollamaStart`. Returns a disposer (mirrors sibling IPC modules). */
 export function registerOllamaIpc(): () => void {
   ipcMain.handle(IPC.modelOllamaStart, async (): Promise<ModelOllamaStartResult> => {
-    const result = await ai.ensureOllamaRunning({});
+    let result: Awaited<ReturnType<typeof ai.ensureOllamaRunning>>;
+    try {
+      result = await ai.ensureOllamaRunning({});
+    } catch {
+      // a throw used to reject the invoke instead of answering in the contract's own vocabulary
+      return { started: false, ok: false, reason: "start-failed" };
+    }
     return {
       started: result.started,
       ok: result.endpoint !== undefined,

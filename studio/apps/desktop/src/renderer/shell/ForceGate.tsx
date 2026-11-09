@@ -30,7 +30,7 @@
  */
 
 import { ForceOverrideDialog } from "@prometheus/ui";
-import { type ReactElement, useCallback, useState } from "react";
+import { type ReactElement, useCallback, useRef, useState } from "react";
 
 import { useSecurityStore } from "../stores/features.js";
 
@@ -56,18 +56,29 @@ export interface ForceGateHandle {
 
 export function useForceGate(): ForceGateHandle {
   const [pending, setPending] = useState<ForceRequest | null>(null);
+  // The request is read from a REF, not from inside a state updater. `onConfirm` used to run
+  // inside `setPending((p) => …)`; React may call an updater twice (StrictMode does, always),
+  // and a doubled updater here is a doubled FORCED install — the one action this dialog exists
+  // to make deliberate.
+  const pendingRef = useRef<ForceRequest | null>(null);
   const noteForced = useSecurityStore((s) => s.noteForced);
 
-  const ask = useCallback((req: ForceRequest): void => setPending(req), []);
-  const cancel = useCallback((): void => setPending(null), []);
+  const ask = useCallback((req: ForceRequest): void => {
+    pendingRef.current = req;
+    setPending(req);
+  }, []);
+  const cancel = useCallback((): void => {
+    pendingRef.current = null;
+    setPending(null);
+  }, []);
   const confirm = useCallback((): void => {
-    setPending((p) => {
-      if (p) {
-        noteForced();
-        p.onConfirm();
-      }
-      return null;
-    });
+    const p = pendingRef.current;
+    pendingRef.current = null;
+    setPending(null);
+    if (p) {
+      noteForced();
+      p.onConfirm();
+    }
   }, [noteForced]);
 
   return { pending, ask, cancel, confirm };

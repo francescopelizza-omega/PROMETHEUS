@@ -285,7 +285,10 @@ export function ollamaCapsFor(bin: string): NodeJS.ProcessEnv | undefined {
   return out;
 }
 
-export function startModelServer(argv: readonly string[]): StartResult {
+export function startModelServer(
+  argv: readonly string[],
+  opts: { env?: Readonly<Record<string, string>> } = {},
+): StartResult {
   const [name, ...args] = argv;
   if (!name) return { ok: false, error: "no start command for this runner" };
   // a bare name off PATH (`lms` in ~/.lmstudio/bin) is spawned by its absolute path; one ON
@@ -297,7 +300,9 @@ export function startModelServer(argv: readonly string[]): StartResult {
       detached: true,
       stdio: "ignore",
       shell: false,
-      env: safeChildEnv(ollamaCapsFor(bin)),
+      // `opts.env` carries a server's own settings (offline flags, a per-session API key) —
+      // merged over the scrubbed environment, never replacing it
+      env: { ...safeChildEnv(ollamaCapsFor(bin)), ...(opts.env ?? {}) },
       windowsHide: true,
     });
     child.unref();

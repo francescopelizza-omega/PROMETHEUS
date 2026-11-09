@@ -10,6 +10,8 @@
  * shared by the CLI, the TUI and the desktop app so the three cannot drift into three catalogues.
  */
 
+import type { CatalogGate, CatalogGguf } from "./catalog-types.js";
+
 /** The four sections the picker offers. */
 export type ModelSection = "local" | "free" | "paid" | "rotation";
 
@@ -76,6 +78,36 @@ export interface LocalModelEntry {
   license: string;
   /** coding / reasoning / vision / nvidia / tiny … — used for grouping and filters. */
   tags: readonly string[];
+  /** RAM at the model's native context (GiB). */
+  recRamGb?: number;
+  /** the GGUF build Prometheus downloads (stage → sha256 → nemesis → library). */
+  gguf?: CatalogGguf;
+  /** the smallest widely used quant, for giant MoE rows. */
+  ggufSmall?: CatalogGguf;
+  /** MLX build for Apple Silicon. */
+  mlx?: string;
+  /** an Ollama `:cloud` tag — runs remotely; never offered as local. */
+  ollamaCloud?: string;
+  /** transformers loading needs trust_remote_code — only its GGUF/MLX build is used. */
+  remoteCode?: boolean;
+  vision?: boolean;
+  hfGated?: boolean | "auto" | "manual";
+  publisher?: string;
+  /** what the catalogue build vetted (a row is eligible, never trusted — downloads are scanned). */
+  gate?: CatalogGate;
+  /** one-line demand label, e.g. "≈4.7GB Q4 · 12GB RAM · CPU-ok". */
+  resourceLabel?: string;
+  /** model family (`qwen3`, `llama3.1`, `glm` …) — decides which streaming runtime can load it. */
+  family?: string;
+  /** the catalogue's RAM tier (tiny 2–4 GB … datacenter 384 GB+), for grouping in the picker. */
+  tier?: "tiny" | "light" | "moderate" | "heavy" | "workstation" | "server" | "datacenter";
+  /** release month, `YYYY-MM`. */
+  released?: string;
+  /** RAM the small quant (`ggufSmall`) needs (GiB) — the fallback when Q4 does not fit. */
+  smallMinRamGb?: number;
+  /** the small quant's weights on disk (GiB). */
+  smallGb?: number;
+  reasoning?: boolean;
 }
 
 /** What the free tier of a provider looks like — a dated snapshot, never a promise. */
@@ -116,7 +148,7 @@ export interface FreeTierInfo {
 
 /** A runtime that lets a model too big for this machine run anyway, slowly. */
 export interface OffloadRuntime {
-  id: "airllm" | "colibri";
+  id: "airllm" | "colibri" | "llamacpp-stream";
   name: string;
   repo: string;
   /** one line: how it works. */
@@ -130,7 +162,7 @@ export interface OffloadRuntime {
   /** usable for an interactive agent session (vs offline/batch jobs only). */
   interactive: boolean;
   /** Dense or MoE — which kind of model it helps. */
-  helps: "dense" | "moe";
+  helps: "dense" | "moe" | "any";
   /** the Prometheus command that installs it, when the engine can do it gated. */
   installCommand?: string;
   /** the steps to run when the install is manual — shown verbatim, never executed blindly. */
@@ -146,6 +178,15 @@ export interface MachineProfile {
   vramGb: number;
   /** Apple Silicon unified memory: RAM doubles as VRAM. */
   unified: boolean;
-  /** free disk where models land (GiB), when known. */
+  /** free disk where models land (GiB), when known — the least free of the stores. */
   freeDiskGb?: number;
+  /** free disk per runtime store (GiB): a pick is measured against the store it writes to
+   *  (`ollama` | `lmstudio` | `hf` | `llamacpp`), so a nearly full disk holding one store no
+   *  longer refuses a model bound for a store on a big external drive. */
+  freeDiskGbByStore?: Partial<Record<string, number>>;
+  /** memory free RIGHT NOW (GiB), when the host measured it — shown, never used for the fit. */
+  freeRamGb?: number;
+  /** `process.platform` / `process.arch` — which streaming runtimes have a build here. */
+  platform?: string;
+  arch?: string;
 }

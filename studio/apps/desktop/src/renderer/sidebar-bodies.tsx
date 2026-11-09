@@ -46,7 +46,7 @@ function Hint({ children }: { children: ReactNode }): ReactElement {
 
 const groupLabelStyle: CSSProperties = {
   padding: "var(--space-4, 8px) var(--space-6, 12px) var(--space-2, 4px)",
-  fontSize: "0.7rem",
+  fontSize: "0.75rem",
   fontWeight: 600,
   textTransform: "uppercase",
   letterSpacing: "0.04em",
@@ -167,7 +167,7 @@ function VcsBody(): ReactElement {
                 <span style={{ overflow: "hidden", textOverflow: "ellipsis", minWidth: 0 }}>
                   {r.path}
                 </span>
-                <span style={{ color: "var(--text-secondary)", fontSize: "0.7rem" }}>
+                <span style={{ color: "var(--text-secondary)", fontSize: "0.75rem" }}>
                   {r.kind.slice(0, 1).toUpperCase()}
                 </span>
               </div>

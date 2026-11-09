@@ -48,6 +48,8 @@ import {
   which,
 } from "@prometheus/core/updates-live";
 
+import { runPrometheus } from "@prometheus/engine-bridge";
+
 import { c } from "../render.js";
 
 export interface ModelActionDeps {
@@ -67,6 +69,13 @@ export interface ModelActionDeps {
   signal?: () => AbortSignal | undefined;
   /** test seams. */
   pull?: typeof pullModel;
+  /** nemesis over what the pull stored (`modelhub ollama-gate`); `acceptWarn` after a typed OK.
+   *  REQUIRED, like a real pull would be: hosts pass `defaultOllamaGate`, tests a fake, so no
+   *  test can ever spawn the engine and scan a real model store by default. */
+  gate: OllamaGate;
+  /** remove a pulled model the user refused (`modelhub ollama-discard`) — hosts pass
+   *  `defaultOllamaDiscard`. */
+  discard: (tag: string) => Promise<unknown>;
   remove?: typeof removeModel;
   loaded?: typeof loadedModels;
   localManifest?: typeof readLocalManifest;
@@ -137,11 +146,85 @@ export async function pullWithProgress(
   });
 }
 
+export type OllamaGate = (tag: string, acceptWarn: boolean) => Promise<Record<string, unknown>>;
+
+/** The sidecar's post-pull scan: nemesis over Ollama's stored blobs (removed on a BLOCK). */
+export const defaultOllamaGate: OllamaGate = async (tag, acceptWarn) =>
+  (await runPrometheus(
+    [
+      "sidecar",
+      "modelhub",
+      "ollama-gate",
+      `--tag=${tag}`,
+      ...(acceptWarn ? ["--accept-warn"] : []),
+    ],
+    { timeoutMs: 4 * 60 * 60 * 1000 },
+  ).catch((e: unknown) => ({
+    ok: false,
+    error: e instanceof Error ? e.message : String(e),
+  }))) as unknown as Record<string, unknown>;
+
+export const defaultOllamaDiscard = (tag: string): Promise<unknown> =>
+  runPrometheus(["sidecar", "modelhub", "ollama-discard", `--tag=${tag}`]).catch(() => undefined);
+
+/** An Ollama-registry library tag — the same policy as the engine's and the sidecar's. */
+const LIBRARY_TAG = /^[a-z0-9][a-z0-9._-]*(\/[a-z0-9][a-z0-9._-]*)?(:[A-Za-z0-9._-]+)?$/;
+
+/** Why `tag` must not go through `ollama pull`, or undefined. */
+export function pullTagRefusal(tag: string): string | undefined {
+  const first = tag.split("/", 1)[0] ?? "";
+  if (tag.includes("/") && (first.includes(".") || first.includes(":")))
+    return `'${tag}' names a host — use /hug ${tag.split("/").slice(1).join("/")} (nemesis-gated) instead`;
+  if (!LIBRARY_TAG.test(tag) || tag.length > 200) return `'${tag}' is not an Ollama library tag`;
+  return undefined;
+}
+
+/**
+ * After an `ollama pull`: scan what it stored. A WARN is accepted only when the user types the
+ * tag; refused, the model is REMOVED (left in the store, the next pick would see it installed
+ * and use it without a scan). Returns true when the model may be used.
+ */
+export async function gateAfterPull(
+  tag: string,
+  deps: Pick<ModelActionDeps, "write" | "ask" | "gate" | "discard">,
+  opts: { interactive?: boolean } = {},
+): Promise<{ ok: boolean; detail: string }> {
+  const gate = deps.gate;
+  deps.write(c.dim("  scanning the pulled model with nemesis…"));
+  let g = await gate(tag, false);
+  if (g.ok !== true && g.needs_confirm === true) {
+    const reasons: string[] = [];
+    for (const sc of (Array.isArray(g.scans) ? g.scans : []) as { reasons?: unknown }[])
+      for (const r of Array.isArray(sc?.reasons) ? sc.reasons : []) reasons.push(String(r));
+    deps.write(c.yellow(`  ⚠ nemesis WARN: ${String(g.error ?? "review the findings")}`));
+    for (const r of [...new Set(reasons)].slice(0, 8)) deps.write(c.dim(`    · ${r}`));
+    const typed =
+      opts.interactive === false
+        ? ""
+        : (await deps.ask(`type ${tag} to use it anyway (Enter refuses): `)).trim();
+    if (typed === tag) g = await gate(tag, true);
+    else {
+      await deps.discard(tag);
+      return { ok: false, detail: `nemesis WARN — not used; ${tag} removed from Ollama` };
+    }
+  }
+  if (g.ok !== true)
+    return { ok: false, detail: String(g.error ?? "nemesis could not verify the model") };
+  return { ok: true, detail: "scanned by nemesis" };
+}
+
 /** `/updates pull <tag>` — download the build a tag now points at, with live progress. */
 export async function runPull(tag: string, deps: ModelActionDeps): Promise<boolean> {
   const write = deps.write;
   if (tag.trim() === "") {
     write(c.red("usage: /updates pull <model:tag>"));
+    return false;
+  }
+  // Refused before the question, like the auth rung below: `hf.co/<anyone>/<repo>` is an
+  // arbitrary uploader's file and goes through the gated /hug instead.
+  const bad = pullTagRefusal(tag.trim());
+  if (bad) {
+    write(c.red(bad));
     return false;
   }
   // The gate comes BEFORE the question. Asking first and refusing after teaches a user that the
@@ -181,7 +264,14 @@ export async function runPull(tag: string, deps: ModelActionDeps): Promise<boole
     write(c.red(`pull failed: ${res.error}`));
     return false;
   }
-  write(c.green(`✓ ${tag} pulled.`));
+  // Ollama's registry has no local stage: the blobs are scanned BEFORE "pulled" is reported —
+  // this path used to report success and leave the model to be used unscanned.
+  const g = await gateAfterPull(tag, deps);
+  if (!g.ok) {
+    write(c.red(`✗ ${g.detail}`));
+    return false;
+  }
+  write(c.green(`✓ ${tag} pulled and ${g.detail}.`));
   write(c.dim("  /model to make it the active one."));
   return true;
 }
@@ -411,28 +501,33 @@ export async function runCatalog(
     write(r.blocked ? c.dim(r.line) : r.line);
     write(c.dim(`      ${r.body[0] ?? ""}`));
     if (r.blocked) write(c.yellow(`      ${r.blocked}`));
-    else if (r.command) write(c.cyan(`      /updates pull ${installTag(r.entry)}`));
+    else if (r.command) write(c.cyan(`      ${installSlash(r.entry)}`));
   }
-  write(c.dim("Pick one with:  /updates pull <tag>"));
+  write(c.dim("Pick one with:  /updates pull <tag>   (Hugging Face repos:  /hug <repo>)"));
   return rows;
 }
 
 /**
- * The tag `/updates pull` should be given for a catalogue row.
- *
- * `hf.co/<repo>` is ollama's own officially supported form for a HuggingFace GGUF repo, so the
- * browser hands the pull command a tag the daemon already understands — no conversion, no
- * scraping, and the same code path as pulling any other model.
+ * What a catalogue row hands the next step: the registry tag for `/updates pull`, or — for a
+ * HuggingFace GGUF repo — the repo for the gated `/hug` (never `hf.co/<repo>`, which went
+ * through `ollama pull` unscanned and is refused now).
  */
 export function installTag(entry: u.CatalogEntry): string {
   switch (entry.route.kind) {
     case "ollama-tag":
       return entry.route.tag;
     case "ollama-hf":
-      return `hf.co/${entry.route.repo}${entry.route.quant ? `:${entry.route.quant}` : ""}`;
+      return entry.route.repo;
     default:
       return entry.name;
   }
+}
+
+/** The slash command that installs a catalogue row through a gated path. */
+export function installSlash(entry: u.CatalogEntry): string {
+  return entry.route.kind === "ollama-hf"
+    ? `/hug ${entry.route.repo}`
+    : `/updates pull ${installTag(entry)}`;
 }
 
 /* ─────────────────────────────── convert ─────────────────────────────── */

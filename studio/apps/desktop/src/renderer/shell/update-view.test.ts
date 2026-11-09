@@ -11,6 +11,7 @@ import {
   updateOnDismiss,
   updateOnDownloadError,
   updateOnDownloadStart,
+  updateOnInstallError,
   updateOnProgress,
   updateOnReady,
 } from "./update-view.js";
@@ -68,4 +69,14 @@ test("ready without a prior announce is not renderable; dismiss resets fully", (
   assert.equal(updateOnReady(UPDATE_IDLE).phase, "idle");
   const ready = updateOnReady(updateOnAvailable(UPDATE_IDLE, { version: "3.0.0" }));
   assert.deepEqual(updateOnDismiss(ready), UPDATE_IDLE);
+});
+
+test("a failed restart-to-install in READY keeps the staged update and SHOWS the error", () => {
+  const ready = { phase: "ready" as const, version: "1.2.3", percent: 100, error: null };
+  const s = updateOnInstallError(ready, "quitAndInstall refused");
+  assert.equal(s.phase, "ready");
+  assert.equal(s.error, "quitAndInstall refused");
+  // not applicable outside ready: never invents a state
+  const idle = { phase: "idle" as const, version: null, percent: 0, error: null };
+  assert.deepEqual(updateOnInstallError(idle, "x"), idle);
 });

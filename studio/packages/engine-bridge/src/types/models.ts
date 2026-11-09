@@ -16,9 +16,16 @@ import type { EnvelopeBase } from "./envelope.js";
 export type ModelsConfigEnvelope = EnvelopeBase<{
   command: "models";
   action: "config";
-  /** the default folder where local models/tools install. */
-  models_root: string;
-  exists: boolean;
+  /**
+   * Where each serving runtime keeps its models. Prometheus has no model folder of its own —
+   * the old `models_root` setting only ever created duplicates, and is retired.
+   */
+  stores?: { runtime: string; store: string; set_by: string }[];
+  /** a stale `models_root` still in the config (ignored). */
+  ignored_models_root?: string;
+  /** @deprecated retired — never set by a current engine. */
+  models_root?: string;
+  exists?: boolean;
 }>;
 
 /** One open model in the local-run catalog (the model picker). */

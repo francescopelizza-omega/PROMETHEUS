@@ -207,7 +207,7 @@ function TaskRow({
           <div
             style={{
               color: "var(--text-secondary)",
-              fontSize: "0.68rem",
+              fontSize: "0.75rem",
               fontFamily: "var(--font-mono)",
             }}
           >
@@ -244,7 +244,7 @@ function TaskRow({
             <span
               style={{
                 color: "var(--text-secondary)",
-                fontSize: "0.72rem",
+                fontSize: "0.75rem",
                 maxWidth: 220,
                 overflow: "hidden",
                 textOverflow: "ellipsis",
@@ -333,7 +333,7 @@ function TaskForm({
             }}
           />
           {cronError && (
-            <span style={{ color: "var(--danger)", fontSize: "0.7rem" }}>{cronError}</span>
+            <span style={{ color: "var(--danger)", fontSize: "0.75rem" }}>{cronError}</span>
           )}
         </Field>
         <Field label="Autonomy" style={{ flex: "0 0 160px" }}>
@@ -380,7 +380,7 @@ function TaskForm({
       {errors.length > 0 && (
         <ul
           aria-label="validation errors"
-          style={{ margin: 0, paddingLeft: "var(--space-5, 10px)", color: "var(--danger)" }}
+          style={{ margin: 0, paddingLeft: "var(--space-4, 8px)", color: "var(--danger)" }}
         >
           {errors.map((e) => (
             <li key={e} style={{ fontSize: "0.75rem" }}>
@@ -443,7 +443,7 @@ const thStyle: CSSProperties = {
   padding: "var(--space-2, 4px) var(--space-3, 6px)",
   color: "var(--text-secondary)",
   fontWeight: 500,
-  fontSize: "0.72rem",
+  fontSize: "0.75rem",
   textTransform: "uppercase",
   letterSpacing: "0.02em",
   borderBottom: "1px solid var(--border-strong)",
@@ -472,7 +472,7 @@ const refreshBtn: CSSProperties = {
 };
 
 const fieldLabelStyle: CSSProperties = {
-  fontSize: "0.72rem",
+  fontSize: "0.75rem",
   color: "var(--text-secondary)",
   fontFamily: "var(--font-ui)",
 };
@@ -494,14 +494,15 @@ const linkBtn: CSSProperties = {
   border: "none",
   color: "var(--accent)",
   cursor: "pointer",
-  fontSize: "0.72rem",
+  fontSize: "0.75rem",
   fontFamily: "var(--font-ui)",
   padding: "0 var(--space-1, 2px)",
 };
 
 const primaryBtn: CSSProperties = {
   background: "var(--accent)",
-  color: "var(--bg-app)",
+  // the token MADE for text on an accent fill — `--bg-app` was 3.4:1 on the light scheme
+  color: "var(--on-accent)",
   border: "none",
   borderRadius: "var(--radius-sm, 4px)",
   padding: "var(--space-2, 4px) var(--space-4, 8px)",

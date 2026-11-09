@@ -93,7 +93,7 @@ export function PermissionCard({
         <span style={{ flex: 1 }} />
         {typeof authLevel === "number" && (
           <span
-            style={{ fontFamily: "var(--font-mono)", fontSize: 10, color: `var(${authVar})` }}
+            style={{ fontFamily: "var(--font-mono)", fontSize: 12, color: `var(${authVar})` }}
             title="the authorisation level in force"
           >
             A{authLevel}
@@ -104,7 +104,7 @@ export function PermissionCard({
         <span
           style={{
             fontFamily: "var(--font-mono)",
-            fontSize: 11,
+            fontSize: 12,
             color: "var(--text-primary)",
             wordBreak: "break-all",
           }}
@@ -113,7 +113,7 @@ export function PermissionCard({
         </span>
         <span
           style={{
-            fontSize: 11,
+            fontSize: 12,
             // out-of-scope is the one thing on this card that must never read calm.
             color: insideWorkingSet ? "var(--ok)" : "var(--danger-fg)",
             fontWeight: insideWorkingSet ? 400 : 600,

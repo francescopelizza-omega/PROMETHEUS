@@ -748,6 +748,10 @@ async function grepTool(
   if (glob && !safeToken(glob)) return refuse(`refusing a glob that looks like a flag: ${glob}`);
   const max = Math.min(Math.max(num(args.maxMatches) ?? 200, 1), 2000);
   const target = where ? resolvePath(where, cwd) : cwd;
+  // `grep(".", path: ".env")` printed the whole file: naming one file to rg searches it even
+  // when hidden or ignored. The SAME refusal `read_file` gives.
+  const direct = secretPathReason(target) ?? secretPathReason(realPathOrSelf(target));
+  if (direct) return refuse(`grep: refusing to search a credential file — ${direct}`);
 
   const rg = await exec(
     "rg",
@@ -767,8 +771,23 @@ async function grepTool(
   );
   // rg exits 1 for "no matches" — a result, not a failure. 127 means it is not installed.
   if (rg.code === 0 || rg.code === 1) {
-    const hits = rg.stdout.trim();
-    return done(true, hits || `no matches for /${pattern}/ under ${target}`);
+    // A directory search prints `path:line:text`. Drop every line from a credential file
+    // (`credentials.json`, `id_rsa`, a `*.pem` that is not hidden and not gitignored).
+    let withheld = 0;
+    const kept = rg.stdout
+      .trim()
+      .split("\n")
+      .filter((line) => {
+        const m = /^(.+?):\d+:/.exec(line);
+        if (!m?.[1]) return true;
+        const abs = resolvePath(m[1], cwd);
+        if (secretPathReason(abs) === null) return true;
+        withheld += 1;
+        return false;
+      });
+    const hits = kept.join("\n").trim();
+    const note = withheld > 0 ? `\n(${withheld} line(s) from credential files withheld)` : "";
+    return done(true, (hits || `no matches for /${pattern}/ under ${target}`) + note);
   }
   const missing = rg.code === 127 ? " (ripgrep is not installed on this machine)" : "";
   return refuse(`grep failed: ${rg.stderr.trim() || `exit ${rg.code}`}${missing}`);
@@ -1063,6 +1082,16 @@ async function runCommandTool(
        * credential path ride inside the flag, and `grep -r --include=.env .` returned the
        * entire .env to the model, auto-approved at the default authorisation level.
        */
+      // `@file` / `<file` is how curl, httpie and friends read a FILE's contents into a request
+      // (`-d @.env`, `-d@.env`, `-F f=@.env`, `name=<.env`): the path is after the sigil.
+      const fileRef = /^(?:-[A-Za-z])?(?:[^=\s]*=)?[@<](.+)$/.exec(arg);
+      if (fileRef?.[1]) {
+        const viaSigil = guardSecretPath(resolvePath(fileRef[1], cwd), "read", deps.roots);
+        if (viaSigil) {
+          auditRefusal(`credential path behind @/<: ${arg}`, cls.tier);
+          return viaSigil;
+        }
+      }
       if (arg.startsWith("-")) {
         const eq = arg.indexOf("=");
         if (eq === -1) continue;

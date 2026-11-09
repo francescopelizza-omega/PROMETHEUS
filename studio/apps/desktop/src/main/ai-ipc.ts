@@ -55,7 +55,11 @@ import {
 } from "@prometheus/core/agent-idle-watchdog";
 import { looksLikeToolsRejection } from "@prometheus/core/agent-protocol";
 import { createCliSecretsStore } from "@prometheus/core/agent-system-host";
-import { probeHostTools } from "@prometheus/core/agent-system-host";
+import {
+  externalToolDefaultsFrom,
+  probeHostTools,
+  renderHostToolManifest,
+} from "@prometheus/core/agent-system-host";
 import { applyEffort, applyEffortToMessages } from "@prometheus/core/ai-effort";
 import type { EffortResolution } from "@prometheus/core/ai-effort";
 import {
@@ -396,10 +400,13 @@ function emit(sender: WebContents | undefined, ev: AiProgressEvent): void {
  * never calls `setSecurityPosture` behaves exactly as it did before this existed.
  */
 let activePosture: coreSettings.SecurityPosture = coreSettings.securityPosture(undefined);
+/** the raw settings last adopted — the external-tool defaults are read from them. */
+let activeSettingsRaw: Record<string, unknown> = {};
 
 /** Adopt the resolved settings as the active posture. Called at startup and on every change. */
 export function setSecurityPosture(settings: coreSettings.Settings | undefined): void {
   activePosture = coreSettings.securityPosture(settings);
+  activeSettingsRaw = (settings ?? {}) as unknown as Record<string, unknown>;
 }
 
 /** The posture in force (for the banner / tests). */
@@ -1684,9 +1691,15 @@ export function registerAiIpc(ipc: IpcMain): void {
  */
 export function listHostTools(probe: typeof probeHostTools = probeHostTools): HostToolsResult {
   try {
+    const statuses = probe();
+    // The SAME manifest the CLI's agent is given, rendered with the user's Settings → External
+    // Tools defaults. Studio's agent used to get none: those settings were editable here and
+    // read only by the terminal.
+    const manifest = renderHostToolManifest(statuses, externalToolDefaultsFrom(activeSettingsRaw));
     return {
       ok: true,
-      tools: probe().map((s) => ({
+      ...(manifest ? { manifest } : {}),
+      tools: statuses.map((s) => ({
         id: s.tool.id,
         bins: [...s.tool.bins],
         purpose: s.tool.purpose,

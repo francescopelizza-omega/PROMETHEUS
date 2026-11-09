@@ -79,24 +79,52 @@ class OllamaModelsDir(unittest.TestCase):
             )
             self.assertEqual(models_dir_from(out), str(Path("/tmp/somewhere-else").resolve()), out)
 
-    def test_an_explicit_models_root_still_wins(self):
-        """An explicit `models config --set-root` is an instruction, and is obeyed."""
+    def test_a_configured_models_root_is_ignored_for_weights(self):
+        """`models_root` is retired: it redirected ollama into a Prometheus folder, duplicating
+        every model already in ~/.ollama/models. A stale value must change nothing."""
         with tempfile.TemporaryDirectory() as td:
             cfg = Path(td) / "cfg"
             cfg.mkdir(parents=True, exist_ok=True)
             chosen = Path(td) / "my-models"
             (cfg / "config.json").write_text(json.dumps({"models_root": str(chosen)}))
             out, _ = run_engine(["models", "pull", "qwen3.6"], {}, td)
-            self.assertEqual(models_dir_from(out), str((chosen / "ollama").resolve()), out)
+            self.assertEqual(models_dir_from(out), str((Path(td) / ".ollama" / "models").resolve()), out)
+            self.assertNotIn("OLLAMA_MODELS=", out)
+            self.assertFalse((chosen / "ollama").exists(), "no Prometheus model store is created")
+
+    def test_set_root_is_retired_and_removes_a_stale_value(self):
+        with tempfile.TemporaryDirectory() as td:
+            cfg = Path(td) / "cfg"
+            cfg.mkdir(parents=True, exist_ok=True)
+            (cfg / "config.json").write_text(json.dumps({"models_root": str(Path(td) / "old"), "k": 1}))
+            env = dict(os.environ)
+            env.pop("OLLAMA_MODELS", None)
+            env.update(HOME=td, PROMETHEUS_CONFIG_DIR=str(cfg))
+            p = subprocess.run([sys.executable, str(ENGINE), "models", "config", "--set-root", "/x"],
+                               capture_output=True, text=True, env=env, timeout=120)
+            self.assertNotEqual(p.returncode, 0)
+            self.assertIn("no longer keeps models", p.stdout + p.stderr)
+            saved = json.loads((cfg / "config.json").read_text())
+            self.assertNotIn("models_root", saved)
+            self.assertEqual(saved.get("k"), 1, "other preferences are kept")
+
+    def test_models_config_lists_each_runtimes_own_store(self):
+        with tempfile.TemporaryDirectory() as td:
+            env = dict(os.environ)
+            env.pop("OLLAMA_MODELS", None)
+            env.update(HOME=td, PROMETHEUS_CONFIG_DIR=str(Path(td) / "cfg"))
+            p = subprocess.run([sys.executable, str(ENGINE), "--json", "models", "config"],
+                               capture_output=True, text=True, env=env, timeout=120)
+            obj = json.loads([ln for ln in p.stdout.splitlines() if ln.strip()][-1])
+            stores = {s["runtime"].split(" ")[0]: s["store"] for s in obj["stores"]}
+            self.assertEqual(stores["ollama"], str(Path(td) / ".ollama" / "models"))
+            self.assertEqual(stores["lmstudio"], str(Path(td) / ".lmstudio" / "models"))
+            self.assertTrue(stores["huggingface"].endswith(".cache/huggingface/hub"))
+            self.assertNotIn(".prometheus", json.dumps(obj["stores"]))
 
     def test_a_models_root_inside_a_git_tree_is_refused(self):
-        """Model weights must never be written into a repository.
-
-        The real config found on this machine pointed at a source directory inside the
-        Prometheus checkout. Honouring it would have put tens of gigabytes where `git add -A`
-        would try to commit them, so an obviously-wrong value is refused loudly and the
-        resolution falls through to ollama's own store.
-        """
+        """Model weights must never be written into a repository (and a models_root is
+        ignored altogether now): the pull targets ollama's own store."""
         with tempfile.TemporaryDirectory() as td:
             repo = Path(td) / "some-repo"
             (repo / ".git").mkdir(parents=True)
@@ -104,10 +132,8 @@ class OllamaModelsDir(unittest.TestCase):
             cfg.mkdir(parents=True, exist_ok=True)
             (cfg / "config.json").write_text(json.dumps({"models_root": str(repo / "inside")}))
             out, _ = run_engine(["models", "pull", "qwen3.6"], {}, td)
-            self.assertIn("git working tree", out, out)
-            # Refused AND recovered — not refused and then broken.
             self.assertEqual(models_dir_from(out), str((Path(td) / ".ollama" / "models").resolve()), out)
-
+            self.assertFalse((repo / "inside").exists())
 
 if __name__ == "__main__":
     unittest.main()

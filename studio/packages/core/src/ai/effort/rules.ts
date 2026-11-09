@@ -809,6 +809,8 @@ const RUNNER_PORTS: ReadonlyMap<string, EffortRuntime> = new Map([
   ["11434", "ollama"],
   ["1234", "lmstudio"],
   ["8080", "llamacpp"],
+  // llama-server's own default since v0.7.0
+  ["9931", "llamacpp"],
   ["8000", "vllm"],
 ]);
 

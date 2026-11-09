@@ -78,7 +78,7 @@ export function ChangelistsPanel({
           borderBottom: "1px solid var(--border-subtle)",
         }}
       >
-        <span style={{ fontSize: "0.72rem", color: "var(--text-secondary)" }}>Changelists</span>
+        <span style={{ fontSize: "0.75rem", color: "var(--text-secondary)" }}>Changelists</span>
         {creating === null ? (
           <Button size="sm" variant="ghost" onClick={() => setCreating("")}>
             + new list
@@ -103,7 +103,7 @@ export function ChangelistsPanel({
                 color: "var(--text-primary)",
                 border: "1px solid var(--border-subtle)",
                 borderRadius: "var(--radius-sm, 3px)",
-                fontSize: "0.72rem",
+                fontSize: "0.75rem",
                 padding: "1px 4px",
               }}
             />
@@ -137,7 +137,7 @@ export function ChangelistsPanel({
                   border: "none",
                   color: "var(--text-secondary)",
                   cursor: "pointer",
-                  fontSize: "0.7rem",
+                  fontSize: "0.75rem",
                   width: 14,
                 }}
               >
@@ -166,12 +166,12 @@ export function ChangelistsPanel({
                     color: "var(--text-primary)",
                     border: "1px solid var(--border-subtle)",
                     borderRadius: "var(--radius-sm, 3px)",
-                    fontSize: "0.72rem",
+                    fontSize: "0.75rem",
                     padding: "1px 4px",
                   }}
                 />
               ) : (
-                <span style={{ flex: 1, fontSize: "0.72rem", color: "var(--text-primary)" }}>
+                <span style={{ flex: 1, fontSize: "0.75rem", color: "var(--text-primary)" }}>
                   {list.name}
                   <span style={{ color: "var(--text-secondary)" }}> ({files.length})</span>
                   {list.isDefault && (
@@ -218,7 +218,7 @@ export function ChangelistsPanel({
                     alignItems: "center",
                     gap: 6,
                     padding: "1px 6px 1px 24px",
-                    fontSize: "0.7rem",
+                    fontSize: "0.75rem",
                   }}
                 >
                   <span
@@ -246,7 +246,7 @@ export function ChangelistsPanel({
                         color: "var(--text-secondary)",
                         border: "1px solid var(--border-subtle)",
                         borderRadius: "var(--radius-sm, 3px)",
-                        fontSize: "0.66rem",
+                        fontSize: "0.75rem",
                         maxWidth: 110,
                       }}
                     >
@@ -264,7 +264,7 @@ export function ChangelistsPanel({
                 style={{
                   margin: 0,
                   padding: "1px 6px 3px 24px",
-                  fontSize: "0.68rem",
+                  fontSize: "0.75rem",
                   color: "var(--text-secondary)",
                 }}
               >
@@ -283,7 +283,7 @@ const ICON_BTN = {
   border: "none",
   color: "var(--text-secondary)",
   cursor: "pointer",
-  fontSize: "0.7rem",
+  fontSize: "0.75rem",
 } as const;
 
 export default ChangelistsPanel;

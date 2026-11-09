@@ -136,6 +136,15 @@ export const IPC = {
   // Auto-install the local runner (ollama) ON THE USER'S BEHALF, OS-aware (macOS
   // brew / Linux install.sh) — replaces the copy-paste command with a real run.
   modelInstallRunner: "model:installRunner",
+  /** gated GGUF download (stage → sha256 → nemesis → library) + import into Ollama */
+  modelFetchGguf: "model:fetchGguf",
+  modelHugOllama: "model:hugOllama",
+  modelDiscardOllama: "model:discardOllama",
+  modelRuntimeStatus: "model:runtimeStatus",
+  modelInstallRuntime: "model:installRuntime",
+  modelServeGguf: "model:serveGguf",
+  modelLinkLmstudio: "model:linkLmstudio",
+  modelStartLmstudio: "model:startLmstudio",
   modelLibrary: "model:library",
   modelRemove: "model:remove",
   modelServe: "model:serve",
@@ -364,6 +373,7 @@ export const IPC = {
   ideCommandFilesList: "ide:commandFiles.list",
   ideGate: "ide:gate",
   agentSystemTool: "agent:systemTool",
+  agentApproveToolCall: "agent:approveToolCall",
   agentEngineTool: "agent:engineTool",
   /** run ONE user-configured lifecycle hook (PreToolUse/PostToolUse/SessionStart) in MAIN. */
   agentHookRun: "agent:hookRun",
@@ -1300,6 +1310,8 @@ export interface AiDiscoverRunnersResult {
 export interface HostToolsResult {
   ok: boolean;
   tools: HostToolRow[];
+  /** the external-tool manifest the agent's system prompt carries (same text as the CLI's). */
+  manifest?: string;
   error?: string;
 }
 
@@ -2070,9 +2082,77 @@ export interface ModelPullRequest {
   tag?: string;
   /** correlation id so progress events can be routed to the right UI row. */
   runId?: string;
+  /** accept a nemesis WARN on the pulled blobs — sent only after the user typed the model's
+   *  name over the findings. Never implied by anything else. */
+  acceptWarn?: boolean;
 }
 
 /** Result of a real ollama `pull` (the actual local-model install). */
+export interface ModelFetchGgufRequest {
+  /** catalogue id (also the library / stage key). */
+  id: string;
+  /** `org/name` of the GGUF repo on Hugging Face. */
+  repo: string;
+  /** the file (or first shard) inside it. */
+  file: string;
+  runId?: string;
+  /** admit over a nemesis WARN — sent only after the user typed the model's name. Main honours
+   *  it only right after it returned `needsConfirm` for this same model; it accepts a WARN and
+   *  nothing else. */
+  acceptWarn?: boolean;
+  /** serve the admitted file with llama.cpp or LM Studio instead of importing it into Ollama
+   *  (main keeps the admitted path; the next step names only the model id). */
+  runtime?: "llamacpp" | "lmstudio";
+}
+
+/** A model the runtime steps report as served: its OpenAI-compatible base and model name. */
+export interface ModelRuntimeServeResult {
+  ok: boolean;
+  baseUrl?: string;
+  model?: string;
+  error?: string;
+}
+
+export interface ModelFetchGgufResult {
+  ok: boolean;
+  /** the Ollama tag the admitted model is served under. */
+  tag?: string;
+  /** the admitted library file. */
+  path?: string;
+  /** "download" | "gate" | "import" — where it stopped. */
+  stage?: string;
+  error?: string;
+  /** nemesis WARN: nothing admitted yet; the user may accept `gateReasons` and re-run with force. */
+  needsConfirm?: boolean;
+  gateReasons?: string[];
+}
+
+/** `model:hugOllama` — a Hugging Face GGUF repo into Ollama through the gated path. */
+export interface ModelHugOllamaRequest {
+  /** `org/name` on Hugging Face. */
+  repo: string;
+  /** library / Ollama name; defaults to the repo. */
+  id?: string;
+  /** GGUF quantisation to pick (default Q4_K_M). */
+  quant?: string;
+  /** admit over a nemesis WARN — sent only after the user typed the name (see fetchGguf). */
+  acceptWarn?: boolean;
+  runId?: string;
+}
+
+export interface ModelHugOllamaResult {
+  ok: boolean;
+  /** the Ollama tag it is served under (`prometheus/<id>:latest`). */
+  tag?: string;
+  error?: string;
+  /** the repo ships no GGUF at all (it can be converted instead) — not "lacks this quant". */
+  noGguf?: boolean;
+  /** the GGUFs it does ship, when the chosen quant is missing. */
+  available?: string[];
+  needsConfirm?: boolean;
+  gateReasons?: string[];
+}
+
 export interface ModelPullResult {
   ok: boolean;
   command?: string;
@@ -2100,6 +2180,10 @@ export interface ModelPullResult {
   /** per-quantisation explanations behind a fit refusal; empty unless the guard fired. */
   reasons?: string[];
   error?: string;
+  /** nemesis WARNed on the pulled blobs: on disk, NOT used until the user accepts `gateReasons`
+   *  (re-run with `acceptWarn`). A BLOCK is a plain failure — the model was removed. */
+  needsConfirm?: boolean;
+  gateReasons?: string[];
 }
 
 /** Request to auto-install a local model RUNNER on the user's behalf (`model:installRunner`). */
@@ -2418,6 +2502,28 @@ export interface ModelApi {
    * actionable result (`installable:true` when the ollama runner itself is missing).
    */
   pull(req: ModelPullRequest): Promise<ModelPullResult>;
+  /**
+   * Fetch a catalogue model that has no Ollama-registry build: its GGUF is downloaded from
+   * Hugging Face, verified against Hugging Face's sha256, scanned by nemesis, admitted to the
+   * library and imported into Ollama (`prometheus/<id>`). Never `ollama pull hf.co/…`.
+   */
+  fetchGguf(req: ModelFetchGgufRequest): Promise<ModelFetchGgufResult>;
+  /** A Hugging Face GGUF repo → staged, sha256-verified, nemesis-admitted, imported to Ollama. */
+  hugOllama(req: ModelHugOllamaRequest): Promise<ModelHugOllamaResult>;
+  /** Remove a pulled model the user refused after a nemesis WARN (`ollama rm`). */
+  discardOllama(req: { tag: string }): Promise<{ ok: boolean; error?: string }>;
+  /** Which serving runtimes are installed (llama.cpp's `llama-server`, LM Studio's `lms`). */
+  runtimeStatus(): Promise<{ llamacpp: boolean; lmstudio: boolean }>;
+  /** Install llama.cpp or LM Studio through its official package channel. */
+  installRuntime(req: {
+    runtime: "llamacpp" | "lmstudio";
+  }): Promise<{ ok: boolean; error?: string; manual?: string }>;
+  /** Serve a model's ADMITTED GGUF with llama-server (offline; main resolves the file). */
+  serveGguf(req: { id: string; ctx: number }): Promise<ModelRuntimeServeResult>;
+  /** Symlink a model's ADMITTED GGUF into LM Studio's models folder. */
+  linkLmstudio(req: { id: string }): Promise<{ ok: boolean; error?: string }>;
+  /** Start LM Studio's server if needed and resolve the key it lists for the model. */
+  startLmstudio(req: { id: string }): Promise<ModelRuntimeServeResult>;
   /**
    * Auto-install the local RUNNER (ollama) ON THE USER'S BEHALF — OS-aware (macOS
    * `brew install ollama` / Linux `curl … install.sh | sh`), no copy-paste. Progress
@@ -2940,6 +3046,8 @@ export interface AuthLevelResult {
   level: number | null;
   /** the file consulted, for the settings UI and for support questions. */
   path?: string;
+  /** a RAISE the human declined in main's native dialog — the saved level is unchanged */
+  declined?: boolean;
   error?: string;
 }
 
@@ -3019,9 +3127,10 @@ export interface CatalogRowView {
   fit: string;
   /** why it cannot run here. Set only when `fit` is "too-big". */
   blocked?: string;
-  /** the exact `ollama pull` line, or null when there is no automatic route. */
+  /** the exact gated install line (`prometheus models pull …` / `prometheus model hug …`), or
+   *  null when there is no automatic route. */
   command: string | null;
-  /** the tag to hand `/updates pull`. */
+  /** the registry tag for a pull, or the Hugging Face repo for the gated hug. */
   tag: string;
   /** pre-formatted detail lines for the row's expanded view. */
   body: string[];
@@ -3771,6 +3880,24 @@ export interface AgentSystemToolRequest {
    * tells main how tightly to confine a call that was already approved.
    */
   authLevel?: number;
+  /**
+   * The single-use token `agent:approveToolCall` minted when a human (or a remembered grant)
+   * approved THIS call — bound to its name and exact args. Main runs its own ladder at the
+   * clamped level; when that says "ask" and no valid token comes with the call, main asks the
+   * human itself with a native dialog (main/agent-approvals.ts).
+   */
+  approval?: string;
+}
+
+/** `agent:approveToolCall` — mint an approval token for one exact call a human approved. */
+export interface AgentApproveToolCallRequest {
+  name: string;
+  args: Record<string, unknown>;
+}
+export interface AgentApproveToolCallResult {
+  ok: boolean;
+  token?: string;
+  error?: string;
 }
 
 /**
@@ -3881,6 +4008,10 @@ export interface McpAgentCallRequest {
   serverId: string;
   tool: string;
   args: Record<string, unknown>;
+  /** the operator's level — main CLAMPS it, exactly as for agent:systemTool */
+  authLevel?: number;
+  /** single-use token from agent:approveToolCall for `mcp__<server>__<tool>` + these args */
+  approval?: string;
 }
 
 /**
@@ -4819,6 +4950,8 @@ export interface IdeApi {
   gate(req: IdeGateRequest): Promise<IdeGateResult>;
   /** Phase 6: run one of core's shared system tools — the same path the CLI runs. */
   systemTool(req: AgentSystemToolRequest): Promise<AgentSystemToolResult>;
+  /** mint the approval token for one exact call a human approved (see AgentSystemToolRequest.approval) */
+  approveToolCall?(req: AgentApproveToolCallRequest): Promise<AgentApproveToolCallResult>;
   /** list, or run, one of the user's configured lifecycle hooks (main owns the spawn). */
   hookRun(req: AgentHookRunRequest): Promise<AgentHookRunResult>;
   /** record a tripped canary token (point 6b) — main owns the audit file, renderer cannot (C5). */
@@ -5085,6 +5218,9 @@ export type SpectacularChatPreview =
 /** models config — the default models install folder. */
 export interface SpectacularModelsConfig {
   ok: boolean;
+  /** where each serving runtime keeps its models (Prometheus keeps no copy of its own). */
+  stores?: { runtime: string; store: string; setBy: string }[];
+  /** @deprecated the retired models_root; never set any more. */
   modelsRoot?: string;
   exists?: boolean;
   error?: string;
@@ -5473,6 +5609,9 @@ export interface ExtInfoView {
   permissions: string[];
   /** APP-060: the stored verdict (absent → the chip shows unknown, never a fake GREEN). */
   verdict?: ExtStoredVerdictView;
+  /** why an ENABLED extension is not running: its startup activation failed (it used to be
+   *  swallowed, so an enabled extension silently never ran). */
+  activationError?: string;
 }
 
 /** One finding surfaced in the install/rescan verdict card (plain data, rendered as TEXT). */
@@ -5498,6 +5637,9 @@ export interface ExtListResult {
   ok: boolean;
   extensions?: ExtInfoView[];
   error?: string;
+  /** the last failure to save the enabled/disabled registry — the toggle took effect for this
+   *  run but will not survive a restart. */
+  persistError?: string;
 }
 
 export interface ExtInstallResult {

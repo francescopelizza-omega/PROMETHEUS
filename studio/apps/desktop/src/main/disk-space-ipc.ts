@@ -22,7 +22,7 @@
  */
 import { accessSync, constants as fsConstants } from "node:fs";
 import { delimiter, isAbsolute, join } from "node:path";
-import { ipcMain } from "electron";
+import { BrowserWindow, dialog, ipcMain } from "electron";
 
 import type { PrivilegedGate } from "@prometheus/core/agent-system-host";
 import {
@@ -166,9 +166,35 @@ export function registerDiskSpaceIpcHandlers(
     toolPaths?: () => Pick<DiskToolPaths, "python" | "ptyHost">;
     /** opens the dedicated root terminal window; without it no administrator session starts */
     rootWindow?: OpenRootTerminalWindow;
+    /**
+     * Asks the human, from the MAIN process, before a permanent or high-risk delete. The
+     * renderer's own dialog is UX; this is the control — a compromised or buggy renderer can
+     * send `confirm:true, ackHighRisk:true` but cannot click a native dialog. Injected for tests.
+     */
+    confirmDestructive?: (
+      sender: Electron.WebContents | undefined,
+      message: string,
+      detail: string,
+    ) => Promise<boolean>;
   } = {},
 ): () => void {
   const client = deps.client ?? createDiskSpaceClient();
+  const confirmDestructive =
+    deps.confirmDestructive ??
+    (async (sender, message, detail): Promise<boolean> => {
+      const win = sender ? BrowserWindow.fromWebContents(sender) : null;
+      const opts: Electron.MessageBoxOptions = {
+        type: "warning",
+        buttons: ["Cancel", "Delete"],
+        defaultId: 0,
+        cancelId: 0,
+        noLink: true,
+        message,
+        detail,
+      };
+      const res = win ? await dialog.showMessageBox(win, opts) : await dialog.showMessageBox(opts);
+      return res.response === 1;
+    });
   const toolPaths = deps.toolPaths ?? diskSpaceToolPaths;
   /** the one interactive root session */
   let admin: AdminSessionState | null = null;
@@ -268,10 +294,47 @@ export function registerDiskSpaceIpcHandlers(
     const mode = cleanMode(a.mode);
     if (!mode.ok) return { ok: false, error: mode.error };
     try {
-      const r = await client.deleteConfirm(ps.value, {
-        mode: mode.value,
-        ackHighRisk: a.ackHighRisk === true,
-      });
+      // Re-plan HERE, in main, and ask the human natively when it matters. The renderer's
+      // `ackHighRisk` used to be forwarded as given — the typed confirmation lived only in
+      // renderer code. A plan that needs a phrase, or any permanent delete, now needs this
+      // dialog's explicit click as well; `ackHighRisk` reaches the sidecar only after it.
+      const plan = await client.deletePlan(ps.value, { mode: mode.value });
+      if (!plan.ok) return { ok: false, error: plan.error ?? "could not plan the delete" };
+      const needsAck = plan.requiresPhrase === true;
+      // the typed phrase first: never show the native dialog for a delete that would then be
+      // refused anyway
+      if (needsAck && a.ackHighRisk !== true) {
+        return { ok: false, error: "this delete needs the typed confirmation in the dialog" };
+      }
+      if (needsAck || mode.value === "permanent") {
+        const items = (plan.items ?? []) as { path?: string; risk?: string | null }[];
+        const shown = items
+          .slice(0, 8)
+          .map((it) => `• ${it.path ?? "?"}${it.risk ? ` (${it.risk} risk)` : ""}`)
+          .join("\n");
+        const more = items.length > 8 ? `\n…and ${items.length - 8} more` : "";
+        const ok = await confirmDestructive(
+          _e?.sender,
+          mode.value === "permanent"
+            ? `Permanently delete ${items.length} item(s)? This cannot be undone.`
+            : `Move ${items.length} high-risk item(s) to the Trash?`,
+          `${shown}${more}`,
+        );
+        if (!ok) return { ok: false, error: "cancelled — nothing was deleted" };
+      }
+      // Delete EXACTLY what the human was shown: the plan's canonical paths, with --canonical so
+      // the sidecar refuses one whose parent became a symlink since (no silent re-resolution).
+      const shownPaths = ((plan.items ?? []) as { path?: string }[])
+        .map((it) => it.path)
+        .filter((x): x is string => typeof x === "string" && x.length > 0);
+      const r = await client.deleteConfirm(
+        shownPaths.length === ps.value.length ? shownPaths : ps.value,
+        {
+          mode: mode.value,
+          ackHighRisk: needsAck && a.ackHighRisk === true,
+          canonical: shownPaths.length === ps.value.length,
+        },
+      );
       return r.ok
         ? { ok: (r.results ?? []).every((x) => x.ok), results: r.results ?? [] }
         : { ok: false, error: r.error ?? "failed" };
@@ -455,6 +518,9 @@ export function registerDiskSpaceIpcHandlers(
       (win as RootTerminalWindow | null)?.close();
       sender.removeListener?.("did-start-navigation", onNavigate as never);
       sender.removeListener?.("render-process-gone", end);
+      // the `once("destroyed")` too — left behind, every finished session on this window stacked
+      // one more listener (MaxListenersExceededWarning after ten)
+      sender.removeListener?.("destroyed", end);
       if (admin === session) admin = null;
     }
   });

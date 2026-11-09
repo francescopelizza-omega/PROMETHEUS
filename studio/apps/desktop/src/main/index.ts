@@ -21,6 +21,7 @@
 import { type ChildProcess, spawn as nodeSpawn } from "node:child_process";
 import { existsSync, statSync } from "node:fs";
 import { connect as netConnect } from "node:net";
+import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -93,7 +94,13 @@ import { registerDiskSpaceIpcHandlers } from "./disk-space-ipc.js";
 import { registerEffortIpcHandlers } from "./effort-ipc.js";
 import { registerEnvIpcHandlers } from "./env-ipc.js";
 import { registerExtIpcHandlers } from "./ext-ipc.js";
-import { type RunWorkerTask, registerIdeIpcHandlers } from "./ide-ipc.js";
+import {
+  type RunWorkerTask,
+  clampAuthLevelForElevation,
+  clampAuthLevelForPosture,
+  clampAuthLevelToSaved,
+  registerIdeIpcHandlers,
+} from "./ide-ipc.js";
 import {
   detectDapAdapter,
   installDapAdapter,
@@ -118,6 +125,7 @@ import {
 import { type PtyBackend, PtyHost, nodePtyBackend } from "./ide/pty-host.js";
 import { RunHost } from "./ide/run-host.js";
 import type { TestRunSpawn } from "./ide/test-run-host.js";
+import { installIpcSenderGuard } from "./ipc-sender-guard.js";
 import { registerIpcHandlers } from "./ipc.js";
 import { registerLmstudioIpc } from "./lmstudio-ipc.js";
 import { registerMcpIpcHandlers } from "./mcp-ipc.js";
@@ -489,6 +497,19 @@ const SERVE_PROFILES_PATH =
 /** Vite dev server URL injected by electron-vite in dev; absent in production. */
 const RENDERER_DEV_URL = process.env.ELECTRON_RENDERER_URL;
 
+// S11 — every IPC message is checked for WHICH of our pages sent it (top-level frame, app's own
+// renderer URL, and a per-window channel allowlist: the terminal windows reach only their own few
+// channels). Installed here, at module load, so it precedes every `ipcMain.handle` in this app.
+/** The autonomy level main ENFORCES for a renderer's claim: saved file ∧ posture ∧ sudo. */
+function enforcedAuthLevel(level: number): number {
+  return clampAuthLevelToSaved(clampAuthLevelForPosture(clampAuthLevelForElevation(level)));
+}
+
+installIpcSenderGuard(ipcMain, {
+  rendererDirs: [join(__dirname, "../renderer"), join(app.getAppPath(), "out", "renderer")],
+  devUrl: RENDERER_DEV_URL,
+});
+
 // ── App identity (so the running app is "Prometheus Studio", not "Electron") ──
 // Without this, an `electron-vite dev` run shows "Electron" in the macOS menu bar /
 // dock / About panel and groups under the generic Electron id on Windows. Set as
@@ -522,15 +543,60 @@ const appIcon = nativeImage.createFromPath(APP_ICON_PATH);
  * and have the main process ask the OS to launch the external handler — defeating the
  * sandbox. Anything else (incl. unparseable URLs) is dropped.
  */
+/**
+ * Hosts Prometheus itself links to (docs, model pages, the repo). A link to one of these opens
+ * straight away; ANY other host asks first, natively, showing the host — so a compromised
+ * renderer cannot silently drive the OS browser to a page of its choosing (a phishing page, a
+ * drive-by download, a tracking URL carrying data out in its query string).
+ */
+const KNOWN_LINK_HOSTS = new Set([
+  "gitlab.com",
+  "github.com",
+  "huggingface.co",
+  "ollama.com",
+  "lmstudio.ai",
+  "docs.anthropic.com",
+  "www.anthropic.com",
+  "platform.openai.com",
+  "nodejs.org",
+  "www.python.org",
+  "brew.sh",
+]);
+let externalPromptOpen = false;
+
 function openExternalSafe(url: string): void {
+  let parsed: URL;
   try {
-    const proto = new URL(url).protocol;
-    if (proto === "https:" || proto === "http:" || proto === "mailto:") {
-      void shell.openExternal(url);
-    }
+    parsed = new URL(url);
   } catch {
-    /* unparseable URL — drop it */
+    return; // unparseable URL — drop it
   }
+  const proto = parsed.protocol;
+  if (proto !== "https:" && proto !== "http:" && proto !== "mailto:") return;
+  if (proto === "https:" && KNOWN_LINK_HOSTS.has(parsed.hostname.toLowerCase())) {
+    void shell.openExternal(url);
+    return;
+  }
+  // One prompt at a time: a renderer looping window.open() gets one dialog, not a hundred.
+  if (externalPromptOpen) return;
+  externalPromptOpen = true;
+  const target = proto === "mailto:" ? url.slice(0, 200) : parsed.host;
+  void dialog
+    .showMessageBox({
+      type: "question",
+      buttons: ["Cancel", "Open"],
+      defaultId: 0,
+      cancelId: 0,
+      message: proto === "mailto:" ? "Open your mail app?" : `Open ${target} in your browser?`,
+      detail: url.length > 500 ? `${url.slice(0, 500)}…` : url,
+    })
+    .then((r) => {
+      if (r.response === 1) void shell.openExternal(url);
+    })
+    .catch(() => {})
+    .finally(() => {
+      externalPromptOpen = false;
+    });
 }
 
 /**
@@ -603,7 +669,9 @@ function applyWindowHardening(win: BrowserWindow): void {
     return { action: "deny" };
   });
   win.webContents.on("will-navigate", (event, url) => {
-    const isDev = !!RENDERER_DEV_URL && url.startsWith(RENDERER_DEV_URL);
+    // ORIGIN equality, not a string prefix: `http://localhost:5173.evil.com` starts with the dev
+    // URL and is somebody else's page.
+    const isDev = !!RENDERER_DEV_URL && sameOrigin(url, RENDERER_DEV_URL);
     if (isDev || isOwnRendererUrl(url, rendererEntryPath())) return;
     /**
      * ANY other `file://` navigation is a DROP (or a drive-by), never in-app routing.
@@ -620,23 +688,59 @@ function applyWindowHardening(win: BrowserWindow): void {
      */
     event.preventDefault();
     const decision = classifyNavigation(url, rendererEntryPath(), statSync);
+    /*
+     * NOT trusted as a drop on its own. `will-navigate` also fires for page-initiated navigation
+     * (`location.href = "file:///"`), so a compromised renderer could have granted itself write
+     * scope over `/` — persisted to workspace-grants.json — with no gesture at all. A grant now
+     * needs the HUMAN: a native confirm naming the path, after the sensitive-path guard, and
+     * never for the filesystem root, the home directory itself or any ancestor of it.
+     */
+    if (decision.kind !== "folder" && decision.kind !== "file") return;
+    try {
+      assertNotSensitivePath(decision.path);
+    } catch {
+      return;
+    }
+    if (decision.kind === "folder" && isTooBroadToGrant(decision.path)) return;
+    const what = decision.kind === "folder" ? "folder" : "file";
+    const answer = dialog.showMessageBoxSync(win, {
+      type: "question",
+      buttons: [decision.kind === "folder" ? "Open folder" : "Open file", "Cancel"],
+      defaultId: 1,
+      cancelId: 1,
+      message: `Open this ${what} in Prometheus?`,
+      detail: `${decision.path}\n\nPrometheus will be able to read and write ${
+        decision.kind === "folder" ? "files in this folder" : "this file"
+      }.`,
+    });
+    if (answer !== 0) return;
     if (decision.kind === "folder") {
       // The drag-and-drop equivalent of File ▸ Open Folder — same gesture, same grant.
       grantWorkingSetRoot(decision.path);
       broadcastIde({ channel: "shell.dropped", path: decision.path, kind: "folder" });
       return;
     }
-    if (decision.kind === "file") {
-      // A dropped credential is still a credential: the guard decides, not the gesture.
-      try {
-        assertNotSensitivePath(decision.path);
-      } catch {
-        return;
-      }
-      approveOutsideWorkingSet(decision.path);
-      broadcastIde({ channel: "shell.dropped", path: decision.path, kind: "file" });
-    }
+    approveOutsideWorkingSet(decision.path);
+    broadcastIde({ channel: "shell.dropped", path: decision.path, kind: "file" });
   });
+}
+
+/** Same scheme + host + port. A malformed URL is never the same origin. */
+function sameOrigin(a: string, b: string): boolean {
+  try {
+    return new URL(a).origin === new URL(b).origin;
+  } catch {
+    return false;
+  }
+}
+
+/** `/`, the home directory itself, or anything above it: never a workspace grant. */
+function isTooBroadToGrant(path: string): boolean {
+  const norm = (p: string): string => p.replace(/\/+$/, "") || "/";
+  const target = norm(path);
+  const home = norm(homedir());
+  if (target === "/" || target === home) return true;
+  return home.startsWith(`${target}/`);
 }
 
 /** A positive integer from the environment, or `fallback`. Used only by the e2e pins. */
@@ -985,7 +1089,10 @@ async function runHeadlessSmoke(): Promise<void> {
       `[mcp] adopted ${adoptedMcp} connector(s) from the old app-private store into ${sharedMcpStorePath()}`,
     );
   }
-  disposeMcpIpc = registerMcpIpcHandlers({ storePath: sharedMcpStorePath() });
+  disposeMcpIpc = registerMcpIpcHandlers({
+    storePath: sharedMcpStorePath(),
+    clampLevel: enforcedAuthLevel,
+  });
   // APP-095: git-backed settings sync (reads the SAME mcp store, redacts secrets).
   disposeSettingsSyncIpc = registerSettingsSyncIpcHandlers({
     mcpStorePath: sharedMcpStorePath(),
@@ -1372,7 +1479,10 @@ async function bootstrap(): Promise<void> {
       `[settings] adopted ${adoptedSettings} setting(s) from the old app-private global layer into ${sharedGlobalSettingsPath()}`,
     );
   }
-  disposeMcpIpc = registerMcpIpcHandlers({ storePath: sharedMcpStorePath() });
+  disposeMcpIpc = registerMcpIpcHandlers({
+    storePath: sharedMcpStorePath(),
+    clampLevel: enforcedAuthLevel,
+  });
   // APP-095: git-backed settings sync (reads the SAME mcp store, redacts secrets).
   disposeSettingsSyncIpc = registerSettingsSyncIpcHandlers({
     mcpStorePath: sharedMcpStorePath(),
@@ -1491,6 +1601,10 @@ async function bootstrap(): Promise<void> {
     .catch(() => {
       /* best-effort wake-up only — the chat rail's own probe still works standalone */
     });
+  // Weights an older install left inside Prometheus's own library move to the store of the
+  // runtime that serves them NOW, not "the next time that model is picked". Fire-and-forget,
+  // never blocks the window; nothing to move = one directory walk.
+  void createModelHubClient().migrateLibrary();
 
   const mainWin = createMainWindow();
   // Wire the consent-gated auto-updater (no-op in dev where electron-updater is

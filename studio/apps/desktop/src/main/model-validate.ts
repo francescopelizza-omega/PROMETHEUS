@@ -352,6 +352,7 @@ export interface ModelPullArgs {
   id: string;
   tag?: string;
   runId?: string;
+  acceptWarn?: boolean;
 }
 /** Validate a `model:pull` (real ollama install) request — a bare id + optional tag. */
 export function validateModelPull(arg: unknown): GuardResult<ModelPullArgs> {
@@ -359,9 +360,116 @@ export function validateModelPull(arg: unknown): GuardResult<ModelPullArgs> {
   if (typeof o.id !== "string" || o.id.trim() === "") {
     return invalidArgs("model pull requires a string id");
   }
+  // Both become sidecar argv. A `-`-led value (`id: "--no-gate"`) used to double as a flag and
+  // switch the post-pull nemesis scan off; the sidecar refuses that too, this refuses it first.
+  if (o.id.startsWith("-") || o.id.length > 200) return invalidArgs("model pull: bad id");
   const v: ModelPullArgs = { id: o.id };
-  if (typeof o.tag === "string") v.tag = o.tag;
+  if (o.tag !== undefined) {
+    if (typeof o.tag !== "string" || o.tag.startsWith("-") || o.tag.length > 200)
+      return invalidArgs("model pull: bad tag");
+    v.tag = o.tag;
+  }
   if (typeof o.runId === "string") v.runId = o.runId;
+  // strictly `true`: a truthy string or 1 must never accept a nemesis WARN
+  if (o.acceptWarn === true) v.acceptWarn = true;
+  return { ok: true, value: v };
+}
+
+/** `model:installRuntime` — the two serving runtimes the guided picker can prepare. */
+export function validateModelRuntime(
+  arg: unknown,
+): GuardResult<{ runtime: "llamacpp" | "lmstudio" }> {
+  const o = asObject(arg);
+  return o.runtime === "llamacpp" || o.runtime === "lmstudio"
+    ? { ok: true, value: { runtime: o.runtime } }
+    : invalidArgs("runtime must be llamacpp or lmstudio");
+}
+
+/** A catalogue id for the runtime steps (`model:serveGguf` / `linkLmstudio` / `startLmstudio`). */
+export function validateModelRuntimeStep(arg: unknown): GuardResult<{ id: string; ctx: number }> {
+  const o = asObject(arg);
+  const id = typeof o.id === "string" ? o.id.trim() : "";
+  if (!/^[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}$/.test(id)) return invalidArgs("not a catalogue id");
+  const ctx = typeof o.ctx === "number" && Number.isFinite(o.ctx) ? Math.floor(o.ctx) : 8192;
+  return { ok: true, value: { id, ctx } };
+}
+
+/** An Ollama-registry library tag (same shape the sidecar's tag policy accepts). */
+const OLLAMA_TAG_RE = /^[a-z0-9][a-z0-9._-]*(\/[a-z0-9][a-z0-9._-]*)?(:[A-Za-z0-9._-]+)?$/;
+export function validateModelDiscardOllama(arg: unknown): GuardResult<{ tag: string }> {
+  const o = asObject(arg);
+  const tag = typeof o.tag === "string" ? o.tag.trim() : "";
+  if (!OLLAMA_TAG_RE.test(tag) || tag.length > 200) {
+    return invalidArgs("discardOllama: not an Ollama library tag");
+  }
+  return { ok: true, value: { tag } };
+}
+
+export interface ModelHugOllamaArgs {
+  repo: string;
+  id?: string;
+  quant?: string;
+  acceptWarn?: boolean;
+  runId?: string;
+}
+/** Validate a `model:hugOllama` request — every string becomes sidecar argv. */
+export function validateModelHugOllama(arg: unknown): GuardResult<ModelHugOllamaArgs> {
+  const o = asObject(arg);
+  const repo = typeof o.repo === "string" ? o.repo.trim() : "";
+  if (!/^[\w.-]+\/[\w.-]+$/.test(repo) || repo.startsWith("-")) {
+    return invalidArgs("hugOllama: repo must be org/name");
+  }
+  const v: ModelHugOllamaArgs = { repo };
+  if (o.id !== undefined) {
+    const id = typeof o.id === "string" ? o.id.trim() : "";
+    if (!id || id.startsWith("-") || id.length > 200) return invalidArgs("hugOllama: bad model id");
+    v.id = id;
+  }
+  if (o.quant !== undefined) {
+    const q = typeof o.quant === "string" ? o.quant.trim() : "";
+    if (!/^[A-Za-z0-9][A-Za-z0-9_.-]{0,31}$/.test(q)) return invalidArgs("hugOllama: bad quant");
+    v.quant = q;
+  }
+  if (o.acceptWarn === true) v.acceptWarn = true;
+  if (typeof o.runId === "string") v.runId = o.runId;
+  return { ok: true, value: v };
+}
+
+export interface ModelFetchGgufArgs {
+  id: string;
+  repo: string;
+  file: string;
+  runId?: string;
+  acceptWarn?: boolean;
+  runtime?: "llamacpp" | "lmstudio";
+}
+/**
+ * Validate a `model:fetchGguf` request. The renderer names a catalogue model; the strings are
+ * still checked here, because they become sidecar argv: an `org/name` repo, a relative file
+ * path with no `..`, ending in `.gguf`, and nothing that starts with `-`.
+ */
+export function validateModelFetchGguf(arg: unknown): GuardResult<ModelFetchGgufArgs> {
+  const o = asObject(arg);
+  const id = typeof o.id === "string" ? o.id.trim() : "";
+  const repo = typeof o.repo === "string" ? o.repo.trim() : "";
+  const file = typeof o.file === "string" ? o.file.trim() : "";
+  if (!id || id.startsWith("-") || id.length > 200) return invalidArgs("fetchGguf: bad model id");
+  if (!/^[\w.-]+\/[\w.-]+$/.test(repo) || repo.startsWith("-")) {
+    return invalidArgs("fetchGguf: repo must be org/name");
+  }
+  if (
+    !file.endsWith(".gguf") ||
+    file.startsWith("/") ||
+    file.startsWith("-") ||
+    file.split("/").includes("..") ||
+    file.includes("\\")
+  ) {
+    return invalidArgs("fetchGguf: file must be a relative .gguf path inside the repo");
+  }
+  const v: ModelFetchGgufArgs = { id, repo, file };
+  if (typeof o.runId === "string") v.runId = o.runId;
+  if (o.acceptWarn === true) v.acceptWarn = true;
+  if (o.runtime === "llamacpp" || o.runtime === "lmstudio") v.runtime = o.runtime;
   return { ok: true, value: v };
 }
 

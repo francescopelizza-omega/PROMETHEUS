@@ -135,16 +135,24 @@ function McpManager(): ReactElement {
     void load();
   }, [load]);
 
+  // One mcp operation at a time: toggles and imports could interleave, and the first one's
+  // `finally` re-enabled every button while the second was still running.
+  const busyRef = useRef(false);
   const toggle = useCallback(
     async (id: string, next: boolean): Promise<void> => {
       const api = mcpApi();
-      if (!api) return;
+      if (!api || busyRef.current) return;
+      busyRef.current = true;
       setBusy(true);
-      setNotice(next ? `connecting ${id}…` : `disabling ${id}…`);
-      const r = await api.setEnabled(id, next);
-      setNotice(r.ok ? null : `⚠ ${r.error ?? "toggle failed"}`);
-      await load();
-      setBusy(false);
+      try {
+        setNotice(next ? `connecting ${id}…` : `disabling ${id}…`);
+        const r = await api.setEnabled(id, next);
+        setNotice(r.ok ? null : `⚠ ${r.error ?? "toggle failed"}`);
+        await load();
+      } finally {
+        busyRef.current = false;
+        setBusy(false); // a rejected call must not leave every button disabled
+      }
     },
     [load],
   );
@@ -153,7 +161,15 @@ function McpManager(): ReactElement {
     async (id: string): Promise<void> => {
       const api = mcpApi();
       if (!api) return;
-      await api.remove(id);
+      // one click deleted the server's whole config (its command, env and tokens) with no
+      // question and no error report
+      if (!window.confirm(`Remove the "${id}" connector? Its configuration is deleted.`)) return;
+      try {
+        const r = await api.remove(id);
+        setNotice(r.ok ? null : `⚠ ${r.error ?? "remove failed"}`);
+      } catch (e) {
+        setNotice(`⚠ ${e instanceof Error ? e.message : String(e)}`);
+      }
       await load();
     },
     [load],
@@ -161,27 +177,42 @@ function McpManager(): ReactElement {
 
   const importAgents = useCallback(async (): Promise<void> => {
     const api = mcpApi();
-    if (!api) return;
+    if (!api || busyRef.current) return;
+    busyRef.current = true;
     setBusy(true);
-    setNotice("importing from installed agents…");
-    const r = await api.import();
-    setNotice(r.ok ? `imported ${r.imported} connector(s)` : `⚠ ${r.error ?? "import failed"}`);
-    await load();
-    setBusy(false);
+    try {
+      setNotice("importing from installed agents…");
+      const r = await api.import();
+      setNotice(r.ok ? `imported ${r.imported} connector(s)` : `⚠ ${r.error ?? "import failed"}`);
+      await load();
+    } finally {
+      busyRef.current = false;
+      setBusy(false); // a rejected call must not leave every button disabled
+    }
   }, [load]);
 
+  /** true when the connector was added — the form keeps what the user typed otherwise */
   const doAdd = useCallback(
-    async (req: McpAddRequest): Promise<void> => {
+    async (req: McpAddRequest): Promise<boolean> => {
       const api = mcpApi();
-      if (!api) return;
+      if (!api || busyRef.current) return false;
+      busyRef.current = true;
       setBusy(true);
-      setNotice(`adding ${req.id} (nemesis-gating the launch command)…`);
-      const r = await api.add(req);
-      if (r.ok) setNotice(`added ${req.id} — enable it to connect`);
-      else if (r.blocked) setNotice(`⛔ ${req.id} BLOCKED by nemesis (${r.verdict ?? "unsafe"})`);
-      else setNotice(`⚠ ${r.error ?? "add failed"}`);
-      await load();
-      setBusy(false);
+      try {
+        setNotice(`adding ${req.id} (nemesis-gating the launch command)…`);
+        const r = await api.add(req);
+        if (r.ok) setNotice(`added ${req.id} — enable it to connect`);
+        else if (r.blocked) setNotice(`⛔ ${req.id} BLOCKED by nemesis (${r.verdict ?? "unsafe"})`);
+        else setNotice(`⚠ ${r.error ?? "add failed"}`);
+        await load();
+        return r.ok;
+      } catch (e) {
+        setNotice(`⚠ ${e instanceof Error ? e.message : String(e)}`);
+        return false;
+      } finally {
+        busyRef.current = false;
+        setBusy(false); // a rejected call must not leave every button disabled
+      }
     },
     [load],
   );
@@ -226,14 +257,18 @@ function McpManager(): ReactElement {
             url: fUrl.trim(),
             ...(Object.keys(headers).length > 0 ? { headers } : {}),
           };
-    void doAdd({ id, label, transport });
-    setAddOpen(false);
-    setFId("");
-    setFLabel("");
-    setFCommand("");
-    setFArgs("");
-    setFUrl("");
-    setFHeaders("");
+    // cleared ONLY once the add succeeded: a blocked or refused connector used to wipe the form,
+    // pasted Authorization headers included, so the user had to retype everything
+    void doAdd({ id, label, transport }).then((added) => {
+      if (!added) return;
+      setAddOpen(false);
+      setFId("");
+      setFLabel("");
+      setFCommand("");
+      setFArgs("");
+      setFUrl("");
+      setFHeaders("");
+    });
   }, [fId, fLabel, fKind, fCommand, fArgs, fUrl, fHeaders, doAdd]);
 
   const enabled = Object.fromEntries(servers.map((s) => [s.id, s.enabled]));
@@ -478,17 +513,21 @@ function SettingsSyncPanel(): ReactElement {
   const push = async (): Promise<void> => {
     const api = window.prometheus?.settingsSync;
     if (!api || !repoDir) return;
+    let r: Awaited<ReturnType<typeof api.push>> | undefined;
     setBusy(true);
-    setStatus(null);
-    // gather the renderer-owned settings (keymap-overrides.ts + ThemeProvider keys).
-    const ls = window.localStorage;
-    const keymap = {
-      base: ls.getItem("prometheus.keymap.base") || "default",
-      overrides: JSON.parse(ls.getItem("prometheus.keymap.userBindings") || "[]"),
-    };
-    const themes = JSON.parse(ls.getItem("prometheus.customSchemes") || "[]");
-    const r = await api.push({ repoDir, keymap, themes }).catch(() => undefined);
-    setBusy(false);
+    try {
+      setStatus(null);
+      // gather the renderer-owned settings (keymap-overrides.ts + ThemeProvider keys).
+      const ls = window.localStorage;
+      const keymap = {
+        base: ls.getItem("prometheus.keymap.base") || "default",
+        overrides: JSON.parse(ls.getItem("prometheus.keymap.userBindings") || "[]"),
+      };
+      const themes = JSON.parse(ls.getItem("prometheus.customSchemes") || "[]");
+      r = await api.push({ repoDir, keymap, themes }).catch(() => undefined);
+    } finally {
+      setBusy(false); // a rejected call must not leave every button disabled
+    }
     setStatus(
       r?.ok
         ? { kind: "ok", message: r.message ?? "pushed" }
@@ -499,10 +538,14 @@ function SettingsSyncPanel(): ReactElement {
   const pull = async (): Promise<void> => {
     const api = window.prometheus?.settingsSync;
     if (!api || !repoDir) return;
+    let r: Awaited<ReturnType<typeof api.pull>> | undefined;
     setBusy(true);
-    setStatus(null);
-    const r = await api.pull({ repoDir }).catch(() => undefined);
-    setBusy(false);
+    try {
+      setStatus(null);
+      r = await api.pull({ repoDir }).catch(() => undefined);
+    } finally {
+      setBusy(false); // a rejected call must not leave every button disabled
+    }
     if (!r?.ok || !r.bundle) {
       setStatus({ kind: "error", message: r?.error ?? "pull failed" });
       return;
@@ -645,8 +688,22 @@ export function ExtensionsRoute(): ReactElement {
     const api = extApi();
     if (!api) return;
     const r = await api.list();
-    if (r.ok) setExts(r.extensions ?? []);
-    else setNotice(r.error ?? "failed to list extensions");
+    if (r.ok) {
+      setExts(r.extensions ?? []);
+      // say why something enabled is not running, or why a toggle will not survive restart
+      const broken = (r.extensions ?? []).filter((e) => e.activationError);
+      if (broken.length > 0) {
+        setNotice(
+          broken
+            .map((e) => `${e.label} is enabled but failed to start: ${e.activationError}`)
+            .join(" · "),
+        );
+      } else if (r.persistError) {
+        setNotice(
+          `extension settings could not be saved (they reset on restart): ${r.persistError}`,
+        );
+      }
+    } else setNotice(r.error ?? "failed to list extensions");
   }, []);
 
   useEffect(() => {
@@ -661,11 +718,15 @@ export function ExtensionsRoute(): ReactElement {
   const pickAndGate = useCallback(async (): Promise<void> => {
     const fo = await window.prometheus?.fileOpen?.({ title: "Choose a .promext extension" });
     if (!fo?.ok || !fo.path) return;
+    let g: Awaited<ReturnType<NonNullable<ReturnType<typeof securityApi>>["gateFull"]>> | undefined;
     setBusy(true);
-    setWarnTyped("");
-    setNotice("nemesis-gating the extension…");
-    const g = await securityApi()?.gateFull(fo.path);
-    setBusy(false);
+    try {
+      setWarnTyped("");
+      setNotice("nemesis-gating the extension…");
+      g = await securityApi()?.gateFull(fo.path);
+    } finally {
+      setBusy(false); // a rejected call must not leave every button disabled
+    }
     setNotice(null);
     if (!g?.ok || !g.verdict) {
       setFlow({ path: fo.path, error: g?.error ?? "gate failed" });
@@ -691,19 +752,22 @@ export function ExtensionsRoute(): ReactElement {
       return;
     }
     setBusy(true);
-    setNotice("installing…");
-    const api = extApi();
-    const r = await api?.install(flow.path);
-    if (r?.ok) {
-      if (r.id) await api?.rescan(r.id); // store the verdict so the chip persists
-      setNotice(`installed ${r.id}`);
-      setFlow(null);
-      await loadExts();
-    } else {
-      setNotice(`⚠ ${r?.error ?? "install failed"}${r?.code ? ` (${r.code})` : ""}`);
-      setFlow(null);
+    try {
+      setNotice("installing…");
+      const api = extApi();
+      const r = await api?.install(flow.path);
+      if (r?.ok) {
+        if (r.id) await api?.rescan(r.id); // store the verdict so the chip persists
+        setNotice(`installed ${r.id}`);
+        setFlow(null);
+        await loadExts();
+      } else {
+        setNotice(`⚠ ${r?.error ?? "install failed"}${r?.code ? ` (${r.code})` : ""}`);
+        setFlow(null);
+      }
+    } finally {
+      setBusy(false); // a rejected call must not leave every button disabled
     }
-    setBusy(false);
   }, [flow, warnTyped, loadExts]);
 
   /** Enable/disable → real host activation, persisted for the next launch. */
@@ -712,10 +776,13 @@ export function ExtensionsRoute(): ReactElement {
       const api = extApi();
       if (!api) return;
       setBusy(true);
-      const r = enable ? await api.activate(id) : await api.deactivate(id);
-      setNotice(r?.ok ? null : `⚠ ${r?.error ?? "toggle failed"}`);
-      await loadExts();
-      setBusy(false);
+      try {
+        const r = enable ? await api.activate(id) : await api.deactivate(id);
+        setNotice(r?.ok ? null : `⚠ ${r?.error ?? "toggle failed"}`);
+        await loadExts();
+      } finally {
+        setBusy(false); // a rejected call must not leave every button disabled
+      }
     },
     [loadExts],
   );
@@ -725,11 +792,14 @@ export function ExtensionsRoute(): ReactElement {
       const api = extApi();
       if (!api) return;
       setBusy(true);
-      setNotice("rescanning…");
-      const r = await api.rescan(id);
-      setNotice(r?.ok ? `scan: ${r.verdict?.tier ?? "?"}` : `⚠ ${r?.error ?? "rescan failed"}`);
-      await loadExts();
-      setBusy(false);
+      try {
+        setNotice("rescanning…");
+        const r = await api.rescan(id);
+        setNotice(r?.ok ? `scan: ${r.verdict?.tier ?? "?"}` : `⚠ ${r?.error ?? "rescan failed"}`);
+        await loadExts();
+      } finally {
+        setBusy(false); // a rejected call must not leave every button disabled
+      }
     },
     [loadExts],
   );

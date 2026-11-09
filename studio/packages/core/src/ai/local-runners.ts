@@ -61,6 +61,12 @@ export interface LocalRunnerSpec {
   /** the runner's NATIVE (non-OpenAI) API root, where it has one — used for richer status. */
   nativeUrl?: string;
   /**
+   * Other ports the vendor has used as its default, probed when `port` does not answer. A
+   * server the USER started listens wherever its version defaults to — llama.cpp moved
+   * `llama-server` from 8080 to 9931 in v0.7.0, so a current one was invisible to discovery.
+   */
+  altPorts?: readonly number[];
+  /**
    * The environment variable the VENDOR itself documents for relocating this server, when one
    * exists. Read by `localRunners()` below — never by a caller, so there is exactly one place
    * that knows how a vendor spells its host override.
@@ -212,6 +218,9 @@ export const LOCAL_RUNNERS: readonly LocalRunnerSpec[] = Object.freeze([
     // the user's 90 GB Hugging Face cache on their behalf is the kind of "helpful" that loads
     // 23 GB they did not ask for. `undefined` is the honest answer and the UI says so.
     processMatch: "llama-server",
+    // 9931 = llama-server's own default since v0.7.0 (8080 before; Prometheus passes 8080
+    // explicitly when IT starts one, so both are probed).
+    altPorts: Object.freeze([9931]),
     bin: "llama-server",
     install: Object.freeze(["brew", "install", "llama.cpp"]),
   }),
@@ -271,7 +280,9 @@ export function runnerForBaseUrl(
   if (!isLocalUrl(url)) return undefined;
   const port = portOf(url);
   if (port === undefined) return undefined;
-  return localRunners(env).find((r) => r.port === port && isLocalUrl(r.baseUrl));
+  return localRunners(env).find(
+    (r) => (r.port === port || (r.altPorts ?? []).includes(port)) && isLocalUrl(r.baseUrl),
+  );
 }
 
 /** The runner with this id, with any vendor host override already applied. */

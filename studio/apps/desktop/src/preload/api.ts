@@ -188,6 +188,8 @@ import {
   type ModelDownloadRequest,
   type ModelDownloadResult,
   type ModelEndpointsResult,
+  type ModelFetchGgufRequest,
+  type ModelFetchGgufResult,
   type ModelFetchHfRequest,
   type ModelFetchHfResult,
   type ModelFitRequest,
@@ -197,6 +199,8 @@ import {
   type ModelHealthListResult,
   type ModelHealthRecordResult,
   type ModelHealthRecordView,
+  type ModelHugOllamaRequest,
+  type ModelHugOllamaResult,
   type ModelInfoResult,
   type ModelInstallConverterResult,
   type ModelInstallHfCliResult,
@@ -212,6 +216,7 @@ import {
   type ModelPullResult,
   type ModelRepointRequest,
   type ModelRepointResult,
+  type ModelRuntimeServeResult,
   type ModelSearchRequest,
   type ModelSearchResult,
   type ModelServeRequest,
@@ -293,6 +298,8 @@ import {
   type VersionResult,
 } from "../shared/ipc-contract.js";
 import type {
+  AgentApproveToolCallRequest,
+  AgentApproveToolCallResult,
   AgentCanaryTripRequest,
   AgentCanaryTripResult,
   AgentEngineToolRequest,
@@ -587,6 +594,24 @@ function createModelApi(): ModelApi {
       ipcRenderer.invoke(IPC.modelPull, req),
     installRunner: (req?: ModelInstallRunnerRequest): Promise<ModelInstallRunnerResult> =>
       ipcRenderer.invoke(IPC.modelInstallRunner, req ?? {}),
+    fetchGguf: (req: ModelFetchGgufRequest): Promise<ModelFetchGgufResult> =>
+      ipcRenderer.invoke(IPC.modelFetchGguf, req),
+    hugOllama: (req: ModelHugOllamaRequest): Promise<ModelHugOllamaResult> =>
+      ipcRenderer.invoke(IPC.modelHugOllama, req),
+    discardOllama: (req: { tag: string }): Promise<{ ok: boolean; error?: string }> =>
+      ipcRenderer.invoke(IPC.modelDiscardOllama, req),
+    runtimeStatus: (): Promise<{ llamacpp: boolean; lmstudio: boolean }> =>
+      ipcRenderer.invoke(IPC.modelRuntimeStatus),
+    installRuntime: (req: {
+      runtime: "llamacpp" | "lmstudio";
+    }): Promise<{ ok: boolean; error?: string; manual?: string }> =>
+      ipcRenderer.invoke(IPC.modelInstallRuntime, req),
+    serveGguf: (req: { id: string; ctx: number }): Promise<ModelRuntimeServeResult> =>
+      ipcRenderer.invoke(IPC.modelServeGguf, req),
+    linkLmstudio: (req: { id: string }): Promise<{ ok: boolean; error?: string }> =>
+      ipcRenderer.invoke(IPC.modelLinkLmstudio, req),
+    startLmstudio: (req: { id: string }): Promise<ModelRuntimeServeResult> =>
+      ipcRenderer.invoke(IPC.modelStartLmstudio, req),
     library: (modality?: string): Promise<ModelSearchResult> =>
       ipcRenderer.invoke(IPC.modelLibrary, { modality }),
     remove: (
@@ -1104,6 +1129,8 @@ function createIdeApi(): IdeApi {
       ipcRenderer.invoke(IPC.agentCanaryTrip, req),
     systemTool: (req: AgentSystemToolRequest): Promise<AgentSystemToolResult> =>
       ipcRenderer.invoke(IPC.agentSystemTool, req),
+    approveToolCall: (req: AgentApproveToolCallRequest): Promise<AgentApproveToolCallResult> =>
+      ipcRenderer.invoke(IPC.agentApproveToolCall, req),
     // ── the `prometheus_*` verbs: the product's own surface, run by the engine ──
     engineTool: (req: AgentEngineToolRequest): Promise<AgentSystemToolResult> =>
       ipcRenderer.invoke(IPC.agentEngineTool, req),

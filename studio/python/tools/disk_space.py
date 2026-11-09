@@ -938,8 +938,13 @@ class Context:
         path = str(path)
         if not os.path.lexists(path):
             return True, f"{path}: already gone", 0
+        if os.path.islink(path) and keep_dir:
+            # "empty this folder" through a link would empty whatever it points at
+            return False, f"refusing to empty {path}: it is a symlink", 0
         if self.is_protected(path) and not keep_dir:
             return False, f"refusing to delete protected path {path}", 0
+        if self.is_protected(os.path.realpath(path)) and os.path.realpath(path) != os.path.abspath(path):
+            return False, f"refusing: {path} resolves to the protected path {os.path.realpath(path)}", 0
         size = self.du(path) if os.path.isdir(path) and not os.path.islink(path) else self.path_size(path)
         if self.dry_run:
             what = "contents of " if keep_dir else ""
@@ -947,19 +952,22 @@ class Context:
             return True, f"[dry-run] would delete {what}{path} ({human(size)})", 0
         try:
             if os.path.isdir(path) and not os.path.islink(path):
+                # one filesystem, fd-relative, no symlink is ever followed (rmtree_one_fs) — a
+                # mount or a swapped-in link under a cache can never take the delete elsewhere
+                errs: list[str] = []
                 if keep_dir:
                     for entry in os.scandir(path):
                         if entry.is_dir(follow_symlinks=False):
-                            shutil.rmtree(entry.path, ignore_errors=True)
+                            rmtree_one_fs(entry.path, errs)
                         else:
                             try:
                                 os.unlink(entry.path)
-                            except OSError:
-                                pass
+                            except OSError as e:
+                                errs.append(f"{entry.path}: {e}")
                 else:
-                    shutil.rmtree(path, ignore_errors=True)
-                    if os.path.exists(path):
-                        shutil.rmtree(path)
+                    rmtree_one_fs(path, errs)
+                if errs:
+                    self.log(f"DEL  {path}: {len(errs)} entr{'y' if len(errs) == 1 else 'ies'} not removed")
             else:
                 os.unlink(path)
         except OSError as exc:
@@ -1996,7 +2004,12 @@ class PathFamily(Procedure):
     def _add(found: list, seen: set, path: str, owner: str) -> None:
         if not os.path.lexists(path):
             return
-        real = os.path.realpath(path) if os.path.islink(path) else path
+        # A SYMLINKED cache entry is never followed into a cleanup target. Resolving it meant a
+        # planted `~/.cache/x -> /etc` had /etc's CONTENTS deleted by the root `--apply` path
+        # (keep_dir skips the protected-path check). A real cache is a directory, not a pointer.
+        if os.path.islink(path):
+            return
+        real = path
         if not os.path.exists(real):
             return
         key = os.path.realpath(real)
@@ -3338,7 +3351,16 @@ def move_to_trash(ctx: Context, path: str) -> tuple[bool, str]:
                 fh.write("[Trash Info]\nPath=" + quote(os.fsencode(os.path.abspath(path))) + "\nDeletionDate=" +
                          _dt.datetime.now().strftime("%Y-%m-%dT%H:%M:%S") + "\n")
         try:
-            os.rename(path, target)
+            if os.rename in os.supports_dir_fd:
+                # fd-relative source: a parent folder swapped for a symlink after the
+                # protection check cannot redirect which item goes to the Trash.
+                pfd, base = open_parent_nofollow(path, bool(getattr(ctx, "canonical_paths", False)))
+                try:
+                    os.rename(base, target, src_dir_fd=pfd)
+                finally:
+                    os.close(pfd)
+            else:
+                os.rename(path, target)
         except OSError:
             if info_file:
                 try:
@@ -3362,6 +3384,38 @@ def move_to_trash(ctx: Context, path: str) -> tuple[bool, str]:
 
 
 _DIR_FLAGS = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+
+
+# Walking the ancestors needs only SEARCH (x) permission — the same thing a path-based
+# unlink/rename needs. O_RDONLY would demand read permission on every folder above the target
+# and break deletes under an execute-only ancestor (/home 0711 on hardened hosts).
+_WALK_FLAGS = (getattr(os, "O_SEARCH", 0) or getattr(os, "O_PATH", 0) or os.O_RDONLY) \
+    | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+
+
+def open_parent_nofollow(path: str, canonical: bool = False) -> tuple[int, str]:
+    """Open the folder that contains `path`, walking EVERY component from `/` with
+    O_NOFOLLOW, and return (fd, base name). Callers operate on `base` relative to the fd.
+
+    `canonical=True` (the sidecar, whose paths were canonicalised when the human was shown the
+    plan): the parent is walked EXACTLY as given, so any component swapped for a symlink since
+    then makes the open fail — the delete never follows it anywhere. `canonical=False` (the
+    interactive TUI, whose paths are display paths like /tmp/…): realpath once, then walk; the
+    walk still refuses a swap that lands after that point.
+    """
+    path = os.path.abspath(path).rstrip("/") or "/"
+    parent, base = os.path.split(path)
+    walk = (parent or "/") if canonical else os.path.realpath(parent or "/")
+    fd = os.open("/", _WALK_FLAGS)
+    try:
+        for part in [x for x in walk.split("/") if x]:
+            nfd = os.open(part, _WALK_FLAGS, dir_fd=fd)
+            os.close(fd)
+            fd = nfd
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd, base
 
 
 def _rm_contents(fd: int, shown: str, dev: int, errors: list[str]) -> None:
@@ -3393,15 +3447,19 @@ def _rm_contents(fd: int, shown: str, dev: int, errors: list[str]) -> None:
             errors.append(f"{where}: {exc.strerror or exc}")
 
 
-def rmtree_one_fs(path: str, errors: list[str]) -> None:
-    """rm -rf --one-file-system, symlink-race safe (fd-relative, O_NOFOLLOW, identity checks)."""
+def rmtree_one_fs(path: str, errors: list[str], canonical: bool = False) -> None:
+    """rm -rf --one-file-system, symlink-race safe (fd-relative, O_NOFOLLOW, identity checks).
+
+    The parent is opened component by component without following links
+    (`open_parent_nofollow`) — the old `os.open(parent)` followed symlinks in every folder
+    above the target, the one place the fd-relative design did not cover.
+    """
     path = os.path.abspath(path)
-    parent, base = os.path.split(path.rstrip("/"))
-    st = os.lstat(path)
-    if not stat.S_ISDIR(st.st_mode):
-        raise OSError(f"{path} is not a folder")
-    pfd = os.open(parent or "/", _DIR_FLAGS)
+    pfd, base = open_parent_nofollow(path, canonical)
     try:
+        st = os.stat(base, dir_fd=pfd, follow_symlinks=False)
+        if not stat.S_ISDIR(st.st_mode):
+            raise OSError(f"{path} is not a folder")
         fd = os.open(base, _DIR_FLAGS, dir_fd=pfd)
         try:
             fst = os.fstat(fd)
@@ -3427,11 +3485,18 @@ def delete_permanently(ctx: Context, path: str) -> tuple[bool, str]:
     if ctx.dry_run:
         return True, f"[dry-run] would delete {path}"
     errors: list[str] = []
+    canonical = bool(getattr(ctx, "canonical_paths", False))
     try:
-        if os.path.isdir(path) and not os.path.islink(path):
-            rmtree_one_fs(path, errors)
-        else:
-            os.unlink(path)
+        pfd, base = open_parent_nofollow(path, canonical)
+        try:
+            st = os.stat(base, dir_fd=pfd, follow_symlinks=False)
+            is_dir = stat.S_ISDIR(st.st_mode)
+            if not is_dir:
+                os.unlink(base, dir_fd=pfd)     # a link is removed, never followed
+        finally:
+            os.close(pfd)
+        if is_dir:
+            rmtree_one_fs(path, errors, canonical)
     except OSError as exc:
         errors.append(f"{path}: {exc.strerror or exc}")
     if errors:

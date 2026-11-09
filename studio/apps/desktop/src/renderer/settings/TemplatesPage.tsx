@@ -324,7 +324,7 @@ export function TemplatesPage(): ReactElement {
             {errors.length > 0 && (
               <ul
                 aria-label="validation errors"
-                style={{ margin: 0, paddingLeft: "var(--space-5, 10px)", color: "var(--danger)" }}
+                style={{ margin: 0, paddingLeft: "var(--space-4, 8px)", color: "var(--danger)" }}
               >
                 {errors.map((e) => (
                   <li key={e} style={{ fontSize: "0.75rem" }}>
@@ -371,7 +371,7 @@ function TemplateLabel({ t, dim }: { t: LiveTemplateDef; dim?: boolean }): React
       <code style={{ fontFamily: "var(--font-mono)" }}>
         {t.kind === "postfix" ? `.${t.abbrev}` : t.abbrev}
       </code>{" "}
-      <span style={{ color: "var(--text-secondary)", fontSize: "0.72rem" }}>
+      <span style={{ color: "var(--text-secondary)", fontSize: "0.75rem" }}>
         {label(t.languages)}
       </span>
     </span>
@@ -383,7 +383,7 @@ function Badge({ kind }: { kind: "seed" | "user" }): ReactElement {
     <span
       style={{
         fontFamily: "var(--font-mono)",
-        fontSize: "0.62rem",
+        fontSize: "0.75rem",
         textTransform: "uppercase",
         padding: "0 var(--space-1, 2px)",
         borderRadius: "var(--radius-sm, 4px)",
@@ -410,7 +410,7 @@ function Field({ label: l, children }: { label: string; children: ReactElement }
 }
 
 const fieldLabelStyle: CSSProperties = {
-  fontSize: "0.72rem",
+  fontSize: "0.75rem",
   color: "var(--text-secondary)",
   fontFamily: "var(--font-ui)",
 };
@@ -450,7 +450,7 @@ const previewStyle: CSSProperties = {
 
 const hintStyle: CSSProperties = {
   margin: 0,
-  fontSize: "0.7rem",
+  fontSize: "0.75rem",
   color: "var(--text-secondary)",
   lineHeight: 1.5,
 };
@@ -460,14 +460,14 @@ const linkBtn: CSSProperties = {
   border: "none",
   color: "var(--accent)",
   cursor: "pointer",
-  fontSize: "0.72rem",
+  fontSize: "0.75rem",
   fontFamily: "var(--font-ui)",
   padding: "0 var(--space-1, 2px)",
   flexShrink: 0,
 };
 
 const overrideNote: CSSProperties = {
-  fontSize: "0.62rem",
+  fontSize: "0.75rem",
   color: "var(--text-secondary)",
   fontFamily: "var(--font-mono)",
   flexShrink: 0,
@@ -481,7 +481,7 @@ function chip(active: boolean): CSSProperties {
     borderRadius: "var(--radius-sm, 4px)",
     color: active ? "var(--text-primary)" : "var(--text-secondary)",
     cursor: "pointer",
-    fontSize: "0.72rem",
+    fontSize: "0.75rem",
     fontFamily: "var(--font-ui)",
   };
 }
@@ -496,14 +496,15 @@ function langChip(active: boolean): CSSProperties {
     borderRadius: "var(--radius-sm, 4px)",
     color: active ? "var(--text-primary)" : "var(--text-secondary)",
     cursor: "pointer",
-    fontSize: "0.72rem",
+    fontSize: "0.75rem",
     fontFamily: "var(--font-ui)",
   };
 }
 
 const primaryBtn: CSSProperties = {
   background: "var(--accent)",
-  color: "var(--bg-app)",
+  // the token MADE for text on an accent fill — `--bg-app` was 3.4:1 on the light scheme
+  color: "var(--on-accent)",
   border: "none",
   borderRadius: "var(--radius-sm, 4px)",
   padding: "var(--space-2, 4px) var(--space-4, 8px)",

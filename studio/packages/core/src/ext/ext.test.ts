@@ -101,7 +101,8 @@ test("permissionSummary + planInstall (path, gate target, compat error)", () => 
   assert.equal(isPlanError(plan), false);
   if (!isPlanError(plan)) {
     assert.equal(plan.installPath, "/home/.prometheus-studio/extensions/acme.csv-lens");
-    assert.equal(plan.gateTarget, "acme/csv-lens"); // repo wins
+    // the code that RUNS is always scanned; a manifest-named repo can never stand in for it
+    assert.equal(plan.gateTarget, "/tmp/stage");
   }
   // no repo → gate the staging dir
   const noRepo = { ...m, repo: undefined };

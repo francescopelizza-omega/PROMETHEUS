@@ -49,6 +49,7 @@ import { DecisionOverlay } from "../renderer/shell/DecisionOverlay.js";
 import { EngineGate } from "../renderer/shell/EngineGate.js";
 import { ForceGate, useForceGate } from "../renderer/shell/ForceGate.js";
 import { Segmented } from "../renderer/shell/Segmented.js";
+import { errorText, notify } from "../renderer/stores/toasts.js";
 import type {
   CatalogAppLifecycleRequest,
   CatalogBrowseResult,
@@ -117,7 +118,7 @@ function catalogApi(): Window["prometheus"]["catalog"] {
  */
 function useBrowse() {
   return useQuery({
-    queryKey: qk.catalog(),
+    queryKey: qk.catalogBrowse(),
     queryFn: (): Promise<CatalogBrowseResult> => catalogApi().browse(),
   });
 }
@@ -323,7 +324,10 @@ export function CatalogRoute(): ReactElement {
         install.mutate({ ...beginInstallRun(vars.name, "commit"), dryRun: false, force: false });
         return;
       }
-      if (res.ok) setInstallDone(vars.name);
+      if (res.ok) {
+        setInstallDone(vars.name);
+        notify({ key: `install:${vars.name}`, tone: "ok", title: `Installed ${vars.name}` });
+      }
       // a non-allow/non-forced FAILURE. Surface the REAL reason: the engine reports a
       // nemesis BLOCK via structured install_events (no top-level error/verdict) — e.g.
       // frontend-design flagged dangerous (21 HIGH findings). Without this the banner
@@ -351,6 +355,12 @@ export function CatalogRoute(): ReactElement {
               .join(", ")}.`;
         }
         setInstallError({ name: vars.name, error: msg ?? "install failed" });
+        notify({
+          key: `install:${vars.name}`,
+          tone: "danger",
+          title: `Install failed: ${vars.name}`,
+          description: msg ?? "install failed",
+        });
       }
       setInstallLeg(null);
       endRun();
@@ -360,6 +370,12 @@ export function CatalogRoute(): ReactElement {
       setInstallError({
         name: vars.name,
         error: e instanceof Error ? e.message : "install failed",
+      });
+      notify({
+        key: `install:${vars.name}`,
+        tone: "danger",
+        title: `Install failed: ${vars.name}`,
+        description: errorText(e),
       });
       setInstallLeg(null);
       endRun();
@@ -514,6 +530,14 @@ export function CatalogRoute(): ReactElement {
   }, [superscanning]);
 
   const loading = browseQ.isPending;
+  /** Why the browse read failed, when it did (a rejected IPC or an ok:false envelope). */
+  const browseFailure: string | null = browseQ.isError
+    ? browseQ.error instanceof Error
+      ? browseQ.error.message
+      : String(browseQ.error)
+    : browseQ.data && !browseQ.data.ok
+      ? (browseQ.data.error ?? "the engine returned an error")
+      : null;
 
   /** What the install island is about: the armed run's tool, else the selected row. */
   const installTarget = activeRun?.tool ?? selected?.id ?? null;
@@ -779,8 +803,21 @@ export function CatalogRoute(): ReactElement {
 
                     {loading ? (
                       <p style={{ color: "var(--text-secondary)" }}>loading catalog…</p>
+                    ) : browseFailure ? (
+                      // An engine failure is not an empty catalog. It used to render "no
+                      // items." — indistinguishable from a registry that really is empty.
+                      <div role="alert" style={{ color: "var(--danger)" }}>
+                        The catalog could not be read: {browseFailure}{" "}
+                        <Button size="sm" variant="ghost" onClick={() => void browseQ.refetch()}>
+                          Retry
+                        </Button>
+                      </div>
                     ) : filtered.length === 0 ? (
-                      <p style={{ color: "var(--text-secondary)" }}>no items.</p>
+                      <p style={{ color: "var(--text-secondary)" }}>
+                        {items.length === 0
+                          ? "the catalog is empty."
+                          : "nothing matches these filters."}
+                      </p>
                     ) : (
                       <ul
                         style={{
@@ -799,8 +836,13 @@ export function CatalogRoute(): ReactElement {
                             verdict={verdicts[i.id] ?? "queued"}
                             selected={i.id === selectedId}
                             onSelect={() => setSelectedId(i.id)}
+                            installBusy={install.isPending}
                             onInstall={() => {
                               setSelectedId(i.id);
+                              // one install at a time: a second click (or a second row) while a
+                              // run is in flight started a parallel engine run whose log lines
+                              // interleaved into the same island
+                              if (install.isPending) return;
                               install.mutate({
                                 ...beginInstallRun(i.id, "dry"),
                                 dryRun: true,
@@ -825,7 +867,7 @@ export function CatalogRoute(): ReactElement {
                     paddingTop: "var(--space-3, 6px)",
                     borderTop: "1px solid var(--border-subtle)",
                     color: "var(--text-muted)",
-                    fontSize: "0.72rem",
+                    fontSize: "0.75rem",
                     lineHeight: 1.45,
                   }}
                 >
@@ -1535,8 +1577,10 @@ function BrowseRow(props: {
   onSelect: () => void;
   onInstall: () => void;
   onOpenDocs: () => void;
+  /** another install is running: Install looks DISABLED rather than silently ignoring clicks */
+  installBusy?: boolean;
 }): ReactElement {
-  const { item, verdict, selected, onSelect, onInstall, onOpenDocs } = props;
+  const { item, verdict, selected, onSelect, onInstall, onOpenDocs, installBusy } = props;
   const documented = item.tier === "documented";
   const present =
     (item.state?.presence ?? (item.state?.installed ? "present" : "absent")) === "present";
@@ -1614,7 +1658,7 @@ function BrowseRow(props: {
               <span
                 style={{
                   flex: "none",
-                  fontSize: "0.68rem",
+                  fontSize: "0.75rem",
                   color: "var(--text-muted)",
                   whiteSpace: "nowrap",
                 }}
@@ -1626,7 +1670,7 @@ function BrowseRow(props: {
           <span
             style={{
               display: "block",
-              fontSize: "0.72rem",
+              fontSize: "0.75rem",
               color: "var(--text-secondary)",
               overflow: "hidden",
               textOverflow: "ellipsis",
@@ -1648,16 +1692,19 @@ function BrowseRow(props: {
         <button
           type="button"
           onClick={documented ? onOpenDocs : onInstall}
+          disabled={!documented && installBusy}
+          title={!documented && installBusy ? "another install is running" : undefined}
           style={{
             flex: "none",
+            opacity: !documented && installBusy ? 0.55 : 1,
             // §2's primary variant. The spec names a deep-navy fill; expressed with the
             // app's own tokens so it re-themes (raw hex is a build failure, 08 §6).
             background: documented ? "transparent" : "var(--bg-active)",
             border: `1px solid ${documented ? "var(--border-subtle)" : "var(--border-strong)"}`,
             borderRadius: "var(--radius-md, 6px)",
             color: documented ? "var(--text-secondary)" : "var(--text-title)",
-            cursor: "pointer",
-            fontSize: "0.74rem",
+            cursor: !documented && installBusy ? "default" : "pointer",
+            fontSize: "0.75rem",
             fontWeight: 600,
             padding: "3px 9px",
             whiteSpace: "nowrap", // §7
@@ -1720,7 +1767,7 @@ function ItemCard(props: {
               <span
                 key={agent}
                 style={{
-                  fontSize: "0.72rem",
+                  fontSize: "0.75rem",
                   border: "1px solid var(--border-subtle)",
                   borderRadius: 4,
                   padding: "0 5px",
@@ -1948,6 +1995,8 @@ function SkillsPanel(): ReactElement {
   // APP-006: the typed-confirm target for skill removal + its inline failure.
   const [removeTarget, setRemoveTarget] = useState<string | null>(null);
   const [removeError, setRemoveError] = useState<{ name: string; error: string } | null>(null);
+  // enable/disable/scaffold failures — these used to be swallowed by `.catch(() => {})`
+  const [actionError, setActionError] = useState<string | null>(null);
   const refetch = useCallback(() => void qc.invalidateQueries({ queryKey: ["skills"] }), [qc]);
 
   // Skills are prometheus.py-installed artifacts → the TOP-LEVEL uninstall verb
@@ -1987,8 +2036,20 @@ function SkillsPanel(): ReactElement {
       if (pending.has(name)) return;
       setPending((p) => new Set(p).add(name));
       const op = disabledNow ? catalogApi().enable({ name }) : catalogApi().disable({ name });
+      const verb = disabledNow ? "enable" : "disable";
       void op
-        .catch(() => {})
+        .then((r: unknown) => {
+          const o = (r ?? {}) as { ok?: boolean; error?: string; message?: string };
+          // an ok:false envelope used to be dropped: the row just flipped back on refetch
+          setActionError(
+            o.ok === false
+              ? `${verb} ${name} failed: ${o.error ?? o.message ?? "unknown error"}`
+              : null,
+          );
+        })
+        .catch((e: unknown) =>
+          setActionError(`${verb} ${name} failed: ${e instanceof Error ? e.message : String(e)}`),
+        )
         .finally(() => {
           setPending((p) => {
             const next = new Set(p);
@@ -2011,17 +2072,27 @@ function SkillsPanel(): ReactElement {
           setScaffolding(true);
           void catalogApi()
             .scaffoldSkill({ name: n, autoFire: true })
-            .then(() => {
+            .then((r: unknown) => {
+              const o = (r ?? {}) as { ok?: boolean; error?: string; message?: string };
+              if (o.ok === false) {
+                // keep the typed name so the user can correct it; say why it failed
+                setActionError(`scaffold ${n} failed: ${o.error ?? o.message ?? "unknown error"}`);
+                return;
+              }
+              setActionError(null);
               setNewName("");
               refetch();
             })
-            .catch(() => {})
+            .catch((e: unknown) =>
+              setActionError(`scaffold ${n} failed: ${e instanceof Error ? e.message : String(e)}`),
+            )
             .finally(() => setScaffolding(false));
         }}
         style={{ display: "flex", gap: 8, marginBottom: 10 }}
       >
         <input
           placeholder="new skill name (scaffold)"
+          aria-label="New skill name"
           value={newName}
           onChange={(e) => setNewName(e.target.value)}
           style={{
@@ -2084,6 +2155,11 @@ function SkillsPanel(): ReactElement {
       {removeError && (
         <div role="alert" style={{ color: "var(--danger)", fontSize: "0.8rem", marginTop: 8 }}>
           Remove failed: {removeError.name} — {removeError.error}
+        </div>
+      )}
+      {actionError && (
+        <div role="alert" style={{ color: "var(--danger)", fontSize: "0.8rem", marginTop: 8 }}>
+          {actionError}
         </div>
       )}
       {/* APP-006: typed-confirm gate — same deep-red dialog as purge/uninstall. */}

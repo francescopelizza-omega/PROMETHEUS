@@ -54,6 +54,36 @@ export interface ProgramSpec {
    * (`read`, auto at A1 — a five-rung downgrade needing only a directory named `status`).
    */
   valueOptions?: readonly string[];
+  /**
+   * Raise a subcommand's tier when its ARGUMENTS make it mutate. `git branch` lists (read);
+   * `git branch -D main` deletes. A subcommand table keyed on the verb alone cannot tell the
+   * two apart, so `git branch -D`, `git tag -d` and `git remote set-url` all auto-ran at A1.
+   * `after` is everything following the subcommand token.
+   */
+  escalate?: Readonly<
+    Record<string, (after: readonly string[]) => { tier: ExecTier; why: string } | null>
+  >;
+}
+
+/**
+ * A list-or-create verb (`git branch`, `git tag`): listing is a read; ANY mutating flag, or a
+ * bare name with no listing flag (which creates one), is a `command`.
+ */
+function listOrCreate(
+  verb: string,
+  mutating: RegExp,
+  listing: RegExp,
+): (after: readonly string[]) => { tier: ExecTier; why: string } | null {
+  return (after) => {
+    if (after.some((a) => mutating.test(a))) {
+      return { tier: "command", why: `\`git ${verb}\` with a flag that changes refs` };
+    }
+    const named = after.some((a) => !a.startsWith("-"));
+    if (named && !after.some((a) => listing.test(a))) {
+      return { tier: "command", why: `\`git ${verb} <name>\` creates a ref` };
+    }
+    return null;
+  };
 }
 
 /* ── the escapes, named once and reused ─────────────────────────────────────*/
@@ -225,6 +255,19 @@ export const PROGRAMS: Readonly<Record<string, ProgramSpec>> = Object.freeze({
       "cherry-pick": "command",
       init: "command",
       mv: "command",
+      // `git remote` alone / `-v` lists. The verbs that change config are `command`; the ones
+      // that contact the remote are `install`, like `fetch`.
+      "remote get-url": "read",
+      "remote add": "command",
+      "remote remove": "command",
+      "remote rm": "command",
+      "remote rename": "command",
+      "remote set-url": "command",
+      "remote set-head": "command",
+      "remote set-branches": "command",
+      "remote show": "install",
+      "remote prune": "install",
+      "remote update": "install",
       fetch: "install",
       pull: "install",
       push: "install",
@@ -236,7 +279,23 @@ export const PROGRAMS: Readonly<Record<string, ProgramSpec>> = Object.freeze({
       rm: "destructive",
     },
     valueOptions: ["-C", "--git-dir", "--work-tree", "--namespace", "--exec-path"],
+    escalate: {
+      branch: listOrCreate(
+        "branch",
+        /^-[dDmMcCfu]$|^--(delete|move|copy|force|set-upstream-to|unset-upstream|edit-description|track|no-track)\b/,
+        /^-l$|^--list$|^--(no-)?contains\b|^--(no-)?merged\b|^--points-at\b/,
+      ),
+      tag: listOrCreate(
+        "tag",
+        /^-[dfasum]$|^--(delete|force|annotate|sign|local-user|message|file)\b|^-[mu].+/,
+        /^-l$|^--list$|^--(no-)?contains\b|^--(no-)?merged\b|^--points-at\b|^-n\d*$/,
+      ),
+    },
     denyFlags: [
+      // `--output=<file>` (diff/log/show/format-patch) writes an arbitrary file from a "read".
+      { re: /^--output(=|$)/, why: "`git --output` writes an arbitrary file — use write_file" },
+      // An external diff driver / textconv filter is a program named in config.
+      { re: /^--ext-diff$/, why: RUNS_CODE("git --ext-diff") },
       // `git -c core.pager=sh`, `-c alias.x=!sh`, `-c core.sshCommand=…` are all shells.
       { re: /^-c$|^--config-env=/, why: RUNS_CODE("git -c <config>") },
       { re: /^--exec-path=/, why: RUNS_CODE("git --exec-path") },
@@ -291,9 +350,29 @@ export const PROGRAMS: Readonly<Record<string, ProgramSpec>> = Object.freeze({
         why: "writing a downloaded file — fetch it with web_fetch instead",
       },
       { re: /^-K$|^--config$/, why: RUNS_CODE("curl -K") },
+      // UPLOADING a local file is exfiltration, not a fetch: `-d @~/.ssh/id_rsa`, `-d@.env`,
+      // `-F f=@~/.aws/credentials`, `-F f=<file`, `-H @headers`, `-T file`.
+      {
+        re: /^@|^-[dFH]@|^--(data|data-binary|data-urlencode|form|json|header)=@|=[@<]/,
+        why: "`curl … @file` sends a local file's contents off the machine",
+      },
+      { re: /^-T$|^-T.|^--upload-file/, why: "`curl -T` uploads a local file" },
     ],
   },
-  wget: { tier: "install" },
+  wget: {
+    tier: "install",
+    denyFlags: [
+      {
+        re: /^--(post-file|body-file)/,
+        why: "`wget --post-file` sends a local file off the machine",
+      },
+      {
+        re: /^-[oO]$|^--output-document|^-P$|^--directory-prefix/,
+        why: "writing a downloaded file — fetch it with web_fetch instead",
+      },
+      { re: /^-e$|^--execute/, why: RUNS_CODE("wget -e") },
+    ],
+  },
   brew: {
     tier: "install",
     needsSubcommand: true,
@@ -577,6 +656,10 @@ export const FORBIDDEN: Readonly<Record<string, string>> = Object.freeze({
   script: "runs another program (and records a tty) — see `env`",
   watch: "re-runs another program forever — see `env`",
   launchctl: "installs a persistent background job",
+  // AppleScript can `do shell script … with administrator privileges` — a root prompt the
+  // privileged gate never sees — and drive any app via Apple Events. A shell in all but name.
+  osascript:
+    "runs AppleScript/JXA — `do shell script` is a shell, `with administrator privileges` is root",
   systemctl: "controls system services",
 });
 
@@ -612,6 +695,32 @@ export function basename(program: string): string {
 export function programSpec(program: string): ProgramSpec | undefined {
   const base = basename(program);
   if (PROGRAMS[base]) return PROGRAMS[base];
-  const family = base.includes(".") ? (base.split(".")[0] as string) : "";
-  return family ? PROGRAMS[family] : undefined;
+  // Only a NUMERIC version suffix folds: `python3.11` → `python3`. `git.evil` or `cat.sh` is a
+  // different file that merely borrows a known name, and must stay unknown (→ a human decides).
+  const m = /^([^.]+)\.\d+(?:\.\d+)*$/.exec(base);
+  return m ? PROGRAMS[m[1] as string] : undefined;
+}
+
+/**
+ * Directories whose binaries are the system's own. A program named by path ANYWHERE else
+ * (`./ls`, `/tmp/x/git`) is a file someone put there — possibly the agent itself, one write
+ * earlier — so it classifies as unknown no matter which well-known name it borrows.
+ */
+const TRUSTED_BIN_DIRS: readonly string[] = [
+  "/bin/",
+  "/sbin/",
+  "/usr/bin/",
+  "/usr/sbin/",
+  "/usr/local/bin/",
+  "/opt/homebrew/bin/",
+  "/opt/local/bin/",
+];
+
+/** True when argv[0] names a path outside the trusted system bin directories. */
+export function isUntrustedPath(program: string): boolean {
+  const p = (program ?? "").replace(/\\/g, "/");
+  if (!p.includes("/")) return false;
+  if (p.includes("/../") || p.includes("/./")) return true;
+  const dir = p.slice(0, p.lastIndexOf("/") + 1);
+  return !TRUSTED_BIN_DIRS.includes(dir);
 }

@@ -134,7 +134,7 @@ export function BlameView({ root }: { root: string }): ReactElement {
             background: "var(--bg-surface-2)",
             border: "1px solid var(--border-subtle)",
             borderRadius: 4,
-            fontSize: "0.72rem",
+            fontSize: "0.75rem",
           }}
         >
           <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
@@ -177,12 +177,12 @@ export function BlameView({ root }: { root: string }): ReactElement {
       )}
 
       {status === "none" && (
-        <p style={{ color: "var(--text-secondary)", fontSize: "0.72rem" }}>
+        <p style={{ color: "var(--text-secondary)", fontSize: "0.75rem" }}>
           Open a tracked file to see its blame.
         </p>
       )}
       {status === "empty" && (
-        <p style={{ color: "var(--text-secondary)", fontSize: "0.72rem" }}>
+        <p style={{ color: "var(--text-secondary)", fontSize: "0.75rem" }}>
           No blame (untracked, outside the repo, or not committed).
         </p>
       )}
@@ -209,7 +209,7 @@ export function BlameView({ root }: { root: string }): ReactElement {
               background: "transparent",
               cursor: "pointer",
               padding: "1px 0",
-              fontSize: "0.7rem",
+              fontSize: "0.75rem",
               fontFamily: "var(--font-mono, monospace)",
               color: "var(--text-primary)",
             }}

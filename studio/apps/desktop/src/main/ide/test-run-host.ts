@@ -149,12 +149,26 @@ export function runTestVerb(
     let stderrTail = "";
     let envelope: Record<string, unknown> | null = null;
 
+    // SIGTERM FIRST: testmgr runs pytest in its own session and reaps that whole group on
+    // SIGTERM. A bare SIGKILL could not be caught, so the python wrapper died and pytest — plus
+    // everything the tests started — kept running, orphaned. SIGKILL follows if it lingers.
+    let killing = false;
     const killer = (): void => {
+      if (killing) return;
+      killing = true;
       try {
-        child.kill("SIGKILL");
+        child.kill("SIGTERM");
       } catch {
         /* already dead */
       }
+      const hard = setTimeout(() => {
+        try {
+          child.kill("SIGKILL");
+        } catch {
+          /* already dead */
+        }
+      }, 2_000);
+      hard.unref?.();
     };
     opts.kills?.add(killer);
 

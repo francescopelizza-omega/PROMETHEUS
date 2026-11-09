@@ -328,6 +328,13 @@ def _query(argv: Sequence[str]) -> int:
             # anything left → truncated (peek one more)
             if cur.fetchone() is not None:
                 truncated = True
+        # A console statement that changes data must STICK. Nothing committed, so an INSERT /
+        # UPDATE / DELETE answered ok:true with no rows, and closing the connection rolled it back
+        # (sqlite, psycopg2 and pymysql all do) — the change was reported and then vanished.
+        affected = cur.rowcount if isinstance(getattr(cur, "rowcount", None), int) else -1
+        commit = getattr(c.raw, "commit", None)
+        if callable(commit):
+            commit()
         duration_ms = round((time.monotonic() - started) * 1000, 3)
         return emit(
             "sql.query",
@@ -336,6 +343,7 @@ def _query(argv: Sequence[str]) -> int:
             row_count=len(rows),
             truncated=truncated,
             duration_ms=duration_ms,
+            **({"affected": affected} if not columns and affected >= 0 else {}),
         )
     except _MissingDriver as exc:
         return fail("sql.query", str(exc), driver_missing=exc.pip_pkg)

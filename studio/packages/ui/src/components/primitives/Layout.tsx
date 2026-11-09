@@ -104,7 +104,7 @@ export function Skeleton({
         width: typeof width === "number" ? `${width}px` : width,
         height: typeof height === "number" ? `${height}px` : height,
         borderRadius: rad(radius),
-        background: v("bg-surface-2"),
+        background: v("bg-active"), // bg-surface-2 sat 1.1:1 on a panel — a skeleton nobody could see
         // the shimmer animation lives in the global stylesheet (reduced-motion safe).
       }}
     />

@@ -68,7 +68,15 @@ const MOCK_EXPORTS = Number(process.versions.node.split(".")[0]) >= 26 ? "export
 
 mock.module("electron", { [MOCK_EXPORTS]: { ipcMain: fakeIpcMain } });
 const { registerScheduleIpcHandlers } = await import("./schedule-ipc.js");
-registerScheduleIpcHandlers(globalPath);
+// main's native "run this unattended?" consent, answered by the test
+const consentAsked: string[] = [];
+let consentAnswer = true;
+registerScheduleIpcHandlers(globalPath, {
+  confirm: async (t) => {
+    consentAsked.push(t.id);
+    return consentAnswer;
+  },
+});
 
 const validTask = {
   id: "task-1",
@@ -204,7 +212,41 @@ test("scheduleUpsert: re-upserting an existing id overwrites that entry (merge-b
 
   const list = (await fakeIpcMain.invoke(IPC.scheduleList, {})) as ScheduleListResult;
   assert.equal(Object.keys(list.store ?? {}).length, 2, "still 2 tasks, not 3");
-  assert.deepEqual(list.store?.["task-1"], updated);
+  // the caller's edit lands; its claimed run HISTORY does not — that is the runner's to write
+  const { lastRunIso: _r, lastResult: _l, ...edit } = updated;
+  assert.deepEqual(list.store?.["task-1"], edit);
+});
+
+test("scheduleUpsert: an unattended task that may act needs main's native consent", async () => {
+  consentAsked.length = 0;
+  consentAnswer = false;
+  const risky = {
+    ...validTask,
+    id: "task-3",
+    name: "Nightly cleanup",
+    autonomy: "commands" as const,
+    task: "delete build artifacts",
+  };
+  const no = (await fakeIpcMain.invoke(IPC.scheduleUpsert, risky)) as ScheduleUpsertResult;
+  assert.equal(no.ok, false);
+  assert.deepEqual(consentAsked, ["task-3"]);
+  const list = (await fakeIpcMain.invoke(IPC.scheduleList, {})) as ScheduleListResult;
+  assert.equal(list.store?.["task-3"], undefined, "a refused task is never written");
+  // a readonly task never asks; unknown fields never ride along
+  const ro = (await fakeIpcMain.invoke(IPC.scheduleUpsert, {
+    ...validTask,
+    id: "task-ro",
+    injected: "x",
+  })) as ScheduleUpsertResult;
+  assert.equal(ro.ok, true);
+  assert.deepEqual(consentAsked, ["task-3"]);
+  const after2 = (await fakeIpcMain.invoke(IPC.scheduleList, {})) as ScheduleListResult;
+  assert.equal(
+    (after2.store?.["task-ro"] as unknown as Record<string, unknown>).injected,
+    undefined,
+  );
+  await fakeIpcMain.invoke(IPC.scheduleRemove, { id: "task-ro" });
+  consentAnswer = true;
 });
 
 test("scheduleRemove: rejects a missing id and leaves the store untouched", async () => {
@@ -249,7 +291,7 @@ test("registerScheduleIpcHandlers: a full dispose lets re-registration succeed (
   assert.equal(fakeIpcMain.handledChannels().size, 0);
 
   assert.doesNotThrow(() => {
-    registerScheduleIpcHandlers(globalPath);
+    registerScheduleIpcHandlers(globalPath, { confirm: async () => true });
   }, "re-registering after a full dispose must not throw double-registration");
   assert.deepEqual(
     [...fakeIpcMain.handledChannels()].sort(),

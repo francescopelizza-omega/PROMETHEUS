@@ -248,10 +248,21 @@ export interface PullResult {
   installable?: boolean;
   install?: string;
   error?: string;
+  /** nemesis WARNed on the pulled blobs: the model is on disk but NOT usable until the human
+   *  reviews `gateReasons` and the pull is re-run with `acceptWarn`. */
+  needsConfirm?: boolean;
+  gateReasons?: string[];
   raw: SidecarEnvelope;
 }
 
 function toPullResult(env: SidecarEnvelope): PullResult {
+  const gate = (env.gate ?? {}) as { scans?: { reasons?: unknown }[]; model_findings?: unknown };
+  const reasons = [
+    ...(Array.isArray(gate.scans)
+      ? gate.scans.flatMap((sc) => (Array.isArray(sc?.reasons) ? sc.reasons.map(String) : []))
+      : []),
+    ...(Array.isArray(gate.model_findings) ? gate.model_findings.map(String) : []),
+  ];
   return {
     ...env,
     ok: env.ok !== false,
@@ -264,6 +275,8 @@ function toPullResult(env: SidecarEnvelope): PullResult {
     installable: env.installable === true ? true : undefined,
     install: typeof env.install === "string" ? env.install : undefined,
     error: typeof env.error === "string" ? env.error : undefined,
+    ...(env.needs_confirm === true ? { needsConfirm: true } : {}),
+    ...(reasons.length ? { gateReasons: [...new Set(reasons)].slice(0, 8) } : {}),
     raw: env,
   };
 }
@@ -523,6 +536,9 @@ export interface InstallTargetOptions {
   /** required for vllm — the HF-format directory (vLLM never needs the GGUF). */
   src?: string;
   quant?: string;
+  /** lmstudio only: symlink the ADMITTED file into LM Studio's models folder (no `lms import`,
+   *  no second copy); the sidecar refuses a file no admission record vouches for. */
+  link?: boolean;
 }
 
 /**
@@ -645,6 +661,9 @@ function toModel(row: Record<string, unknown>): Model {
 const PERMISSIVE = ["apache", "mit", "bsd"];
 
 // ── the client ────────────────────────────────────────────────────────────────
+
+/** How long a gated download / import / post-pull scan may run (a 400 GB model takes hours). */
+export const GATED_TRANSFER_TIMEOUT_MS = 12 * 60 * 60 * 1000;
 
 export class ModelHubClient {
   private readonly opts: ModelHubClientOptions;
@@ -771,7 +790,9 @@ export class ModelHubClient {
   /**
    * REAL local-model install via the ollama runner (`ollama pull`). Unlike `download`
    * (the HF/GGUF gate spine), this actually fetches AND serves the weights on the user's
-   * machine — ollama's signed registry is the trust boundary. `onProgress` consumes the
+   * machine. Ollama's registry has no local stage, so the sidecar scans the stored blobs with
+   * nemesis right after the pull (removed on a BLOCK; a WARN comes back `needsConfirm` and is
+   * accepted only by re-running with `acceptWarn`). `onProgress` consumes the
    * JSON-lines stderr stream. Returns an actionable `PullResult` (`installable:true` when
    * the ollama runner itself is missing); it NEVER throws for the "not installed" case.
    */
@@ -781,33 +802,191 @@ export class ModelHubClient {
     /** Override the OVERFLOW RAM refusal — see `ServeOptions.force`. The CLI already sends
      *  this through `runMutation`/`execArgv`; without it here the desktop could not. */
     force?: boolean;
+    /** accept a nemesis WARN on the pulled blobs — only after the human saw the findings.
+     *  Separate from `force` on purpose: overriding the RAM check must never accept a WARN.
+     *  Re-scans what is on disk; it does not pull again. */
+    acceptWarn?: boolean;
+    /** re-scan an INSTALLED model (no download) — run before adopting one. */
+    verifyOnly?: boolean;
     onProgress?: (p: DownloadProgress) => void;
   }): Promise<PullResult> {
-    const argv = ["pull", "--id", opts.id];
-    if (opts.tag) argv.push("--tag", opts.tag);
+    // `--opt=value`: a value can never be a separate token, so `id: "--no-gate"` cannot double
+    // as the flag (the sidecar refuses a flag-shaped separate value too).
+    const argv = ["pull", `--id=${opts.id}`];
+    if (opts.tag) argv.push(`--tag=${opts.tag}`);
     if (opts.force) argv.push("--force");
+    if (opts.acceptWarn) argv.push("--accept-warn");
+    if (opts.verifyOnly) argv.push("--verify-only");
     // Live, via the runner's per-line stderr hook — see `download` above for why the old
     // `env._stderr` scan could never fire.
     const onProgress = opts.onProgress;
-    const env = await this.run(
-      argv,
-      onProgress
+    // A multi-GB `ollama pull` plus the post-pull nemesis scan: the runner's 2-minute default
+    // SIGKILLed real pulls before the gate ever ran.
+    const env = await this.run(argv, {
+      timeoutMs: GATED_TRANSFER_TIMEOUT_MS,
+      ...(onProgress
         ? {
             onStderr: (line: string): void => {
               const p = parseDownloadProgressLine(line);
               if (p) onProgress(p);
             },
           }
-        : undefined,
-    );
+        : {}),
+    });
     return toPullResult(env);
   }
 
   /**
+   * Download a GGUF (or a list of files) from Hugging Face through the GATED path: the sidecar
+   * pins the revision, verifies each file against Hugging Face's sha256, and admits it only
+   * when nemesis allows it (`modelhub stage-hf`). Returns the raw envelope — `admitted`,
+   * `weights[]` (library paths) on success, the gate verdict and `error` otherwise.
+   */
+  async stageHf(opts: {
+    id: string;
+    repo: string;
+    file: string;
+    /** admit over a nemesis WARN — only after the human confirmed the findings. Accepts a WARN
+     *  and nothing else (never a block, a scanner error or a sha256 mismatch). */
+    acceptWarn?: boolean;
+    /**
+     * Where the admitted file ends up — the serving software's own folder: `hf` (Hugging Face
+     * cache, which llama.cpp also uses for its own downloads), `lmstudio` (LM Studio's models
+     * folder), `ollama` (a transit copy import-ollama gives to `ollama create`, then deletes).
+     */
+    place?: "hf" | "lmstudio" | "ollama";
+    onProgress?: (p: DownloadProgress) => void;
+  }): Promise<Record<string, unknown>> {
+    const argv = ["stage-hf", `--id=${opts.id}`, `--repo=${opts.repo}`, `--file=${opts.file}`];
+    argv.push(`--place=${opts.place ?? "hf"}`);
+    if (opts.acceptWarn) argv.push("--accept-warn");
+    const onProgress = opts.onProgress;
+    // A multi-GB download plus a full nemesis scan: the runner's 2-minute default would SIGKILL
+    // every real model mid-download.
+    return (await this.run(argv, {
+      timeoutMs: GATED_TRANSFER_TIMEOUT_MS,
+      ...(onProgress
+        ? {
+            onStderr: (line: string): void => {
+              const p = parseDownloadProgressLine(line);
+              if (p) onProgress(p);
+            },
+          }
+        : {}),
+    })) as unknown as Record<string, unknown>;
+  }
+
+  /** Serve an ADMITTED library GGUF through Ollama (`modelhub import-ollama`). */
+  /**
+   * "Hug" a Hugging Face GGUF repo into Ollama through the GATED path (`modelhub hug-ollama`):
+   * pick the GGUF for `quant`, stage it pinned to a revision, verify Hugging Face's sha256,
+   * admit it through nemesis, import it as `prometheus/<id>`. Replaces `ollama pull hf.co/…`,
+   * which handed an arbitrary uploader's file to Ollama unscanned (and is now refused).
+   */
+  async hugOllama(opts: {
+    repo: string;
+    id?: string;
+    quant?: string;
+    /** admit over a nemesis WARN — only after the human confirmed the findings (WARN only). */
+    acceptWarn?: boolean;
+    onProgress?: (p: DownloadProgress) => void;
+  }): Promise<Record<string, unknown>> {
+    const argv = ["hug-ollama", `--repo=${opts.repo}`];
+    if (opts.id) argv.push(`--id=${opts.id}`);
+    if (opts.quant) argv.push(`--quant=${opts.quant}`);
+    if (opts.acceptWarn) argv.push("--accept-warn");
+    const onProgress = opts.onProgress;
+    return (await this.run(argv, {
+      timeoutMs: GATED_TRANSFER_TIMEOUT_MS,
+      ...(onProgress
+        ? {
+            onStderr: (line: string): void => {
+              const p = parseDownloadProgressLine(line);
+              if (p) onProgress(p);
+            },
+          }
+        : {}),
+    })) as unknown as Record<string, unknown>;
+  }
+
+  /** ok only when the gated library's admission record vouches for THIS file as it is now. */
+  async verifyAdmitted(opts: { path: string }): Promise<{ ok: boolean; error?: string }> {
+    const r = (await this.run(["verify-admitted", `--path=${opts.path}`], {
+      timeoutMs: 60 * 60 * 1000, // re-hashes the file: a 400 GB GGUF takes a few minutes
+    })) as unknown as Record<string, unknown>;
+    return r.ok === true
+      ? { ok: true }
+      : { ok: false, error: typeof r.error === "string" ? r.error : "not admitted" };
+  }
+
+  /**
+   * Move weights left inside the gated library by older installs into the runtime store that
+   * serves them (HF cache, LM Studio, llama.cpp cache) — at startup, not "the next time that
+   * model is picked". Cheap when there is nothing to move (one directory walk). Never throws:
+   * a failure is reported in the result and retried at the next start.
+   */
+  async migrateLibrary(opts: { plan?: boolean } = {}): Promise<{
+    ok: boolean;
+    moved: number;
+    bytes: number;
+    models: Array<Record<string, unknown>>;
+    error?: string;
+  }> {
+    try {
+      const r = (await this.run(["migrate-library", ...(opts.plan ? ["--plan"] : [])], {
+        timeoutMs: 60 * 60 * 1000, // a cross-volume move re-hashes what it copies
+      })) as unknown as Record<string, unknown>;
+      return {
+        ok: r.ok === true,
+        moved: typeof r.moved === "number" ? r.moved : 0,
+        bytes: typeof r.bytes === "number" ? r.bytes : 0,
+        models: Array.isArray(r.models) ? (r.models as Array<Record<string, unknown>>) : [],
+        ...(typeof r.error === "string" ? { error: r.error } : {}),
+      };
+    } catch (err) {
+      return { ok: false, moved: 0, bytes: 0, models: [], error: String(err) };
+    }
+  }
+
+  /** nemesis over an installed Ollama tag's blobs (a signed-ledger hit is cheap). `ok` only
+   *  for an ALLOW, or a WARN the user accepted earlier — run before any local pick is adopted. */
+  async ollamaGate(opts: { tag: string }): Promise<{ ok: boolean; error?: string }> {
+    try {
+      const r = (await this.run(["ollama-gate", `--tag=${opts.tag}`], {
+        timeoutMs: 4 * 60 * 60 * 1000, // a first scan of a large model reads every blob
+      })) as unknown as Record<string, unknown>;
+      return r.ok === true
+        ? { ok: true }
+        : {
+            ok: false,
+            error: typeof r.error === "string" ? r.error : "nemesis could not verify it",
+          };
+    } catch (err) {
+      return { ok: false, error: String(err) };
+    }
+  }
+
+  /** Remove a model the user refused after a nemesis WARN (`ollama rm`), so a later "use"
+   *  cannot adopt it unscanned. */
+  async discardOllama(opts: { tag: string }): Promise<Record<string, unknown>> {
+    return (await this.run(["ollama-discard", `--tag=${opts.tag}`])) as unknown as Record<
+      string,
+      unknown
+    >;
+  }
+
+  async importOllama(opts: { id: string; path: string }): Promise<Record<string, unknown>> {
+    // `ollama create` copies the whole file into Ollama's store
+    return (await this.run(["import-ollama", `--id=${opts.id}`, `--path=${opts.path}`], {
+      timeoutMs: GATED_TRANSFER_TIMEOUT_MS,
+    })) as unknown as Record<string, unknown>;
+  }
+
+  /**
    * Auto-install the local RUNNER (ollama) ON THE USER'S BEHALF. The sidecar
-   * discriminates macOS (`brew install ollama`) vs Linux (`curl … install.sh | sh`)
-   * and runs the command itself, streaming its output as JSON-lines on stderr.
-   * Returns `manual:true` when the host needs a step we won't automate.
+   * installs through Homebrew (an official channel) and streams its output as JSON-lines on
+   * stderr. Ollama's Linux vendor script (`curl … | sh` as root) is never run: without
+   * Homebrew the result is `manual:true` with the exact command for the human.
    */
   async installRunner(opts?: {
     runner?: "ollama";
@@ -1023,11 +1202,31 @@ export class ModelHubClient {
 
   /** Wire a converted/GGUF model into ONE target runtime, never duplicating bytes. */
   async installTarget(opts: InstallTargetOptions): Promise<InstallTargetResult> {
-    const argv = ["install-target", "--target", opts.target, "--id", opts.id];
-    if (opts.gguf) argv.push("--gguf", opts.gguf);
-    if (opts.src) argv.push("--src", opts.src);
-    if (opts.quant) argv.push("--quant", opts.quant);
-    return toInstallTargetResult(await this.run(argv));
+    // `--opt=value` throughout: no value can be a separate token that doubles as a flag
+    const argv = ["install-target", `--target=${opts.target}`, `--id=${opts.id}`];
+    if (opts.gguf) argv.push(`--gguf=${opts.gguf}`);
+    if (opts.src) argv.push(`--src=${opts.src}`);
+    if (opts.quant) argv.push(`--quant=${opts.quant}`);
+    if (opts.link) argv.push("--link");
+    // re-hashes every shard and may move/copy across volumes (and `ollama create` reads the
+    // whole file): the default 120 s SIGKILLed a 70B link mid-way, leaving a partial file
+    return toInstallTargetResult(await this.run(argv, { timeoutMs: 4 * 60 * 60 * 1000 }));
+  }
+
+  /**
+   * Install a local runtime (llama.cpp, LM Studio, MLX, …) or local-model agent through its
+   * OFFICIAL package channel (`modelhub install-runtime`). Vendor `curl | sh` scripts are never
+   * run: those come back `manual` with the exact command for the human.
+   */
+  async installRuntime(opts: {
+    runtime: string;
+    onProgress?: (line: string) => void;
+  }): Promise<Record<string, unknown>> {
+    const onProgress = opts.onProgress;
+    return (await this.run(["install-runtime", `--runtime=${opts.runtime}`], {
+      timeoutMs: 60 * 60 * 1000,
+      ...(onProgress ? { onStderr: (line: string): void => onProgress(line) } : {}),
+    })) as unknown as Record<string, unknown>;
   }
 }
 

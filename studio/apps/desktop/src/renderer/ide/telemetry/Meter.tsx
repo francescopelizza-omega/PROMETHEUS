@@ -93,7 +93,7 @@ export function Meter({
         )}
       </div>
       {note && !compact && (
-        <span style={{ color: "var(--text-secondary)", fontSize: "0.72rem" }}>{note}</span>
+        <span style={{ color: "var(--text-secondary)", fontSize: "0.75rem" }}>{note}</span>
       )}
     </div>
   );

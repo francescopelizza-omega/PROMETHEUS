@@ -417,7 +417,7 @@ function FileNode({
           style={{ accentColor: "var(--accent)" }}
         />
         <span style={{ fontFamily: mono, overflowWrap: "break-word" }}>{node.path}</span>
-        <span style={{ color: secondary, fontSize: "0.72rem", whiteSpace: "nowrap" }}>
+        <span style={{ color: secondary, fontSize: "0.75rem", whiteSpace: "nowrap" }}>
           {node.editCount} edit{node.editCount === 1 ? "" : "s"}
         </span>
       </label>
@@ -425,7 +425,7 @@ function FileNode({
         {node.edits.map((e, i) => (
           <div
             key={`${e.startLine}:${e.startCol}:${i}`}
-            style={{ margin: "5px 0", fontFamily: mono, fontSize: "0.74rem" }}
+            style={{ margin: "5px 0", fontFamily: mono, fontSize: "0.75rem" }}
           >
             <div style={{ color: secondary }}>
               L{e.startLine}:{e.startCol}–L{e.endLine}:{e.endCol}
@@ -512,7 +512,7 @@ export function RefactorPreviewDialog(props: RefactorPreviewDialogProps): ReactE
           raised
           elevation="e3"
           actions={
-            <span style={{ color: secondary, fontSize: "0.72rem" }}>
+            <span style={{ color: secondary, fontSize: "0.75rem" }}>
               {stage === "preview" && preview
                 ? `${selectedCount}/${preview.files.length} file${preview.files.length === 1 ? "" : "s"} selected`
                 : null}

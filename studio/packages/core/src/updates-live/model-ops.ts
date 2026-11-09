@@ -245,13 +245,30 @@ export async function loadedModels(deps: OpsDeps = {}): Promise<string[]> {
   }
 }
 
-/** Where ollama keeps its store. `$OLLAMA_MODELS` wins, as it does for the daemon itself. */
+/**
+ * Where ollama keeps its store. `$OLLAMA_MODELS` wins, as it does for the daemon itself; else
+ * the first of the per-user default and the Linux SERVICE stores (official install script's
+ * `ollama` user, distro packages) that actually holds a store; else the per-user default.
+ * Only `~/.ollama/models` used to be read, so a Linux service install looked empty.
+ */
 export function ollamaModelsDir(deps: OpsDeps = {}): string {
   if (deps.modelsDir) return deps.modelsDir;
   const env = deps.env ?? process.env;
-  return env.OLLAMA_MODELS && env.OLLAMA_MODELS.trim() !== ""
-    ? env.OLLAMA_MODELS
-    : join(homedir(), ".ollama", "models");
+  if (env.OLLAMA_MODELS && env.OLLAMA_MODELS.trim() !== "") return env.OLLAMA_MODELS;
+  const home = join(homedir(), ".ollama", "models");
+  for (const cand of [
+    home,
+    "/usr/share/ollama/.ollama/models",
+    "/var/lib/ollama/.ollama/models",
+    "/var/lib/ollama/models",
+  ]) {
+    try {
+      if (statSync(join(cand, "manifests")).isDirectory()) return cand;
+    } catch {
+      /* not this one */
+    }
+  }
+  return home;
 }
 
 /**

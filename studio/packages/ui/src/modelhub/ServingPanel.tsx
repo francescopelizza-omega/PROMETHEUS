@@ -134,7 +134,7 @@ function Row({
           gap: "var(--space-3, 6px)",
           color: "var(--text-secondary)",
           fontFamily: "var(--font-mono)",
-          fontSize: "0.72rem",
+          fontSize: "0.75rem",
           flexWrap: "wrap",
         }}
       >
@@ -151,7 +151,7 @@ function Row({
       </div>
 
       {status === "error" && p.lastError && (
-        <span style={{ color: "var(--danger)", fontSize: "0.72rem" }}>{inert(p.lastError)}</span>
+        <span style={{ color: "var(--danger)", fontSize: "0.75rem" }}>{inert(p.lastError)}</span>
       )}
 
       {/* §7 row actions (PROPS only) */}
@@ -247,7 +247,7 @@ export function ServingPanel({
           ))}
         </ul>
       )}
-      <p style={{ color: "var(--text-secondary)", fontSize: "0.72rem", margin: 0 }}>
+      <p style={{ color: "var(--text-secondary)", fontSize: "0.75rem", margin: 0 }}>
         “Use in IDE” repoints the IDE agent pane at the base-URL (key: local). Paid tools: localai
         audit ▸
       </p>

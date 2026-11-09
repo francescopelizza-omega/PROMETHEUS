@@ -31,6 +31,13 @@ const MUTATING = { destructiveHint: true, idempotentHint: true, openWorldHint: t
 const flag = (): FieldSpec => ({ type: "boolean", default: false });
 const optStr = (description?: string): FieldSpec => ({ type: "string", description });
 
+/** A tool/model id used as a positional: refused when it could be read as an option. */
+function toolId(v: unknown): string {
+  const id = s(v);
+  if (id.startsWith("-")) throw new Error(`invalid tool id ${JSON.stringify(id)}`);
+  return id;
+}
+
 export const STUDIO_TOOLS: ToolDef[] = [
   {
     name: "prometheus_models",
@@ -71,13 +78,18 @@ export const STUDIO_TOOLS: ToolDef[] = [
       ...globals(a),
       "models",
       s(a.action),
-      ...(a.tool ? [s(a.tool)] : []),
+      // The tool id goes RIGHT AFTER the action, before any option: the `models` parser has two
+      // optional positionals, and argparse before 3.13 cannot place one after options (a
+      // trailing `-- <tool>` exits 2 there; install.sh supports Python 3.9+). An id that
+      // starts with "-" is refused instead of `--`-guarded. Flags are the engine's HYPHENATED
+      // spellings — the underscore ones were rejected on every call.
+      ...(a.tool ? [toolId(a.tool)] : []),
       ...(a.path ? ["--path", s(a.path)] : []),
       ...(a.method ? ["--method", s(a.method)] : []),
-      ...(a.target_python ? ["--target_python", s(a.target_python)] : []),
-      ...(a.max_jobs != null ? ["--max_jobs", s(a.max_jobs)] : []),
+      ...(a.target_python ? ["--target-python", s(a.target_python)] : []),
+      ...(a.max_jobs != null ? ["--max-jobs", s(a.max_jobs)] : []),
       ...(a.cuda ? ["--cuda", s(a.cuda)] : []),
-      ...(a.fa_version ? ["--fa_version", s(a.fa_version)] : []),
+      ...(a.fa_version ? ["--fa-version", s(a.fa_version)] : []),
     ],
   },
   {

@@ -38,7 +38,7 @@ const headerBtnStyle = {
   border: "none",
   color: "var(--accent)",
   cursor: "pointer",
-  fontSize: "0.72rem",
+  fontSize: "0.75rem",
   padding: "0 2px",
 } as const;
 

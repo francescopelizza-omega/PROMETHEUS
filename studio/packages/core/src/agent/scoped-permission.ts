@@ -70,6 +70,8 @@ export function deriveSubject(ref: string, argv?: readonly string[]): string | n
      * shortcut they could not have meant to ask for.
      */
     if (argv.some((a) => a.includes("*"))) return null;
+    // A compound line (`a; b`, `a | b`, a redirect) is a script, not a command: never remembered.
+    if (argv.some((a) => a.includes("\u0000"))) return null;
     const cmd = argv.join(" ").trim();
     if (cmd === "") return null;
     const subject = `bash:${cmd}`;

@@ -41,9 +41,25 @@ export interface StdioTransportDeps {
 }
 
 const REQUEST_TIMEOUT_MS = 15_000;
+/**
+ * Per-method budgets. One 15 s cap for everything failed two common cases: a cold
+ * `npx -y some-server` routinely needs longer than that just to start (so connect failed), and a
+ * real tool (a build, a browser task, a migration) timed out while the server kept working — the
+ * model saw "timed out", retried, and the side effect happened twice.
+ */
+const METHOD_TIMEOUT_MS: Record<string, number> = {
+  initialize: 60_000,
+  "tools/list": 30_000,
+  "tools/call": 5 * 60_000,
+};
+/** How long a server gets to exit on SIGTERM before its group is SIGKILLed. */
+const CLOSE_GRACE_MS = 2_000;
 const PROTOCOL_VERSION = "2024-11-05";
 
-/** Env vars that can hijack what a child interpreter loads/executes (mirror of safe-env). */
+/**
+ * Env vars that can hijack what a child interpreter loads/executes (mirror of engine-bridge's
+ * safe-env, which this package cannot import without a cycle). Keep the two lists identical.
+ */
 const STRIP_EXACT = new Set([
   "LD_PRELOAD",
   "LD_LIBRARY_PATH",
@@ -53,19 +69,48 @@ const STRIP_EXACT = new Set([
   "PYTHONHOME",
   "PYTHONEXECUTABLE",
   "PYTHONUSERBASE",
+  "PYTHONBREAKPOINT",
+  "PYTHONCASEOK",
   "NODE_OPTIONS",
+  "NODE_REPL_EXTERNAL_MODULE",
   "BASH_ENV",
   "ENV",
 ]);
 
-/** A curated child env: the parent env minus hijack-class vars, plus explicit overrides. */
-function safeSpawnEnv(extra?: Record<string, string>): NodeJS.ProcessEnv {
+const isHijack = (k: string): boolean =>
+  STRIP_EXACT.has(k.toUpperCase()) || k.toUpperCase().startsWith("DYLD_");
+
+/** Credential-named variables (mirror of engine-bridge `isSecretEnvKey`). */
+const SECRET_NAME =
+  /(^|_)(API_?KEY|APIKEY|TOKEN|SECRET|PASSWORD|PASSWD|PASSPHRASE|CREDENTIALS?|PRIVATE_KEY|ACCESS_KEY|AUTH|SESSION_KEY|PAT)(_|$)/i;
+const SECRET_EXACT = new Set(["AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN", "DOCKER_AUTH_CONFIG"]);
+/** Agent sockets: they grant USE of a key without revealing it, and git-over-ssh needs them. */
+const NOT_SECRET = new Set(["SSH_AUTH_SOCK", "GPG_AGENT_INFO", "XAUTHORITY"]);
+const isSecret = (k: string): boolean =>
+  !NOT_SECRET.has(k.toUpperCase()) && (SECRET_EXACT.has(k.toUpperCase()) || SECRET_NAME.test(k));
+
+/**
+ * A server's env: the parent env minus hijack-class vars AND minus every inherited credential,
+ * plus the server's own configured `env` (hijack vars refused there too).
+ *
+ * A third-party MCP server used to inherit EVERY key in the user's shell — ANTHROPIC_API_KEY,
+ * GITHUB_TOKEN, AWS_SECRET_ACCESS_KEY — whatever it was for. It now gets only the secrets its
+ * config names explicitly, which is how a user hands a token to the one server that needs it.
+ * A config's `env` is not trusted to set LD_PRELOAD either: imported and marketplace configs
+ * are written by someone else.
+ */
+export function safeSpawnEnv(extra?: Record<string, string>): NodeJS.ProcessEnv {
   const out: NodeJS.ProcessEnv = {};
   for (const [k, v] of Object.entries(process.env)) {
-    if (v === undefined || STRIP_EXACT.has(k) || k.startsWith("DYLD_")) continue;
+    if (v === undefined || isHijack(k) || isSecret(k)) continue;
     out[k] = v;
   }
-  if (extra) for (const [k, v] of Object.entries(extra)) out[k] = v;
+  if (extra) {
+    for (const [k, v] of Object.entries(extra)) {
+      if (v === undefined || isHijack(k)) continue;
+      out[k] = v;
+    }
+  }
   return out;
 }
 
@@ -106,8 +151,11 @@ export class StdioMcpTransport implements McpClientTransport {
     const child = this.spawnFn(t.command, t.args, {
       shell: false,
       ...(t.cwd ? { cwd: t.cwd } : {}),
-      env: { ...safeSpawnEnv(), ...(t.env ?? {}) },
+      env: safeSpawnEnv(t.env),
       stdio: ["pipe", "pipe", "pipe"],
+      // its OWN process group, so close() can signal the whole tree: for `npx some-server` the
+      // direct child is the npx wrapper, and killing only it orphaned the real server
+      detached: process.platform !== "win32",
     });
     this.proc = child;
     /**
@@ -124,6 +172,7 @@ export class StdioMcpTransport implements McpClientTransport {
      * through a recycled pid.
      */
     this.untrack = trackChildProcess(child as unknown as ExitingChild, {
+      group: true,
       label: `mcp:${this.cfg.id}`,
       command: t.command,
     });
@@ -218,12 +267,31 @@ export class StdioMcpTransport implements McpClientTransport {
     this.untrack();
     this.untrack = () => {};
     if (this.proc) {
-      try {
-        this.proc.kill("SIGKILL"); // SIGKILL, not just close the pipe, so no orphan is left
-      } catch {
-        /* already dead */
-      }
+      const proc = this.proc;
       this.proc = null;
+      // SIGTERM the GROUP, then SIGKILL it after a grace period — never the bare pid only (that
+      // orphaned npx's real server), and never a pid that is not a real one (`kill(-1)` is the
+      // broadcast to every process this user owns).
+      const signal = (sig: NodeJS.Signals): void => {
+        const pid = proc.pid;
+        try {
+          if (typeof pid === "number" && Number.isInteger(pid) && pid > 1) process.kill(-pid, sig);
+          else proc.kill(sig);
+        } catch {
+          try {
+            proc.kill(sig);
+          } catch {
+            /* already dead */
+          }
+        }
+      };
+      if (this.exited === null) {
+        signal("SIGTERM");
+        const t = setTimeout(() => {
+          if (this.exited === null) signal("SIGKILL");
+        }, CLOSE_GRACE_MS);
+        t.unref?.();
+      }
     }
   }
 
@@ -306,9 +374,13 @@ export class StdioMcpTransport implements McpClientTransport {
         reject(new Error("MCP server is not connected"));
         return;
       }
+      const ms = METHOD_TIMEOUT_MS[method] ?? REQUEST_TIMEOUT_MS;
       const timer = setTimeout(() => {
-        if (this.pending.delete(id)) reject(new Error(`MCP ${method} timed out`));
-      }, REQUEST_TIMEOUT_MS);
+        if (!this.pending.delete(id)) return;
+        // tell the server to stop working on it, so a retry does not run beside the original
+        this.notify("notifications/cancelled", { requestId: id, reason: "timed out" });
+        reject(new Error(`MCP ${method} timed out after ${Math.round(ms / 1000)}s`));
+      }, ms);
       this.pending.set(id, { resolve, reject, timer });
       this.proc.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id, method, params })}\n`);
     });

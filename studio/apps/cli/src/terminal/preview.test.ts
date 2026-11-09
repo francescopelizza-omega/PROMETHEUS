@@ -127,3 +127,14 @@ test("renderArgv quotes only unsafe tokens (display only — never injection-saf
   // an empty token is quoted (never bare).
   assert.equal(renderArgv(["x", ""]), "x ''");
 });
+
+test("--runner reaches the engine argv (a local-model agent is wired to the chosen server)", async () => {
+  const { Commands } = await import("@prometheus/engine-bridge");
+  const opts = toChatPreviewOpts({ model: "qwen3:8b", runner: "lmstudio" });
+  assert.equal(opts.runner, "lmstudio");
+  const argv = Commands.chatPreview("aider", opts);
+  assert.deepEqual(argv.slice(argv.indexOf("--runner"), argv.indexOf("--runner") + 2), [
+    "--runner",
+    "lmstudio",
+  ]);
+});

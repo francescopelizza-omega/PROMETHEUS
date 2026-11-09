@@ -1530,11 +1530,18 @@ export const COMMAND_SPECS: readonly CommandSpec[] = Object.freeze([
           name: "cli",
           kind: "flag",
           type: "enum",
-          choices: ["claude", "codex", "gemini", "cursor", "opencode"],
-          description: "paid CLI for a terminal chat",
+          // the engine's CHAT_CLIS keys: hermes/aider/goose run on a LOCAL model (--model +
+          // --runner), wired per run through env/argv only
+          choices: ["claude", "codex", "gemini", "cursor", "opencode", "hermes", "aider", "goose"],
+          description: "agent CLI for a terminal chat",
         },
         { name: "model", kind: "flag", type: "string" },
-        { name: "runner", kind: "flag", type: "enum", choices: ["ollama", "lmstudio"] },
+        {
+          name: "runner",
+          kind: "flag",
+          type: "enum",
+          choices: ["llamacpp", "lmstudio", "ollama", "vllm"],
+        },
         { name: "system-prompt", kind: "flag", type: "string", description: "system-prompt file" },
         { name: "replace-system", kind: "flag", type: "boolean" },
         {

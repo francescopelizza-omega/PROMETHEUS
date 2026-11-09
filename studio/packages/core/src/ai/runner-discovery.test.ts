@@ -311,3 +311,26 @@ test("nextStepHint falls back to an install offer, then to plain honesty", () =>
     "No local model server found on this machine.",
   );
 });
+
+test("a llama-server on its v0.7+ default port 9931 is found, and reported where it really is", async () => {
+  const rows = await discoverRunners({
+    env: NO_ENV,
+    fetchFn: fetchFor({ "http://localhost:9931/v1/models": { data: [{ id: "qwen3-8b" }] } }),
+  });
+  const ll = rows.find((r) => r.id === "llamacpp");
+  assert.equal(ll?.state, "serving");
+  assert.equal(ll?.port, 9931);
+  assert.equal(ll?.baseUrl, "http://localhost:9931/v1");
+  assert.deepEqual(ll?.models, ["qwen3-8b"]);
+});
+
+test("the primary port still wins when both answer", async () => {
+  const rows = await discoverRunners({
+    env: NO_ENV,
+    fetchFn: fetchFor({
+      "http://localhost:8080/v1/models": { data: [{ id: "a" }] },
+      "http://localhost:9931/v1/models": { data: [{ id: "b" }] },
+    }),
+  });
+  assert.equal(rows.find((r) => r.id === "llamacpp")?.port, 8080);
+});

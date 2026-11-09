@@ -76,6 +76,7 @@ import {
   validateCatalogToggle,
   validateCatalogUninstall,
 } from "./catalog-validate.js";
+import { consentToForce } from "./force-consent.js";
 
 /** Coerce an unknown caught value to a short error string. */
 // `errString` was a LOCAL copy here, one of twenty across main/*.ts, and every copy returned
@@ -397,7 +398,8 @@ export function registerCatalogIpcHandlers(wiring: CatalogIpcWiring = {}): () =>
   // ── install (GATED by the engine's nemesis; force needs the typed-confirm) ─
   ipcMain.handle(
     IPC.catalogInstall,
-    async (evt: unknown, arg: unknown): Promise<CatalogInstallResult> => {
+    async (evt: unknown, rawArg: unknown): Promise<CatalogInstallResult> => {
+      const arg = await consentToForce(evt, IPC.catalogInstall, rawArg); // native consent for any force flag
       const v = validateCatalogInstall(arg);
       if (!v.ok) return { ok: false, error: v.error.message };
       const a = v.value;
@@ -476,7 +478,8 @@ export function registerCatalogIpcHandlers(wiring: CatalogIpcWiring = {}): () =>
   // ── bundle (the one-run official set; force needs the typed-confirm) ───────
   ipcMain.handle(
     IPC.catalogBundle,
-    async (evt: unknown, arg: unknown): Promise<CatalogInstallResult> => {
+    async (evt: unknown, rawArg: unknown): Promise<CatalogInstallResult> => {
+      const arg = await consentToForce(evt, IPC.catalogBundle, rawArg); // native consent for any force flag
       const v = validateCatalogBundle(arg);
       if (!v.ok) return { ok: false, error: v.error.message };
       const a = v.value;

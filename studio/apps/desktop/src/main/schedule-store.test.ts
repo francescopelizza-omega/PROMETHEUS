@@ -141,3 +141,24 @@ test("removeScheduledTask: removing an id that is already gone is a no-op", asyn
     assert.deepEqual(reloaded, { [task.id]: task });
   });
 });
+
+test("a corrupt store is never overwritten, and concurrent upserts lose nothing", async () => {
+  const { writeFile, readFile } = await import("node:fs/promises");
+  const dir = await mkdtemp(join(tmpdir(), "prom-schedule-store-corrupt-"));
+  try {
+    const path = join(dir, "schedules.json");
+    await writeFile(path, '{ "keep": { "id": "keep", ', "utf8");
+    await assert.rejects(upsertTask(path, makeTask({ id: "new" })));
+    assert.equal(
+      await readFile(path, "utf8"),
+      '{ "keep": { "id": "keep", ',
+      "user's file untouched",
+    );
+
+    const fresh = join(dir, "fresh.json");
+    await Promise.all(["a", "b", "c", "d"].map((id) => upsertTask(fresh, makeTask({ id }))));
+    assert.deepEqual(Object.keys(await loadSchedules(fresh)).sort(), ["a", "b", "c", "d"]);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});

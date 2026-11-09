@@ -100,7 +100,7 @@ export const Checkbox = forwardRef<HTMLInputElement, CheckboxProps>(function Che
               alignItems: "center",
               justifyContent: "center",
               color: v("brand-fg"),
-              fontSize: "11px",
+              fontSize: "12px",
               lineHeight: 1,
               pointerEvents: "none",
             }}

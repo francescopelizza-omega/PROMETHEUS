@@ -9,6 +9,13 @@
   Python's, so library validation must be relaxed. network.client is needed because
   the engine downloads models/repos and `nemesis update` pulls feeds. This is a real
   attack-surface tradeoff, documented in the security review with file 03.
+
+  com.apple.security.cs.allow-dyld-environment-variables was REMOVED (security review
+  S10). It let DYLD_INSERT_LIBRARIES / DYLD_LIBRARY_PATH inject a library into the signed,
+  hardened app from the environment — and nothing needs it: the bundled CPython is
+  relocatable (@rpath / @executable_path), and every child env Prometheus builds strips
+  DYLD_* anyway (engine-bridge safe-env). Do not restore it to make a dylib load; fix the
+  dylib's install name instead.
 -->
 <plist version="1.0">
   <dict>
@@ -17,8 +24,6 @@
     <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
     <true/>
     <key>com.apple.security.cs.disable-library-validation</key>
-    <true/>
-    <key>com.apple.security.cs.allow-dyld-environment-variables</key>
     <true/>
     <key>com.apple.security.network.client</key>
     <true/>

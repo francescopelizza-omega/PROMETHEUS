@@ -129,6 +129,30 @@ test("detectBackends: a live ollama with a model → a ready local endpoint", as
   assert.match(backendSummary(b), /local · qwen2.5-coder/);
 });
 
+test("detectBackends: the DEFAULT server (/server) is adopted when it serves a model", async () => {
+  const serving = {
+    "http://localhost:11434/v1": ["qwen2.5-coder:7b"],
+    "http://localhost:1234/v1": ["prometheus/qwen3-8b"],
+  };
+  const lm = await detect({
+    client: fakeClient([]),
+    fetchFn: fakeFetch(serving),
+    preferredRunner: "lmstudio",
+  });
+  assert.equal(lm.localRunner?.name, "lmstudio");
+  assert.equal(lm.localEndpoint?.model, "prometheus/qwen3-8b");
+  // the default serving NOTHING does not strand the session: the first that serves is used
+  const idle = await detect({
+    client: fakeClient([]),
+    fetchFn: fakeFetch(serving),
+    preferredRunner: "llamacpp",
+  });
+  assert.equal(idle.localRunner?.name, "ollama");
+  // and without a preference Ollama, first in registry order, wins as before
+  const none = await detect({ client: fakeClient([]), fetchFn: fakeFetch(serving) });
+  assert.equal(none.localRunner?.name, "ollama");
+});
+
 test("detectBackends: no runner, paid CLIs present → no endpoint, summary points at /setup", async () => {
   const b = await detect({
     client: fakeClient(["claude", "gemini"]),
@@ -732,9 +756,44 @@ test("runSetup: local branch pulls a model via ollama and adopts the endpoint", 
       return 0;
     },
   });
-  assert.deepEqual(pulls, [["ollama", ["pull", "qwen2.5-coder:3b"]]]);
+  assert.deepEqual(pulls, [["ollama", ["pull", "--", "qwen2.5-coder:3b"]]]);
   assert.equal(r.endpoint?.model, "qwen2.5-coder:3b");
   assert.match(out.join("\n"), /pulled/);
+});
+
+test("runSetup local: a model nemesis does not admit is NEVER adopted", async () => {
+  for (const [gateEnv, typed, adopted] of [
+    [{ ok: false, error: "nemesis BLOCKED qwen2.5-coder:3b" }, "", false],
+    [
+      { ok: false, needs_confirm: true, error: "nemesis WARN", scans: [{ reasons: ["TMPL x"] }] },
+      "",
+      false,
+    ],
+    [{ ok: false, needs_confirm: true, error: "nemesis WARN" }, "qwen2.5-coder:3b", true],
+  ] as const) {
+    const out: string[] = [];
+    const gates: string[][] = [];
+    const client = {
+      runPrometheus: (async (argv: string[]) => {
+        if (argv[0] === "scan") return { agents: [] };
+        if (argv.includes("ollama-gate")) {
+          gates.push(argv);
+          return argv.includes("--accept-warn") ? { ok: true } : gateEnv;
+        }
+        return { ok: true };
+      }) as EngineClient["runPrometheus"],
+    } as unknown as EngineClient;
+    const r = await setup({
+      client,
+      write: (s) => out.push(s),
+      fetchFn: fakeFetch({ "http://localhost:11434/v1": [] }),
+      ask: scriptedAsk(["1", "1", "y", typed]),
+      runChild: async () => 0,
+    });
+    assert.equal(r.endpoint !== undefined, adopted, JSON.stringify(gateEnv));
+    assert.ok(gates.length >= 1, "the gate always runs after the pull");
+    if (!adopted) assert.match(out.join("\n"), /not adopted/);
+  }
 });
 
 test("runSetup: paid branch lists installed CLIs (no endpoint adopted)", async () => {
@@ -809,28 +868,33 @@ test("runSetup local: declining the Ollama-install prompt still writes visible f
   assert.match(out.join("\n"), /skipped/i);
 });
 
-test("runSetup local: askPath repoints open_models, then pulls + adopts", async () => {
+test("runSetup local: the model goes to Ollama's own store — no folder question — then pulls + adopts", async () => {
   const home = mkdtempSync(join(tmpdir(), "prom-setup-"));
   const pulls: Array<[string, string[]]> = [];
-  const chosen = join(home, "big-disk", "models");
+  const out: string[] = [];
   const r = await setup({
     client: fakeClient([]),
-    write: () => {},
+    write: (s) => out.push(s),
     fetchFn: fakeFetch({ "http://localhost:11434/v1": [] }), // ollama up, no model → picker
-    ask: scriptedAsk(["1", "1", "n", "y"]), // local → model#1 → don't keep folder → confirm pull
-    askPath: async () => chosen,
+    ask: scriptedAsk(["1", "1", "y"]), // local → model#1 → confirm pull
+    askPath: async () => {
+      throw new Error("/setup must not ask for a models folder any more");
+    },
     runChild: async (cmd, args) => {
       pulls.push([cmd, args]);
       return 0;
     },
     home,
   });
-  assert.deepEqual(pulls, [["ollama", ["pull", "qwen2.5-coder:3b"]]]);
+  assert.deepEqual(pulls, [["ollama", ["pull", "--", "qwen2.5-coder:3b"]]]);
   assert.equal(r.endpoint?.model, "qwen2.5-coder:3b");
-  assert.equal(resolveCategory("open_models", home), chosen); // override persisted
+  const text = out.join("\n");
+  assert.match(text, /Ollama's own models folder/);
+  assert.doesNotMatch(text, /Keep this folder/);
+  assert.equal(process.env.PROMETHEUS_MODELS_DIR?.includes("open_models") ?? false, false);
 });
 
-test("runPathsWizard: lists categories and repoints one via askPath", async () => {
+test("runPathsWizard: lists where models live (read only) and repoints a download category", async () => {
   const home = mkdtempSync(join(tmpdir(), "prom-paths-"));
   ensureHomeTree(home);
   const out: string[] = [];
@@ -838,12 +902,15 @@ test("runPathsWizard: lists categories and repoints one via askPath", async () =
   await runPathsWizard({
     client: fakeClient([]),
     write: (s) => out.push(s),
-    ask: scriptedAsk(["1"]), // change category #1 (open_models)
+    ask: scriptedAsk(["1"]), // change category #1 (videos)
     askPath: async () => newDir,
     home,
   });
-  assert.equal(resolveCategory("open_models", home), newDir);
-  assert.match(out.join("\n"), /Open LLM models/);
+  assert.equal(resolveCategory("videos", home), newDir);
+  const text = out.join("\n");
+  assert.match(text, /Models/);
+  assert.match(text, /\.ollama\/models|OLLAMA_MODELS/);
+  assert.doesNotMatch(text, /Open LLM models/);
 });
 
 /* ── one runner at a time, and LM Studio's real listing (2026-10-22) ─────────── */

@@ -22,6 +22,7 @@ import {
 } from "@prometheus/ui";
 import type { ReactElement } from "react";
 
+import { modKey } from "../platform.js";
 import { authLevelUiLabel, authLevelVar, useAuthorisationStore } from "../stores/authorisation.js";
 import type { HealthPill } from "../stores/health-derive.js";
 
@@ -163,7 +164,7 @@ export function ShellStatusBar({
   right.push({ id: "encoding", label: encoding, title: "File encoding" });
   right.push({
     id: "cmdk",
-    label: "⌘K",
+    label: `${modKey()}K`,
     title: "Command palette",
     tone: "--text-secondary",
     onClick: onCommandPalette,

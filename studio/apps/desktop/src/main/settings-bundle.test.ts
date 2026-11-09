@@ -108,3 +108,32 @@ test("validateSettingsBundle round-trips a good bundle; rejects a malformed one"
       ),
   );
 });
+
+test("connector ARGS lose their secrets too, and a connector with no args does not crash", async () => {
+  const { redactArgs } = await import("./settings-bundle.js");
+  assert.deepEqual(
+    redactArgs([
+      "mcp-remote",
+      "https://h/mcp",
+      "--header",
+      "Authorization: Bearer abc",
+      "-e",
+      "GITHUB_TOKEN=ghp_xxxxxxxxxxxxxxxx",
+      "--api-key=sk-123456789012",
+      "--root",
+      "/work",
+    ]),
+    [
+      "mcp-remote",
+      "https://h/mcp",
+      "--header",
+      "<redacted>",
+      "-e",
+      "GITHUB_TOKEN=<redacted>",
+      "--api-key=<redacted>",
+      "--root",
+      "/work",
+    ],
+  );
+  assert.deepEqual(redactArgs(undefined), []);
+});

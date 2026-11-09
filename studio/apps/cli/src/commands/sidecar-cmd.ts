@@ -270,6 +270,8 @@ export async function runMutation(
     deps: SidecarDeps;
     /** does this sidecar use the `--confirm` plan→run toggle? envmgr/metadata yes; modelhub/repo no. */
     confirm?: boolean;
+    /** a long-running verb (a model download) overrides the runner's 2-minute default. */
+    timeoutMs?: number;
     renderOk?: (env: SidecarEnvelope) => CommandOutcome;
   },
 ): Promise<CommandOutcome> {
@@ -280,7 +282,11 @@ export async function runMutation(
   if (!wantsExecute(ctx)) {
     return previewOutcome(command, script, useConfirm ? [...base, "--confirm"] : [...base], note);
   }
-  const env = await deps.runSidecar(script, execArgv(ctx, base, useConfirm));
+  const env = await deps.runSidecar(
+    script,
+    execArgv(ctx, base, useConfirm),
+    ...(opts.timeoutMs ? [{ timeoutMs: opts.timeoutMs }] : []),
+  );
   if (env.ok !== false && renderOk && !ctx.json) return renderOk(env);
   return renderMutation(ctx, command, env);
 }

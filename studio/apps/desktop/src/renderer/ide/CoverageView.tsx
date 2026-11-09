@@ -75,7 +75,7 @@ export function CoverageView({ root }: { root: string }): ReactElement {
     border: "1px solid var(--border-subtle)",
     borderRadius: 4,
     padding: "2px 4px",
-    fontSize: "0.74rem",
+    fontSize: "0.75rem",
   } as const;
 
   return (
@@ -124,17 +124,17 @@ export function CoverageView({ root }: { root: string }): ReactElement {
       </div>
 
       {err && (
-        <p role="alert" style={{ margin: "0 0 6px", color: "var(--danger)", fontSize: "0.72rem" }}>
+        <p role="alert" style={{ margin: "0 0 6px", color: "var(--danger)", fontSize: "0.75rem" }}>
           {err}
         </p>
       )}
 
       {!report ? (
-        <p style={{ color: "var(--text-secondary)", fontSize: "0.72rem" }}>
+        <p style={{ color: "var(--text-secondary)", fontSize: "0.75rem" }}>
           Run coverage or import a report to see per-file coverage.
         </p>
       ) : (
-        <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "0.72rem" }}>
+        <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "0.75rem" }}>
           <thead>
             <tr style={{ color: "var(--text-secondary)", textAlign: "left" }}>
               <th style={{ padding: "2px 4px" }}>file</th>

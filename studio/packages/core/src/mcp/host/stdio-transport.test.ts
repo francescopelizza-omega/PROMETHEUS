@@ -19,7 +19,7 @@ import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { StdioMcpTransport } from "./stdio-transport.js";
+import { StdioMcpTransport, safeSpawnEnv } from "./stdio-transport.js";
 import type { McpServerConfig } from "./types.js";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -124,5 +124,28 @@ test("a NOTIFICATION is never answered — answering one is a protocol error", a
     );
   } finally {
     await t.close();
+  }
+});
+
+test("an MCP server inherits no credentials and cannot set a loader hijack through its config", () => {
+  const saved = { a: process.env.ANTHROPIC_API_KEY, p: process.env.PROM_PLAIN_VAR };
+  try {
+    process.env.ANTHROPIC_API_KEY = "s3cret";
+    process.env.PROM_PLAIN_VAR = "ok";
+    const env = safeSpawnEnv({
+      GITHUB_TOKEN: "given",
+      LD_PRELOAD: "/tmp/evil.so",
+      DYLD_INSERT_LIBRARIES: "x",
+    });
+    assert.equal(env.ANTHROPIC_API_KEY, undefined, "an inherited key never reaches the server");
+    assert.equal(env.GITHUB_TOKEN, "given", "a token the config names explicitly does");
+    assert.equal(env.LD_PRELOAD, undefined);
+    assert.equal(env.DYLD_INSERT_LIBRARIES, undefined);
+    assert.equal(env.PROM_PLAIN_VAR, "ok");
+  } finally {
+    if (saved.a === undefined) Reflect.deleteProperty(process.env, "ANTHROPIC_API_KEY");
+    else process.env.ANTHROPIC_API_KEY = saved.a;
+    if (saved.p === undefined) Reflect.deleteProperty(process.env, "PROM_PLAIN_VAR");
+    else process.env.PROM_PLAIN_VAR = saved.p;
   }
 });

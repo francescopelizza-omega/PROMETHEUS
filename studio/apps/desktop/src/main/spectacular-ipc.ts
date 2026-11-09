@@ -181,18 +181,25 @@ export function registerSpectacularIpcHandlers(): () => void {
   ipcMain.handle(
     IPC.spectacularModelsConfig,
     async (_evt, arg: unknown): Promise<SpectacularModelsConfig> => {
-      const rawRoot = (arg as { setRoot?: string } | undefined)?.setRoot;
-      // setRoot becomes `--set-root <value>` — a leading-dash value would inject a flag.
-      if (rawRoot !== undefined && cleanPathToken(rawRoot) === undefined) {
-        return { ok: false, error: "invalid models root path" };
+      // Choosing a "models folder" is retired: it made the engine point Ollama at a Prometheus
+      // folder, so every pull became a duplicate of what the user already had. Models live in
+      // each runtime's own store; this only REPORTS where those are.
+      if ((arg as { setRoot?: string } | undefined)?.setRoot !== undefined) {
+        return {
+          ok: false,
+          error:
+            "Prometheus keeps no model folder of its own — each model lives in the store of the app that runs it",
+        };
       }
-      const setRoot = rawRoot;
       try {
-        const e = await engine.modelsConfig(setRoot);
+        const e = await engine.modelsConfig();
         const out: SpectacularModelsConfig = {
           ok: e.ok !== false,
-          modelsRoot: e.models_root,
-          exists: e.exists,
+          stores: (e.stores ?? []).map((s) => ({
+            runtime: s.runtime,
+            store: s.store,
+            setBy: s.set_by,
+          })),
         };
         if (typeof e.error === "string") out.error = e.error;
         return out;
@@ -254,7 +261,9 @@ export function registerSpectacularIpcHandlers(): () => void {
        * chooser. `setWorkingSetRoots` then lets the renderer pick which granted directory is
        * the current workspace, and refuses anything outside them.
        */
-      if (path) grantWorkingSetRoot(path);
+      // …and ONLY what they chose. After an own-repo redirect `path` is the HOME directory, which
+      // the human never picked — granting it made all of $HOME the agent's write scope, persisted.
+      if (path && !guard?.redirected) grantWorkingSetRoot(path);
       return {
         ok: true,
         path,

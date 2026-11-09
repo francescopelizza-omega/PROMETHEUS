@@ -56,11 +56,12 @@ class TestConfig(unittest.TestCase):
     def test_default_models_root(self):
         self.assertEqual(p.get_models_root(), p.DEFAULT_MODELS_ROOT)
 
-    def test_set_models_root_persists_and_creates(self):
-        target = str(self._dir / "models-here")
-        root = p.set_models_root(target)
-        self.assertTrue(root.exists())
-        self.assertEqual(p.get_models_root(), root)
+    def test_set_models_root_is_retired_and_creates_nothing(self):
+        target = self._dir / "models-here"
+        with self.assertRaises(RuntimeError):
+            p.set_models_root(str(target))
+        self.assertFalse(target.exists())
+        self.assertNotIn("models_root", p.load_config())
 
     def test_set_models_root_rejects_empty(self):
         with self.assertRaises(RuntimeError):
@@ -179,6 +180,18 @@ class TestTerminalCmd(unittest.TestCase):
         argv, _, _ = p.build_terminal_cmd("codex", bypass=True, prompt="x")
         self.assertLess(argv.index("never"), argv.index("exec"))  # approval set before subcmd
 
+    def test_gemini_value_flag_sits_right_before_the_prompt(self):
+        # `gemini -p` takes the prompt as its VALUE: emitted early it swallowed `-m` and the
+        # model/--yolo flags were mis-parsed (2026-11-03 audit).
+        argv, _, _ = p.build_terminal_cmd("gemini", model="gemini-2.5-pro", bypass=True, prompt="hi")
+        self.assertEqual(argv[-2:], ["-p", "hi"])
+        self.assertIn("-m", argv)
+        self.assertLess(argv.index("-m"), argv.index("-p"))
+        # claude's -p is a boolean (--print): it stays up front, the prompt after `--`
+        cargv, _, _ = p.build_terminal_cmd("claude", prompt="hi")
+        self.assertEqual(cargv[1], "-p")
+        self.assertEqual(cargv[-2:], ["--", "hi"])
+
     def test_gemini_sysprompt_via_env(self):
         _, env, _ = p.build_terminal_cmd("gemini", system_prompt_file="/tmp/sp.md", prompt="x")
         self.assertEqual(env.get("GEMINI_SYSTEM_MD"), os.path.abspath("/tmp/sp.md"))
@@ -284,43 +297,40 @@ class TestSpectacularHardening(unittest.TestCase):
 
     # ---- --dry-run must not mutate ------------------------------------------
     def test_dry_run_models_config_writes_nothing(self):
-        """`--dry-run models config --set-root DIR` used to CREATE DIR and PERSIST models_root,
-        then report ok — a dry run that silently repointed the user's whole model library.
-        Validation still runs (a dry run that "succeeds" on a path it would reject is useless);
-        only the two mutations are withheld."""
+        """`--dry-run models config --set-root DIR` creates nothing and persists nothing — now
+        that the setting is retired, not even the removal of a stale value."""
         target = self._dir / "would-be-models-root"
+        p.save_config({"models_root": "/old/place"})
         p.JSON_OUT = True
         p.DRY_RUN = True
         rc, d = _run_main_json(["--dry-run", "models", "config", "--set-root", str(target)])
-        self.assertEqual(rc, 0)
-        self.assertTrue(d["ok"])
-        self.assertTrue(d.get("dry_run"), msg="a machine caller must be told nothing was persisted")
-        self.assertFalse(d["exists"], msg="`exists` must be honest — the folder was not created")
-        self.assertFalse(target.exists(), "--dry-run created the folder")
-        self.assertFalse(p.PROM_CONFIG.exists(), "--dry-run persisted the config")
-
-    def test_dry_run_still_validates_the_path(self):
-        # a dry run reports the SAME refusal a real run would — a file where a folder must be.
-        clash = self._dir / "not-a-folder"
-        clash.write_text("x")
-        p.JSON_OUT = True
-        p.DRY_RUN = True
-        rc, d = _run_main_json(["--dry-run", "models", "config", "--set-root", str(clash)])
         self.assertEqual(rc, 2)
         self.assertFalse(d["ok"])
-        self.assertIn("not a directory", d["error"])
+        self.assertFalse(target.exists(), "--dry-run created the folder")
+        self.assertEqual(p.load_config().get("models_root"), "/old/place", "--dry-run changed the config")
 
-    def test_real_run_still_persists(self):
-        # the guard must not disarm the real path.
+    def test_models_config_reports_each_runtimes_store(self):
+        p.JSON_OUT = True
+        p.DRY_RUN = False
+        rc, d = _run_main_json(["models", "config"])
+        self.assertEqual(rc, 0)
+        self.assertTrue(d["ok"])
+        runtimes = [s["runtime"].split(" ")[0] for s in d["stores"]]
+        self.assertEqual(runtimes, ["ollama", "lmstudio", "huggingface", "llama.cpp"])
+
+    def test_real_run_removes_a_stale_models_root(self):
+        # a stale models_root is REMOVED (it only ever created duplicate model stores), and no
+        # folder is created for it
         target = self._dir / "real-models-root"
+        p.save_config({"models_root": str(target), "keep": 1})
         p.JSON_OUT = True
         p.DRY_RUN = False
         rc, d = _run_main_json(["models", "config", "--set-root", str(target)])
-        self.assertEqual(rc, 0)
-        self.assertTrue(d["exists"])
-        self.assertNotIn("dry_run", d)
-        self.assertTrue(target.is_dir())
-        self.assertTrue(p.PROM_CONFIG.exists())
+        self.assertEqual(rc, 2)
+        self.assertEqual(d.get("removed_models_root"), str(target))
+        self.assertFalse(target.exists())
+        self.assertNotIn("models_root", p.load_config())
+        self.assertEqual(p.load_config().get("keep"), 1)
 
     def test_dry_run_never_persists_a_trust_APPROVAL(self):
         """`install_repo_spec` calls `enforce_gate` under --dry-run on purpose, to show the
@@ -546,13 +556,15 @@ class TestSpectacularHardening(unittest.TestCase):
         self.assertEqual(rc, 2)
         self.assertFalse(d["ok"])
 
-    def test_models_config_file_path_rejected(self):
+    def test_models_config_set_root_is_retired(self):
+        # Prometheus keeps no model folder of its own: --set-root is refused, whatever the path
         f = self._dir / "afile"
         f.write_text("x")
         rc, d = _run_main_json(["models", "config", "--set-root", str(f)])
         self.assertEqual(rc, 2)
         self.assertFalse(d["ok"])
-        self.assertIn("not a directory", d["error"])
+        self.assertIn("no longer keeps models", d["error"])
+        self.assertEqual(d.get("retired"), "models_root")
 
     def test_models_pull_json_no_ollama_is_graceful(self):
         rc, d = _run_main_json(["models", "pull", "qwen3:8b"])

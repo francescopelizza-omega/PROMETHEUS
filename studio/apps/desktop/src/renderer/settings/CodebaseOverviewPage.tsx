@@ -148,7 +148,7 @@ const hintStyle: CSSProperties = {
 };
 
 const sectionTitle: CSSProperties = {
-  fontSize: "0.72rem",
+  fontSize: "0.75rem",
   fontWeight: 500,
   textTransform: "uppercase",
   letterSpacing: "0.02em",

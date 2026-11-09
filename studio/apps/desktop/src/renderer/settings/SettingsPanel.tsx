@@ -105,7 +105,10 @@ const EDITOR_BINDINGS: readonly KeyBindingView[] = [
  *  (shown as read-only reference rows for JetBrains/VS Code/Vim parity, APP-057). */
 const KEYMAP_PRESETS: readonly { id: string; label: string }[] = [
   { id: "default", label: "Prometheus Default" },
-  ...BUILTIN_KEYMAPS.map((k) => ({ id: k.id, label: k.label })),
+  // The JetBrains / VS Code / Vim presets do NOT change live key handling (the matcher always
+  // runs the Prometheus default + your overrides); they list that editor's bindings for
+  // reference. Said in the label, so picking one never looks like it remapped the editor.
+  ...BUILTIN_KEYMAPS.map((k) => ({ id: k.id, label: `${k.label} (reference only)` })),
 ];
 
 /** id → title for a CORE-preset command (its own catalog), falling back to the id. */
@@ -257,10 +260,25 @@ export function SettingsPanel({ workspaceRoot }: SettingsPanelProps = {}): React
   };
 
   return (
-    <div style={{ display: "flex", gap: "var(--space-6, 12px)", minHeight: 0 }}>
+    <div
+      style={{
+        display: "flex",
+        gap: "var(--space-6, 12px)",
+        flex: 1,
+        minHeight: 0,
+        overflow: "hidden",
+      }}
+    >
       <nav
         aria-label="settings categories"
-        style={{ display: "flex", flexDirection: "column", gap: 2, width: 140, flexShrink: 0 }}
+        style={{
+          display: "flex",
+          flexDirection: "column",
+          gap: 2,
+          width: 140,
+          flexShrink: 0,
+          overflowY: "auto",
+        }}
       >
         {NAV.map((n) => (
           <button
@@ -282,7 +300,7 @@ export function SettingsPanel({ workspaceRoot }: SettingsPanelProps = {}): React
           Run setup wizard…
         </button>
       </nav>
-      <div style={{ flex: 1, minWidth: 0 }}>
+      <div style={{ flex: 1, minWidth: 0, minHeight: 0, overflowY: "auto" }}>
         {page === "appearance" && <AppearancePage {...(workspaceRoot ? { workspaceRoot } : {})} />}
         {page === "fonts" && <FontsPage />}
         {page === "format" && <FormatPage />}

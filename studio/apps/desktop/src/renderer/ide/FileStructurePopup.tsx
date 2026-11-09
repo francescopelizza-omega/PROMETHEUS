@@ -120,7 +120,7 @@ export function FileStructurePopup({
         alignItems: "flex-start",
         justifyContent: "center",
         paddingTop: "12vh",
-        background: "var(--overlay, rgba(0,0,0,0.35))",
+        background: "color-mix(in srgb, var(--bg-app) 60%, transparent)", // the shared scrim recipe (no --overlay token exists)
         zIndex: Z.dropdown,
       }}
     >
@@ -206,7 +206,7 @@ export function FileStructurePopup({
                   <span
                     style={{
                       color: "var(--text-secondary)",
-                      fontSize: "0.72rem",
+                      fontSize: "0.75rem",
                       overflow: "hidden",
                       textOverflow: "ellipsis",
                       minWidth: 0, // flex/grid floor — without it the ellipsis is unreachable

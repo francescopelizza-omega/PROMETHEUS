@@ -35,7 +35,13 @@ import { authLevelMeta } from "../authorization.js";
 import type { ParsedCommand, Stage } from "./parse.js";
 import { allStages, formatCommand } from "./parse.js";
 import { classifyPrivileged } from "./privileged.js";
-import { type ExecTier, basename, forbiddenReason, programSpec } from "./registry.js";
+import {
+  type ExecTier,
+  basename,
+  forbiddenReason,
+  isUntrustedPath,
+  programSpec,
+} from "./registry.js";
 
 /** Ascending risk — the same order `CATEGORY_ORDER` uses in authorization.ts. */
 const RANK: Readonly<Record<ExecTier, number>> = Object.freeze({
@@ -108,6 +114,17 @@ function classifyStage(stage: Stage): StageClass | { error: string; program: str
   const forbidden = forbiddenReason(program);
   if (forbidden) return { error: `\`${program}\` is not permitted: ${forbidden}`, program };
 
+  // `./cat` or `/tmp/x/git` borrows a known name but is whatever file sits there — possibly
+  // one the agent wrote a turn ago. Tiering it as `cat` (read, auto-approved at A1) would turn
+  // "write a file" into "run arbitrary code". A path outside the system bin dirs → unknown.
+  if (isUntrustedPath(stage.argv[0] ?? "")) {
+    return {
+      program,
+      tier: "destructive",
+      reason: `\`${stage.argv[0]}\` is a program named by path outside the system bin directories — classified at the highest tier so a human decides`,
+    };
+  }
+
   const spec = programSpec(program);
   if (!spec) {
     return {
@@ -147,6 +164,14 @@ function classifyStage(stage: Stage): StageClass | { error: string; program: str
     return { program, tier: spec.tier, reason: `\`${program}\` with no subcommand` };
   }
   const tier = subTier ?? spec.tier;
+  const esc = sub ? spec.escalate?.[sub] : undefined;
+  if (esc) {
+    const after = rest.slice(rest.indexOf(sub as string) + 1);
+    const raised = esc(after);
+    if (raised && RANK[raised.tier] > RANK[tier]) {
+      return { program, tier: raised.tier, reason: raised.why };
+    }
+  }
   const reason =
     subTier !== undefined
       ? `\`${program} ${matchedKey}\` is ${subTier}`

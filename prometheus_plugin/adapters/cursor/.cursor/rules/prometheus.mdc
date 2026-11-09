@@ -1,0 +1,21 @@
+---
+description: Use the Prometheus MCP tools to scan/install/audit AI-agent plugins
+globs:
+alwaysApply: false
+---
+
+# Prometheus plugin manager
+
+When the user wants to detect installed AI agent CLIs, browse/install/audit/remove
+agent plugins or skills, or check the security verdict of a plugin, use the
+`prometheus_*` MCP tools (from the `prometheus` server).
+
+- Detect agents: `prometheus_scan`, `prometheus_superscan`
+- Browse: `prometheus_list`, `prometheus_info`, `prometheus_where`, `prometheus_matrix`
+- Audit before installing: `prometheus_audit`
+- Install/remove: `prometheus_install` / `prometheus_uninstall` — ALWAYS call with
+  `dryRun: true` first and show the user the gate verdict + events before a real run.
+- Toggle: `prometheus_enable` / `prometheus_disable`
+
+Never set `yes: true` on an install unless the user has explicitly approved the
+findings. A `blocked` install event means the nemesis gate refused it.

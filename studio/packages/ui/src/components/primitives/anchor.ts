@@ -47,7 +47,20 @@ export interface AnchoredLayerBox {
   left: number;
   top: number;
   width: number;
+  /**
+   * Set for a layer that opens ABOVE its trigger: the distance from the viewport's bottom edge
+   * to the layer's bottom edge. Anchoring by `top` used the DECLARED worst-case height, so a
+   * two-row list floated 100+ px above its trigger. Use `anchoredEdge(box)` to style it.
+   */
+  bottom?: number;
 }
+
+/** `{top}` or `{bottom}` for a `position: fixed` layer — whichever edge hugs the trigger. */
+export function anchoredEdge(b: AnchoredLayerBox): { top: number } | { bottom: number } {
+  return b.bottom !== undefined ? { bottom: b.bottom } : { top: b.top };
+}
+
+const EDGE_PAD = 8;
 
 /**
  * Track `anchorRef`'s viewport rect while `open`, and return clamped `fixed` coordinates.
@@ -73,9 +86,21 @@ export function useAnchoredLayer(
         : width === "anchor-min"
           ? Math.min(Math.max(r.width, 260), maxWidth ?? 420)
           : width;
-    const rawTop = placement === "above" ? r.top - height - gap : r.bottom + gap;
+    const vh = window.innerHeight;
+    // An "above" layer that does not fit above (a trigger near the top of the window — Home's
+    // ask bar) FLIPS below instead of being clamped to y=8, where it sat over the TopBar,
+    // detached from the input it belongs to.
+    const fitsAbove = r.top - height - gap >= EDGE_PAD;
+    const roomBelow = vh - r.bottom - gap;
+    const above = placement === "above" && (fitsAbove || roomBelow < r.top - gap);
+    const rawTop = above ? r.top - height - gap : r.bottom + gap;
     const { x, y } = clampToViewport(r.left, rawTop, w, height);
-    setBox({ left: x, top: y, width: Math.round(w) });
+    setBox({
+      left: x,
+      top: y,
+      width: Math.round(w),
+      ...(above ? { bottom: Math.max(EDGE_PAD, Math.round(vh - r.top + gap)) } : {}),
+    });
   }, [anchorRef, width, maxWidth, height, gap, placement]);
 
   useEffect(() => {

@@ -373,7 +373,19 @@ export function parseLmsEstimate(out: string): number | null {
   const n = Number(m[1]);
   const unit = (m[2] as string).toLowerCase();
   const mult =
-    unit === "gib" ? 2 ** 30 : unit === "gb" ? 1e9 : unit === "mib" ? 2 ** 20 : unit === "mb" ? 1e6 : unit === "kib" ? 1024 : unit === "kb" ? 1e3 : 1;
+    unit === "gib"
+      ? 2 ** 30
+      : unit === "gb"
+        ? 1e9
+        : unit === "mib"
+          ? 2 ** 20
+          : unit === "mb"
+            ? 1e6
+            : unit === "kib"
+              ? 1024
+              : unit === "kb"
+                ? 1e3
+                : 1;
   return Number.isFinite(n) && n > 0 ? Math.round(n * mult) : null;
 }
 
@@ -393,8 +405,7 @@ export async function lmsEstimateBytes(
 ): Promise<number | null> {
   const bin = opts.lms === undefined ? lmsBinary() : opts.lms;
   if (!bin || model.startsWith("-")) return null;
-  const run =
-    opts.run ?? ((b: string, a: string[]) => execCapture(b, a, { timeoutMs: 30_000 }));
+  const run = opts.run ?? ((b: string, a: string[]) => execCapture(b, a, { timeoutMs: 30_000 }));
   const r = await run(bin, ["load", model, "-c", String(contextLength), "--estimate-only", "-y"]);
   return r.code === 0 ? parseLmsEstimate(r.stdout) : null;
 }

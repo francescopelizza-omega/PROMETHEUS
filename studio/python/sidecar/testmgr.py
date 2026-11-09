@@ -221,6 +221,41 @@ def _kill_group(proc: "subprocess.Popen[str]") -> None:
         pass  # already gone
 
 
+def _arm_group_reaper(proc: "subprocess.Popen[str]") -> None:
+    """Kill ``proc``'s group when this process is told to stop or loses its parent."""
+    if os.name != "posix":  # pragma: no cover - POSIX only
+        return
+    if not isinstance(proc, subprocess.Popen):
+        return  # a test double — there is no real process group to reap
+    import atexit
+
+    def _reap(*_a: Any) -> None:
+        if proc.poll() is None:
+            _kill_group(proc)
+
+    def _on_signal(signum: int, _frame: Any) -> None:
+        _reap()
+        os._exit(128 + signum)
+
+    for sig in (signal.SIGTERM, signal.SIGHUP):
+        try:
+            signal.signal(sig, _on_signal)
+        except (ValueError, OSError):  # not the main thread / not supported
+            pass
+    atexit.register(_reap)
+    parent = os.getppid()
+
+    def _watch_parent() -> None:
+        # SIGKILL cannot be caught; a re-parented process (our parent gone) is the tell
+        while proc.poll() is None:
+            if os.getppid() != parent:
+                _reap()
+                return
+            time.sleep(1.0)
+
+    threading.Thread(target=_watch_parent, daemon=True).start()
+
+
 def _emit_event(obj: Dict[str, Any]) -> None:
     """One JSON-line per test event, flushed per line — stdout is a pipe, so without
     the flush every event would arrive at once at process exit (not live)."""
@@ -414,6 +449,12 @@ def _run_ids(command: str, argv: Sequence[str], ids: List[str], flag: str) -> in
         proc = _spawn(run_argv, root)
     except OSError as exc:
         return fail(command, f"failed to launch {run_argv[0]}: {exc}")
+
+    # The run lives in its OWN session (so a timeout can reap the whole tree) — which also means
+    # nothing reaps it when THIS process is stopped: the host's Stop / window-close / timeout
+    # SIGKILLs this python, and pytest plus everything it started kept running, orphaned. So:
+    # SIGTERM/SIGHUP take the group down with us, and a watchdog notices if our parent died.
+    _arm_group_reaper(proc)
 
     # hard timeout: a watchdog thread group-kills the run on expiry, which closes the
     # stdout pipe and unblocks the read loop below — the caller never hangs.

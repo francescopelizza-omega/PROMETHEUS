@@ -82,7 +82,37 @@ export function controlSurface(): CSSProperties {
 export const HOVER_TRANSITION =
   "background var(--motion-hover, 120ms) ease-out, border-color var(--motion-hover, 120ms) ease-out, box-shadow var(--motion-hover, 120ms) ease-out";
 
-/** Attach a tokenized focus ring on focus, clear it on blur (shared by primitives). */
+/**
+ * True when this focus came from the KEYBOARD (`:focus-visible`). A button that is CLICKED
+ * receives focus too, and painting the ring then left a cyan halo on every button the mouse
+ * touched until something else took focus — the ring is a keyboard affordance (08 §7).
+ * Falls back to "show it" where the selector is unsupported: an extra ring beats a missing one.
+ */
+export function isKeyboardFocus(el: HTMLElement): boolean {
+  try {
+    return el.matches(":focus-visible");
+  } catch {
+    return true;
+  }
+}
+
+/** The ring for CLICKABLE controls (buttons, triggers): keyboard focus only. */
+export function focusVisibleRingHandlers(): {
+  onFocus: (e: { currentTarget: HTMLElement }) => void;
+  onBlur: (e: { currentTarget: HTMLElement }) => void;
+} {
+  return {
+    onFocus: (e) => {
+      if (isKeyboardFocus(e.currentTarget)) e.currentTarget.style.boxShadow = FOCUS_RING;
+    },
+    onBlur: (e) => {
+      e.currentTarget.style.boxShadow = "none";
+    },
+  };
+}
+
+/** Attach a tokenized focus ring on focus, clear it on blur — for TEXT fields, which show
+ *  focus however they got it (you are about to type into it). */
 export function focusRingHandlers(): {
   onFocus: (e: { currentTarget: HTMLElement }) => void;
   onBlur: (e: { currentTarget: HTMLElement }) => void;

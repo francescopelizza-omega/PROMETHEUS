@@ -150,12 +150,13 @@ test("the tool schema survives the JSON-Schema → FieldSpec crossing", async ()
   const tool = s.tools()[0];
   assert.equal(tool?.schema.q?.type, "string");
   assert.equal(tool?.schema.q?.required, true);
-  // Annotations are carried VERBATIM — inventing a readOnlyHint would undo the fail-safe
-  // in `autoApprovable`.
-  assert.equal(tool?.annotations.readOnlyHint, true);
+  // A server's own `readOnlyHint` is only a CLAIM until the user vouches for that tool
+  // (`autoApprove`): unvouched, the ladder sees it as open-world (`ladderAnnotations`, core).
+  assert.equal(tool?.annotations.readOnlyHint, false);
+  assert.equal(tool?.annotations.openWorldHint, true);
 });
 
-test("a server that declared NO annotations gets none invented for it", async () => {
+test("a server that declared NO annotations is treated as open-world and destructive", async () => {
   const bare = server("x", {
     capabilities: {
       tools: [{ name: "run", inputSchema: { type: "object" } }],
@@ -164,7 +165,13 @@ test("a server that declared NO annotations gets none invented for it", async ()
     },
   });
   const s = await openMcpSession({ manager: fakeManager([bare]) });
-  assert.deepEqual(s.tools()[0]?.annotations, {});
+  // Nothing is invented in the PERMISSIVE direction: no annotations means open-world and
+  // destructive, never the `config` fallback that A3 auto-approved.
+  assert.deepEqual(s.tools()[0]?.annotations, {
+    readOnlyHint: false,
+    openWorldHint: true,
+    destructiveHint: true,
+  });
 });
 
 /* ── calling one ────────────────────────────────────────────────────────────*/

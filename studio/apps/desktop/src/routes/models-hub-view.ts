@@ -167,8 +167,14 @@ export function parsePullProgress(
  * unvalidated, so the registry a tag resolves to is whatever the tag says. "The registry it
  * names" is true for every tag; "ollama's signed registry" is true only for some.
  */
+/*
+ * UPDATE 2026-11-03: the scan now exists. `v_pull` runs `model_acquire.gate_ollama_model` over
+ * the blobs Ollama stored, AFTER the download and BEFORE the model is used: a block removes it,
+ * a warning is not used until the user types the model's name. The note says exactly that —
+ * and still does not claim a manifest scan before the download, which does not happen.
+ */
 export const PULL_SCAN_NOTE =
-  "not scanned by nemesis — a pulled tag has no local staging directory, so the registry it names is the trust boundary · the local daemon serves the model when the pull finishes";
+  "scanned by nemesis after the download, before it is used — removed on a block; a warning waits for your confirmation · the local daemon serves the model when the pull finishes";
 
 /* ── the Endpoints island ────────────────────────────────────────────────────*/
 
@@ -319,3 +325,24 @@ export function installedRows(models: readonly InstalledSource[]): InstalledRow[
     served: m.served === true,
   }));
 }
+
+/**
+ * The DEFAULT LOCAL SERVER — the app's twin of the terminal's `/server` (same key in the shared
+ * settings.json, so both surfaces agree; also in Settings → AI & Agents). Ollama unless the user
+ * picks another. It decides which running server is used when several serve models, which one
+ * is started first, and the runtime a guided local pick is prepared for.
+ *
+ * The ids mirror `@prometheus/core`'s `DEFAULT_SERVER_IDS` (the renderer does not import core);
+ * `models-hub-view.test.ts` pins that they match.
+ */
+export const DEFAULT_SERVER_OPTIONS: readonly { id: string; label: string; hint: string }[] = [
+  { id: "ollama", label: "Ollama (default)", hint: "registry pulls, scanned by nemesis · :11434" },
+  { id: "lmstudio", label: "LM Studio", hint: "gated downloads linked in, no copy · :1234" },
+  {
+    id: "llamacpp",
+    label: "llama.cpp",
+    hint: "llama-server on the admitted GGUF, offline · :8080",
+  },
+  { id: "mlx", label: "MLX-LM", hint: "Apple Silicon, admitted MLX build, offline · :8090" },
+  { id: "vllm", label: "vLLM", hint: "GPU server, adopted when running · :8000" },
+];

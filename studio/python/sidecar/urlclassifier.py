@@ -56,7 +56,9 @@ _SIGNALS: List[Tuple[float, str, str]] = [
      r"\b(do\s+not|don'?t|never)\b[^\n]{0,30}\b(tell|inform|notify|warn|mention)\b[^\n]{0,20}"
      r"\b(the\s+)?(user|human|operator)\b"),
     (0.5, "markdown-exfil",
-     r"!\[[^\]]*\]\(https?://[^)]*[?&=][^)]*\)"),     # image URL with a data param
+     # bounded: `[^)]*[?&=][^)]*` was quadratic on `![](http://` + a long `====…` run with no
+     # closing paren — attacker-controlled page text could stall the classifier
+     r"!\[[^\]]{0,200}\]\(https?://[^)\s]{0,2000}?[?&=][^)\s]{0,2000}\)"),
     (0.4, "fenced-instruction", r"\bBEGIN\b[^\n]{0,30}\b(SYSTEM|INSTRUCTIONS?|PROMPT)\b"),
     (0.35, "tool-invoke", r"<\s*(tool_call|function_call|invoke)\b|\bcall\s+the\s+\w+\s+tool\b"),
 ]

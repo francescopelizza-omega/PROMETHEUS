@@ -440,6 +440,7 @@ export {
 export {
   DEFAULT_EXTERNAL_TOOLS,
   EXTERNAL_TOOL_CHOICES,
+  externalToolDefaultsFrom,
   HOST_TOOLS,
   type ExternalToolDefaults,
   type HostTool,

@@ -62,7 +62,7 @@ const PANE: CSSProperties = {
   margin: 0,
   padding: 6,
   fontFamily: "var(--font-mono, monospace)",
-  fontSize: "0.7rem",
+  fontSize: "0.75rem",
   whiteSpace: "pre",
   background: "var(--bg-inset)",
   border: "1px solid var(--border-subtle)",
@@ -156,7 +156,7 @@ export function MergeView({ root, file, onResolved, onClose }: MergeViewProps): 
       <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
         <strong style={{ fontSize: "0.8rem", color: "var(--text-primary)" }}>Merge · {file}</strong>
         <span style={{ flex: 1 }} />
-        <span style={{ fontSize: "0.72rem", color: "var(--text-secondary)" }}>
+        <span style={{ fontSize: "0.75rem", color: "var(--text-secondary)" }}>
           {unresolved > 0 ? `${unresolved} unresolved` : "all resolved"}
         </span>
         <Button
@@ -172,7 +172,7 @@ export function MergeView({ root, file, onResolved, onClose }: MergeViewProps): 
       </div>
 
       {error && (
-        <p style={{ color: "var(--danger)", fontSize: "0.74rem", margin: "0 0 6px" }}>{error}</p>
+        <p style={{ color: "var(--danger)", fontSize: "0.75rem", margin: "0 0 6px" }}>{error}</p>
       )}
 
       {phase === "loading" && (
@@ -220,7 +220,7 @@ export function MergeView({ root, file, onResolved, onClose }: MergeViewProps): 
                       margin: 0,
                       padding: "2px 6px",
                       fontFamily: "var(--font-mono, monospace)",
-                      fontSize: "0.72rem",
+                      fontSize: "0.75rem",
                       whiteSpace: "pre-wrap",
                       color: "var(--text-secondary)",
                     }}
@@ -244,7 +244,7 @@ export function MergeView({ root, file, onResolved, onClose }: MergeViewProps): 
                   }}
                 >
                   <div style={{ display: "flex", alignItems: "center", gap: 4, marginBottom: 2 }}>
-                    <span style={{ fontSize: "0.68rem", color: "var(--text-secondary)" }}>
+                    <span style={{ fontSize: "0.75rem", color: "var(--text-secondary)" }}>
                       conflict {idx + 1}
                       {active !== "unresolved" ? ` · ${active}` : ""}
                     </span>
@@ -288,7 +288,7 @@ export function MergeView({ root, file, onResolved, onClose }: MergeViewProps): 
                           : "1px solid var(--border-subtle)",
                       borderRadius: "var(--radius-sm, 3px)",
                       fontFamily: "var(--font-mono, monospace)",
-                      fontSize: "0.72rem",
+                      fontSize: "0.75rem",
                     }}
                   />
                 </div>
@@ -302,7 +302,7 @@ export function MergeView({ root, file, onResolved, onClose }: MergeViewProps): 
 }
 
 const LABEL: CSSProperties = {
-  fontSize: "0.66rem",
+  fontSize: "0.75rem",
   textTransform: "uppercase",
   letterSpacing: "0.04em",
   color: "var(--text-secondary)",

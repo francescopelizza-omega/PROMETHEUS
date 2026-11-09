@@ -141,6 +141,20 @@ export function registerMetadataIpcHandlers(wiring: MetadataIpcWiring = {}): () 
     if (typeof path !== "string" || !path || !isAbsolute(path)) {
       return { ok: false, error: "an absolute path is required" };
     }
+    // "Open" on something that RUNS (an app, a .command script, an installer, an executable)
+    // is "execute". The renderer does not get to decide that alone — a file the agent wrote a
+    // minute ago is one click from running — so main asks the human, natively, first.
+    if (await runsWhenOpened(path)) {
+      const r = await dialog.showMessageBox({
+        type: "warning",
+        buttons: ["Cancel", "Run it"],
+        defaultId: 0,
+        cancelId: 0,
+        message: "Run this program?",
+        detail: `${path}\n\nOpening it starts it. Only continue if you know where it came from.`,
+      });
+      if (r.response !== 1) return { ok: false, error: "declined" };
+    }
     try {
       const err = await shell.openPath(path); // "" on success, else an error string
       return err ? { ok: false, error: err } : { ok: true };
@@ -187,4 +201,19 @@ export function registerMetadataIpcHandlers(wiring: MetadataIpcWiring = {}): () 
       ipcMain.removeHandler(channel);
     }
   };
+}
+
+/** Extensions macOS / Windows / Linux EXECUTE when "opened" rather than display. */
+const RUNS_EXT =
+  /\.(app|command|terminal|tool|sh|bash|zsh|csh|pkg|mpkg|dmg|scpt|scptd|applescript|workflow|action|prefpane|webloc|inetloc|fileloc|jar|exe|bat|cmd|com|msi|ps1|vbs|lnk|desktop|appimage|run|bin)$/i;
+
+/** True when opening `path` would START something (by extension or the executable bit). */
+export async function runsWhenOpened(path: string): Promise<boolean> {
+  if (RUNS_EXT.test(path.replace(/\/+$/, ""))) return true;
+  try {
+    const st = await stat(path);
+    return st.isFile() && (st.mode & 0o111) !== 0;
+  } catch {
+    return false;
+  }
 }

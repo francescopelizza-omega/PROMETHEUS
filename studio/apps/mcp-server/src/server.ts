@@ -22,7 +22,9 @@ import { pathToFileURL } from "node:url";
  * `EXPOSED_TOOLS` = the READ-ONLY subset of `mcpServer.TOOLS` (the 14 ported prometheus.py
  * verbs + the 5 studio action tools @prometheus/core declares). Concretely: prometheus_scan,
  * _superscan, _list, _info, _where, _status, _audit, _matrix, _skills_list, _vault_status,
- * _localai, _mcp_discover. Every tool this server does NOT list here — prometheus_install,
+ * _doctor, _harden, _describe, _tutorial, _methods, _disk_space (read views only), _localai.
+ * (`prometheus_mcp_discover` was removed from core; see tools.studio.ts.) Every tool
+ * this server does NOT list here — prometheus_install,
  * _uninstall, _enable, _disable, _models, _apps, _worldsim, and the host-local write_file /
  * propose_edit / web_fetch tools the interactive agent loop also exposes — is DELIBERATELY
  * absent from the catalog. Nothing is silently downgraded to read-only; the tool is simply

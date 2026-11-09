@@ -246,3 +246,13 @@ test("parity: every verb-slash name is a registry verb id (no invented verbs)", 
     assert.ok(getCommandSpec(id), `${id} must be a CommandSpec id`);
   }
 });
+
+test("a pane slash with no pane projector runs the verb that shows the same view", async () => {
+  // Neither host injects renderPane; `/app` (singular) is the one pane name the host
+  // registry does not own, and it used to print only "(app pane)".
+  const { ctx, verbCalls } = makeCtx();
+  const { renderPane: _noProjector, ...hostWithoutPanes } = ctx;
+  const r = await execSlash("app", "list", hostWithoutPanes);
+  assert.equal(r.kind, "verb");
+  assert.deepEqual(verbCalls.at(-1), ["apps", "list"]);
+});

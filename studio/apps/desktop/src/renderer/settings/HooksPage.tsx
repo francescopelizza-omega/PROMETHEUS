@@ -104,7 +104,8 @@ export function HooksPage({ workspaceRoot }: HooksPageProps): ReactElement {
 
   const errors = validateHookDraft(draft);
 
-  const persist = async (scope: HookScope, rows: HookSpec[]): Promise<void> => {
+  /** true when the write landed — callers keep the user's draft otherwise */
+  const persist = async (scope: HookScope, rows: HookSpec[]): Promise<boolean> => {
     setPending(true);
     try {
       const res = await window.prometheus?.settings?.set(
@@ -113,11 +114,16 @@ export function HooksPage({ workspaceRoot }: HooksPageProps): ReactElement {
         SCOPE_WRITE[scope],
         workspaceRoot,
       );
-      if (res && !res.ok) setError(res.error ?? "save failed");
-      else {
-        setError(undefined);
-        await reload();
+      if (res && !res.ok) {
+        setError(res.error ?? "save failed");
+        return false;
       }
+      setError(undefined);
+      await reload();
+      return true;
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+      return false;
     } finally {
       setPending(false);
     }
@@ -133,8 +139,8 @@ export function HooksPage({ workspaceRoot }: HooksPageProps): ReactElement {
       spec,
       editing && editing.scope === scope ? editing.index : undefined,
     );
-    await persist(scope, next);
-    resetForm();
+    // the draft is cleared only when it was saved — a refused write used to throw it away
+    if (await persist(scope, next)) resetForm();
   };
 
   const editAt = (scope: HookScope, index: number, spec: HookSpec): void => {
@@ -144,8 +150,8 @@ export function HooksPage({ workspaceRoot }: HooksPageProps): ReactElement {
 
   const removeAt = async (scope: HookScope, index: number): Promise<void> => {
     const rows = scope === "user" ? globalRows : workspaceRows;
-    await persist(scope, removeHook(rows, index));
-    if (editing?.scope === scope && editing.index === index) resetForm();
+    const ok = await persist(scope, removeHook(rows, index));
+    if (ok && editing?.scope === scope && editing.index === index) resetForm();
   };
 
   /** Drop the Workspace file's `hooks` override entirely, so Global hooks apply again here. */
@@ -164,10 +170,14 @@ export function HooksPage({ workspaceRoot }: HooksPageProps): ReactElement {
     }
   };
 
-  if (error) {
+  // Only a page with NOTHING to show is replaced by its error. A failed save used to take over
+  // the whole page for good — the list and form never came back, and nothing cleared `error`.
+  if (error && !nodes) {
     return (
       <Panel title="Lifecycle Hooks" elevation="e1">
-        <div style={{ color: "var(--danger)", padding: "var(--space-4, 8px)" }}>{error}</div>
+        <div role="alert" style={{ color: "var(--danger)", padding: "var(--space-4, 8px)" }}>
+          {error}
+        </div>
       </Panel>
     );
   }
@@ -193,6 +203,11 @@ export function HooksPage({ workspaceRoot }: HooksPageProps): ReactElement {
           gap: "var(--space-4, 8px)",
         }}
       >
+        {error && (
+          <div role="alert" style={{ color: "var(--danger)", fontSize: 12.5 }}>
+            {error}
+          </div>
+        )}
         <p style={hintStyle}>
           A hook is a shell command bound to <code>PreToolUse</code>, <code>PostToolUse</code>, or{" "}
           <code>SessionStart</code>. <strong>Arrays replace, they don't merge</strong>: if the
@@ -314,7 +329,7 @@ export function HooksPage({ workspaceRoot }: HooksPageProps): ReactElement {
             {errors.length > 0 && (
               <ul
                 aria-label="validation errors"
-                style={{ margin: 0, paddingLeft: "var(--space-5, 10px)", color: "var(--danger)" }}
+                style={{ margin: 0, paddingLeft: "var(--space-4, 8px)", color: "var(--danger)" }}
               >
                 {errors.map((e) => (
                   <li key={e} style={{ fontSize: "0.75rem" }}>
@@ -379,7 +394,7 @@ function HookScopeList({
                 <code style={{ fontFamily: "var(--font-mono)", fontSize: "0.78rem" }}>
                   {spec.command}
                 </code>
-                <div style={{ color: "var(--text-secondary)", fontSize: "0.68rem" }}>
+                <div style={{ color: "var(--text-secondary)", fontSize: "0.75rem" }}>
                   matches: {matcherLabel(spec)}
                 </div>
               </span>
@@ -420,7 +435,7 @@ function Field({ label: l, children }: { label: string; children: ReactElement }
 }
 
 const fieldLabelStyle: CSSProperties = {
-  fontSize: "0.72rem",
+  fontSize: "0.75rem",
   color: "var(--text-secondary)",
   fontFamily: "var(--font-ui)",
 };
@@ -448,7 +463,7 @@ const rowStyle: CSSProperties = {
 
 const eventBadge: CSSProperties = {
   fontFamily: "var(--font-mono)",
-  fontSize: "0.62rem",
+  fontSize: "0.75rem",
   textTransform: "uppercase",
   padding: "0 var(--space-1, 2px)",
   borderRadius: "var(--radius-sm, 4px)",
@@ -459,7 +474,7 @@ const eventBadge: CSSProperties = {
 
 const hintStyle: CSSProperties = {
   margin: 0,
-  fontSize: "0.72rem",
+  fontSize: "0.75rem",
   color: "var(--text-secondary)",
   lineHeight: 1.5,
 };
@@ -475,7 +490,7 @@ const linkBtn: CSSProperties = {
   border: "none",
   color: "var(--accent)",
   cursor: "pointer",
-  fontSize: "0.72rem",
+  fontSize: "0.75rem",
   fontFamily: "var(--font-ui)",
   padding: "0 var(--space-1, 2px)",
   flexShrink: 0,
@@ -483,7 +498,8 @@ const linkBtn: CSSProperties = {
 
 const primaryBtn: CSSProperties = {
   background: "var(--accent)",
-  color: "var(--bg-app)",
+  // the token MADE for text on an accent fill — `--bg-app` was 3.4:1 on the light scheme
+  color: "var(--on-accent)",
   border: "none",
   borderRadius: "var(--radius-sm, 4px)",
   padding: "var(--space-2, 4px) var(--space-4, 8px)",

@@ -125,6 +125,7 @@ import subprocess  # noqa: E402
 import tempfile  # noqa: E402
 
 sys.path.insert(0, str(HERE))
+import _test_stores  # noqa: E402,F401 — every model store is a temp dir
 import envmgr  # noqa: E402
 
 
@@ -175,6 +176,18 @@ class GateSpineTests(unittest.TestCase):
             return real(cmd, *a, **k)
 
         return stub
+
+    def test_url_vcs_and_path_specs_are_refused_before_pip_runs(self) -> None:
+        for spec in ("pkg @ https://x.example/y.whl", "git+https://x.example/r.git", "./local",
+                     "/abs/dir", "https://x.example/p.tar.gz"):
+            installs: list = []
+            with mock_run(self._stub_download(_BENIGN, installs)):
+                obj = _capture(envmgr._gate_install, "pkg.install", self.ENV, [spec],
+                               confirmed=True, force=False)
+            self.assertFalse(obj["ok"], msg=spec)
+            self.assertTrue(obj.get("invalid"), msg=spec)
+            self.assertNotIn("blocked", obj, msg="a malformed spec is not a security verdict")
+            self.assertEqual(installs, [], msg=spec)
 
     def test_benign_artifact_installs_from_staging(self) -> None:
         installs: list = []

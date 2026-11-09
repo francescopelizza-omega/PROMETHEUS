@@ -39,11 +39,12 @@
  * Every handler wraps its store call in try/catch → {ok:false, error: String(e)}, mirroring
  * schedule-ipc.ts's `errString` helper exactly.
  */
-import { readFileSync, statSync } from "node:fs";
+import { lstatSync, readFileSync } from "node:fs";
 import { basename, isAbsolute } from "node:path";
 import { describeEngineFailure } from "@prometheus/engine-bridge";
 
 import { ipcMain } from "electron";
+import { assertNotSensitivePath } from "./ide/path-guard.js";
 
 import {
   IPC,
@@ -169,10 +170,22 @@ export function registerPersonaIpcHandlers(workspaceRoot: () => string | undefin
     if (!isAbsolute(path) || isRemoteLookingPath(path)) {
       return { ok: false, error: "path must be an absolute local file path" };
     }
+    // The path is the RENDERER's, and import + export round-trips the file's text back to it:
+    // `importPath ~/.ssh/id_ed25519` then `export id_ed25519` returned the private key. A persona
+    // is a markdown file with agent frontmatter; nothing else is read, and never a credential.
+    if (!/\.md$/i.test(path)) {
+      return { ok: false, error: "a persona is a .md file" };
+    }
+    let guarded: string;
+    try {
+      guarded = assertNotSensitivePath(path);
+    } catch (e) {
+      return { ok: false, error: errString(e) };
+    }
     try {
       let size: number;
       try {
-        const stat = statSync(path);
+        const stat = lstatSync(guarded);
         if (!stat.isFile()) {
           return { ok: false, error: `"${path}" is not a file` };
         }
@@ -188,11 +201,14 @@ export function registerPersonaIpcHandlers(workspaceRoot: () => string | undefin
       }
       let markdown: string;
       try {
-        markdown = readFileSync(path, "utf8");
+        markdown = readFileSync(guarded, "utf8");
       } catch (e) {
         return { ok: false, error: errString(e) };
       }
-      const suggestedName = basename(path, ".md");
+      if (!/^\uFEFF?---\r?\n/.test(markdown)) {
+        return { ok: false, error: "not a persona: the file has no `---` frontmatter block" };
+      }
+      const suggestedName = basename(guarded).replace(/\.md$/i, "");
       return toImportResult(importPersonaMarkdown(suggestedName, markdown));
     } catch (e) {
       return { ok: false, error: errString(e) };

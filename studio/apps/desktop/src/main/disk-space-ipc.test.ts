@@ -31,6 +31,9 @@ mock.module("electron", {
       on: (ch: string, fn: Handler) => listeners.set(ch, fn),
       removeAllListeners: (ch: string) => listeners.delete(ch),
     },
+    // never reached: the tests inject `confirmDestructive`
+    dialog: { showMessageBox: async () => ({ response: 0 }) },
+    BrowserWindow: { fromWebContents: () => null },
   },
 });
 const { registerDiskSpaceIpcHandlers } = await import("./disk-space-ipc.js");
@@ -57,10 +60,21 @@ const client = {
   },
   deletePlan: async (ps: string[], a?: { mode?: string }) => {
     calls.push(`plan ${ps} ${a?.mode}`);
-    return { ...ok, planned: true, items: [] };
+    const risky = ps.some((x) => x.includes("risky"));
+    return {
+      ...ok,
+      planned: true,
+      items: ps.map((path) => ({ path, risk: risky ? "HIGH" : "LOW" })),
+      requiresPhrase: risky,
+    };
   },
-  deleteConfirm: async (ps: string[], a: { mode?: string; ackHighRisk?: boolean }) => {
-    calls.push(`confirm ${ps} ${a.mode} ${a.ackHighRisk === true}`);
+  deleteConfirm: async (
+    ps: string[],
+    a: { mode?: string; ackHighRisk?: boolean; canonical?: boolean },
+  ) => {
+    calls.push(
+      `confirm ${ps} ${a.mode} ${a.ackHighRisk === true}${a.canonical ? " canonical" : ""}`,
+    );
     return { ...ok, executed: true, results: [] };
   },
   cleanupPlan: async () => ({ ...ok, findings: [] }),
@@ -169,10 +183,17 @@ const openRootWindow = (h: { onKey(input: KeyInput): void; onClosed(): void }) =
     },
   };
 };
+/** what the (stubbed) native main-process dialog answers; every prompt is recorded */
+let nativeAnswer = true;
+const nativePrompts: string[] = [];
 const dispose = registerDiskSpaceIpcHandlers({
   client,
   gate: () => gate,
   rootWindow: openRootWindow,
+  confirmDestructive: async (_sender, message) => {
+    nativePrompts.push(message);
+    return nativeAnswer;
+  },
 });
 const invoke = (ch: string, arg?: unknown) => (handlers.get(ch) as Handler)(undefined, arg);
 
@@ -347,14 +368,17 @@ test("paths must be absolute or ~-relative; anything else never reaches the side
   assert.deepEqual(calls, ["map ~ 5000"]);
 });
 
-test("a delete PLAN never confirms; a delete needs confirm:true, and acknowledges high risk only when told", async () => {
+test("a delete PLAN never confirms; a delete needs confirm:true and is re-planned in main", async () => {
   calls.length = 0;
+  nativePrompts.length = 0;
+  nativeAnswer = true;
   await invoke(IPC.diskDeletePlan, { paths: ["/tmp/a"], mode: "permanent" });
   const refused = (await invoke(IPC.diskDelete, { paths: ["/tmp/a"], mode: "trash" })) as {
     ok: boolean;
   };
   assert.equal(refused.ok, false);
   await invoke(IPC.diskDelete, { paths: ["/tmp/a"], mode: "trash", confirm: true });
+  // a renderer-supplied ackHighRisk is NOT forwarded when the plan does not need it
   await invoke(IPC.diskDelete, {
     paths: ["/tmp/a"],
     mode: "permanent",
@@ -363,9 +387,49 @@ test("a delete PLAN never confirms; a delete needs confirm:true, and acknowledge
   });
   assert.deepEqual(calls, [
     "plan /tmp/a permanent",
-    "confirm /tmp/a trash false",
-    "confirm /tmp/a permanent true",
+    "plan /tmp/a trash",
+    "confirm /tmp/a trash false canonical",
+    "plan /tmp/a permanent",
+    "confirm /tmp/a permanent false canonical",
   ]);
+  // a low-risk trash move needs no native dialog; a permanent delete always does
+  assert.equal(nativePrompts.length, 1);
+  assert.match(nativePrompts[0] ?? "", /Permanently delete 1 item/);
+});
+
+test("a permanent or high-risk delete needs the MAIN-process dialog, whatever the renderer sends", async () => {
+  calls.length = 0;
+  nativePrompts.length = 0;
+  nativeAnswer = false;
+  const r = (await invoke(IPC.diskDelete, {
+    paths: ["/tmp/risky"],
+    mode: "trash",
+    confirm: true,
+    ackHighRisk: true,
+  })) as { ok: boolean; error?: string };
+  assert.equal(r.ok, false);
+  assert.match(r.error ?? "", /cancelled/);
+  assert.deepEqual(calls, ["plan /tmp/risky trash"]); // never confirmed
+  nativeAnswer = true;
+  calls.length = 0;
+  nativePrompts.length = 0;
+  // the dialog alone is not the typed phrase: a high-risk plan still needs ackHighRisk — and
+  // the native dialog is not even shown for a delete that would be refused
+  const noAck = (await invoke(IPC.diskDelete, {
+    paths: ["/tmp/risky"],
+    mode: "trash",
+    confirm: true,
+  })) as { ok: boolean };
+  assert.equal(noAck.ok, false);
+  assert.equal(nativePrompts.length, 0);
+  calls.length = 0;
+  await invoke(IPC.diskDelete, {
+    paths: ["/tmp/risky"],
+    mode: "trash",
+    confirm: true,
+    ackHighRisk: true,
+  });
+  assert.deepEqual(calls, ["plan /tmp/risky trash", "confirm /tmp/risky trash true canonical"]);
 });
 
 test("an unknown delete mode is refused", async () => {

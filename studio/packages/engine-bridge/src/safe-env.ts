@@ -97,3 +97,44 @@ export function safeChildEnv(extra?: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   }
   return out;
 }
+
+/**
+ * Is this env var name a CREDENTIAL — an API key, token, password or secret?
+ *
+ * The engine/sidecar legitimately needs these (HF_TOKEN for a gated download), so
+ * `safeChildEnv` keeps them. A child the AGENT starts does not: `run_command("printenv")` is a
+ * tier-`read` command, auto-approved at A1, and every key in the parent environment
+ * (ANTHROPIC_API_KEY, GITHUB_TOKEN, AWS_SECRET_ACCESS_KEY…) went straight into the transcript —
+ * and from there to whichever model provider the session uses.
+ */
+const SECRET_NAME =
+  /(^|_)(API_?KEY|APIKEY|TOKEN|SECRET|PASSWORD|PASSWD|PASSPHRASE|CREDENTIALS?|PRIVATE_KEY|ACCESS_KEY|AUTH|SESSION_KEY|PAT)(_|$)/i;
+const SECRET_EXACT = new Set(["AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN", "DOCKER_AUTH_CONFIG"]);
+/** Agent sockets: they grant USE of a key without revealing it, and git-over-ssh needs them. */
+const NOT_SECRET = new Set(["SSH_AUTH_SOCK", "GPG_AGENT_INFO", "XAUTHORITY"]);
+
+export function isSecretEnvKey(name: string): boolean {
+  const k = name.toUpperCase();
+  if (NOT_SECRET.has(k)) return false;
+  return SECRET_EXACT.has(k) || SECRET_NAME.test(k);
+}
+
+/**
+ * The env for a process the AGENT starts (`run_command` and the like): `safeChildEnv` minus
+ * every credential-named variable. The user can pass specific names through deliberately with
+ * `PROMETHEUS_EXEC_PASS_ENV=GH_TOKEN,NPM_TOKEN` — set in THEIR shell, which the agent cannot
+ * write.
+ */
+export function agentChildEnv(extra?: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const pass = new Set(
+    (process.env.PROMETHEUS_EXEC_PASS_ENV ?? "")
+      .split(",")
+      .map((x) => x.trim().toUpperCase())
+      .filter(Boolean),
+  );
+  const out = safeChildEnv(extra);
+  for (const k of Object.keys(out)) {
+    if (isSecretEnvKey(k) && !pass.has(k.toUpperCase())) delete out[k];
+  }
+  return out;
+}

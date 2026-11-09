@@ -10,6 +10,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import type { McpServerConfig, McpToolDescriptor } from "../../mcp/host/types.js";
+import { classifyAuth } from "../authorization.js";
 import {
   MCP_TOOL_PREFIX,
   allMcpToolDefs,
@@ -89,23 +90,43 @@ test("a namespaced name round-trips, and a built-in name is not mistaken for one
 
 /* ── the confirm gate must not be widened ───────────────────────────────────*/
 
-test("a server that declares NO annotations gets none — it does not become auto-approvable", () => {
-  // `autoApprovable` fails safe on unknown annotations; inventing a readOnlyHint here would
-  // quietly undo that and let a stranger's tool run with no human in the loop.
+test("a server that declares NO annotations is open-world + destructive — never auto below the network rung", () => {
+  // `{}` used to fall through `classifyAuth` to `config`, which A3 auto-approves: a stranger's
+  // code ran with no human in the loop two rungs below "network allowed".
   const defs = mcpToolDefs(server({}, [{ name: "anything", inputSchema: {} }]));
-  assert.deepEqual(defs[0]?.annotations, {});
-  assert.notEqual(defs[0]?.annotations.readOnlyHint, true);
+  const ann = defs[0]?.annotations ?? {};
+  assert.equal(ann.readOnlyHint, false);
+  assert.equal(ann.openWorldHint, true);
+  assert.equal(ann.destructiveHint, true);
+  assert.equal(classifyAuth("mcp__github__anything", ann), "install");
 });
 
-test("declared annotations are carried through verbatim", () => {
+test("a server's own readOnlyHint is NOT trusted unless the user vouched for that tool", () => {
+  const unvouched = mcpToolDefs(server({}, [READ_ISSUE]))[0]?.annotations ?? {};
+  assert.equal(unvouched.readOnlyHint, false, "a claim from an unvetted server is only a claim");
+  assert.equal(classifyAuth("mcp__github__get_issue", unvouched), "install");
+  const vouched =
+    mcpToolDefs(server({ autoApprove: ["get_issue"] }, [READ_ISSUE]))[0]?.annotations ?? {};
+  assert.equal(vouched.readOnlyHint, true);
+  assert.equal(classifyAuth("mcp__github__get_issue", vouched), "read");
+});
+
+test("vouching never upgrades a tool the server itself calls destructive or open-world", () => {
   const defs = mcpToolDefs(
-    server({}, [
-      READ_ISSUE,
-      { name: "delete_repo", inputSchema: {}, annotations: { destructiveHint: true } },
+    server({ autoApprove: ["delete_repo"] }, [
+      {
+        name: "delete_repo",
+        inputSchema: {},
+        annotations: { readOnlyHint: true, destructiveHint: true },
+      },
     ]),
   );
-  assert.equal(defs[0]?.annotations.readOnlyHint, true);
-  assert.equal(defs[1]?.annotations.destructiveHint, true);
+  assert.equal(defs[0]?.annotations.readOnlyHint, false);
+  assert.equal(defs[0]?.annotations.destructiveHint, true);
+});
+
+test("an MCP tool whose annotations a host could not resolve classifies as install, not config", () => {
+  assert.equal(classifyAuth("mcp__github__anything", undefined), "install");
 });
 
 /* ── a blocked or unready server reaches nothing ────────────────────────────*/

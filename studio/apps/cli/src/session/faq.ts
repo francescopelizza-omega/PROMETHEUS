@@ -33,7 +33,7 @@ export const FAQ_DB: readonly FaqEntry[] = Object.freeze([
   {
     topic: "model-local",
     q: "How do I run a free local model?",
-    a: "Type /setup → 'Download a free local model'. It uses Ollama (install via `prometheus apps install ollama`), pulls a model (e.g. qwen2.5-coder:7b), and stores it under ~/.prometheus/open_models. Once a local runner serves a model, the session auto-uses it.",
+    a: "Type /setup → 'Download a free local model'. It uses Ollama (install it with `/models runtimes install ollama` — the native app, through its official package channel), pulls a model (e.g. qwen2.5-coder:7b) and scans what Ollama stored with nemesis before the model is used. Once a local runner serves a model, the session auto-uses it.",
     keywords: ["ollama", "lmstudio", "offline", "free", "gguf", "download model"],
   },
   {
@@ -51,12 +51,11 @@ export const FAQ_DB: readonly FaqEntry[] = Object.freeze([
   {
     topic: "security",
     q: "What is the security gate (nemesis)?",
-    // NOT "every install/clone/download". Catalog installs, repo clones and the HF/GGUF
-    // model spine stage bytes locally and pass them to `nemesis_gate`; `ollama pull` does
-    // not — `v_pull` (python/sidecar/modelhub.py) hands the tag to the runner and there is
-    // no local stage dir to scan, which its own docstring says out loud. A blanket claim
-    // here is the same over-claim that was corrected in Studio's Home hero.
-    a: "Catalog installs, repo clones and staged model downloads are scanned by nemesis and get a verdict: allow (0) / warn (10) / block (20) / error (2, fail-closed). `ollama pull` is NOT scanned — it has no local staging directory, so ollama's own registry is the trust boundary there. Prometheus NEVER decides 'safe' in JS — it renders the engine's verdict. Override a block only with --force behind a typed confirm.",
+    // Precise, not blanket. Catalog installs, repo clones and the HF/GGUF model spine stage
+    // bytes locally and pass them to `nemesis_gate` BEFORE admission; an Ollama pull has no
+    // stage, so `v_pull` (python/sidecar/modelhub.py) scans the stored blobs AFTER the download
+    // and before the model is used (gate_ollama_model). Say which is which.
+    a: "Catalog installs, repo clones and staged model downloads are scanned by nemesis and get a verdict: allow (0) / warn (10) / block (20) / error (2, fail-closed). Models pulled through Ollama are scanned after the download and before they are used (removed on a block). For a model download a warning is used only when you type the model's name, and a block is final. Prometheus NEVER decides 'safe' in JS — it renders the engine's verdict. Other installs: override a block only with --force behind a typed confirm.",
     keywords: ["nemesis", "gate", "safe", "scan", "verdict", "block", "malware"],
   },
   {
@@ -108,7 +107,7 @@ export const FAQ_DB: readonly FaqEntry[] = Object.freeze([
     q: "How do I discover + download open models?",
     // These are their OWN verbs. This answer used to say `/model search|fit|pull|hw|endpoints`,
     // and `/model search x` answered "no model matching" — `/model` only switches models.
-    a: "/fit (scores models vs your hardware), /pull <id> (gated download → ~/.prometheus/open_models), /hw (hardware budget), /endpoints (live runners). Model-running tools (AirLLM, FlashAttention …): /models tools, /models install <tool>.",
+    a: "/fit (scores models vs your hardware), /pull <id> (gated download into the store of the server that runs it — Ollama, LM Studio or the Hugging Face cache; Prometheus keeps no copy), /hw (hardware budget), /endpoints (live runners). Model-running tools (AirLLM, FlashAttention …): /models tools, /models install <tool>.",
     keywords: ["huggingface", "search model", "quant", "fit", "hardware", "vram"],
   },
   {
@@ -126,7 +125,7 @@ export const FAQ_DB: readonly FaqEntry[] = Object.freeze([
   {
     topic: "paths",
     q: "Where does Prometheus store everything? Can I change it?",
-    a: "Everything lives under ~/.prometheus (config, open_models, downloads/{videos,audio,files}, cache, logs, records, state). Run /paths to repoint heavy-download folders (models/videos/files) to another disk — Tab-completes. Override the root with $PROMETHEUS_HOME.",
+    a: "Everything Prometheus keeps lives under ~/.prometheus (config, downloads/{videos,audio,files}, cache, logs, records, state). Models do not: each lives in its server's own store (Ollama's ~/.ollama/models, LM Studio's models folder, the Hugging Face cache) — /paths lists them. Run /paths to repoint heavy-download folders (videos/audio/files) to another disk — Tab-completes. Override the root with $PROMETHEUS_HOME.",
     keywords: ["folder", "directory", "download path", "disk", "storage", "~/.prometheus", "home"],
   },
   {

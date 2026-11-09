@@ -43,6 +43,8 @@ export interface ChatPreviewOpts {
   cwd?: string;
   /** one-shot prompt (else interactive). */
   prompt?: string;
+  /** the local server a local-model agent is wired to (ollama | lmstudio | llamacpp | vllm). */
+  runner?: string;
 }
 
 /**
@@ -110,6 +112,7 @@ const Commands = {
     ...(o.bypass ? ["--bypass"] : []),
     ...(o.tmux === undefined ? [] : typeof o.tmux === "string" ? ["--tmux", o.tmux] : ["--tmux"]),
     ...(o.cwd ? ["--cwd", o.cwd] : []),
+    ...(o.runner ? ["--runner", o.runner] : []),
     ...(o.prompt ? ["--", o.prompt] : []),
   ],
 

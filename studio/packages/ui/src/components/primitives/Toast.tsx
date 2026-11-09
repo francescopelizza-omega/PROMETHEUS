@@ -56,15 +56,23 @@ function ToastCard({
 }: { toast: ToastData; onDismiss: (id: string) => void }): ReactNode {
   const tone = toast.tone ?? "info";
   const color = v(TONE_TOKEN[tone]);
+  // the timer PAUSES while the pointer is over the card (or a control in it has focus), so a
+  // toast someone is reading does not vanish under them
+  const [held, setHeld] = useState(false);
   useEffect(() => {
     const ms = toast.duration ?? 5000;
-    if (ms <= 0) return;
+    if (ms <= 0 || held) return;
     const handle = setTimeout(() => onDismiss(toast.id), ms);
     return () => clearTimeout(handle);
-  }, [toast.id, toast.duration, onDismiss]);
+  }, [toast.id, toast.duration, onDismiss, held]);
   return (
     <div
-      role="status"
+      // only a danger toast interrupts a screen reader; the rest are announced politely
+      role={tone === "danger" ? "alert" : "status"}
+      onMouseEnter={() => setHeld(true)}
+      onMouseLeave={() => setHeld(false)}
+      onFocus={() => setHeld(true)}
+      onBlur={() => setHeld(false)}
       style={{
         display: "flex",
         alignItems: "flex-start",
@@ -113,16 +121,31 @@ function ToastCard({
 export interface ToastViewportProps {
   toasts: ToastData[];
   onDismiss: (id: string) => void;
+  /**
+   * Where the stack sits. `bottom-right` (the default) suits a page with nothing in that corner;
+   * a host with a status bar and a right-hand rail there passes `top-right` plus `offsetTop` so
+   * toasts never cover its controls.
+   */
+  placement?: "bottom-right" | "top-right";
+  /** px below the top edge for `top-right` (clears a title/top bar) */
+  offsetTop?: number;
 }
 
-export function ToastViewport({ toasts, onDismiss }: ToastViewportProps): ReactNode {
+export function ToastViewport({
+  toasts,
+  onDismiss,
+  placement = "bottom-right",
+  offsetTop = 0,
+}: ToastViewportProps): ReactNode {
+  const edge =
+    placement === "top-right" ? { top: `calc(${offsetTop}px + ${sp(4)})` } : { bottom: sp(8) };
   return (
     <div
-      aria-live="assertive"
+      aria-live="polite"
       aria-atomic="false"
       style={{
         position: "fixed",
-        bottom: sp(8),
+        ...edge,
         right: sp(8),
         zIndex: Z.toast,
         display: "flex",

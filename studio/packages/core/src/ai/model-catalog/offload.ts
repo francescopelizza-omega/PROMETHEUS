@@ -11,8 +11,11 @@
  * thousands of tokens. Offering it as a chat model without saying so would be the worst kind
  * of "it works" — the session would simply never answer.
  *
+ * None of them is ever chosen for the user: a model that does not fit RAM is refused, and these
+ * run it only when the user insists (`local:<id>@<runtime>`) and types the model's name.
+ *
  * Sources (2026-10-12): github.com/lyogavin/airllm (README, v3.0), github.com/JustVugg/colibri
- * (README). Speeds are the authors' own figures.
+ * (README), llama.cpp `--mmap` / `--cpu-moe` docs. Speeds are the authors' own figures.
  */
 import type { OffloadRuntime } from "./types.js";
 
@@ -23,21 +26,29 @@ export const OFFLOAD_RUNTIMES: readonly OffloadRuntime[] = Object.freeze([
     repo: "https://github.com/JustVugg/colibri",
     mechanism:
       "Keeps the dense part of a Mixture-of-Experts model in RAM and streams the experts from NVMe.",
-    speed: "Mid-size MoE (Qwen3.6-35B) about 6 tok/s on CPU; giant MoE (GLM-5.2) 0.05–1.8 tok/s.",
+    speed: "Mid-size MoE (Qwen3.6-35B) about 6 tok/s on CPU; giant MoE (GLM-5.2) 0.05–2 tok/s.",
     servesOpenAi: true,
     serveUrl: "http://127.0.0.1:8000/v1",
     interactive: true,
     helps: "moe",
-    // Not an engine verb: colibri is a C engine built from a GitHub checkout, and Prometheus's
-    // rule for fetched code is that nemesis scans it before anything runs. The steps are shown
-    // verbatim for the user to run after that scan — never executed on their behalf.
-    manualSteps: [
-      "git clone https://github.com/JustVugg/colibri ~/colibri",
-      "prometheus nemesis ~/colibri     # nemesis threat scan before running anything from it",
-      "cd ~/colibri && ./start-here.sh --list          # shows which models fit this machine",
-      "cd ~/colibri && ./start-here.sh --model <ID>    # downloads + starts the server on 127.0.0.1:8000",
-    ],
+    // Installed by Prometheus from its PINNED source commit (v2.1.0), scanned by nemesis and
+    // built here — the prebuilt release archive is refused by nemesis (native binaries nobody
+    // here built). It reads the gated GGUF in place (`coli import --mode link`).
     license: "Apache-2.0",
+  },
+  {
+    id: "llamacpp-stream",
+    name: "llama.cpp from SSD",
+    repo: "https://github.com/ggml-org/llama.cpp",
+    mechanism:
+      "llama-server memory-maps the GGUF; weights that do not fit in RAM are paged in from disk as each token needs them.",
+    speed:
+      "Disk-bound: a MoE model with few active experts stays usable; a dense model larger than RAM reads every weight per token (tens of seconds per token).",
+    servesOpenAi: true,
+    serveUrl: "http://127.0.0.1:8080/v1",
+    interactive: false,
+    helps: "any",
+    license: "MIT",
   },
   {
     id: "airllm",
@@ -46,10 +57,12 @@ export const OFFLOAD_RUNTIMES: readonly OffloadRuntime[] = Object.freeze([
     mechanism:
       "Runs a dense model one transformer layer at a time from disk, so peak RAM is about one layer.",
     speed: "Disk-bound: roughly 20 s to minutes per token for a 70B model — offline jobs only.",
-    servesOpenAi: false,
+    // Prometheus's own OpenAI-compatible shim (python/sidecar/airllm_serve.py) wraps the library
+    // on 127.0.0.1 — AirLLM itself is a Python library with no server.
+    servesOpenAi: true,
+    serveUrl: "http://127.0.0.1:8094/v1",
     interactive: false,
     helps: "dense",
-    installCommand: "prometheus models install airllm",
     license: "Apache-2.0",
   },
 ]);

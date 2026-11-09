@@ -52,6 +52,7 @@ export {
   allMcpToolDefs,
   isMcpToolName,
   jsonSchemaToFieldSpec,
+  ladderAnnotations,
   mcpInputSchemaToToolSchema,
   mcpToolDefs,
   mcpToolName,

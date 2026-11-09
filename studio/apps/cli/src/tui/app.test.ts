@@ -403,3 +403,118 @@ test("a wrapped COMMAND pastes as one command: every row but the last ends in a 
     assert.equal(pasted.replace(/\s+/g, " "), "brew upgrade --formula hdrhistogram_c libuv");
   }
 });
+
+test("/model opens the full-screen browser on the alternate screen; q leaves it and the chrome comes back", async () => {
+  const { mkdtempSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const { EventEmitter } = await import("node:events");
+  const configHome = mkdtempSync(join(tmpdir(), "tui-browser-"));
+  class FakeIn extends EventEmitter {
+    isTTY = true;
+    setRawMode(): this {
+      return this;
+    }
+    resume(): this {
+      return this;
+    }
+    pause(): this {
+      return this;
+    }
+    setEncoding(): this {
+      return this;
+    }
+  }
+  const writes: string[] = [];
+  class FakeOut extends EventEmitter {
+    columns = 140;
+    rows = 40;
+    isTTY = true;
+    write(chunk: string | Uint8Array): boolean {
+      writes.push(String(chunk));
+      return true;
+    }
+  }
+  // a models host that touches nothing real: no daemon, no sidecar, no network
+  const modelsHost = {
+    context: async () => ({
+      machine: { ramGb: 36, vramGb: 0, unified: true, freeDiskGb: 500 },
+      keyFor: () => undefined,
+      installedOllama: [],
+      served: [],
+      rotation: [],
+      ollamaInstalled: true,
+      ollamaServing: true,
+    }),
+    connectKey: async () => ({ ok: true as const, live: [] }),
+    liveModels: async () => [],
+    installOllama: async () => ({ ok: true }),
+    startOllama: async () => ({ ok: true }),
+    pull: async () => ({ ok: true as const }),
+    adopt: async () => ({ ok: true as const, label: "x" }),
+    restore: () => undefined,
+    restoreHint: () => undefined,
+    rotationMembers: () => [],
+    saveChoice: () => {},
+  };
+  const stdin = new FakeIn();
+  const type = (s: string) => stdin.emit("data", Buffer.from(s));
+  // the session takes a moment to come up; keys typed before it reads stdin are lost
+  setTimeout(() => type("/model"), 1500);
+  setTimeout(() => type("\r"), 1700);
+  setTimeout(() => type("q"), 3000);
+  setTimeout(() => type("\x04"), 3600);
+  setTimeout(() => stdin.emit("end"), 6_000);
+  const { launchTui } = await import("./app.js");
+  await launchTui(
+    {
+      command: [],
+      positionals: [],
+      json: false,
+      noColor: true,
+      help: false,
+      version: false,
+      repl: true,
+      dryRun: false,
+      yes: false,
+      strict: false,
+      force: false,
+      noGate: false,
+      verbose: false,
+      quiet: false,
+      flags: {},
+      cwd: configHome,
+    } as never,
+    {
+      stdin: stdin as never,
+      stdout: new FakeOut() as never,
+      isTty: true,
+      configHome,
+      home: configHome,
+      backends: {
+        liveRunners: [],
+        paidClis: [],
+        startedRunners: new Set<string>(),
+        unavailableRunners: [],
+      },
+      modelsHost: modelsHost as never,
+    },
+  );
+  const all = writes.join("");
+  const on = all.indexOf("\x1b[?1049h");
+  const off = all.indexOf("\x1b[?1049l", on);
+  assert.ok(
+    on >= 0,
+    `the browser took the alternate screen; saw: ${all
+      .replace(/\x1b\[[0-9;?]*[A-Za-z]/g, "")
+      .split(/\r?\n/)
+      .filter((l) => /model|measur|›/i.test(l))
+      .slice(-15)
+      .join(" | ")}`,
+  );
+  assert.ok(off > on, "q left the alternate screen");
+  const screen = all.slice(on, off).replace(/\x1b\[[0-9;?]*[A-Za-z]/g, "");
+  assert.match(screen, /Prometheus · Models/);
+  assert.match(screen, /Fits this machine/);
+  assert.match(screen, /Enter choose · ! run anyway/);
+});

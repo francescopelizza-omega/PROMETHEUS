@@ -24,9 +24,49 @@ AND the caller passes ``--confirm``.
 from __future__ import annotations
 
 import json
+import os
 import sys
+import tempfile
 import traceback
 from typing import Any, Callable, Dict, List, NoReturn, Sequence
+
+# ---------------------------------------------------------------------------- test seams
+# The model-hub verbs carry test seams (MODELHUB_FAKE_* / MODELHUB_FORCE_* …) that replace
+# installers, scanners' inputs and store paths. One of them (a fake colibri install) used to
+# switch OFF a gate check in production, because nothing stopped the variables from reaching a
+# real run. They are honoured ONLY inside the test harness: `_test_stores` writes a marker
+# file with a random token into its own temp dir; without that exact marker every seam is
+# removed from the environment before any verb reads it.
+_SEAM_PREFIXES = ("MODELHUB_FAKE_", "MODELHUB_FORCE_")
+_SEAM_NAMES = ("MODELHUB_HF_BASE", "MODELHUB_OLLAMA_MODELS", "MODELHUB_ZERO_COPY_TEST",
+               "MODELHUB_NO_DAEMON_SPAWN")
+
+
+def under_test_harness() -> bool:
+    root, token = os.environ.get("MODELHUB_TEST_STORES"), os.environ.get("MODELHUB_TEST_TOKEN")
+    if not root or not token:
+        return False
+    try:
+        real = os.path.realpath(root)
+        tmp = os.path.realpath(tempfile.gettempdir())
+        if os.path.commonpath([real, tmp]) != tmp:
+            return False
+        with open(os.path.join(real, ".modelhub-test-marker"), encoding="utf-8") as f:
+            return f.read().strip() == token
+    except (OSError, ValueError):
+        return False
+
+
+def _strip_seams() -> None:
+    if under_test_harness():
+        return
+    for k in list(os.environ):
+        if k.startswith(_SEAM_PREFIXES) or k in _SEAM_NAMES:
+            del os.environ[k]
+    os.environ.pop("MODELHUB_TEST_STORES", None)
+
+
+_strip_seams()
 
 
 def log(*parts: Any) -> None:
@@ -85,7 +125,10 @@ def positional(argv: Sequence[str]) -> List[str]:
 
 
 def opt_value(argv: Sequence[str], name: str, default: str | None = None) -> str | None:
-    """Value for ``--name VALUE`` or ``--name=VALUE``; else ``default``."""
+    """Value for ``--name VALUE`` or ``--name=VALUE``; else ``default``.
+
+    A flag-shaped value is returned AS IS (callers refuse it: falling back to ``default`` would
+    turn ``--path --help`` into "run on ."). See ``flag_shaped_value`` for the up-front check."""
     pref = name + "="
     for i, a in enumerate(argv):
         if a == name and i + 1 < len(argv):
@@ -93,6 +136,19 @@ def opt_value(argv: Sequence[str], name: str, default: str | None = None) -> str
         if a.startswith(pref):
             return a[len(pref):]
     return default
+
+
+def flag_shaped_value(argv: Sequence[str], valued: Sequence[str]) -> str | None:
+    """The first option in ``valued`` whose separate value token starts with ``-``, or None.
+
+    ``--id --no-gate`` made ``--no-gate`` both the id AND a present flag (``"--no-gate" in
+    argv``), so a caller-chosen id could switch off the post-pull nemesis scan, accept a WARN or
+    skip the RAM guard. Such argv is refused before any verb runs; a value that really starts
+    with ``-`` must be written ``--name=VALUE``."""
+    for i, a in enumerate(argv[:-1]):
+        if a in valued and argv[i + 1].startswith("-"):
+            return a
+    return None
 
 
 def dispatch(prog: str, handlers: Dict[str, Handler], argv: Sequence[str]) -> int:

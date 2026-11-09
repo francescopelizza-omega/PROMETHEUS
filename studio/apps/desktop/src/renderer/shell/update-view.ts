@@ -54,6 +54,14 @@ export function updateOnDownloadError(s: UpdateState, error: string): UpdateStat
   return { ...s, phase: "available", percent: 0, error: error || "download failed" };
 }
 
+/** quitAndInstall failed. The download is still staged, so the phase STAYS "ready" (the
+ *  restart can be retried) and the message is shown. Routing this through
+ *  `updateOnDownloadError` dropped it: that reducer ignores every phase but "downloading". */
+export function updateOnInstallError(s: UpdateState, error: string): UpdateState {
+  if (s.phase !== "ready") return s;
+  return { ...s, error: error || "install failed" };
+}
+
 /** update:ready (update-downloaded) — "Restart to update" becomes the only action. */
 export function updateOnReady(s: UpdateState): UpdateState {
   if (s.phase === "idle") return s; // a ready with no prior announce is not renderable

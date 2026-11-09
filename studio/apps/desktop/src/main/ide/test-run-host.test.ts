@@ -180,7 +180,7 @@ test("runTestVerb fails closed when the child exits without a terminal envelope"
   assert.match(result.error ?? "", /boom/);
 });
 
-test("runTestVerb SIGKILLs a child that exceeds the stdout cap (fail-closed)", async () => {
+test("runTestVerb stops a child that exceeds the stdout cap (fail-closed)", async () => {
   const child = new FakeTestChild();
   const promise = runTestVerb(
     () => child,
@@ -192,7 +192,8 @@ test("runTestVerb SIGKILLs a child that exceeds the stdout cap (fail-closed)", a
   for (let i = 0; i < 9; i++) child.pushStdout(blob);
   const result = await promise;
   assert.equal(result.ok, false);
-  assert.equal(child.killedWith, "SIGKILL");
+  // SIGTERM first (testmgr reaps its pytest group on it); SIGKILL follows only if it lingers
+  assert.equal(child.killedWith, "SIGTERM");
   assert.match(result.error ?? "", /aborted/);
 });
 
@@ -210,7 +211,8 @@ test("runTestVerb registers a killer in the kill set and removes it on settle", 
   for (const kill of kills) kill();
   child.close(1);
   await promise;
-  assert.equal(child.killedWith, "SIGKILL");
+  // SIGTERM first (testmgr reaps its pytest group on it); SIGKILL follows only if it lingers
+  assert.equal(child.killedWith, "SIGTERM");
   assert.equal(kills.size, 0);
 });
 

@@ -35,6 +35,7 @@
 // Vite externalizes for the browser and THROWS on eval → the whole renderer fails to
 // mount (black window). Never import the bare `@prometheus/core` from the renderer (C5).
 import { makeCheckpoint, restorePlan, shouldSnapshot } from "@prometheus/core/agent-checkpoint";
+import { parseMcpToolName } from "@prometheus/core/agent-protocol";
 import {
   type Session,
   deserializeSession,
@@ -62,6 +63,7 @@ import {
   Panel,
   SpendMeter,
   Z,
+  anchoredEdge,
   useAnchoredLayer,
 } from "@prometheus/ui";
 import {
@@ -374,7 +376,7 @@ function QuestionCard(props: {
           </Button>
         </div>
       ) : (
-        <pre style={{ margin: 0, fontSize: "0.7rem", whiteSpace: "pre-wrap" }}>{output}</pre>
+        <pre style={{ margin: 0, fontSize: "0.75rem", whiteSpace: "pre-wrap" }}>{output}</pre>
       )}
     </Panel>
   );
@@ -510,6 +512,26 @@ export function AgentPane({
   const [showProviders, setShowProviders] = useState(false);
   // §2.5 composer chips: the compact model picker popover + the reasoning-effort tier.
   const [showEndpointPicker, setShowEndpointPicker] = useState(false);
+  // The chip's popup is portaled to <body>: it closed only via the chip or a choice — no
+  // Escape, no outside click. Both close it now; the chip row itself is its trigger.
+  const endpointLayerRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    if (!showEndpointPicker) return;
+    const onDown = (e: MouseEvent): void => {
+      const t = e.target as Node | null;
+      if (endpointLayerRef.current?.contains(t) || chipRowRef.current?.contains(t)) return;
+      setShowEndpointPicker(false);
+    };
+    const onKey = (e: KeyboardEvent): void => {
+      if (e.key === "Escape") setShowEndpointPicker(false);
+    };
+    window.addEventListener("mousedown", onDown);
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("mousedown", onDown);
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [showEndpointPicker]);
   // §2.3.2: Home's ask bar hands its draft to THIS composer (the rail is always present,
   // so the draft follows the user instead of a route change). Also drains the
   // sessionStorage seed on mount, which covers a cold open straight into the rail.
@@ -1544,6 +1566,10 @@ export function AgentPane({
         systemTool: (req) =>
           ide()?.systemTool(req) ??
           Promise.resolve({ ok: false, summary: "the editor bridge is unavailable" }),
+        // main's single-use approval for a call a remembered grant approved (run-controller)
+        approveToolCall: (req) =>
+          ide()?.approveToolCall?.(req) ??
+          Promise.resolve({ ok: false, error: "the editor bridge is unavailable" }),
         engineTool: (req) =>
           ide()?.engineTool(req) ??
           Promise.resolve({ ok: false, summary: "the engine bridge is unavailable" }),
@@ -1802,18 +1828,41 @@ export function AgentPane({
          * take their approval, and then fail with `unknown tool "notebook_edit"` — the exact
          * "offered but unreachable" shape this pane has been bitten by before.
          */
+        // The human just clicked Run on THIS card: have main mint a single-use approval bound
+        // to this exact call. Main runs its own ladder, and without the token it would ask the
+        // same question again in a native dialog (main/agent-approvals.ts).
+        const approval =
+          tool === NOTEBOOK_EDIT_TOOL_NAME
+            ? undefined
+            : await ide()
+                ?.approveToolCall?.({ name: tool, args })
+                .then((r) => (r.ok ? r.token : undefined))
+                .catch(() => undefined);
+        // An MCP tool is not a host tool: it runs on the server main holds the transport for.
+        // Sending it to agent:systemTool failed as `unknown tool "mcp__…"` on the card while the
+        // loop ran the call anyway through its own MCP seam.
+        const mcpRef = parseMcpToolName(tool);
         const st =
           tool === NOTEBOOK_EDIT_TOOL_NAME
             ? await notebookCardResult(args)
-            : await ide()?.systemTool({
-                name: tool,
-                args,
-                cwd: root,
-                // Same reason as run-controller's seam: main's OS sandbox for `run_command`
-                // opens the network only at the level the pill already permits, so the level
-                // has to travel with the call rather than be assumed.
-                authLevel: useAuthorisationStore.getState().level,
-              });
+            : mcpRef
+              ? await mcpApi().agentCall({
+                  serverId: mcpRef.serverId,
+                  tool: mcpRef.tool,
+                  args,
+                  authLevel: useAuthorisationStore.getState().level,
+                  ...(approval ? { approval } : {}),
+                })
+              : await ide()?.systemTool({
+                  name: tool,
+                  args,
+                  cwd: root,
+                  // Same reason as run-controller's seam: main's OS sandbox for `run_command`
+                  // opens the network only at the level the pill already permits, so the level
+                  // has to travel with the call rather than be assumed.
+                  authLevel: useAuthorisationStore.getState().level,
+                  ...(approval ? { approval } : {}),
+                });
         const r = st && {
           ok: st.ok,
           exitCode: typeof st.data?.exitCode === "number" ? st.data.exitCode : st.ok ? 0 : 1,
@@ -1922,7 +1971,7 @@ export function AgentPane({
                 padding: "3px 6px",
                 borderRadius: 5,
                 cursor: "pointer",
-                fontSize: "0.74rem",
+                fontSize: "0.75rem",
                 whiteSpace: "nowrap",
                 color: selected ? "var(--text-primary)" : "var(--text-secondary)",
                 background: selected
@@ -1984,7 +2033,7 @@ export function AgentPane({
                     border: "none",
                     color: "var(--text-secondary)",
                     cursor: "pointer",
-                    fontSize: "0.72rem",
+                    fontSize: "0.75rem",
                     padding: 0,
                     lineHeight: 1,
                   }}
@@ -2107,7 +2156,7 @@ export function AgentPane({
                   >
                     {sesh.title}
                   </span>
-                  <span style={{ color: "var(--text-secondary)", fontSize: "0.68rem" }}>
+                  <span style={{ color: "var(--text-secondary)", fontSize: "0.75rem" }}>
                     {sesh.turns.length} turns · {sesh.updatedAt.slice(0, 16).replace("T", " ")}
                     {sesh.workspacePath ? ` · ${sesh.workspacePath.split("/").pop()}` : ""}
                   </span>
@@ -2193,7 +2242,7 @@ export function AgentPane({
           return (
             <div
               aria-label="model capabilities"
-              style={{ display: "flex", flexWrap: "wrap", gap: 4, fontSize: "0.66rem" }}
+              style={{ display: "flex", flexWrap: "wrap", gap: 4, fontSize: "0.75rem" }}
             >
               {badges.map((b) => (
                 <span
@@ -2217,7 +2266,7 @@ export function AgentPane({
         const totals = agentRuns.usageFor(activeId);
         const isCloud = active?.locality === "cloud";
         return (
-          <div style={{ display: "flex", alignItems: "center", gap: 8, fontSize: "0.72rem" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, fontSize: "0.75rem" }}>
             {totals.costUsd !== null && endpointId ? (
               // cloud with a known cost → the real $-meter (banded, capped).
               <SpendMeter
@@ -2246,7 +2295,7 @@ export function AgentPane({
                 borderRadius: 4,
                 color: "var(--text-secondary)",
                 cursor: "pointer",
-                fontSize: "0.72rem",
+                fontSize: "0.75rem",
                 padding: "2px 6px",
               }}
             >
@@ -2268,12 +2317,17 @@ export function AgentPane({
               openWeight: e.locality === "local",
               modelId: e.model ?? e.id,
             }));
-            const meters = Object.entries(meteredCaps).map(([id, cap]) => ({
-              providerLabel: id,
-              spentUsd: agentRuns.usageFor(activeId).costUsd ?? 0,
-              capUsd: cap.capUsd,
-              ...(cap.autoDisable ? { onCapNote: "auto-disable at cap" } : {}),
-            }));
+            // Spend is recorded per SESSION, not per provider, so it can only be attributed to
+            // the provider this session is using. Every capped provider used to show the
+            // active run's cost as its own — the same figure on each meter.
+            const meters = Object.entries(meteredCaps)
+              .filter(([id]) => id === (endpointId ?? active?.id))
+              .map(([id, cap]) => ({
+                providerLabel: id,
+                spentUsd: agentRuns.usageFor(activeId).costUsd ?? 0,
+                capUsd: cap.capUsd,
+                ...(cap.autoDisable ? { onCapNote: "auto-disable at cap" } : {}),
+              }));
             return (
               <AiProvidersScreen
                 surfaces={[{ id: "chat", label: "Chat / Agent" }]}
@@ -2316,7 +2370,7 @@ export function AgentPane({
       )}
 
       {/* chat controls: + New opens a fresh TAB; Clear wipes THIS tab; Stop aborts it. */}
-      <div style={{ display: "flex", gap: 6, fontSize: "0.74rem" }}>
+      <div style={{ display: "flex", gap: 6, fontSize: "0.75rem" }}>
         <Button size="sm" variant="ghost" onClick={() => newSession()}>
           + New
         </Button>
@@ -2461,7 +2515,7 @@ export function AgentPane({
                 border: "none",
                 color: "var(--text-secondary)",
                 cursor: "pointer",
-                fontSize: "0.7rem",
+                fontSize: "0.75rem",
                 padding: 0,
                 lineHeight: 1,
               }}
@@ -2483,7 +2537,7 @@ export function AgentPane({
                   border: "none",
                   color: "var(--text-secondary)",
                   cursor: "pointer",
-                  fontSize: "0.7rem",
+                  fontSize: "0.75rem",
                   padding: 0,
                   lineHeight: 1,
                 }}
@@ -2506,7 +2560,7 @@ export function AgentPane({
                   border: "none",
                   color: "var(--text-secondary)",
                   cursor: "pointer",
-                  fontSize: "0.7rem",
+                  fontSize: "0.75rem",
                   padding: 0,
                   lineHeight: 1,
                 }}
@@ -2535,7 +2589,7 @@ export function AgentPane({
               border: "1px dashed var(--border-subtle)",
               background: "var(--bg-inset)",
               color: "var(--text-secondary)",
-              fontSize: "0.74rem",
+              fontSize: "0.75rem",
             }}
           >
             <summary style={{ cursor: "pointer", color: "var(--text-muted)" }}>
@@ -2562,7 +2616,7 @@ export function AgentPane({
             style={{
               alignSelf: "flex-start",
               color: "var(--text-muted)",
-              fontSize: "0.72rem",
+              fontSize: "0.75rem",
               fontStyle: "italic",
             }}
           >
@@ -2659,7 +2713,7 @@ export function AgentPane({
               title={`${card.tool ?? "run_command"} · ${card.status}`}
               elevation="e1"
             >
-              <code style={{ fontSize: "0.72rem", display: "block", marginBottom: 4 }}>
+              <code style={{ fontSize: "0.75rem", display: "block", marginBottom: 4 }}>
                 {card.cwd} $ {card.command}
               </code>
               {card.status === "pending" ? (
@@ -2706,7 +2760,7 @@ export function AgentPane({
                   </Button>
                 </div>
               ) : (
-                <pre style={{ margin: 0, fontSize: "0.7rem", whiteSpace: "pre-wrap" }}>
+                <pre style={{ margin: 0, fontSize: "0.75rem", whiteSpace: "pre-wrap" }}>
                   {card.output}
                 </pre>
               )}
@@ -2729,7 +2783,7 @@ export function AgentPane({
                 borderRadius: "var(--radius-sm, 4px)",
                 background: "color-mix(in srgb, var(--accent) 18%, var(--bg-surface-2))",
                 color: "var(--text-primary)",
-                fontSize: "0.7rem",
+                fontSize: "0.75rem",
               }}
             >
               <span aria-hidden="true">
@@ -2765,7 +2819,7 @@ export function AgentPane({
               style={{
                 position: "fixed",
                 left: mentionBox.left,
-                top: mentionBox.top,
+                ...anchoredEdge(mentionBox),
                 width: mentionBox.width,
                 maxHeight: MENTION_H,
                 overflow: "auto",
@@ -2792,7 +2846,7 @@ export function AgentPane({
                     padding: "4px 8px",
                     cursor: "pointer",
                     fontFamily: "var(--font-mono, monospace)",
-                    fontSize: "0.72rem",
+                    fontSize: "0.75rem",
                     background: i === mentionActive ? "var(--bg-inset)" : "transparent",
                     color: "var(--text-primary)",
                   }}
@@ -2818,13 +2872,13 @@ export function AgentPane({
               style={{
                 position: "fixed",
                 left: noSymbolsBox.left,
-                top: noSymbolsBox.top,
+                ...anchoredEdge(noSymbolsBox),
                 padding: "3px 8px",
                 background: "var(--bg-surface-2)",
                 border: "1px solid var(--border-subtle)",
                 borderRadius: 6,
                 color: "var(--text-secondary)",
-                fontSize: "0.7rem",
+                fontSize: "0.75rem",
                 zIndex: Z.dropdown,
               }}
             >
@@ -2840,7 +2894,7 @@ export function AgentPane({
               style={{
                 position: "fixed",
                 left: slashBox.left,
-                top: slashBox.top,
+                ...anchoredEdge(slashBox),
                 width: slashBox.width,
                 maxHeight: SLASH_H,
                 overflow: "auto",
@@ -2867,7 +2921,7 @@ export function AgentPane({
                     border: "none",
                     padding: "4px 8px",
                     cursor: "pointer",
-                    fontSize: "0.74rem",
+                    fontSize: "0.75rem",
                     background: i === slashActive ? "var(--bg-inset)" : "transparent",
                     color: "var(--text-primary)",
                   }}
@@ -2881,7 +2935,7 @@ export function AgentPane({
                       style={{
                         marginLeft: "auto",
                         color: "var(--text-secondary)",
-                        fontSize: "0.68rem",
+                        fontSize: "0.75rem",
                       }}
                     >
                       {cmd.category}
@@ -3039,7 +3093,7 @@ export function AgentPane({
             minWidth: 0,
             gap: 7,
             marginTop: 7,
-            fontSize: 11,
+            fontSize: 12,
             color: "var(--text-muted)",
             position: "relative",
           }}
@@ -3074,13 +3128,14 @@ export function AgentPane({
           {endpointBox &&
             createPortal(
               <div
+                ref={endpointLayerRef}
                 role="listbox"
                 tabIndex={-1}
                 aria-label="Model endpoint"
                 style={{
                   position: "fixed",
                   left: endpointBox.left,
-                  top: endpointBox.top,
+                  ...anchoredEdge(endpointBox),
                   width: endpointBox.width,
                   maxHeight: ENDPOINT_H,
                   overflowY: "auto",
@@ -3214,7 +3269,7 @@ function TraitRail({
         ))}
       </div>
       {focused ? (
-        <div style={{ marginTop: 4, fontSize: 11, color: "var(--text-muted)" }}>
+        <div style={{ marginTop: 4, fontSize: 12, color: "var(--text-muted)" }}>
           {focused.actionable
             ? focused.id === "effort"
               ? "↑/↓ raise/lower effort · ←/→ move · esc done"
@@ -3293,7 +3348,7 @@ function composerChip(): CSSProperties {
     border: "1px solid var(--border-chip)",
     color: "var(--text-muted)",
     cursor: "pointer",
-    fontSize: 11,
+    fontSize: 12,
     lineHeight: 1.6,
   };
 }

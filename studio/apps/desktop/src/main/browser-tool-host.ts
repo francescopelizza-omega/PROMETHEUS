@@ -37,6 +37,8 @@ import { BrowserWindow, session } from "electron";
 import type { BrowserHostDeps } from "@prometheus/core/agent-system-host";
 import { safeFetchCheck } from "@prometheus/engine-bridge";
 
+import { isLocalHost } from "./browser-local-host.js";
+
 const PARTITION = "agent-browser-tool";
 const NAV_TIMEOUT_MS = 25_000;
 /** Generous — the shared `capUtf8` byte-cap in core does the real, byte-accurate trim. */
@@ -64,10 +66,42 @@ async function hostAllowed(url: string): Promise<boolean> {
   }
 }
 
+let sessionHardened = false;
+
+/** Once per partition: no permissions, no local subresources, no downloads. */
+function hardenSession(): void {
+  if (sessionHardened) return;
+  sessionHardened = true;
+  const ses = session.fromPartition(PARTITION);
+  // Electron's DEFAULT handler grants every request — camera, microphone, geolocation,
+  // notifications, clipboard. An agent-driven offscreen page gets none of them.
+  ses.setPermissionRequestHandler((_wc, _perm, callback) => callback(false));
+  ses.setPermissionCheckHandler(() => false);
+  ses.webRequest.onBeforeRequest((details, callback) => {
+    try {
+      const u = new URL(details.url);
+      if (u.protocol === "data:" || u.protocol === "blob:") return callback({});
+      if (
+        u.protocol !== "http:" &&
+        u.protocol !== "https:" &&
+        u.protocol !== "wss:" &&
+        u.protocol !== "ws:"
+      ) {
+        return callback({ cancel: true });
+      }
+      return callback({ cancel: isLocalHost(u.hostname) });
+    } catch {
+      return callback({ cancel: true });
+    }
+  });
+  ses.on("will-download", (event) => event.preventDefault());
+}
+
 let win: BrowserWindow | null = null;
 
 function getWindow(): BrowserWindow {
   if (win && !win.isDestroyed()) return win;
+  hardenSession();
   const w = new BrowserWindow({
     show: false,
     width: 1280,
@@ -85,6 +119,8 @@ function getWindow(): BrowserWindow {
   contents.on("will-navigate", (event) => {
     event.preventDefault();
   });
+  // A popup would be a second, unguarded webContents on the same session.
+  contents.setWindowOpenHandler(() => ({ action: "deny" }));
 
   contents.on("will-redirect", (event, url) => {
     event.preventDefault();

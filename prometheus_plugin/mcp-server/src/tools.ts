@@ -36,6 +36,13 @@ function pos(value: string | undefined): string[] {
   return value && value.length > 0 ? ["--", value] : [];
 }
 
+/** A positional that must precede options: no `--` guard possible, so a "-"-leading id is refused. */
+function bareId(value: string | undefined): string[] {
+  if (!value) return [];
+  if (value.startsWith("-")) throw new Error(`invalid id ${JSON.stringify(value)}`);
+  return [value];
+}
+
 /**
  * Deterministically render the tool table to Markdown (CLI-035 docs/TOOLS.md). Pure over the
  * tool list, so the reference can NEVER drift by hand — regenerate with `npm run docs`.
@@ -107,7 +114,7 @@ export const TOOLS: ToolDef[] = [
       "security note, caveats, install targets and selectable components.",
     schema: { name: z.string().min(1).describe("registry plugin name (see prometheus_list)") },
     annotations: RO,
-    toArgv: (a) => ["info", a.name],
+    toArgv: (a) => ["info", ...pos(a.name)],
   },
   {
     name: "prometheus_where",
@@ -116,7 +123,7 @@ export const TOOLS: ToolDef[] = [
       "destination path) BEFORE installing it.",
     schema: { name: z.string().min(1).describe("registry plugin name") },
     annotations: RO,
-    toArgv: (a) => ["where", a.name],
+    toArgv: (a) => ["where", ...pos(a.name)],
   },
   {
     name: "prometheus_status",
@@ -125,7 +132,7 @@ export const TOOLS: ToolDef[] = [
       "across every targeted agent. Pass 'all' for the whole registry.",
     schema: { name: z.string().min(1).describe("registry plugin name, or 'all'") },
     annotations: RO,
-    toArgv: (a) => ["status", a.name],
+    toArgv: (a) => ["status", ...pos(a.name)],
   },
   {
     name: "prometheus_audit",
@@ -139,7 +146,7 @@ export const TOOLS: ToolDef[] = [
       name: z.string().min(1).describe("registry plugin name, or 'all'"),
     },
     annotations: RO,
-    toArgv: (a) => ["audit", a.name],
+    toArgv: (a) => ["audit", ...pos(a.name)],
   },
   {
     name: "prometheus_matrix",
@@ -177,28 +184,26 @@ export const TOOLS: ToolDef[] = [
       "target agent. nemesis seeds/refreshes its malware DB and scans the code FIRST — " +
       "a DANGEROUS (block-verdict) plugin is reported as a 'blocked' event and NOT " +
       "installed. ALWAYS preview with dryRun:true first; set yes:true only when the user " +
-      "approved non-critical findings. To install code nemesis flagged as DANGEROUS, the " +
-      "user must explicitly approve it — set force:true (equivalent to `/prometheus " +
-      "--force`); the result then carries a `forced_danger` block and ok:false.",
+      "approved non-critical findings. Code nemesis flagged as DANGEROUS is NEVER " +
+      "installed through this tool: a tool argument cannot be the user's consent. Tell " +
+      "the user to run `prometheus --force install <name>` in their own terminal if they " +
+      "accept the risk.",
     schema: {
       name: z.string().min(1).describe("registry plugin name, 'all', or 'official-bundle'"),
       only: z.string().optional().describe("component selection, e.g. a sub-plugin id"),
       dryRun: z.boolean().default(true).describe("preview without changing anything (default true)"),
       yes: z.boolean().default(false).describe("auto-approve non-critical gate findings"),
       strict: z.boolean().default(false).describe("block on medium-or-higher findings too"),
-      force: z.boolean().default(false).describe(
-        "DANGER: override a nemesis BLOCK and install code flagged as malicious/unsafe. " +
-        "Only set when the user has explicitly accepted the risk for THIS source.",
-      ),
     },
     annotations: { destructiveHint: true, idempotentHint: true, openWorldHint: true },
     toArgv: (a) => [
       ...(a.dryRun ? ["--dry-run"] : []),
       ...(a.yes ? ["--yes"] : []),
       ...(a.strict ? ["--strict"] : []),
-      ...(a.force ? ["--force"] : []),
-      "install", a.name,
-      ...(a.only ? ["--only", a.only] : []),
+      // options BEFORE the `--`: after it argparse reads everything as positionals
+      "install",
+      ...(a.only ? [`--only=${a.only}`] : []),
+      ...pos(a.name),
     ],
   },
   {
@@ -221,8 +226,9 @@ export const TOOLS: ToolDef[] = [
     toArgv: (a) => [
       ...(a.dryRun ? ["--dry-run"] : []),
       ...(a.yes ? ["--yes"] : []),
-      "uninstall", a.name,
-      ...(a.only ? ["--only", a.only] : []),
+      "uninstall",
+      ...(a.only ? [`--only=${a.only}`] : []),
+      ...pos(a.name),
     ],
   },
   {
@@ -235,7 +241,7 @@ export const TOOLS: ToolDef[] = [
         .describe("toggle the plugin's on-disk hooks or MCP servers"),
     },
     annotations: { idempotentHint: true },
-    toArgv: (a) => ["enable", a.name, ...(a.component ? ["--component", a.component] : [])],
+    toArgv: (a) => ["enable", ...(a.component ? ["--component", a.component] : []), ...pos(a.name)],
   },
   {
     name: "prometheus_disable",
@@ -247,7 +253,7 @@ export const TOOLS: ToolDef[] = [
         .describe("toggle the plugin's on-disk hooks or MCP servers"),
     },
     annotations: { idempotentHint: true },
-    toArgv: (a) => ["disable", a.name, ...(a.component ? ["--component", a.component] : [])],
+    toArgv: (a) => ["disable", ...(a.component ? ["--component", a.component] : []), ...pos(a.name)],
   },
   // ---- CLI-035: full read surface (describe/tutorial/methods/doctor/…) --- //
   {
@@ -318,7 +324,9 @@ export const TOOLS: ToolDef[] = [
       tool: z.string().optional().describe("tool id (airllm|flashattention|…) for status/versions"),
     },
     annotations: RO,
-    toArgv: (a) => ["models", a.action, ...(a.action === "config" ? ["--show"] : []), ...pos(a.tool)],
+    // tool BEFORE `--show`: with an option first, argparse < 3.13 cannot place the optional
+    // positional after it, and `models config --show -- <tool>` exits 2 on Python 3.9–3.12.
+    toArgv: (a) => ["models", a.action, ...bareId(a.tool), ...(a.action === "config" ? ["--show"] : [])],
   },
   {
     name: "prometheus_apps",
@@ -399,7 +407,10 @@ export const TOOLS: ToolDef[] = [
       // defense-in-depth: the schema already rejects a missing confirm, but never build argv
       // for an unconfirmed destructive verb.
       if (a.confirm !== true) throw new Error("confirm-required");
-      return ["sync", ...pos(a.skill), ...(a.to ? ["--to", a.to] : [])];
+      // `--to` must come BEFORE the `--`: after it, argparse took "--to" as a positional and
+      // every call that named a target failed with "unrecognized arguments". `=` keeps a
+      // value that starts with "-" from being read as a flag.
+      return ["sync", ...(a.to ? [`--to=${a.to}`] : []), ...pos(a.skill)];
     },
   },
   // ---- disk space: read-only views (no delete, no root — ever, over MCP) ---- //

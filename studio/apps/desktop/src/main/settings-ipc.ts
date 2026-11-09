@@ -11,7 +11,7 @@
  */
 import { settings as coreSettings } from "@prometheus/core";
 import { describeEngineFailure } from "@prometheus/engine-bridge";
-import { ipcMain } from "electron";
+import { dialog, ipcMain } from "electron";
 
 import { assertNotSensitivePath } from "./ide/path-guard.js";
 
@@ -167,7 +167,28 @@ export function registerSettingsIpcHandlers(opts: SettingsIpcOptions): () => voi
       }
       const { global, workspace } = await loadEffective(globalPath, workspaceRoot);
       if (scope === "global") {
-        await writeLayerAtomic(globalPath, coreSettings.setInLayer(global, key, a.value));
+        const next = coreSettings.setInLayer(global, key, a.value);
+        // A write that WEAKENS the security posture, or adds commands that run on their own
+        // (hooks), is the human's decision — not the renderer's. A compromised renderer could
+        // otherwise turn the gate off, allow --force and widen the network in three calls
+        // with nothing on screen. Main asks natively; Cancel is the default.
+        const weakening = postureWeakening(
+          global as Record<string, unknown>,
+          next as Record<string, unknown>,
+          key,
+        );
+        if (weakening) {
+          const r = await dialog.showMessageBox({
+            type: "warning",
+            buttons: ["Cancel", "Change it"],
+            defaultId: 0,
+            cancelId: 0,
+            message: `Change a security setting: ${key}?`,
+            detail: `${weakening}\n\nNew value: ${JSON.stringify(a.value)?.slice(0, 600) ?? "(unset)"}`,
+          });
+          if (r.response !== 1) return { ok: false, error: "declined" };
+        }
+        await writeLayerAtomic(globalPath, next);
       } else {
         await writeLayerAtomic(
           workspaceSettingsPath(safeRoot as string),
@@ -213,7 +234,25 @@ export function registerSettingsIpcHandlers(opts: SettingsIpcOptions): () => voi
       }
       const { global, workspace } = await loadEffective(globalPath, workspaceRoot);
       if (scope === "global") {
-        await writeLayerAtomic(globalPath, coreSettings.resetInLayer(global, key));
+        const next = coreSettings.resetInLayer(global, key);
+        // Same rule as settings:set — a reset back to a LOOSER default is still a loosening.
+        const weakening = postureWeakening(
+          global as Record<string, unknown>,
+          next as Record<string, unknown>,
+          key,
+        );
+        if (weakening) {
+          const r = await dialog.showMessageBox({
+            type: "warning",
+            buttons: ["Cancel", "Reset it"],
+            defaultId: 0,
+            cancelId: 0,
+            message: `Reset a security setting: ${key}?`,
+            detail: weakening,
+          });
+          if (r.response !== 1) return { ok: false, error: "declined" };
+        }
+        await writeLayerAtomic(globalPath, next);
       } else {
         await writeLayerAtomic(
           workspaceSettingsPath(safeRoot as string),
@@ -234,4 +273,31 @@ export function registerSettingsIpcHandlers(opts: SettingsIpcOptions): () => voi
       ipcMain.removeHandler(channel);
     }
   };
+}
+
+/**
+ * Why this global write needs a human, or null when it does not: it loosens the posture
+ * (cloud on, wider network, gate floor removed, --force allowed) or changes lifecycle hooks
+ * (commands that run on every tool call). Tightening never asks.
+ */
+export function postureWeakening(
+  before: Record<string, unknown>,
+  after: Record<string, unknown>,
+  key: string,
+): string | null {
+  if (key === "hooks" || key.startsWith("hooks.")) {
+    return "Hooks are shell commands Prometheus runs automatically around tool calls.";
+  }
+  const a = coreSettings.securityPosture(before as never);
+  const b = coreSettings.securityPosture(after as never);
+  const rank: Record<string, number> = { none: 0, "mcp-only": 1, allow: 2 };
+  if (!a.allowCloud && b.allowCloud) return "This allows cloud models.";
+  if ((rank[b.network] ?? 9) > (rank[a.network] ?? 9)) {
+    return `This widens network access from "${a.network}" to "${b.network}".`;
+  }
+  if (a.minGateMode === "enforce" && b.minGateMode !== "enforce") {
+    return "This removes the floor that keeps the nemesis gate enforcing.";
+  }
+  if (!a.allowForce && b.allowForce) return "This allows --force past a nemesis BLOCK.";
+  return null;
 }

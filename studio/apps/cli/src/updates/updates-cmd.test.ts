@@ -713,6 +713,8 @@ function dispatchFakes() {
         modelStorePath: () => "/Users/u/.ollama/models",
       },
       pull: async () => ({ ok: true, error: "", aborted: false }),
+      gate: async () => ({ ok: true }),
+      discard: async () => undefined,
       audit: () => {},
       freeDiskBytes: () => 100e9,
       runtimeFormula: () => undefined,

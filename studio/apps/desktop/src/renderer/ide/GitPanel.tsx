@@ -148,7 +148,7 @@ function RefPill({ label }: { label: string }): ReactElement {
         padding: "0 4px",
         marginLeft: 4,
         borderRadius: "var(--radius-sm, 3px)",
-        fontSize: "0.65rem",
+        fontSize: "0.75rem",
         fontFamily: "var(--font-mono, monospace)",
         // The tag branch paints on solid --warn amber; --text-primary over it measured 1.45:1.
         // --bg-app is what the sibling isHead branch already uses over --accent. The third
@@ -236,7 +236,7 @@ function DiffView({ diff, fileName }: { diff: string; fileName: string }): React
           maxHeight: "min(46vh, 640px)",
           overflow: "auto",
           fontFamily: "var(--font-mono, monospace)",
-          fontSize: "0.72rem",
+          fontSize: "0.75rem",
           whiteSpace: "pre",
         }}
       >
@@ -317,7 +317,7 @@ function HunkStager({
                 flex: 1,
                 color: "var(--text-secondary)",
                 fontFamily: "var(--font-mono, monospace)",
-                fontSize: "0.68rem",
+                fontSize: "0.75rem",
                 overflow: "hidden",
                 textOverflow: "ellipsis",
                 minWidth: 0, // flex/grid floor — without it the ellipsis is unreachable
@@ -342,7 +342,7 @@ function HunkStager({
               maxHeight: 220,
               overflow: "auto",
               fontFamily: "var(--font-mono, monospace)",
-              fontSize: "0.7rem",
+              fontSize: "0.75rem",
             }}
           >
             {h.lines.map((ln, lIdx) => {
@@ -399,7 +399,7 @@ function HunkStager({
         </Button>
       )}
       {err && (
-        <p role="alert" style={{ margin: "4px 0 0", color: "var(--danger)", fontSize: "0.72rem" }}>
+        <p role="alert" style={{ margin: "4px 0 0", color: "var(--danger)", fontSize: "0.75rem" }}>
           {err}
         </p>
       )}
@@ -482,7 +482,7 @@ function CommitMenuItem({
         width: "100%",
         textAlign: "left",
         padding: "4px 8px",
-        fontSize: "0.72rem",
+        fontSize: "0.75rem",
         fontFamily: "var(--font-ui)",
         background: "transparent",
         border: "none",
@@ -602,7 +602,7 @@ function PullRequests({ root }: { root: string }): ReactElement | null {
         <h4 style={{ margin: 0, color: "var(--text-secondary)" }}>
           {status.provider === "github" ? "PULL REQUESTS" : "MERGE REQUESTS"}
         </h4>
-        <span style={{ color: "var(--text-secondary)", fontSize: "0.68rem" }}>{status.slug}</span>
+        <span style={{ color: "var(--text-secondary)", fontSize: "0.75rem" }}>{status.slug}</span>
         <span style={{ flex: 1 }} />
         <Button size="sm" variant="ghost" onClick={toggle}>
           {open ? "hide" : "show"}
@@ -618,7 +618,7 @@ function PullRequests({ root }: { root: string }): ReactElement | null {
           }}
         >
           {!status.hasToken && (
-            <div style={{ marginBottom: 6, fontSize: "0.72rem" }}>
+            <div style={{ marginBottom: 6, fontSize: "0.75rem" }}>
               <p style={{ margin: "0 0 4px", color: "var(--text-secondary)" }}>
                 Add a {status.provider === "github" ? "GitHub" : "GitLab"} token to load and
                 comment. It is stored encrypted in your OS keychain (Settings), never in this
@@ -638,7 +638,7 @@ function PullRequests({ root }: { root: string }): ReactElement | null {
                     border: "1px solid var(--border-subtle)",
                     borderRadius: 4,
                     padding: "2px 6px",
-                    fontSize: "0.72rem",
+                    fontSize: "0.75rem",
                   }}
                 />
                 <Button
@@ -663,7 +663,7 @@ function PullRequests({ root }: { root: string }): ReactElement | null {
                   #{detail.number} {detail.title}
                 </span>
               </div>
-              <div style={{ color: "var(--text-secondary)", fontSize: "0.7rem", marginBottom: 4 }}>
+              <div style={{ color: "var(--text-secondary)", fontSize: "0.75rem", marginBottom: 4 }}>
                 {detail.author} · {detail.branch} · {detail.state}
               </div>
               {detail.description && (
@@ -673,7 +673,7 @@ function PullRequests({ root }: { root: string }): ReactElement | null {
                     maxHeight: 120,
                     overflow: "auto",
                     whiteSpace: "pre-wrap",
-                    fontSize: "0.72rem",
+                    fontSize: "0.75rem",
                     color: "var(--text-primary)",
                   }}
                 >
@@ -687,7 +687,7 @@ function PullRequests({ root }: { root: string }): ReactElement | null {
                   style={{
                     borderTop: "1px solid var(--border-subtle)",
                     padding: "3px 0",
-                    fontSize: "0.72rem",
+                    fontSize: "0.75rem",
                   }}
                 >
                   <span style={{ color: "var(--accent)" }}>{c.author}</span>{" "}
@@ -717,7 +717,7 @@ function PullRequests({ root }: { root: string }): ReactElement | null {
                       border: "1px solid var(--border-subtle)",
                       borderRadius: 4,
                       padding: "4px 6px",
-                      fontSize: "0.72rem",
+                      fontSize: "0.75rem",
                       resize: "vertical",
                     }}
                   />
@@ -735,12 +735,12 @@ function PullRequests({ root }: { root: string }): ReactElement | null {
           ) : (
             <>
               {busy && (
-                <p style={{ margin: 0, color: "var(--text-secondary)", fontSize: "0.72rem" }}>
+                <p style={{ margin: 0, color: "var(--text-secondary)", fontSize: "0.75rem" }}>
                   loading…
                 </p>
               )}
               {prs && prs.length === 0 && !busy && (
-                <p style={{ margin: 0, color: "var(--text-secondary)", fontSize: "0.72rem" }}>
+                <p style={{ margin: 0, color: "var(--text-secondary)", fontSize: "0.75rem" }}>
                   No open ones.
                 </p>
               )}
@@ -758,7 +758,7 @@ function PullRequests({ root }: { root: string }): ReactElement | null {
                     border: "none",
                     cursor: "pointer",
                     padding: "2px 0",
-                    fontSize: "0.72rem",
+                    fontSize: "0.75rem",
                     color: "inherit",
                   }}
                 >
@@ -786,7 +786,7 @@ function PullRequests({ root }: { root: string }): ReactElement | null {
           {err && (
             <p
               role="alert"
-              style={{ margin: "4px 0 0", color: "var(--danger)", fontSize: "0.72rem" }}
+              style={{ margin: "4px 0 0", color: "var(--danger)", fontSize: "0.75rem" }}
             >
               {err}
             </p>
@@ -804,7 +804,7 @@ const ERROR_BANNER: CSSProperties = {
   border: "1px solid var(--danger)",
   borderRadius: "var(--radius-sm, 3px)",
   color: "var(--danger)",
-  fontSize: "0.72rem",
+  fontSize: "0.75rem",
 };
 const ERROR_DISMISS: CSSProperties = {
   marginLeft: 6,
@@ -1463,7 +1463,7 @@ export function GitPanel({ root }: { root: string }): ReactElement {
             background: "var(--bg-surface-2)",
             border: "1px solid var(--warn)",
             borderRadius: "var(--radius-sm, 3px)",
-            fontSize: "0.74rem",
+            fontSize: "0.75rem",
           }}
         >
           <div style={{ color: "var(--warn)", fontWeight: 600 }}>
@@ -1533,7 +1533,7 @@ export function GitPanel({ root }: { root: string }): ReactElement {
                     gap: 6,
                     width: "100%",
                     padding: "2px 0",
-                    fontSize: "0.72rem",
+                    fontSize: "0.75rem",
                     fontFamily: "var(--font-ui)",
                     textAlign: "left",
                     cursor: "pointer",
@@ -1610,7 +1610,7 @@ export function GitPanel({ root }: { root: string }): ReactElement {
                 alignItems: "center",
                 gap: 6,
                 padding: "2px 0",
-                fontSize: "0.72rem",
+                fontSize: "0.75rem",
               }}
             >
               <span
@@ -1786,12 +1786,12 @@ export function GitPanel({ root }: { root: string }): ReactElement {
               </Button>
             </div>
             {genError && (
-              <p style={{ margin: "4px 0 0", color: "var(--danger)", fontSize: "0.72rem" }}>
+              <p style={{ margin: "4px 0 0", color: "var(--danger)", fontSize: "0.75rem" }}>
                 {genError}
               </p>
             )}
             {genPaused && (
-              <p style={{ margin: "4px 0 0", color: "var(--warn)", fontSize: "0.72rem" }}>
+              <p style={{ margin: "4px 0 0", color: "var(--warn)", fontSize: "0.75rem" }}>
                 ⏸ the model went idle — paused, nothing lost. Edit the draft above, or retry.
               </p>
             )}
@@ -1814,7 +1814,7 @@ export function GitPanel({ root }: { root: string }): ReactElement {
 
       {/* workspaceRoot is the gate scope; surfaced so a reviewer sees it is bound. */}
       {workspaceRoot && workspaceRoot !== root && (
-        <p style={{ color: "var(--text-secondary)", fontSize: "0.7rem" }}>
+        <p style={{ color: "var(--text-secondary)", fontSize: "0.75rem" }}>
           workspace: {workspaceRoot}
         </p>
       )}
@@ -2026,14 +2026,14 @@ export function GitPanel({ root }: { root: string }): ReactElement {
             </div>
             {confirmReset.mode === "hard" ? (
               <>
-                <p style={{ margin: "8px 0", color: "var(--danger)", fontSize: "0.74rem" }}>
+                <p style={{ margin: "8px 0", color: "var(--danger)", fontSize: "0.75rem" }}>
                   This DISCARDS every uncommitted change in the index AND working tree. It cannot be
                   undone.
                 </p>
                 <label
                   style={{
                     display: "block",
-                    fontSize: "0.72rem",
+                    fontSize: "0.75rem",
                     color: "var(--text-secondary)",
                   }}
                 >
@@ -2051,7 +2051,7 @@ export function GitPanel({ root }: { root: string }): ReactElement {
                       color: "var(--text-primary)",
                       border: "1px solid var(--border-subtle)",
                       borderRadius: "var(--radius-sm, 3px)",
-                      fontSize: "0.74rem",
+                      fontSize: "0.75rem",
                     }}
                   />
                 </label>
@@ -2061,7 +2061,7 @@ export function GitPanel({ root }: { root: string }): ReactElement {
                 style={{
                   margin: "8px 0",
                   color: "var(--text-secondary)",
-                  fontSize: "0.74rem",
+                  fontSize: "0.75rem",
                 }}
               >
                 {confirmReset.mode === "soft"
@@ -2134,7 +2134,7 @@ export function GitPanel({ root }: { root: string }): ReactElement {
             <div style={{ fontWeight: 600, fontSize: "0.84rem", marginBottom: 2 }}>
               Interactive rebase
             </div>
-            <div style={{ color: "var(--text-secondary)", fontSize: "0.72rem", marginBottom: 8 }}>
+            <div style={{ color: "var(--text-secondary)", fontSize: "0.75rem", marginBottom: 8 }}>
               onto {rebasePlan.base.slice(0, 7)} · {rebasePlan.rows.length} commit
               {rebasePlan.rows.length === 1 ? "" : "s"} · oldest first
             </div>
@@ -2150,7 +2150,7 @@ export function GitPanel({ root }: { root: string }): ReactElement {
                       gap: 6,
                       padding: "2px 0",
                       paddingLeft: fold ? 16 : 0,
-                      fontSize: "0.72rem",
+                      fontSize: "0.75rem",
                     }}
                   >
                     {fold && (
@@ -2172,7 +2172,7 @@ export function GitPanel({ root }: { root: string }): ReactElement {
                         border: "1px solid var(--border-subtle)",
                         borderRadius: 4,
                         padding: "1px 3px",
-                        fontSize: "0.7rem",
+                        fontSize: "0.75rem",
                       }}
                     >
                       {(["pick", "reword", "squash", "fixup", "drop"] as const).map((a) => (
@@ -2211,7 +2211,7 @@ export function GitPanel({ root }: { root: string }): ReactElement {
                         borderRadius: 3,
                         color: "var(--text-secondary)",
                         cursor: i === 0 ? "default" : "pointer",
-                        fontSize: "0.7rem",
+                        fontSize: "0.75rem",
                         padding: "0 4px",
                       }}
                     >
@@ -2228,7 +2228,7 @@ export function GitPanel({ root }: { root: string }): ReactElement {
                         borderRadius: 3,
                         color: "var(--text-secondary)",
                         cursor: i === rebasePlan.rows.length - 1 ? "default" : "pointer",
-                        fontSize: "0.7rem",
+                        fontSize: "0.75rem",
                         padding: "0 4px",
                       }}
                     >
@@ -2257,18 +2257,18 @@ export function GitPanel({ root }: { root: string }): ReactElement {
                     color: "var(--text-primary)",
                     border: "1px solid var(--border-subtle)",
                     borderRadius: "var(--radius-sm, 3px)",
-                    fontSize: "0.72rem",
+                    fontSize: "0.75rem",
                   }}
                 />
               ) : null,
             )}
             {rebaseTreeDirty && (
-              <p style={{ margin: "6px 0 0", color: "var(--warn)", fontSize: "0.72rem" }}>
+              <p style={{ margin: "6px 0 0", color: "var(--warn)", fontSize: "0.75rem" }}>
                 Commit, stash, or discard your changes first — a rebase needs a clean working tree.
               </p>
             )}
             {!validatePlan(rebasePlan.rows).ok && (
-              <p style={{ margin: "6px 0 0", color: "var(--danger)", fontSize: "0.72rem" }}>
+              <p style={{ margin: "6px 0 0", color: "var(--danger)", fontSize: "0.75rem" }}>
                 {validatePlan(rebasePlan.rows).error}
               </p>
             )}

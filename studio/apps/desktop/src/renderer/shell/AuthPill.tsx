@@ -66,48 +66,40 @@ export function AuthPill({ compact, onClick }: AuthPillProps): ReactElement {
   const color = `var(${authLevelVar(level)})`;
   const name = authLevelUiLabel(level);
 
-  // click-outside + Esc close the picker (it is a popover, not a modal — no focus trap).
-  useEffect(() => {
-    if (!open) return;
-    const onDown = (e: MouseEvent): void => {
-      if (!wrapRef.current?.contains(e.target as Node)) setOpen(false);
-    };
-    const onKey = (e: KeyboardEvent): void => {
-      if (e.key === "Escape") setOpen(false);
-    };
-    window.addEventListener("mousedown", onDown);
-    window.addEventListener("keydown", onKey);
-    return () => {
-      window.removeEventListener("mousedown", onDown);
-      window.removeEventListener("keydown", onKey);
-    };
-  }, [open]);
-
   const handle = useCallback((): void => {
     if (onClick) onClick();
     else setOpen((v) => !v);
   }, [onClick]);
 
   if (compact) {
+    // The composer's `A{n}`. It toggled `open` and then never rendered the picker, so the click
+    // did nothing at all; it opens the same picker as the TopBar pill now, ABOVE (the composer
+    // sits at the bottom of the window).
     return (
-      <button
-        type="button"
-        onClick={handle}
-        title={`Authorisation A${level} — ${name}`}
-        aria-label={`Authorisation level A${level}, ${name}`}
-        style={{
-          background: "transparent",
-          border: "none",
-          padding: 0,
-          cursor: "pointer",
-          fontFamily: "var(--font-mono)",
-          fontSize: 11,
-          fontWeight: 700,
-          color,
-        }}
-      >
-        A{level}
-      </button>
+      <span ref={wrapRef} style={{ position: "relative", flex: "none" }}>
+        <button
+          type="button"
+          onClick={handle}
+          data-auth-trigger=""
+          aria-haspopup="listbox"
+          aria-expanded={open}
+          title={`Authorisation A${level} — ${name}`}
+          aria-label={`Authorisation level A${level}, ${name}`}
+          style={{
+            background: "transparent",
+            border: "none",
+            padding: 0,
+            cursor: "pointer",
+            fontFamily: "var(--font-mono)",
+            fontSize: 12,
+            fontWeight: 700,
+            color,
+          }}
+        >
+          A{level}
+        </button>
+        {open && <AuthPicker placement="above-right" onClose={() => setOpen(false)} />}
+      </span>
     );
   }
 
@@ -116,6 +108,7 @@ export function AuthPill({ compact, onClick }: AuthPillProps): ReactElement {
       <button
         type="button"
         onClick={handle}
+        data-auth-trigger=""
         aria-haspopup="listbox"
         aria-expanded={open}
         title="Authorisation level — click to change"
@@ -132,7 +125,7 @@ export function AuthPill({ compact, onClick }: AuthPillProps): ReactElement {
           cursor: "pointer",
         }}
       >
-        <span style={{ fontFamily: "var(--font-mono)", fontWeight: 700, fontSize: 11, color }}>
+        <span style={{ fontFamily: "var(--font-mono)", fontWeight: 700, fontSize: 12, color }}>
           A{level}
         </span>
         <span style={{ color: "var(--text-secondary)", fontSize: 12 }}>{name}</span>
@@ -153,14 +146,39 @@ export function AuthPicker({
   placement = "below",
 }: {
   onClose: () => void;
-  placement?: "below" | "above";
+  placement?: "below" | "above" | "above-right";
 }): ReactElement {
   const level = useAuthorisationStore((s) => s.level);
+  // Escape and an outside click close the picker WHEREVER it is opened from. These lived only
+  // in AuthPill, so the copy the StatusBar opens could be closed only by choosing a level or
+  // clicking the status entry again. Its own trigger is ignored, so the click that toggles it
+  // shut does not reopen it.
+  const rootRef = useRef<HTMLDivElement | null>(null);
+  const closeRef = useRef(onClose);
+  closeRef.current = onClose;
+  useEffect(() => {
+    const onDown = (e: MouseEvent): void => {
+      const t = e.target as Element | null;
+      if (rootRef.current?.contains(t)) return;
+      if (t?.closest?.('[data-auth-trigger], [data-status-id="auth"]')) return;
+      closeRef.current();
+    };
+    const onKey = (e: KeyboardEvent): void => {
+      if (e.key === "Escape") closeRef.current();
+    };
+    window.addEventListener("mousedown", onDown);
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("mousedown", onDown);
+      window.removeEventListener("keydown", onKey);
+    };
+  }, []);
   const setLevel = useAuthorisationStore((s) => s.setLevel);
   const mode = useAuthorisationStore((s) => s.permissionMode);
   const setPermissionMode = useAuthorisationStore((s) => s.setPermissionMode);
   return (
     <div
+      ref={rootRef}
       role="listbox"
       tabIndex={-1}
       aria-label="Authorisation level"
@@ -168,7 +186,9 @@ export function AuthPicker({
         position: "absolute",
         ...(placement === "below"
           ? { top: "calc(100% + 6px)", right: 0 }
-          : { bottom: "calc(100% + 6px)", left: 0 }),
+          : placement === "above-right"
+            ? { bottom: "calc(100% + 6px)", right: 0 }
+            : { bottom: "calc(100% + 6px)", left: 0 }),
         width: 320,
         zIndex: Z.dropdown,
         display: "flex",
@@ -223,7 +243,7 @@ export function AuthPicker({
             <span
               style={{
                 fontFamily: "var(--font-mono)",
-                fontSize: 11,
+                fontSize: 12,
                 width: 20,
                 flex: "none",
                 textAlign: "left",
@@ -243,7 +263,7 @@ export function AuthPicker({
               >
                 {m.label}
               </span>
-              <span style={{ display: "block", fontSize: 11, color: "var(--text-muted)" }}>
+              <span style={{ display: "block", fontSize: 12, color: "var(--text-muted)" }}>
                 {m.description}
               </span>
             </span>
@@ -282,7 +302,7 @@ export function AuthPicker({
               style={{
                 fontFamily: "var(--font-mono)",
                 fontWeight: 700,
-                fontSize: 11,
+                fontSize: 12,
                 color,
                 width: 20,
                 flex: "none",
@@ -302,7 +322,7 @@ export function AuthPicker({
               >
                 {meta.uiLabel}
               </span>
-              <span style={{ display: "block", fontSize: 11, color: "var(--text-muted)" }}>
+              <span style={{ display: "block", fontSize: 12, color: "var(--text-muted)" }}>
                 {meta.description}
               </span>
             </span>

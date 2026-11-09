@@ -52,6 +52,8 @@ test("agent:systemTool refuses a read outside the working set", async () => {
 
   mock.module("electron", {
     [MOCK_EXPORTS]: {
+      // native confirms (ext/privileged/settings/path seams) answer "Cancel" in tests
+      dialog: { showMessageBox: async () => ({ response: 0 }), showMessageBoxSync: () => 0 },
       ipcMain: fakeIpcMain,
       BrowserWindow: class FakeBrowserWindow {},
       session: { fromPartition: () => ({}) },

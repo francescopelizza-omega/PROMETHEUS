@@ -62,42 +62,42 @@ test("the view goes to the window with the formatted lines, and an approve answe
   assert.equal(payload.id, "abc123");
   assert.equal(payload.commandLine, VIEW.commandLine);
   assert.match(payload.lines[0] ?? "", /PRIVILEGED COMMAND/);
-  assert.deepEqual(a.decide({ id: "abc123", decision: "approve" }, WIN), { ok: true });
+  assert.deepEqual(await a.decide({ id: "abc123", decision: "approve" }, WIN), { ok: true });
   assert.deepEqual(await p, { decision: "approve" });
 });
 
 test("a decision answers ONE request, once — a replay is refused", async () => {
   const { a } = harness();
   const p = a.approver(VIEW, new AbortController().signal);
-  a.decide({ id: "abc123", decision: "approve" }, WIN);
+  await a.decide({ id: "abc123", decision: "approve" }, WIN);
   await p;
-  assert.equal(a.decide({ id: "abc123", decision: "approve" }, WIN).ok, false);
+  assert.equal((await a.decide({ id: "abc123", decision: "approve" }, WIN)).ok, false);
 });
 
 test("an unknown id, a malformed argument or an odd decision never approves", async () => {
   const { a } = harness();
   const p = a.approver(VIEW, new AbortController().signal);
-  assert.equal(a.decide({ id: "nope", decision: "approve" }, WIN).ok, false);
-  assert.equal(a.decide(null, WIN).ok, false);
-  assert.equal(a.decide({ id: 7, decision: "approve" }, WIN).ok, false);
-  assert.equal(a.decide({ id: "abc123", decision: "always" }, WIN).ok, true);
+  assert.equal((await a.decide({ id: "nope", decision: "approve" }, WIN)).ok, false);
+  assert.equal((await a.decide(null, WIN)).ok, false);
+  assert.equal((await a.decide({ id: 7, decision: "approve" }, WIN)).ok, false);
+  assert.equal((await a.decide({ id: "abc123", decision: "always" }, WIN)).ok, true);
   assert.deepEqual(await p, { decision: "deny" });
 });
 
 test("only the window that was asked can answer — another window's approve is refused", async () => {
   const { a } = harness();
   const p = a.approver(VIEW, new AbortController().signal);
-  const other = a.decide({ id: "abc123", decision: "approve" }, WIN + 1);
+  const other = await a.decide({ id: "abc123", decision: "approve" }, WIN + 1);
   assert.equal(other.ok, false);
   // the request is still open for the asked window, which denies it
-  assert.deepEqual(a.decide({ id: "abc123", decision: "deny" }, WIN), { ok: true });
+  assert.deepEqual(await a.decide({ id: "abc123", decision: "deny" }, WIN), { ok: true });
   assert.deepEqual(await p, { decision: "deny" });
 });
 
 test("the typed phrase travels with an approve", async () => {
   const { a } = harness();
   const p = a.approver({ ...VIEW, phrase: "/dev/disk4" }, new AbortController().signal);
-  a.decide({ id: "abc123", decision: "approve", phrase: "/dev/disk4" }, WIN);
+  await a.decide({ id: "abc123", decision: "approve", phrase: "/dev/disk4" }, WIN);
   assert.deepEqual(await p, { decision: "approve", phrase: "/dev/disk4" });
 });
 
@@ -109,7 +109,7 @@ test("a timed-out request closes the dialog and denies; a late click is refused"
   assert.deepEqual(await p, { decision: "deny" });
   assert.equal(sent.at(-1)?.channel, IPC.privilegedClose);
   assert.deepEqual(sent.at(-1)?.payload, { id: "abc123" });
-  assert.equal(a.decide({ id: "abc123", decision: "approve" }, WIN).ok, false);
+  assert.equal((await a.decide({ id: "abc123", decision: "approve" }, WIN)).ok, false);
 });
 
 test("no window to ask means deny", async () => {
@@ -128,4 +128,16 @@ test("a privileged subject is never stored as a grant — sudo, pkexec, wrapped 
   }
   assert.equal(privilegedGrantRefusal("bash:git status"), null);
   assert.equal(privilegedGrantRefusal("engine:prometheus_scan"), null);
+});
+
+test("the renderer's approve is not enough: main's native confirm must say yes too", async () => {
+  for (const human of [false, true]) {
+    const a = createStudioApprover(
+      () => WIN,
+      async () => human,
+    );
+    const p = a.approver(VIEW, new AbortController().signal);
+    assert.deepEqual(await a.decide({ id: "abc123", decision: "approve" }, WIN), { ok: true });
+    assert.deepEqual(await p, { decision: human ? "approve" : "deny" });
+  }
 });

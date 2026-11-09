@@ -31,7 +31,7 @@ function Badge({ text, color }: { text: string; color: string }): ReactElement {
   return (
     <span
       style={{
-        fontSize: "0.68rem",
+        fontSize: "0.75rem",
         padding: "1px 6px",
         borderRadius: "var(--radius-sm, 4px)",
         border: `1px solid ${color}`,
@@ -91,12 +91,12 @@ function ToolCard({ t }: { t: Tool }): ReactElement {
         <span style={{ color: "var(--text-secondary)", fontSize: "0.78rem", lineHeight: 1.35 }}>
           {t.pitch}
         </span>
-        <span style={{ color: "var(--text-secondary)", fontSize: "0.72rem", opacity: 0.85 }}>
+        <span style={{ color: "var(--text-secondary)", fontSize: "0.75rem", opacity: 0.85 }}>
           → {t.tokenSaving}
         </span>
       </button>
       {open && (
-        <div style={{ marginTop: "6px", display: "grid", gap: "4px", fontSize: "0.74rem" }}>
+        <div style={{ marginTop: "6px", display: "grid", gap: "4px", fontSize: "0.75rem" }}>
           {t.install && (
             <div style={{ display: "flex", gap: "6px", alignItems: "baseline", flexWrap: "wrap" }}>
               <b style={{ color: "var(--text-secondary)" }}>install</b>
@@ -111,7 +111,7 @@ function ToolCard({ t }: { t: Tool }): ReactElement {
                   void navigator.clipboard?.writeText(t.install);
                 }}
                 style={{
-                  fontSize: "0.66rem",
+                  fontSize: "0.75rem",
                   padding: "0 6px",
                   borderRadius: "var(--radius-sm, 4px)",
                   border: "1px solid var(--border-subtle)",
@@ -160,7 +160,7 @@ function NanoSection({ onNavigate }: { onNavigate?: (id: ActivityId) => void }):
       </div>
       <ul style={{ listStyle: "none", margin: 0, padding: 0, display: "grid", gap: "4px" }}>
         {n.methods.map((m) => (
-          <li key={m.method} style={{ fontSize: "0.74rem", display: "flex", gap: "6px" }}>
+          <li key={m.method} style={{ fontSize: "0.75rem", display: "flex", gap: "6px" }}>
             <span style={{ color: m.endorsed ? "var(--ok)" : "var(--danger)" }} aria-hidden="true">
               {m.endorsed ? "✓" : "✗"}
             </span>
@@ -175,7 +175,7 @@ function NanoSection({ onNavigate }: { onNavigate?: (id: ActivityId) => void }):
           </li>
         ))}
       </ul>
-      <div style={{ fontSize: "0.74rem" }}>
+      <div style={{ fontSize: "0.75rem" }}>
         <b style={{ color: "var(--text-secondary)" }}>Recommended open ~4GB alternatives:</b>
         <ul style={{ margin: "2px 0 0", paddingLeft: "16px", color: "var(--text-secondary)" }}>
           {n.alternatives.map((a) => (
@@ -205,7 +205,7 @@ function NanoSection({ onNavigate }: { onNavigate?: (id: ActivityId) => void }):
         </ul>
       </div>
       <p
-        style={{ fontSize: "0.72rem", color: "var(--text-secondary)", margin: 0, lineHeight: 1.4 }}
+        style={{ fontSize: "0.75rem", color: "var(--text-secondary)", margin: 0, lineHeight: 1.4 }}
       >
         {n.recommendation}
       </p>
@@ -227,7 +227,7 @@ export function TokenEconomyPanel({
       onClick={onClick}
       aria-pressed={active}
       style={{
-        fontSize: "0.74rem",
+        fontSize: "0.75rem",
         padding: "3px 10px",
         borderRadius: "var(--radius-md, 6px)",
         border: `1px solid ${active ? "var(--accent)" : "var(--border-subtle)"}`,

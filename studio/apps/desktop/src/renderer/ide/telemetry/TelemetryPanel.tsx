@@ -184,7 +184,7 @@ export function TelemetryPanel(): ReactElement {
       </div>
 
       {error && (
-        <span style={{ color: toneVar("warn"), fontSize: "0.72rem" }}>last refresh: {error}</span>
+        <span style={{ color: toneVar("warn"), fontSize: "0.75rem" }}>last refresh: {error}</span>
       )}
     </div>
   );

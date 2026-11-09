@@ -68,6 +68,43 @@ function redactUrl(raw: string): string {
 }
 
 /**
+ * Secrets travel in ARGS too: `npx mcp-remote https://h --header "Authorization: Bearer …"`,
+ * `docker run -e TOKEN=…`, `--api-key sk-…`. A value that follows a secret-named flag, a
+ * `NAME=value` whose name looks secret, an `Authorization:`/`Bearer` header, or a token-shaped
+ * string is replaced with `<redacted>` — the bundle keeps the shape of the command, never the key.
+ */
+const SECRET_FLAG =
+  /^--?(api[_-]?key|token|access[_-]?token|secret|password|passwd|auth|header|bearer|key)$/i;
+const SECRET_ASSIGN = /^([A-Za-z_][A-Za-z0-9_]*)=(.+)$/;
+const SECRET_NAME = /(key|token|secret|passw|auth|credential|bearer)/i;
+const TOKENISH = /^(sk-|ghp_|gho_|github_pat_|xox[abpr]-|AKIA|eyJ)[A-Za-z0-9._-]{8,}/;
+
+export function redactArgs(args: readonly string[] | undefined): string[] {
+  const out: string[] = [];
+  const list = Array.isArray(args) ? args : [];
+  for (let i = 0; i < list.length; i++) {
+    const a = String(list[i]);
+    const prev = i > 0 ? String(list[i - 1]) : "";
+    if (SECRET_FLAG.test(prev) || /authorization\s*:|bearer\s+/i.test(a) || TOKENISH.test(a)) {
+      out.push("<redacted>");
+      continue;
+    }
+    const m = SECRET_ASSIGN.exec(a);
+    if (m && SECRET_NAME.test(m[1] ?? "")) {
+      out.push(`${m[1]}=<redacted>`);
+      continue;
+    }
+    const flagEq = /^(--?[A-Za-z0-9_-]+)=(.+)$/.exec(a);
+    if (flagEq && SECRET_FLAG.test(flagEq[1] ?? "")) {
+      out.push(`${flagEq[1]}=<redacted>`);
+      continue;
+    }
+    out.push(a);
+  }
+  return out;
+}
+
+/**
  * Rebuild a connector with ONLY its non-secret fields — `transport.env` (stdio) and
  * `transport.headers` (http) are STRUCTURALLY DROPPED (never read into the result), so no
  * API key / bearer token can survive into the bundle; the http `url` is credential-stripped.
@@ -79,7 +116,8 @@ export function redactConnector(cfg: McpServerConfig): RedactedConnector {
       ? {
           kind: "stdio",
           command: t.command,
-          args: [...t.args],
+          // `[...t.args]` threw for a stored connector with no args, aborting the whole sync
+          args: redactArgs(t.args),
           ...(t.cwd ? { cwd: t.cwd } : {}),
           // t.env is deliberately NOT copied — that is where stdio secrets live.
         }

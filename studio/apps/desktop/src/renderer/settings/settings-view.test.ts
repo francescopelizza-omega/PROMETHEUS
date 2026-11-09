@@ -69,10 +69,15 @@ test("filterNodes ranks title matches before searchTerm matches", () => {
 });
 
 test("formatKeys renders platform glyphs for chords", () => {
-  assert.equal(formatKeys("cmd+shift+p"), "⌘⇧P");
-  assert.equal(formatKeys("ctrl+`"), "⌃`");
-  assert.equal(formatKeys("g d"), "G D");
-  assert.equal(formatKeys("alt+enter"), "⌥⏎");
+  assert.equal(formatKeys("cmd+shift+p", true), "⌘⇧P");
+  assert.equal(formatKeys("ctrl+`", true), "⌃`");
+  assert.equal(formatKeys("g d", true), "G D");
+  assert.equal(formatKeys("alt+enter", true), "⌥⏎");
+});
+
+test("formatKeys spells the modifiers out off macOS (⌘ is not on those keyboards)", () => {
+  assert.equal(formatKeys("cmd+shift+p", false), "Ctrl+Shift+P");
+  assert.equal(formatKeys("alt+enter", false), "Alt+⏎");
 });
 
 test("isEditableControl: scalar controls with scalar values are editable", () => {
@@ -124,5 +129,47 @@ test("normalizeForDisplay MATCHES core normalizeKeys so a real conflict set (bui
   assert.equal(
     bindingHasConflict({ command: "a", keys: "cmd+shift+p", source: "preset" }, set),
     true,
+  );
+});
+
+test("pruneDeadLeaves: nodes with no value and no live children are not offered", async () => {
+  const { pruneDeadLeaves } = await import("./settings-view.js");
+  const tree = [
+    {
+      id: "a",
+      title: "A",
+      category: "root",
+      ownerFile: "13",
+      control: "page",
+      children: [
+        { id: "a.dead", title: "Dead", category: "A", ownerFile: "13", control: "page" },
+        {
+          id: "a.live",
+          title: "Live",
+          category: "A",
+          ownerFile: "13",
+          control: "toggle",
+          schemaKey: "x",
+        },
+      ],
+    },
+    {
+      id: "b",
+      title: "B",
+      category: "root",
+      ownerFile: "13",
+      control: "page",
+      children: [{ id: "b.dead", title: "Dead", category: "B", ownerFile: "13", control: "page" }],
+    },
+    { id: "c", title: "C", category: "root", ownerFile: "13", control: "page" },
+  ];
+  const out = pruneDeadLeaves(tree);
+  assert.deepEqual(
+    out.map((n) => n.id),
+    ["a"],
+  );
+  assert.deepEqual(
+    out[0]?.children?.map((n) => n.id),
+    ["a.live"],
   );
 });

@@ -56,7 +56,14 @@ import { OWNER_PID_ENV } from "../child-reaper.js";
 import { c } from "../render.js";
 import { type ExecAuditEntry, execAuditEntry } from "../session/exec-gate.js";
 import type { DispatchProbes } from "./dispatch-probes.js";
-import { type ModelActionDeps, authRefusal, gb, pullWithProgress } from "./model-actions-cmd.js";
+import {
+  type ModelActionDeps,
+  type OllamaGate,
+  authRefusal,
+  gateAfterPull,
+  gb,
+  pullWithProgress,
+} from "./model-actions-cmd.js";
 import { STEP_TIMEOUT_MS, type StepResult, type StepRunner, cleanLine } from "./run-step.js";
 
 /** The question, verbatim — the wording the owner asked for. */
@@ -83,6 +90,10 @@ export interface DispatchDeps {
   probes: DispatchProbes;
   /** the in-process model pull. Required, so no test can ever reach a real daemon by default. */
   pull: typeof pullModel;
+  /** nemesis over what each pull stored. Required (see `pull`): hosts pass `defaultOllamaGate`. */
+  gate: OllamaGate;
+  /** removes an upgraded model nemesis WARNed on (a batch run has nobody to confirm it). */
+  discard: (tag: string) => Promise<unknown>;
   /** appends one line to `<home>/config/exec-audit.jsonl`. */
   audit: (entry: ExecAuditEntry) => void;
   /** free bytes on the volume holding the ollama store, measured NOW; undefined = unknown. */
@@ -609,7 +620,26 @@ export async function offerAndDispatch(
         record(step, "failed", detail);
         continue;
       }
-      write(`  ⎿ ${c.green("✓ pulled")}`);
+      // The upgraded blobs are scanned before the step counts as done. A batch run cannot ask
+      // anyone to confirm a WARN, so a WARN removes the upgraded model (it would otherwise be
+      // used next, unscanned-accepted) and the step says how to review it.
+      const g = await gateAfterPull(
+        item.name,
+        {
+          write: (l) => write(`  ⎿ ${l.trim()}`),
+          ask: async () => "",
+          gate: dispatch.gate,
+          discard: dispatch.discard,
+        },
+        { interactive: false },
+      );
+      if (!g.ok) {
+        const detail = `${g.detail} — review with /updates pull ${item.name}`;
+        write(`  ⎿ ${c.red(`✗ ${detail}`)}`);
+        record(step, "failed", detail);
+        continue;
+      }
+      write(`  ⎿ ${c.green("✓ pulled and scanned by nemesis")}`);
       record(step, "updated");
       continue;
     }

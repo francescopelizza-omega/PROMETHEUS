@@ -28,7 +28,7 @@
  * unprivileged `navigator.clipboard` API only.
  */
 import { EmptyState, Panel, StatusPill } from "@prometheus/ui";
-import { type CSSProperties, type ReactElement, useState } from "react";
+import { type CSSProperties, type ReactElement, useRef, useState } from "react";
 
 import { usePersonas } from "../shared/persona/usePersonas.js";
 import {
@@ -66,12 +66,22 @@ export function PersonasPage(): ReactElement {
   const [removeBusy, setRemoveBusy] = useState<string | undefined>(undefined);
   const [removeError, setRemoveError] = useState<string | undefined>(undefined);
 
+  // Export A then B: A's late answer used to land under B's title, so "Copy" could copy the
+  // wrong persona. Only the newest export may write the panel.
+  const exportSeq = useRef(0);
   const handleExport = async (name: string): Promise<void> => {
+    const seq = ++exportSeq.current;
     setExportName(name);
     setExportError(undefined);
     setExportMarkdown(undefined);
     setCopyStatus("idle");
-    const markdown = await exportOne(name);
+    let markdown: string | undefined;
+    try {
+      markdown = await exportOne(name);
+    } catch {
+      markdown = undefined;
+    }
+    if (seq !== exportSeq.current) return;
     if (markdown === undefined) setExportError(`Could not export "${name}".`);
     else setExportMarkdown(markdown);
   };
@@ -93,29 +103,45 @@ export function PersonasPage(): ReactElement {
     if (!res || res.canceled || !res.path) return;
     setImportBusy(true);
     setImportError(undefined);
-    const result = await importPath(res.path);
-    setImportBusy(false);
-    if (!result.ok) setImportError(result.error ?? "Import failed.");
+    try {
+      const result = await importPath(res.path);
+      if (!result.ok) setImportError(result.error ?? "Import failed.");
+    } catch (e) {
+      setImportError(e instanceof Error ? e.message : "Import failed.");
+    } finally {
+      setImportBusy(false); // a rejected IPC used to leave the buttons stuck for good
+    }
   };
 
   const handlePasteImport = async (): Promise<void> => {
     setImportBusy(true);
     setImportError(undefined);
-    const result = await importText(pasteName, pasteMarkdown);
-    setImportBusy(false);
-    if (!result.ok) {
-      setImportError(result.error ?? "Import failed.");
-      return;
+    try {
+      const result = await importText(pasteName, pasteMarkdown);
+      if (!result.ok) {
+        setImportError(result.error ?? "Import failed.");
+        return;
+      }
+      setPasteName("");
+      setPasteMarkdown("");
+    } catch (e) {
+      setImportError(e instanceof Error ? e.message : "Import failed.");
+    } finally {
+      setImportBusy(false);
     }
-    setPasteName("");
-    setPasteMarkdown("");
   };
 
   const handleRemove = async (name: string): Promise<void> => {
     setRemoveBusy(name);
     setRemoveError(undefined);
-    const ok = await remove(name);
-    setRemoveBusy(undefined);
+    let ok = false;
+    try {
+      ok = await remove(name);
+    } catch {
+      ok = false;
+    } finally {
+      setRemoveBusy(undefined);
+    }
     if (!ok) setRemoveError(`Could not remove "${name}".`);
   };
 
@@ -285,7 +311,7 @@ export function PersonasPage(): ReactElement {
                 style={inputStyle}
               />
               {pasteNameInvalid && (
-                <span style={{ color: "var(--danger)", fontSize: "0.72rem" }}>
+                <span style={{ color: "var(--danger)", fontSize: "0.75rem" }}>
                   This name will be rejected — use lowercase letters, numbers, "-" or "_", up to 32
                   characters.
                 </span>
@@ -339,7 +365,7 @@ const thStyle: CSSProperties = {
   padding: "var(--space-2, 4px) var(--space-3, 6px)",
   color: "var(--text-secondary)",
   fontWeight: 500,
-  fontSize: "0.72rem",
+  fontSize: "0.75rem",
   textTransform: "uppercase",
   letterSpacing: "0.02em",
   borderBottom: "1px solid var(--border-strong)",
@@ -380,7 +406,8 @@ const linkBtn: CSSProperties = {
 
 const primaryBtn: CSSProperties = {
   background: "var(--accent)",
-  color: "var(--bg-app)",
+  // the token MADE for text on an accent fill — `--bg-app` was 3.4:1 on the light scheme
+  color: "var(--on-accent)",
   border: "none",
   borderRadius: "var(--radius-sm, 4px)",
   padding: "var(--space-2, 4px) var(--space-4, 8px)",
@@ -413,7 +440,7 @@ const inputStyle: CSSProperties = {
 };
 
 const fieldLabelStyle: CSSProperties = {
-  fontSize: "0.72rem",
+  fontSize: "0.75rem",
   color: "var(--text-secondary)",
   fontFamily: "var(--font-ui)",
 };

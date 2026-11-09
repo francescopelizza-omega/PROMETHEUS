@@ -9,10 +9,12 @@ import { computeIsError } from "./isError.js";
 import { type EngineRunner, runMcpTool, validateArgs } from "./runner.js";
 import { PROMETHEUS_TOOLS } from "./tools.js";
 
-test("catalog is 14 ported + 4 studio = 18 tools, unique names", () => {
-  assert.equal(PROMETHEUS_TOOLS.length, 14);
-  assert.equal(TOOLS.length, 18);
-  assert.equal(new Set(toolNames()).size, 18);
+test("catalog is 20 ported + 4 studio = 24 tools, unique names", () => {
+  // 14 ported verbs + 6 read-only views added 2026-11-02 (doctor, harden, describe, tutorial,
+  // methods, disk_space) so this catalogue matches what the plugin server offers
+  assert.equal(PROMETHEUS_TOOLS.length, 20);
+  assert.equal(TOOLS.length, 24);
+  assert.equal(new Set(toolNames()).size, 24);
   for (const t of ["prometheus_scan", "prometheus_install", "prometheus_models"]) {
     assert.ok(getTool(t), `${t} present`);
   }
@@ -31,9 +33,38 @@ test("toArgv: read-only tools never carry global flags", () => {
   assert.deepEqual(getTool("prometheus_scan")?.toArgv({}), ["scan"]);
   assert.deepEqual(getTool("prometheus_info")?.toArgv({ name: "superpowers" }), [
     "info",
+    "--",
     "superpowers",
   ]);
   assert.deepEqual(getTool("prometheus_skills_list")?.toArgv({}), ["skills", "list"]);
+});
+
+test("toArgv: models emits the engine's hyphenated flags and guards the tool id", () => {
+  const models = getTool("prometheus_models")!;
+  assert.deepEqual(
+    models.toArgv({
+      action: "install",
+      tool: "flashattention",
+      target_python: "/py",
+      max_jobs: 2,
+      fa_version: "2.8",
+    }),
+    [
+      "models",
+      "install",
+      "flashattention",
+      "--target-python",
+      "/py",
+      "--max-jobs",
+      "2",
+      "--fa-version",
+      "2.8",
+    ],
+  );
+  // a "-"-leading id is refused, never passed (argparse < 3.13 cannot take `-- <tool>` here)
+  assert.throws(() => models.toArgv({ action: "status", tool: "-h" }), /invalid tool id/);
+  const argv = models.toArgv({ action: "install", tool: "x", max_jobs: 1 });
+  assert.ok(!argv.some((a) => /^--\w+_\w+/.test(a)), "no underscore flag reaches the engine");
 });
 
 test("toArgv: install puts global flags before the subcommand (§1.1 contract)", () => {
@@ -180,6 +211,7 @@ test("every exposed tool maps to a subcommand the engine actually has", () => {
     "methods",
     "harden",
     "pentest",
+    "disk-space",
   ]);
   for (const tool of TOOLS) {
     const verb = tool.toArgv({})[0];
@@ -188,4 +220,22 @@ test("every exposed tool maps to a subcommand the engine actually has", () => {
       `"${tool.name}" runs \`prometheus ${verb}\`, which is not an engine subcommand`,
     );
   }
+});
+
+test("the added read-only views guard their ids and never offer a delete", () => {
+  assert.deepEqual(getTool("prometheus_describe")?.toArgv({ id: "-rf" }), [
+    "describe",
+    "--",
+    "-rf",
+  ]);
+  assert.deepEqual(getTool("prometheus_info")?.toArgv({ name: "-h" }), ["info", "--", "-h"]);
+  const disk = getTool("prometheus_disk_space");
+  assert.equal(disk?.annotations.readOnlyHint, true);
+  assert.deepEqual(disk?.toArgv({ action: "files", path: "/tmp" }), [
+    "disk-space",
+    "largest-files",
+    "--",
+    "/tmp",
+  ]);
+  assert.throws(() => disk?.toArgv({ action: "delete", path: "/" }));
 });

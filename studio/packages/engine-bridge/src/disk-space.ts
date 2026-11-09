@@ -210,7 +210,8 @@ export interface DiskSpaceClient {
   ): Promise<DiskDeleteResult>;
   deleteConfirm(
     paths: readonly string[],
-    args: { mode?: DiskDeleteMode; ackHighRisk?: boolean },
+    /** `canonical`: the paths are a plan's own output — refuse any whose parent changed since */
+    args: { mode?: DiskDeleteMode; ackHighRisk?: boolean; canonical?: boolean },
     opts?: SidecarOptions,
   ): Promise<DiskDeleteResult>;
   cleanupPlan(opts?: SidecarOptions): Promise<DiskCleanupPlanResult>;
@@ -294,6 +295,7 @@ export function createDiskSpaceClient(
           `--${args.mode ?? "trash"}`,
           "--confirm",
           ...(args.ackHighRisk ? ["--ack-high-risk"] : []),
+          ...(args.canonical ? ["--canonical"] : []),
           "--",
           ...paths,
         ],

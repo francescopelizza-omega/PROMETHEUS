@@ -272,14 +272,17 @@ export function filterCatalog(entries: readonly CatalogEntry[], query: string): 
 export function installCommand(entry: CatalogEntry): string | null {
   switch (entry.route.kind) {
     case "ollama-tag":
-      return `ollama pull ${entry.route.tag}`;
+      // Prometheus's pull, not a bare `ollama pull`: the stored blobs are scanned by nemesis
+      // before the model is used (and removed on a block). The bare command skipped that.
+      return `prometheus models pull ${entry.route.tag}`;
     case "ollama-hf":
       /**
-       * `hf.co/<repo>:<quant>` is ollama's own officially supported form for a HuggingFace GGUF
-       * repo — which is why the catalogue needs no scraping and, for the overwhelming majority
-       * of models, no conversion either. Someone has already published a GGUF.
+       * A HuggingFace GGUF repo goes through the GATED hug: the GGUF is staged pinned to a
+       * revision, checked against HuggingFace's sha256, admitted by nemesis and only then
+       * imported into Ollama. `ollama pull hf.co/<repo>` (ollama's own form) handed an arbitrary
+       * uploader's file to Ollama unscanned; Prometheus refuses that tag everywhere now.
        */
-      return `ollama pull hf.co/${entry.route.repo}${entry.route.quant ? `:${entry.route.quant}` : ""}`;
+      return `prometheus model hug ${entry.route.repo} --target ollama${entry.route.quant ? ` --quant ${entry.route.quant.toLowerCase()}` : ""}`;
     default:
       return null;
   }

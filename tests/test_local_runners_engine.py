@@ -232,3 +232,70 @@ def test_the_docker_ollama_is_published_on_loopback_only():
     src = (ROOT / "prometheus.py").read_text()
     assert '"-p", "127.0.0.1:11434:11434"' in src
     assert '"-p", "11434:11434"' not in src
+
+
+# --- local-model agents (hermes / aider / goose), 2026-11-03 --------------------------------
+# `packages/core/src/ai/runtimes/plan.ts::agentWiring` described these and had no caller; the
+# engine's `chat --cli` is the launcher, so the same wiring lives here (env/argv only).
+
+def test_local_agents_are_wired_to_the_chosen_runner_through_env_and_argv(monkeypatch):
+    monkeypatch.setattr(prom.shutil, "which", lambda b: f"/usr/bin/{b}")
+    # Hermes documents no per-run endpoint flags: launched as is, with the one-time setup said
+    argv, env, notes = prom.build_terminal_cmd("hermes", model="qwen3:8b")
+    assert argv == ["hermes"] and env == {}
+    assert any("hermes model" in n and prom.CHAT_LOCAL_ENDPOINTS["ollama"] in n for n in notes)
+    try:
+        prom.build_terminal_cmd("hermes", model="qwen3:8b", prompt="hi")
+        raise AssertionError("hermes has no documented one-shot flag; a prompt must be refused")
+    except RuntimeError:
+        pass
+    argv, env, _ = prom.build_terminal_cmd("aider", model="qwen3:8b", runner="lmstudio")
+    assert env["OPENAI_API_BASE"] == prom.CHAT_LOCAL_ENDPOINTS["lmstudio"]
+    assert argv[argv.index("--model") + 1] == "openai/qwen3:8b"
+    argv, env, _ = prom.build_terminal_cmd("goose", model="m", runner="llamacpp", prompt="x")
+    assert env["GOOSE_PROVIDER"] == "openai" and env["GOOSE_MODEL"] == "m"
+    assert env["OPENAI_HOST"] + "/v1" == prom.CHAT_LOCAL_ENDPOINTS["llamacpp"]
+    assert argv[1:] == ["run", "-t", "x"]
+    assert prom.build_terminal_cmd("goose", model="m")[0][1:] == ["session"]
+
+
+def test_local_agents_refuse_flag_shaped_values_and_need_a_model(monkeypatch):
+    monkeypatch.setattr(prom.shutil, "which", lambda b: f"/usr/bin/{b}")
+    for kw in ({"model": None}, {"model": "-m"}, {"model": "x", "prompt": "--yes-always"},
+               {"model": "x", "runner": "nope"}):
+        for svc in ("hermes", "aider", "goose"):
+            try:
+                prom.build_terminal_cmd(svc, **kw)
+            except RuntimeError:
+                continue
+            raise AssertionError(f"{svc} accepted {kw}")
+
+
+def test_local_agent_bypass_is_explicit(monkeypatch):
+    monkeypatch.setattr(prom.shutil, "which", lambda b: f"/usr/bin/{b}")
+    argv, _env, notes = prom.build_terminal_cmd("aider", model="m", bypass=True)
+    assert "--yes-always" in argv and any("⚠" in n for n in notes)
+    argv, _env, _ = prom.build_terminal_cmd("aider", model="m")
+    assert "--yes-always" not in argv
+
+
+def test_engine_and_core_agree_on_the_local_agent_wiring():
+    plan = (Path(__file__).resolve().parent.parent / "studio" / "packages" / "core" / "src" / "ai"
+            / "runtimes" / "plan.ts").read_text(encoding="utf-8")
+    for token in ("OPENAI_API_BASE", "GOOSE_PROVIDER", "OPENAI_BASE_PATH",
+                  '"v1/chat/completions"', '["goose", "run", "-t"]', "hermes model"):
+        assert token in plan, token
+    src = Path(prom.__file__).read_text(encoding="utf-8")
+    for token in ("OPENAI_API_BASE", "GOOSE_PROVIDER", 'OPENAI_BASE_PATH="v1/chat/completions"',
+                  '["run", "-t", prompt]', "hermes model"):
+        assert token in src, token
+    # neither side invents Hermes endpoint flags
+    for text in (plan, src):
+        assert '"--base-url", v1' not in text
+
+
+def test_opencode_honours_an_explicit_runner(monkeypatch):
+    monkeypatch.setattr(prom.shutil, "which", lambda b: f"/usr/bin/{b}")
+    _argv, env, _ = prom.build_terminal_cmd("opencode", model="qwen3:8b", runner="llamacpp")
+    cfg = json.loads(env["OPENCODE_CONFIG_CONTENT"])
+    assert cfg["provider"]["prometheus-local"]["options"]["baseURL"] == prom.CHAT_LOCAL_ENDPOINTS["llamacpp"]

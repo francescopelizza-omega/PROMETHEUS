@@ -18,6 +18,7 @@
  * packages/core/src/index.ts and packages/core/src/agent/index.ts) — this file is only the
  * on-disk I/O.
  */
+import { readFile } from "node:fs/promises";
 import { agent } from "@prometheus/core";
 
 import { readLayer, writeLayerAtomic } from "./settings-store.js";
@@ -31,6 +32,40 @@ export async function loadSchedules(globalPath: string): Promise<ScheduleStore> 
   return (await readLayer(globalPath)) as unknown as ScheduleStore;
 }
 
+/**
+ * Load for a WRITE: a missing file is an empty store, but a file that exists and does not parse
+ * THROWS. The fail-soft read above is right for display and wrong for read-modify-write — a
+ * hand-edited or half-written schedules.json read as `{}`, and the next upsert replaced every
+ * task with one. Refusing keeps the user's file for them to fix.
+ */
+export async function loadSchedulesForWrite(globalPath: string): Promise<ScheduleStore> {
+  let raw: string;
+  try {
+    raw = await readFile(globalPath, "utf8");
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === "ENOENT") return {};
+    throw e;
+  }
+  if (!raw.trim()) return {};
+  const parsed: unknown = JSON.parse(raw); // throws on a corrupt file — the write is refused
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error(`${globalPath} is not a schedules object — not overwritten`);
+  }
+  return parsed as ScheduleStore;
+}
+
+/** One write at a time per file: unserialized load→merge→save lost concurrent updates. */
+const queues = new Map<string, Promise<unknown>>();
+function serialized<T>(path: string, op: () => Promise<T>): Promise<T> {
+  const prev = queues.get(path) ?? Promise.resolve();
+  const next = prev.then(op, op);
+  queues.set(
+    path,
+    next.catch(() => undefined),
+  );
+  return next;
+}
+
 /** Persist the whole store atomically. */
 export async function saveSchedules(globalPath: string, store: ScheduleStore): Promise<void> {
   await writeLayerAtomic(globalPath, store as unknown as Record<string, unknown>);
@@ -38,16 +73,20 @@ export async function saveSchedules(globalPath: string, store: ScheduleStore): P
 
 /** Load, merge in one task (keyed by `id`), save, and return the new store. */
 export async function upsertTask(globalPath: string, task: ScheduledTask): Promise<ScheduleStore> {
-  const store = await loadSchedules(globalPath);
-  const merged = agent.mergeTask(store, task);
-  await saveSchedules(globalPath, merged);
-  return merged;
+  return serialized(globalPath, async () => {
+    const store = await loadSchedulesForWrite(globalPath);
+    const merged = agent.mergeTask(store, task);
+    await saveSchedules(globalPath, merged);
+    return merged;
+  });
 }
 
 /** Load, remove one task by id (a no-op if already gone), save, and return the new store. */
 export async function removeScheduledTask(globalPath: string, id: string): Promise<ScheduleStore> {
-  const store = await loadSchedules(globalPath);
-  const next = agent.removeTask(store, id);
-  await saveSchedules(globalPath, next);
-  return next;
+  return serialized(globalPath, async () => {
+    const store = await loadSchedulesForWrite(globalPath);
+    const next = agent.removeTask(store, id);
+    await saveSchedules(globalPath, next);
+    return next;
+  });
 }

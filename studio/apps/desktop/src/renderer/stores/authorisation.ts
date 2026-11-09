@@ -176,6 +176,13 @@ function persist(level: number): void {
     .then((res) => {
       const saved = typeof res?.level === "number" ? clampAuthLevel(res.level) : null;
       if (res?.ok && saved === level) return; // the write landed; the optimistic value was right
+      if (res?.declined) {
+        // the human said no to a RAISE in main's dialog: the pill goes back to what is saved
+        const back = saved ?? DEFAULT_AUTH_LEVEL;
+        mirror(back);
+        useAuthorisationStore.setState({ savedLevel: back, level: back });
+        return;
+      }
       useAuthorisationStore.setState({ savedLevel: saved ?? DEFAULT_AUTH_LEVEL });
     })
     .catch(() => {

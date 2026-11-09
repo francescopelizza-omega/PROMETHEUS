@@ -2756,7 +2756,7 @@ function EditorGroup({ group }: { group: number }): ReactElement {
             background: "var(--bg-surface-2)",
             border: "1px solid var(--border-strong)",
             color: "var(--text-secondary)",
-            fontSize: "0.72rem",
+            fontSize: "0.75rem",
             fontFamily: "var(--font-mono, monospace)",
           }}
         >
@@ -2867,7 +2867,14 @@ function TabBar({ group }: { group: number }): ReactElement {
             >
               <span>{t.name}</span>
               {t.dirty && (
-                <span aria-label="unsaved" style={{ color: "var(--accent)" }}>
+                // `aria-label` on a role-less span is ignored by screen readers: the dot said
+                // nothing to anyone who could not see it. `role="img"` makes the label count.
+                <span
+                  role="img"
+                  aria-label="unsaved changes"
+                  title="Unsaved changes"
+                  style={{ color: "var(--accent)" }}
+                >
                   ●
                 </span>
               )}
@@ -2961,7 +2968,7 @@ function TabStripCounters(): ReactElement | null {
         flexShrink: 0,
         paddingInline: 12,
         fontFamily: "var(--font-mono)",
-        fontSize: 11,
+        fontSize: 12,
       }}
     >
       {problems > 0 && (
@@ -3059,7 +3066,7 @@ function QuickDocHost(): ReactElement | null {
             alignItems: "center",
             marginBottom: 6,
             color: "var(--text-secondary)",
-            fontSize: "0.7rem",
+            fontSize: "0.75rem",
           }}
         >
           <span>Quick Documentation</span>
@@ -3103,7 +3110,7 @@ function QuickDocHost(): ReactElement | null {
                     border: "none",
                     color: "var(--accent)",
                     cursor: "pointer",
-                    fontSize: "0.74rem",
+                    fontSize: "0.75rem",
                     padding: 0,
                     overflow: "hidden",
                     textOverflow: "ellipsis",
@@ -3116,7 +3123,7 @@ function QuickDocHost(): ReactElement | null {
               ) : (
                 <div
                   key={l.url}
-                  style={{ display: "flex", alignItems: "center", gap: 6, fontSize: "0.74rem" }}
+                  style={{ display: "flex", alignItems: "center", gap: 6, fontSize: "0.75rem" }}
                 >
                   <span
                     style={{
@@ -3140,7 +3147,7 @@ function QuickDocHost(): ReactElement | null {
                       borderRadius: 4,
                       color: "var(--text-secondary)",
                       cursor: "pointer",
-                      fontSize: "0.66rem",
+                      fontSize: "0.75rem",
                       padding: "0 5px",
                     }}
                   >
@@ -3309,7 +3316,7 @@ function bpEditInput(
         border: "1px solid var(--border-subtle)",
         borderRadius: 4,
         padding: "3px 6px",
-        fontSize: "0.72rem",
+        fontSize: "0.75rem",
         fontFamily: "var(--font-mono, monospace)",
         width: 260,
       }}
@@ -3377,7 +3384,7 @@ function BreakpointEditHost(): ReactElement | null {
           boxShadow: "var(--elevation-e2, 0 8px 24px rgba(0,0,0,0.4))",
         }}
       >
-        <div style={{ fontSize: "0.7rem", color: "var(--text-secondary)" }}>
+        <div style={{ fontSize: "0.75rem", color: "var(--text-secondary)" }}>
           Breakpoint · line {edit.line}
           {bp && isLogpoint(bp) ? " · logpoint" : ""}
         </div>
@@ -3410,7 +3417,7 @@ function BreakpointEditHost(): ReactElement | null {
                 borderRadius: 4,
                 color: "var(--danger)",
                 cursor: "pointer",
-                fontSize: "0.7rem",
+                fontSize: "0.75rem",
                 padding: "2px 8px",
               }}
             >
@@ -3426,7 +3433,7 @@ function BreakpointEditHost(): ReactElement | null {
               borderRadius: 4,
               color: "var(--text-secondary)",
               cursor: "pointer",
-              fontSize: "0.7rem",
+              fontSize: "0.75rem",
               padding: "2px 8px",
             }}
           >

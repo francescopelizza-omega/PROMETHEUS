@@ -127,7 +127,7 @@ export function WorktreesPanel({ root }: WorktreesPanelProps): ReactElement {
       </div>
 
       {error && (
-        <div style={{ color: "var(--danger)", fontSize: "0.7rem", marginBottom: 6 }}>{error}</div>
+        <div style={{ color: "var(--danger)", fontSize: "0.75rem", marginBottom: 6 }}>{error}</div>
       )}
 
       {worktrees.length === 0 ? (
@@ -197,7 +197,7 @@ export function WorktreesPanel({ root }: WorktreesPanelProps): ReactElement {
                       onChange={(e) => setConfirmTyped(e.target.value)}
                       placeholder={`type "${w.branch ?? w.path}"`}
                       style={{
-                        fontSize: "0.7rem",
+                        fontSize: "0.75rem",
                         padding: "1px 4px",
                         background: "var(--bg-inset)",
                         color: "var(--text-primary)",

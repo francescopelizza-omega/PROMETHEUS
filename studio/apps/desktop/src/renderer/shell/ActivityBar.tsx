@@ -361,7 +361,9 @@ export function ActivityBar({
                 justifyContent: "center",
                 borderRadius: 7,
                 background: "var(--accent)",
-                color: "var(--bg-app)",
+                // the label token computed FOR the accent fill (contrast-pinned), not the
+                // ground colour, which only happens to work on the dark scheme
+                color: "var(--on-accent)",
                 border: "1.5px solid var(--bg-app)",
                 fontSize: 9,
                 fontWeight: 700,

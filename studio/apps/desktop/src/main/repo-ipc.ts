@@ -61,6 +61,7 @@ import {
   type RepoRow,
   type RepoVerdictRef,
 } from "../shared/ipc-contract.js";
+import { consentToForce } from "./force-consent.js";
 import {
   validateRepoBranch,
   validateRepoClone,
@@ -200,7 +201,8 @@ export function registerRepoIpcHandlers(wiring: RepoIpcWiring = {}): () => void 
   const client = createRepoClient(wiring.clientOptions);
 
   // ── clone (STAGE → REAL nemesis → promote | quarantine; force needs confirm) ─
-  ipcMain.handle(IPC.repoClone, async (_evt, arg: unknown): Promise<RepoCloneResult> => {
+  ipcMain.handle(IPC.repoClone, async (_evt, rawArg: unknown): Promise<RepoCloneResult> => {
+    const arg = await consentToForce(_evt, IPC.repoClone, rawArg); // native consent for any force flag
     const v = validateRepoClone(arg);
     if (!v.ok) return { ok: false, error: v.error.message };
     const a = v.value;
@@ -244,7 +246,8 @@ export function registerRepoIpcHandlers(wiring: RepoIpcWiring = {}): () => void 
   });
 
   // ── update (re-stage the new HEAD → re-gate → promote on allow) ────────────
-  ipcMain.handle(IPC.repoUpdate, async (_evt, arg: unknown): Promise<RepoCloneResult> => {
+  ipcMain.handle(IPC.repoUpdate, async (_evt, rawArg: unknown): Promise<RepoCloneResult> => {
+    const arg = await consentToForce(_evt, IPC.repoUpdate, rawArg); // native consent for any force flag
     const v = validateRepoUpdate(arg);
     if (!v.ok) return { ok: false, error: v.error.message };
     try {
@@ -255,7 +258,8 @@ export function registerRepoIpcHandlers(wiring: RepoIpcWiring = {}): () => void 
   });
 
   // ── pin (detached --pin checkout under safe flags → re-gate) ───────────────
-  ipcMain.handle(IPC.repoPin, async (_evt, arg: unknown): Promise<RepoCloneResult> => {
+  ipcMain.handle(IPC.repoPin, async (_evt, rawArg: unknown): Promise<RepoCloneResult> => {
+    const arg = await consentToForce(_evt, IPC.repoPin, rawArg); // native consent for any force flag
     const v = validateRepoPin(arg);
     if (!v.ok) return { ok: false, error: v.error.message };
     try {
@@ -266,7 +270,8 @@ export function registerRepoIpcHandlers(wiring: RepoIpcWiring = {}): () => void 
   });
 
   // ── branch (switch branch under safe flags → re-gate; clears the pin) ──────
-  ipcMain.handle(IPC.repoBranch, async (_evt, arg: unknown): Promise<RepoCloneResult> => {
+  ipcMain.handle(IPC.repoBranch, async (_evt, rawArg: unknown): Promise<RepoCloneResult> => {
+    const arg = await consentToForce(_evt, IPC.repoBranch, rawArg); // native consent for any force flag
     const v = validateRepoBranch(arg);
     if (!v.ok) return { ok: false, error: v.error.message };
     try {

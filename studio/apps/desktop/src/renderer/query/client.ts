@@ -45,12 +45,23 @@ export const qk = {
   health: () => ["health"] as const,
   scan: () => ["scan"] as const,
   catalog: () => ["catalog"] as const,
+  /**
+   * The Catalog route's BROWSE projection — a different payload (`CatalogBrowseResult`) from
+   * `catalog()`'s engine `list()` envelope. They shared one key, so whichever screen loaded
+   * first decided what the other got from cache: Home read a browse result as an envelope and
+   * showed an empty registry. A child key keeps `invalidateQueries(qk.catalog())` refreshing
+   * both (prefix match).
+   */
+  catalogBrowse: () => ["catalog", "browse"] as const,
   status: (name: string) => ["status", name] as const,
   audit: (name: string) => ["audit", name] as const,
   matrix: () => ["matrix"] as const,
   where: (name: string) => ["where", name] as const,
   // ── file 04 Environments tab reads ──────────────────────────────────────
   envs: () => ["envs"] as const,
+  /** The Environments route's typed `env.list()` — not the engine `envList()` envelope `envs()`
+   *  caches (same collision as `catalogBrowse`). */
+  envsDetected: () => ["envs", "detected"] as const,
   pkgs: (envId: string) => ["pkgs", envId] as const,
   cuda: () => ["cuda"] as const,
   // ── file 05 Model Hub tab reads ─────────────────────────────────────────

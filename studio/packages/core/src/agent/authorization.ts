@@ -203,6 +203,9 @@ export function authLevelName(level: number): string {
  * cancel it.
  */
 export function classifyAuth(ref: string, ann: AuthToolEffect | undefined): AuthCategory {
+  // An MCP tool whose annotations a host failed to resolve is another process's code with
+  // unknown effects — never the `config` fallback (auto at A3). See `ladderAnnotations`.
+  if (ann === undefined && ref.startsWith("mcp__")) return "install";
   if (ann?.openWorldHint) return "install"; // network / remote code — outranks readOnly
   if (ann?.readOnlyHint) return "read";
   const base = ref.includes(":") ? (ref.split(":").pop() ?? ref) : ref;

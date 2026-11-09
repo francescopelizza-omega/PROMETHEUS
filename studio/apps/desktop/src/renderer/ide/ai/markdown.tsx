@@ -72,7 +72,7 @@ function CodeBlock({ text }: { text: string }): ReactElement {
           background: "var(--bg-inset)",
           borderRadius: "var(--radius-md, 6px)",
           fontFamily: "var(--font-mono, monospace)",
-          fontSize: "0.72rem",
+          fontSize: "0.75rem",
         }}
       >
         <code>{text}</code>
@@ -95,7 +95,7 @@ function CodeBlock({ text }: { text: string }): ReactElement {
           borderRadius: "var(--radius-sm, 4px)",
           color: "var(--text-secondary)",
           cursor: "pointer",
-          fontSize: "0.7rem",
+          fontSize: "0.75rem",
           padding: "1px 5px",
         }}
       >

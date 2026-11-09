@@ -11,7 +11,7 @@
 
 import { type ButtonHTMLAttributes, type ReactNode, forwardRef } from "react";
 import { type VariantProps, cva } from "../util/cva.js";
-import { HOVER_TRANSITION, focusRingHandlers, rad, sp, v } from "./styles.js";
+import { HOVER_TRANSITION, focusVisibleRingHandlers, rad, sp, v } from "./styles.js";
 
 export const iconButtonVariants = cva(
   "prom-icon-button inline-flex items-center justify-center rounded-md transition",
@@ -79,7 +79,7 @@ export const IconButton = forwardRef<HTMLButtonElement, IconButtonProps>(functio
 ) {
   const dim = size === "sm" ? "28px" : "var(--row-h, 36px)";
   const vs = variantStyle(variant);
-  const ring = focusRingHandlers();
+  const ring = focusVisibleRingHandlers();
   return (
     <button
       ref={ref}

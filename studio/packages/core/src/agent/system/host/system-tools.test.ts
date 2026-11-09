@@ -295,6 +295,39 @@ test("run_command: a credential path hidden in an =-attached FLAG value is refus
   rmSync(dir, { recursive: true, force: true });
 });
 
+test("run_command: a credential path behind an @ / < file sigil is refused", async () => {
+  // `-d @.env`, `-d@.env`, `-F f=@.env`, `name=<.env` read a FILE into the request: the argv
+  // guard saw "@.env", which is no credential path, and let it through (2026-11-03 audit).
+  const dir = mkdtempSync(join(tmpdir(), "prom-sigil-"));
+  writeFileSync(join(dir, ".env"), "AWS_SECRET=abc\n", "utf8");
+  const deps = { cwd: dir, roots: [dir], gateMode: "off" as const };
+  for (const command of ["cat @.env", "cat x=@.env", "cat name=<.env"]) {
+    const out = await runSystemTool("run_command", { command }, deps);
+    assert.equal(out?.ok, false, `${command} was not refused`);
+    assert.ok(!/AWS_SECRET=abc/.test(String(out?.text ?? out?.summary ?? "")), `${command} leaked`);
+  }
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test("grep tool: a credential file is never searched or quoted", async () => {
+  // `grep(".", path: ".env")` returned the file: naming one file makes rg search it even when
+  // hidden. And a non-hidden `credentials.json` in a searched tree came back line by line.
+  const dir = mkdtempSync(join(tmpdir(), "prom-grep-sec-"));
+  writeFileSync(join(dir, ".env"), "AWS_SECRET=abc\n", "utf8");
+  writeFileSync(join(dir, "credentials.json"), '{"AWS_SECRET":"abc"}\n', "utf8");
+  writeFileSync(join(dir, "notes.txt"), "AWS_SECRET is documented here\n", "utf8");
+  const deps = { cwd: dir, roots: [dir], gateMode: "off" as const };
+  const direct = await runSystemTool("grep", { pattern: ".", path: ".env" }, deps);
+  assert.equal(direct?.ok, false, "a direct search of .env was not refused");
+  const tree = await runSystemTool("grep", { pattern: "AWS_SECRET", path: dir }, deps);
+  const text = String(tree?.text ?? tree?.summary ?? "");
+  if (tree?.ok) {
+    assert.ok(!/"abc"/.test(text), `credentials.json leaked: ${text}`);
+    assert.match(text, /notes\.txt/);
+  }
+  rmSync(dir, { recursive: true, force: true });
+});
+
 test("run_command: a RECURSIVE reader over a tree containing a credential file is refused", async () => {
   // regression: `grep -r AWS_SECRET <dir>` named no credential path at all — the operand is the
   // directory — so nothing in argv could be checked and the whole .env came back. Output

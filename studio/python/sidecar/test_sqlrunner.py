@@ -168,3 +168,17 @@ class TestSchema(Base):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestWritesPersist(Base):
+    def test_update_is_committed_and_counted(self) -> None:
+        obj, code = run(sqlrunner._query,
+                        [self.conn, "--sql", "UPDATE items SET note = ? WHERE id < 3", "--params", '["x"]'])
+        self.assertEqual(code, 0, msg=obj)
+        self.assertEqual(obj["affected"], 2)
+        con = sqlite3.connect(self.db)
+        try:
+            notes = [r[0] for r in con.execute("SELECT note FROM items WHERE id < 3")]
+        finally:
+            con.close()
+        self.assertEqual(notes, ["x", "x"], "the change must survive the connection closing")

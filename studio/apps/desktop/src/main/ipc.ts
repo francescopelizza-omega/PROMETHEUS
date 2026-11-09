@@ -62,6 +62,7 @@ import {
   type VersionResult,
 } from "../shared/ipc-contract.js";
 import type { IpcErrorShape } from "./arg-guards.js";
+import { consentToForce } from "./force-consent.js";
 // NOTE: InstallOptions/UninstallOptions are no longer imported here — the zod
 // validators in validate.ts own arg coercion; handlers consume the typed
 // InstallArgs/UninstallArgs the validators return.
@@ -473,8 +474,21 @@ export function registerIpcHandlers(wiring: IpcWiring): () => void {
   ipcMain.handle(
     IPC.install,
     async (evt: unknown, name: unknown, opts: unknown): Promise<EnvelopeResult> => {
+      // native consent for `forced` (an override of a nemesis BLOCK) — see force-consent.ts
+      const consented = await consentToForce(
+        evt,
+        IPC.install,
+        opts && typeof opts === "object" ? { name, ...(opts as Record<string, unknown>) } : opts,
+      );
       // zod seam: a malformed name/opts is rejected with a serializable shape.
-      const a = unwrap(validateInstall(name, opts));
+      const a = unwrap(
+        validateInstall(
+          name,
+          consented && typeof consented === "object"
+            ? (({ name: _n, ...rest }) => rest)(consented as Record<string, unknown>)
+            : consented,
+        ),
+      );
       const sender = senderOf(evt);
       // Register an AbortController under the runId so `cancel(runId)` can abort
       // this child (engine-bridge SIGTERM→SIGKILLs on signal). No runId ⇒ no cancel.

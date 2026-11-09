@@ -35,6 +35,8 @@ import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os";
 import { isAbsolute, join } from "node:path";
 
+import { isHijackEnvKey } from "@prometheus/engine-bridge";
+
 /* ------------------------------------------------------------------------- *
  * The injected git runner (real git by default)
  * ------------------------------------------------------------------------- */
@@ -63,6 +65,14 @@ export type GitRunner = (
 
 const GIT_TIMEOUT_MS = 60_000;
 
+/**
+ * Config that must never come from the REPOSITORY. Studio runs `git status` the moment a folder
+ * opens, and a `.git/config` that came inside a downloaded archive or a shared folder can set
+ * `core.fsmonitor` to any command — which `status` then executes. `-c` on the command line
+ * outranks every config file. `core.fsmonitor=false` costs only speed on huge trees.
+ */
+export const GIT_SAFE_CONFIG: readonly string[] = ["-c", "core.fsmonitor=false"];
+
 /** The default runner: the real `git` binary (or $GIT_BIN). `stdin`, when supplied, is
  *  piped to the child (APP-084 `git apply -` reads the patch over stdin — NEVER argv/shell). */
 export const defaultGitRunner: GitRunner = (cwd, argv, env, stdin) =>
@@ -76,11 +86,20 @@ export const defaultGitRunner: GitRunner = (cwd, argv, env, stdin) =>
       // never block on an interactive credential prompt — a push/pull/fetch with no
       // configured helper FAILS FAST (with a clear error) instead of hanging the IPC.
       // caller `env` overlays LAST (the rebase editor wrappers), never dropping the prompt guard.
-      env: { ...process.env, GIT_TERMINAL_PROMPT: "0", ...(env ?? {}) },
+      // Loader-hijack vars (LD_PRELOAD, DYLD_*, …) are dropped — from the caller's overlay too.
+      env: Object.fromEntries(
+        Object.entries({ ...process.env, GIT_TERMINAL_PROMPT: "0", ...(env ?? {}) }).filter(
+          ([k, v]) => v !== undefined && !isHijackEnvKey(k),
+        ),
+      ) as NodeJS.ProcessEnv,
     };
     let child: ChildProcessWithoutNullStreams;
     try {
-      child = nodeSpawn(bin, argv, options) as ChildProcessWithoutNullStreams;
+      child = nodeSpawn(
+        bin,
+        [...GIT_SAFE_CONFIG, ...argv],
+        options,
+      ) as ChildProcessWithoutNullStreams;
     } catch (err) {
       reject(err instanceof Error ? err : new Error(String(err)));
       return;
@@ -749,10 +768,17 @@ export class GitHost {
   async commit(
     root: string,
     message: string,
-    opts: { amend?: boolean } = {},
+    opts: { amend?: boolean; paths?: readonly string[] } = {},
   ): Promise<GitOpResult> {
     if (!message.trim() && !opts.amend) return { ok: false, error: "empty commit message" };
-    const argv = ["commit", "-m", message, ...(opts.amend ? ["--amend"] : [])];
+    const argv = [
+      "commit",
+      "-m",
+      message,
+      ...(opts.amend ? ["--amend"] : []),
+      // a pathspec commits ONLY these paths, whatever else happens to be staged
+      ...(opts.paths && opts.paths.length > 0 ? ["--", ...opts.paths] : []),
+    ];
     return this.runOp(root, argv);
   }
 

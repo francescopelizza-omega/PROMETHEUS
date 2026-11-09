@@ -386,7 +386,13 @@ def _do_fetch(url: str, allow: List[str], db_dir: Optional[str], ua: str,
     BEFORE any bytes leave; a POST is NOT redirect-followed (never re-POST elsewhere)."""
     chain: List[dict] = []
     cur = url
+    first_origin = urllib.parse.urlsplit(url)[:2]
     for _hop in range(max_redirects + 1):
+        # Credentials and caller headers go to the ORIGIN they were meant for: a redirect to
+        # another scheme/host re-validates the target but no longer re-sent --auth-header
+        # along with it.
+        if extra_headers and urllib.parse.urlsplit(cur)[:2] != first_origin:
+            extra_headers = None
         v = _validate(cur, allow)
         chain.append({"url": cur, "safe": v["safe"], "reason": v["reason"],
                       "pinned_ip": v.get("pinned_ip")})

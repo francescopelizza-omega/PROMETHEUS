@@ -46,9 +46,25 @@ export function useModelHealth(): UseModelHealthResult {
   // guards a poll tick landing after unmount from calling setState on a gone component.
   const alive = useRef(true);
 
+  // Each load is numbered: a poll tick sent BEFORE a mutation's refresh could land AFTER it and
+  // re-show a removed row; only the newest answer is applied. And a rejected invoke is caught —
+  // unwrapped, it was an unhandled rejection every tick with `loading` stuck true.
+  const loadSeq = useRef(0);
   const load = useCallback(async () => {
-    const res = await window.prometheus?.modelHealth?.list();
-    if (!alive.current) return;
+    const seq = ++loadSeq.current;
+    let failed: string | undefined;
+    const res = await Promise.resolve(window.prometheus?.modelHealth?.list()).catch(
+      (e: unknown) => {
+        failed = e instanceof Error ? e.message : "model health IPC unavailable";
+        return undefined;
+      },
+    );
+    if (!alive.current || seq !== loadSeq.current) return;
+    if (failed !== undefined) {
+      setError(failed);
+      setLoading(false);
+      return;
+    }
     if (!res || !res.ok || !res.store) {
       setError(res?.error ?? "model health IPC unavailable");
       setLoading(false);

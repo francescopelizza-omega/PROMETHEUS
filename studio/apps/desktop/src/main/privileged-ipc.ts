@@ -13,7 +13,7 @@
  * request id, and only once.
  */
 import { homedir } from "node:os";
-import { BrowserWindow, ipcMain } from "electron";
+import { BrowserWindow, dialog, ipcMain } from "electron";
 
 import { settings as coreSettings } from "@prometheus/core";
 import {
@@ -28,6 +28,7 @@ import { verdictReasons } from "@prometheus/engine-bridge";
 
 import { IPC } from "../shared/ipc-contract.js";
 import { getSecurityPosture } from "./ai-ipc.js";
+import { pageOfUrl } from "./ipc-sender-guard.js";
 import { createStudioApprover } from "./privileged-approver.js";
 
 let gate: PrivilegedGate | null = null;
@@ -37,13 +38,50 @@ export function studioPrivilegedGate(): PrivilegedGate | undefined {
   return gate ?? undefined;
 }
 
+/** The workbench window — the only page that renders (and may answer) the approval card.
+ *  The focused window first if it IS the workbench, else any workbench, else the first. */
+function workbenchWindow(): BrowserWindow | undefined {
+  const isBench = (w: BrowserWindow | null | undefined): w is BrowserWindow =>
+    !!w && !w.isDestroyed() && pageOfUrl(w.webContents.getURL()) === "workbench";
+  const focused = BrowserWindow.getFocusedWindow();
+  if (isBench(focused)) return focused;
+  return BrowserWindow.getAllWindows().find(isBench) ?? BrowserWindow.getAllWindows()[0];
+}
+
 export function registerPrivilegedIpcHandlers(): () => void {
-  const { approver, decide } = createStudioApprover((channel, payload) => {
-    const win = BrowserWindow.getFocusedWindow() ?? BrowserWindow.getAllWindows()[0];
-    if (!win || win.isDestroyed()) return false;
-    win.webContents.send(channel, payload);
-    return win.webContents.id;
-  });
+  const { approver, decide } = createStudioApprover(
+    (channel, payload) => {
+      const win = workbenchWindow();
+      if (!win || win.isDestroyed()) return false;
+      win.webContents.send(channel, payload);
+      return win.webContents.id;
+    },
+    // Native, main-owned: the exact command line, where it runs, and the script digest.
+    async (view) => {
+      const win = workbenchWindow();
+      const lines = [
+        view.commandLine,
+        "",
+        `in: ${view.cwd}`,
+        `asked by: ${view.requester} (${view.surface})`,
+        ...(view.script ? [`script sha256: ${view.script.sha256}`] : []),
+        ...(view.why ? ["", view.why] : []),
+      ];
+      const options = {
+        type: "warning" as const,
+        buttons: ["Run as administrator", "Deny"],
+        defaultId: 1,
+        cancelId: 1,
+        message: "Run this command as root?",
+        detail: lines.join("\n"),
+      };
+      const r =
+        win && !win.isDestroyed()
+          ? await dialog.showMessageBox(win, options)
+          : await dialog.showMessageBox(options);
+      return r.response === 0;
+    },
+  );
   ipcMain.handle(IPC.privilegedDecide, (e, arg: unknown) => decide(arg, e.sender.id));
   gate = createPrivilegedGate({
     approver,

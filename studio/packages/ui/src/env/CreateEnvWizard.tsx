@@ -46,6 +46,8 @@ export interface CreateEnvWizardProps {
   gatePlan?: GatePlanItemData[];
   onCreate?(payload: CreateEnvPayload): void;
   onCancel?(): void;
+  /** the host's create is in flight — the commit button is disabled so it cannot fire twice */
+  busy?: boolean;
   className?: string;
 }
 
@@ -75,6 +77,7 @@ export function CreateEnvWizard({
   gatePlan,
   onCreate,
   onCancel,
+  busy = false,
   className,
 }: CreateEnvWizardProps): ReactElement {
   const [step, setStep] = useState<Step>(1);
@@ -96,6 +99,7 @@ export function CreateEnvWizard({
   }
 
   function commit(): void {
+    if (busy) return;
     if (!step1.ok || !onCreate) return;
     const payload: CreateEnvPayload = {
       name: name.trim(),
@@ -325,7 +329,11 @@ export function CreateEnvWizard({
           />
         )}
         {step === 3 && (
-          <NavButton label="Create & scan ▶" onClick={commit} disabled={!step1.ok || !onCreate} />
+          <NavButton
+            label={busy ? "Creating…" : "Create & scan ▶"}
+            onClick={commit}
+            disabled={!step1.ok || !onCreate || busy}
+          />
         )}
       </footer>
     </section>

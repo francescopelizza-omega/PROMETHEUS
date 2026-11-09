@@ -101,6 +101,11 @@ export function OnboardingWizard({
   const skip = useCallback(() => finishRef.current(true), []);
   useFocusTrap(rootRef, true, skip);
   const advance = (): void => {
+    // A typed interpreter is APPLIED on Next. Only the "Apply" button used to apply it, so a
+    // user who typed a path and pressed Next (the obvious move) had it recorded and ignored.
+    if (step === "interpreter" && interpreter.trim() && applyNote === null) {
+      void applyInterpreter();
+    }
     const next = nextStep(step);
     if (next === "done") finish(false);
     else setStep(next);

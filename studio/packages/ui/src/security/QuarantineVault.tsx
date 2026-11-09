@@ -176,7 +176,7 @@ export function QuarantineVault({
                     style={{
                       display: "block",
                       fontFamily: "var(--font-ui)",
-                      fontSize: "0.7rem",
+                      fontSize: "0.75rem",
                       color: "var(--text-muted)",
                     }}
                   >

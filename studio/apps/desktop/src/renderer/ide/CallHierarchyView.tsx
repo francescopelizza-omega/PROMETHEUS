@@ -286,7 +286,7 @@ export function CallHierarchyView({ root }: { root: string }): ReactElement {
           style={{
             color: "var(--text-secondary)",
             fontFamily: "var(--font-mono, monospace)",
-            fontSize: "0.72rem",
+            fontSize: "0.75rem",
             marginBottom: 6,
           }}
         >
@@ -296,22 +296,22 @@ export function CallHierarchyView({ root }: { root: string }): ReactElement {
       )}
 
       {status === "idle" && (
-        <p style={{ color: "var(--text-secondary)", fontSize: "0.72rem" }}>
+        <p style={{ color: "var(--text-secondary)", fontSize: "0.75rem" }}>
           Put the caret on a function, then press ⟳.
         </p>
       )}
       {status === "nocaret" && (
-        <p style={{ color: "var(--text-secondary)", fontSize: "0.72rem" }}>
+        <p style={{ color: "var(--text-secondary)", fontSize: "0.75rem" }}>
           No caret yet — click into an editor first.
         </p>
       )}
       {status === "unsupported" && (
-        <p style={{ color: "var(--text-secondary)", fontSize: "0.72rem" }}>
+        <p style={{ color: "var(--text-secondary)", fontSize: "0.75rem" }}>
           No call-hierarchy server for this file type.
         </p>
       )}
       {status === "empty" && (
-        <p style={{ color: "var(--text-secondary)", fontSize: "0.72rem" }}>
+        <p style={{ color: "var(--text-secondary)", fontSize: "0.75rem" }}>
           Nothing at the caret (the server may still be indexing — press ⟳).
         </p>
       )}
@@ -339,7 +339,7 @@ function HierRows({
               alignItems: "center",
               gap: 4,
               paddingLeft: depth * 12,
-              fontSize: "0.74rem",
+              fontSize: "0.75rem",
             }}
           >
             <button
@@ -372,7 +372,7 @@ function HierRows({
                 color: "var(--text-primary)",
                 cursor: "pointer",
                 fontFamily: "var(--font-mono, monospace)",
-                fontSize: "0.74rem",
+                fontSize: "0.75rem",
                 padding: "1px 0",
                 overflow: "hidden",
                 textOverflow: "ellipsis",
@@ -392,7 +392,7 @@ function HierRows({
               style={{
                 paddingLeft: (depth + 1) * 12 + 12,
                 color: "var(--text-secondary)",
-                fontSize: "0.7rem",
+                fontSize: "0.75rem",
               }}
             >
               (none)

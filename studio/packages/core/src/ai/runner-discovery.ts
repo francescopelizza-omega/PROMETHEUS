@@ -224,12 +224,31 @@ export async function discoverRunners(deps: DiscoverDeps = {}): Promise<Discover
   const timeoutMs = deps.timeoutMs ?? DEFAULT_PROBE_TIMEOUT_MS;
   const specs = localRunners(deps.env ?? process.env);
 
+  /** probe the spec's port; when it does not serve, each vendor alternative in turn. */
+  const probeAny = async (spec: LocalRunnerSpec) => {
+    const first = await probeOne(spec, doFetch, timeoutMs);
+    if ("models" in first || !spec.altPorts?.length) return { spec, probe: first };
+    for (const port of spec.altPorts) {
+      const alt: LocalRunnerSpec = {
+        ...spec,
+        port,
+        baseUrl: spec.baseUrl.replace(`:${spec.port}`, `:${port}`),
+        ...(spec.nativeUrl
+          ? { nativeUrl: spec.nativeUrl.replace(`:${spec.port}`, `:${port}`) }
+          : {}),
+      };
+      const r = await probeOne(alt, doFetch, timeoutMs);
+      if ("models" in r) return { spec: alt, probe: r };
+    }
+    return { spec, probe: first };
+  };
+
   return Promise.all(
-    specs.map(async (spec): Promise<DiscoveredRunner> => {
-      const [probe, binPath] = await Promise.all([
-        probeOne(spec, doFetch, timeoutMs),
-        spec.bin && deps.whichFn
-          ? deps.whichFn(spec.bin).catch(() => undefined)
+    specs.map(async (declared): Promise<DiscoveredRunner> => {
+      const [{ spec, probe }, binPath] = await Promise.all([
+        probeAny(declared),
+        declared.bin && deps.whichFn
+          ? deps.whichFn(declared.bin).catch(() => undefined)
           : Promise.resolve(undefined),
       ]);
 

@@ -81,6 +81,29 @@ function rawSensitiveDirs(): string[] {
     resolve(home, ".config", "gh"),
     resolve(home, ".config", "prometheus"), // the URL-pin HMAC key + manifests live here
     resolve(home, ".password-store"),
+    // Prometheus's own state: audit logs, the privileged-gate record, model-gate markers. A
+    // write here forges history; a read hands over the gate's keys.
+    resolve(home, ".prometheus"),
+    // Cloud CLIs keep refresh tokens and service-account keys here.
+    resolve(home, ".config", "gcloud"),
+    resolve(home, ".azure"),
+    resolve(home, ".oci"),
+    resolve(home, ".terraform.d"),
+    // Persistence: anything written here runs at the next login, unattended.
+    resolve(home, "Library", "LaunchAgents"),
+    resolve(home, ".config", "autostart"),
+    resolve(home, ".config", "systemd", "user"),
+    // Browser profiles: cookies, saved passwords, session tokens.
+    resolve(home, "Library", "Application Support", "Google", "Chrome"),
+    resolve(home, "Library", "Application Support", "Firefox"),
+    resolve(home, "Library", "Application Support", "BraveSoftware"),
+    resolve(home, "Library", "Application Support", "Microsoft Edge"),
+    resolve(home, "Library", "Safari"),
+    resolve(home, "Library", "Cookies"),
+    resolve(home, "Library", "Keychains"),
+    resolve(home, ".mozilla"),
+    resolve(home, ".config", "google-chrome"),
+    resolve(home, ".config", "chromium"),
     "/etc",
     "/private/etc", // macOS real /etc
   ];
@@ -101,6 +124,17 @@ function sensitiveFiles(): Set<string> {
       ".zshrc",
       ".zprofile",
       ".profile",
+      // Every shell startup file runs at the next shell — `.zshenv` for EVERY zsh, scripts too.
+      ".zshenv",
+      ".zlogin",
+      ".zlogout",
+      ".bash_login",
+      ".bash_logout",
+      ".config/fish/config.fish",
+      ".cargo/credentials",
+      ".cargo/credentials.toml",
+      ".pgpass",
+      ".my.cnf",
       // Same canonicalisation as sensitiveDirs(): the checked path is realpath'd, so a home
       // that is not already canonical would never match a plain-resolved entry.
     ].flatMap((f) => bothSpellings([resolve(home, f)])),

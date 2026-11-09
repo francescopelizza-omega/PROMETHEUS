@@ -131,7 +131,7 @@ function FileNode({ file, locked }: { file: ReviewFile; locked: boolean }): Reac
             <pre
               style={{
                 margin: "2px 0 0",
-                fontSize: "0.72rem",
+                fontSize: "0.75rem",
                 fontFamily: "var(--font-mono, monospace)",
                 whiteSpace: "pre-wrap",
                 overflowWrap: "break-word",
@@ -432,7 +432,7 @@ export function DiffReview(): ReactElement | null {
             onDeny={() => answer("deny")}
           >
             {pending.length > 1 && (
-              <span style={{ fontSize: 11, color: "var(--text-muted)" }}>
+              <span style={{ fontSize: 12, color: "var(--text-muted)" }}>
                 {pending.length - 1} more file{pending.length - 1 === 1 ? "" : "s"} after this one
               </span>
             )}

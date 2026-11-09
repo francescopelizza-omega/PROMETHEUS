@@ -147,7 +147,7 @@ export function ClipboardHistory({ onClose }: { onClose: () => void }): ReactEle
               <span
                 style={{
                   color: "var(--text-secondary)",
-                  fontSize: "0.68rem",
+                  fontSize: "0.75rem",
                   width: 16,
                   textAlign: "right",
                 }}
@@ -188,7 +188,7 @@ export function ClipboardHistory({ onClose }: { onClose: () => void }): ReactEle
                 border: "none",
                 color: "var(--text-secondary)",
                 cursor: "pointer",
-                fontSize: "0.72rem",
+                fontSize: "0.75rem",
                 padding: "2px 6px",
               }}
             >

@@ -18,7 +18,7 @@
 import { Button, Checkbox, Input, Panel, Select, Spinner, Textarea } from "@prometheus/ui";
 import { type ReactElement, useCallback, useEffect, useMemo, useState } from "react";
 
-import type { AiDiscoveredRunner } from "../shared/ipc-contract.js";
+import type { AiDiscoveredRunner, SpectacularModelsConfig } from "../shared/ipc-contract.js";
 
 import { appendScrollback } from "../renderer/ide/terminal-view.js";
 
@@ -86,6 +86,8 @@ function toShellLine(argv: string[], env: Record<string, string>): string {
 }
 
 interface BuiltCommand {
+  /** whether THIS command was built with bypass flags — the confirm must follow the argv, not the checkbox. */
+  bypass: boolean;
   argv: string[];
   env: Record<string, string>;
   cwd: string;
@@ -129,7 +131,7 @@ function AgenticChat(): ReactElement {
   const [reply, setReply] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
-  const [root, setRoot] = useState<string>("");
+  const [stores, setStores] = useState<NonNullable<SpectacularModelsConfig["stores"]>>([]);
   const [installing, setInstalling] = useState(false);
   const [installMsg, setInstallMsg] = useState<string | null>(null);
   const [pct, setPct] = useState<number | null>(null);
@@ -211,7 +213,7 @@ function AgenticChat(): ReactElement {
     window.prometheus.spectacular
       .modelsConfig()
       .then((r) => {
-        if (alive && r.ok && r.modelsRoot) setRoot(r.modelsRoot);
+        if (alive && r.ok && r.stores) setStores(r.stores);
       })
       .catch(() => {
         /* config read failed — leave root blank, never crash the route */
@@ -238,11 +240,21 @@ function AgenticChat(): ReactElement {
     if (typeof api?.discoverRunners !== "function") return;
     void (async () => {
       try {
-        const r = await api.discoverRunners();
+        const [r, pref] = await Promise.all([
+          api.discoverRunners(),
+          // the user's DEFAULT local server (Models → Endpoints, Settings, or the terminal's
+          // `/server`): preferred when it is serving; otherwise the first that serves
+          window.prometheus.settings
+            ?.get("localModels.defaultServer")
+            .then((x) => (x.ok && typeof x.value === "string" ? x.value : "ollama"))
+            .catch(() => "ollama") ?? Promise.resolve("ollama"),
+        ]);
         if (!alive || !r.ok) return;
         setRunners(r.runners);
         setRunnerHint(r.hint ?? null);
-        const live = r.runners.find((x) => x.state === "serving");
+        const live =
+          r.runners.find((x) => x.state === "serving" && x.id === pref) ??
+          r.runners.find((x) => x.state === "serving");
         if (live) {
           setRunner(live.id);
           // And prefer a model it is ACTUALLY serving over the `qwen3:8b` seed, which is only a
@@ -365,7 +377,14 @@ function AgenticChat(): ReactElement {
           return;
         }
       }
-      if (r.ok && r.installed) {
+      if (r.needsConfirm) {
+        // no review step in the chat bar: never adopt a WARN, and remove it so a later pick
+        // cannot use it unscanned. The guided model picker shows findings and can accept them.
+        await window.prometheus.models.discardOllama?.({ tag: r.tag ?? id }).catch(() => undefined);
+        setInstallMsg(
+          `⚠ nemesis WARN on ${id}: ${(r.gateReasons ?? []).slice(0, 3).join(" · ") || "review needed"} — not installed. Use Models → guided picker to review it.`,
+        );
+      } else if (r.ok && r.installed) {
         setInstallMsg(
           `✓ installed ${id} — served at ${r.endpoint ?? "localhost:11434"}. Press Send.`,
         );
@@ -388,49 +407,27 @@ function AgenticChat(): ReactElement {
     }
   }, [model, installing]);
 
-  const pickFolder = useCallback(async () => {
-    try {
-      const picked = await window.prometheus.folderOpen({
-        title: "Choose the models install folder",
-      });
-      if (picked.ok && picked.path) {
-        const saved = await window.prometheus.spectacular.modelsConfig(picked.path);
-        if (saved.ok && saved.modelsRoot) setRoot(saved.modelsRoot);
-      }
-    } catch (e) {
-      setErr(e instanceof Error ? e.message : "could not set the models folder");
-    }
-  }, []);
-
   return (
     <div style={COL}>
       {/*
-        The label says where a NEW download would go, and nothing more.
-
-        It used to read "(default ~/.prometheus/models)", which was the single most misleading
-        string in the app. Measured 2026-10-01 on the machine this was written for, that
-        directory held 0 bytes and had never held a model, while 143 GB sat in three stores the
-        app did not mention: ~/.ollama/models (29 GB), ~/.lmstudio/models (24 GB) and
-        ~/.cache/huggingface/hub (90 GB). A user reading it reasonably concluded Prometheus kept
-        models somewhere they had never chosen and could not see their own.
-
-        Models you ALREADY have are not in this folder and are not governed by it — they are
-        indexed from each tool's own store by `model.list`, and shown in the library. Saying so
-        here is the difference between "a destination" and "where your models live".
+        Where models live — read only. This panel used to be "Download folder … Change folder…",
+        which ran `models config --set-root` and made the engine point Ollama at that folder:
+        every later pull became a second copy beside the user's real ~/.ollama/models
+        (measured 2026-10-01: 143 GB in Ollama / LM Studio / the HF cache, 0 B in the folder the
+        app advertised). Each runtime owns its store; the user moves it in that runtime.
       */}
-      <Panel title="Download folder" elevation="e1">
-        <div style={ROW}>
-          <span style={LABEL}>new downloads go to:</span>
-          <code style={{ ...CODE, padding: "4px 8px" }}>{root || "(not set yet)"}</code>
-          <Button variant="secondary" size="sm" onClick={() => void pickFolder()}>
-            Change folder…
-          </Button>
+      <Panel title="Where models live" elevation="e1">
+        <div style={{ ...LABEL, marginBottom: 6 }}>
+          Every model is downloaded into the folder of the app that runs it — Prometheus keeps no
+          copy of its own, so nothing is stored twice. Downloads are checked by nemesis first.
         </div>
-        <div style={{ ...LABEL, marginTop: 6 }}>
-          Models you already have are found where their own tool keeps them — Ollama, LM Studio and
-          the Hugging Face cache are all indexed automatically. This folder only decides where a NEW
-          download lands.
-        </div>
+        {stores.map((s) => (
+          <div key={s.runtime} style={ROW}>
+            <span style={LABEL}>{s.runtime.split(" (")[0]}</span>
+            <code style={{ ...CODE, padding: "4px 8px" }}>{s.store}</code>
+            <span style={LABEL}>moved with {s.setBy}</span>
+          </div>
+        ))}
       </Panel>
 
       <Panel title="Agentic chat — local model (free, on-device)" elevation="e1">
@@ -523,6 +520,7 @@ function LiveTerminal({ cmd, onClose }: { cmd: BuiltCommand; onClose: () => void
   useEffect(() => {
     let alive = true;
     let off: (() => void) | undefined;
+    let spawned: string | undefined;
     const bridge = window.prometheus?.ide;
     if (!bridge) {
       setErr("the IDE pty host is unavailable");
@@ -539,6 +537,7 @@ function LiveTerminal({ cmd, onClose }: { cmd: BuiltCommand; onClose: () => void
         return;
       }
       const id = res.ptyId;
+      spawned = id;
       setPtyId(id);
       if (bridge.onEvent) {
         off = bridge.onEvent((ev) => {
@@ -555,6 +554,9 @@ function LiveTerminal({ cmd, onClose }: { cmd: BuiltCommand; onClose: () => void
     return () => {
       alive = false;
       if (off) off();
+      // leaving the route (or a new command) must not orphan the agent CLI's process — only
+      // the ✕ button used to kill it, so navigating away left it running unseen
+      if (spawned) bridge.ptyKill?.(spawned);
     };
   }, [cmd]);
 
@@ -643,8 +645,17 @@ function TerminalChat(): ReactElement {
     }
     const env = r.env ?? {};
     const display = [...Object.entries(env).map(([k, v]) => `${k}=${v}`), ...r.argv].join(" ");
-    setCmd({ argv: r.argv, env, cwd: r.cwd ?? "~", label: r.label ?? cli, display });
+    setCmd({ argv: r.argv, env, cwd: r.cwd ?? "~", label: r.label ?? cli, display, bypass });
     setNotes(r.notes ?? []);
+  }, [cli, model, systemPrompt, bypass, prompt]);
+
+  // A built command is stale the moment an input changes: the preview, Copy and Open must never
+  // run argv built from options that are no longer on screen (untick bypass after building, and
+  // Open used to launch the bypass command WITHOUT its warning).
+  // biome-ignore lint/correctness/useExhaustiveDependencies: the inputs ARE the trigger
+  useEffect(() => {
+    setCmd(null);
+    setCopied(false);
   }, [cli, model, systemPrompt, bypass, prompt]);
 
   const copy = useCallback(() => {
@@ -656,7 +667,7 @@ function TerminalChat(): ReactElement {
   const doOpen = useCallback(() => {
     if (!cmd) return;
     if (
-      bypass &&
+      cmd.bypass &&
       !window.confirm(
         "Bypass permissions: the agent will act WITHOUT confirmations. Open the terminal anyway?",
       )
@@ -664,7 +675,7 @@ function TerminalChat(): ReactElement {
       return;
     }
     setOpen(true);
-  }, [cmd, bypass]);
+  }, [cmd]);
 
   const cliOptions = [
     { value: "claude", label: "Claude Code" },

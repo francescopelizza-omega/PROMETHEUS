@@ -104,6 +104,10 @@ studio/**/.prometheus/
 /AI_SKILLS_WONDERLAND/
 .claude/
 .cursor/
+# …except the Cursor ADAPTER this repo ships (mcp.json + rules), which the rule above hid:
+# it was the only one of nine adapters never published. Narrow on purpose — a user's own
+# .cursor/ anywhere else stays ignored.
+!/prometheus_plugin/adapters/cursor/.cursor/
 .windsurf/
 .clinerules/
 .opencode/

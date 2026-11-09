@@ -147,7 +147,8 @@ test("ttl from keep_alive", () => {
 });
 
 test("LM Studio's own estimate is parsed; an unloaded model is planned at a bounded context", async () => {
-  const out = "Model: nvidia/nemotron-3-nano-omni\nContext Length: 32,768\nEstimated GPU Memory:   24.31 GiB\nEstimated Total Memory: 24.31 GiB\nConfidence: LOW\n";
+  const out =
+    "Model: nvidia/nemotron-3-nano-omni\nContext Length: 32,768\nEstimated GPU Memory:   24.31 GiB\nEstimated Total Memory: 24.31 GiB\nConfidence: LOW\n";
   assert.equal(parseLmsEstimate(out), Math.round(24.31 * 2 ** 30));
   assert.equal(parseLmsEstimate("nothing here"), null);
   const ran: string[][] = [];
@@ -159,8 +160,13 @@ test("LM Studio's own estimate is parsed; an unloaded model is planned at a boun
     },
   });
   assert.equal(bytes, Math.round(24.31 * 2 ** 30));
-  assert.deepEqual(ran, [["/x/lms", "load", "nvidia/nemotron-3-nano-omni", "-c", "32768", "--estimate-only", "-y"]]);
-  assert.equal(await lmsEstimateBytes("-x", 1, { lms: "/x/lms", run: async () => ({ code: 0, stdout: out }) }), null);
+  assert.deepEqual(ran, [
+    ["/x/lms", "load", "nvidia/nemotron-3-nano-omni", "-c", "32768", "--estimate-only", "-y"],
+  ]);
+  assert.equal(
+    await lmsEstimateBytes("-x", 1, { lms: "/x/lms", run: async () => ({ code: 0, stdout: out }) }),
+    null,
+  );
   assert.equal(lmStudioPlanContext(262144, {}), 32768);
   assert.equal(lmStudioPlanContext(8192, {}), 8192);
   assert.equal(lmStudioPlanContext(262144, { PROMETHEUS_LMSTUDIO_CONTEXT: "65536" }), 65536);

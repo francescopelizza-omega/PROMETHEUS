@@ -6,7 +6,7 @@
  * useAnchoredLayer mechanism AgentPane's own mention/slash/model pickers already use, so
  * this reads as the same UI language rather than a bolted-on second style).
  */
-import { type AnchoredLayerBox, Z } from "@prometheus/ui";
+import { type AnchoredLayerBox, Z, anchoredEdge } from "@prometheus/ui";
 import type { ReactElement } from "react";
 import { createPortal } from "react-dom";
 
@@ -38,7 +38,7 @@ export function PathCompletionDropdown({
       style={{
         position: "fixed",
         left: box.left,
-        top: box.top,
+        ...anchoredEdge(box),
         width: box.width,
         maxHeight,
         overflow: "auto",
@@ -71,7 +71,7 @@ export function PathCompletionDropdown({
             padding: "4px 8px",
             cursor: "pointer",
             fontFamily: "var(--font-mono, monospace)",
-            fontSize: "0.72rem",
+            fontSize: "0.75rem",
             background: i === activeIndex ? "var(--bg-inset)" : "transparent",
             color: "var(--text-primary)",
           }}

@@ -485,29 +485,8 @@ export function hostToolManifest(): string | null {
  * through: this string reaches the model, and `validateSettings` does not run at load time.
  */
 function externalToolDefaults(): agent.ExternalToolDefaults {
-  const raw = loadSettings();
-  const d = { ...agent.DEFAULT_EXTERNAL_TOOLS };
-  const str = (k: keyof agent.ExternalToolDefaults, allowed?: readonly string[]): void => {
-    const v = raw[`tools.externalTools.${k}`];
-    if (typeof v === "string" && v.trim() && (!allowed || allowed.includes(v))) {
-      (d as Record<string, unknown>)[k] = v;
-    }
-  };
-  const num = (k: keyof agent.ExternalToolDefaults, min: number, max: number): void => {
-    const v = raw[`tools.externalTools.${k}`];
-    if (typeof v === "number" && Number.isFinite(v) && v >= min && v <= max) {
-      (d as Record<string, unknown>)[k] = v;
-    }
-  };
-  str("imageFormat", agent.EXTERNAL_TOOL_CHOICES.imageFormat);
-  str("imageResizeFilter", agent.EXTERNAL_TOOL_CHOICES.imageResizeFilter);
-  str("videoContainer", agent.EXTERNAL_TOOL_CHOICES.videoContainer);
-  str("ocrLang");
-  str("ytdlpFormat");
-  num("imageQuality", 1, 100);
-  num("pdfDpi", 1, 2400);
-  num("videoMaxHeight", 0, 8192);
-  return d;
+  // one parser for every surface (core), so Studio's Settings page and this terminal agree
+  return agent.externalToolDefaultsFrom(loadSettings());
 }
 
 /** Forget the rendered manifest (after `/install`), so the next turn re-probes. */
@@ -2706,6 +2685,12 @@ export function makeLlmClient(endpoint: AiEndpoint, deps: LlmClientDeps = {}): L
           } else if (!any) {
             const message = err instanceof Error ? err.message : String(err);
             yield { kind: "text", text: `model error: ${message}` };
+          } else {
+            // The stream died AFTER text arrived (connection reset, `overloaded_error`). Saying
+            // nothing let the truncated reply end like a complete one and be saved as such; the
+            // native transport already says it, and so must this one.
+            const message = err instanceof Error ? err.message : String(err);
+            yield { kind: "text", text: `\n\n⚠ the model stopped mid-answer: ${message}` };
           }
         }
       }
@@ -4421,6 +4406,9 @@ export async function runMessageTurn(
           llm,
           runTool,
           confirm,
+          // the TURN's signal: ESC must stop a delegated batch, not only the parent — without it
+          // the child's write_file / propose_edit calls kept applying (or kept asking) after ESC
+          ...(deps.signal ? { signal: deps.signal } : {}),
           // Point 6b: a sub-agent is exactly the surface most likely to touch untrusted content
           // (that's what `touchedUntrustedSurface` above is for) — it must not run with the
           // canary tripwire silently disabled just because it's a delegated turn.

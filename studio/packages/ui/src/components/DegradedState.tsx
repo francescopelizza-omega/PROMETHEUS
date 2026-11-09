@@ -100,7 +100,9 @@ export function DegradedState({
         // when the live source is down. 0.70 measures ~7:1 and is still visibly quieter than
         // the live content beside it, and `pointerEvents:none` + the aria-label (not the
         // contrast) are what actually stop it being mistaken for live state.
-        <div style={{ opacity: 0.7, pointerEvents: "none" }} aria-label="last known state">
+        // `inert` as well: pointerEvents:none stopped the mouse, but Tab + Enter still pressed
+        // the stale Install / Force buttons inside it
+        <div style={{ opacity: 0.7, pointerEvents: "none" }} aria-label="last known state" inert>
           {children}
         </div>
       )}

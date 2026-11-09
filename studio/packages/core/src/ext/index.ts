@@ -30,7 +30,14 @@ export type {
   InstallPlanResult,
   PlanInstallOptions,
 } from "./loader.js";
-export { permissionSummary, gateTargetFor, planInstall, isPlanError } from "./loader.js";
+export {
+  permissionSummary,
+  gateTargetFor,
+  gateTargetsFor,
+  mainEntryError,
+  planInstall,
+  isPlanError,
+} from "./loader.js";
 export type {
   Disposable,
   ExtCommandsApi,

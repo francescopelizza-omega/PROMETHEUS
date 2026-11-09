@@ -208,3 +208,71 @@ test("the pane costs nothing when no item has a body — every existing picker i
   // Same shape as it has always produced: title, filter, one row, hint.
   assert.equal(before.length, 4);
 });
+
+test("two-column picker: title alone on the left (second line empty), two description lines on the right", () => {
+  const items = [
+    {
+      label: "Qwen3 8B",
+      submitText: "/models use local:qwen3-8b",
+      columns: [
+        "Hybrid think/no-think chat and coding.",
+        "Fits 16 GB; 32K native context.",
+      ] as const,
+      body: ["8B · 4.7 GB · tools"],
+    },
+    {
+      label: "Gemma 3 4B",
+      submitText: "/models use local:gemma3-4b",
+      columns: ["Small multimodal model.", "No native tool calling."] as const,
+    },
+  ];
+  const state = openListOverlay("Local models", items);
+  const lines = renderListOverlay(state, 90, 20, "none").map(strip);
+  const i1 = lines.findIndex((l) => l.includes("Qwen3 8B"));
+  assert.ok(i1 > 0, lines.join("\n"));
+  assert.match(lines[i1] ?? "", /Qwen3 8B\s{2,}Hybrid think\/no-think chat and coding\./);
+  // the second row of the item: no title text, the second description line in the right column
+  assert.ok(!(lines[i1 + 1] ?? "").includes("Qwen3"));
+  assert.match(lines[i1 + 1] ?? "", /^[^\w\s]*\s+Fits 16 GB; 32K native context\.$/);
+  // both description lines start in the SAME column
+  const col1 = (lines[i1] ?? "").indexOf("Hybrid");
+  const col2 = (lines[i1 + 1] ?? "").indexOf("Fits");
+  assert.equal(col1, col2);
+  // next item follows immediately, two rows per item
+  assert.match(lines[i1 + 2] ?? "", /Gemma 3 4B\s{2,}Small multimodal model\./);
+  assert.match(lines[i1 + 3] ?? "", /No native tool calling\./);
+  // the highlighted item's detail pane still shows below the list
+  assert.ok(lines.some((l) => l.includes("8B · 4.7 GB · tools")));
+  // never wider than the terminal
+  for (const l of renderListOverlay(state, 40, 12, "none")) assert.ok(stringWidth(strip(l)) <= 40);
+});
+
+test("two-column picker on a very short pane falls back to one line per item, within its rows", () => {
+  const items = Array.from({ length: 12 }, (_, i) => ({
+    label: `Model ${i}`,
+    submitText: `m${i}`,
+    columns: [`first line ${i}`, `second line ${i}`] as const,
+  }));
+  const state = openListOverlay("Local models", items);
+  for (const rows of [4, 5, 6]) {
+    const lines = renderListOverlay(state, 80, rows, "none").map(strip);
+    assert.ok(lines.length <= rows, `rows=${rows}: ${lines.length} lines\n${lines.join("\n")}`);
+    assert.ok(
+      lines.some((l) => /Model 0\s+first line 0/.test(l)),
+      lines.join("\n"),
+    );
+  }
+});
+
+test("two-column picker: typing filters on the description text too", () => {
+  const items = [
+    { label: "A", submitText: "a", columns: ["reads images", "x"] as const },
+    { label: "B", submitText: "b", columns: ["code only", "y"] as const },
+  ];
+  let state = openListOverlay("t", items);
+  for (const ch of "images") state = onListKey(state, { name: "char", ch } as KeyEvent).state;
+  assert.deepEqual(
+    state.filtered.map((i) => i.label),
+    ["A"],
+  );
+});

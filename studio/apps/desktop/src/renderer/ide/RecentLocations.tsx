@@ -192,7 +192,7 @@ export function RecentLocations({
                 </span>
                 <span
                   style={{
-                    fontSize: "0.72rem",
+                    fontSize: "0.75rem",
                     color: "var(--text-secondary)",
                     overflow: "hidden",
                     textOverflow: "ellipsis",

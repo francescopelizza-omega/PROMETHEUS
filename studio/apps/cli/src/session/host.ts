@@ -105,6 +105,7 @@ import { type KeymapResolution, resolveKeymap } from "../tui/keys.js";
 import { detectColorCaps } from "../tui/palette.js";
 import { probeEnv, runtimeBrewFormula } from "../updates/dispatch-cmd.js";
 import { makeDispatchProbes } from "../updates/dispatch-probes.js";
+import { defaultOllamaDiscard, defaultOllamaGate } from "../updates/model-actions-cmd.js";
 import { type StepRunner, makeStepRunner } from "../updates/run-step.js";
 import { runUpdates, updatesStartupNotice } from "../updates/updates-cmd.js";
 import { type QuestionLine, askCancellableOn } from "./ask-cancellable.js";
@@ -170,6 +171,7 @@ import { realGitSpawn } from "./git-helpers.js";
 import { onboarding as onboardingDoctor } from "@prometheus/core";
 import { loadAgentFiles } from "./agent-file-store.js";
 import { type LoadedCommand, expandCommand, loadCommandFiles } from "./command-files.js";
+import { loadDefaultServer, saveDefaultServer } from "./default-server-setting.js";
 import { gatherFacts } from "./doctor-host.js";
 import { loadEffortRules } from "./effort-rules.js";
 import { loadGrantsInto, saveGrants } from "./grants-store.js";
@@ -672,13 +674,11 @@ export async function launchSession(parsed: ParsedArgs, deps: SessionDeps = {}):
   const client = deps.client ?? createEngineClient();
   const handlers = resolveHandlers(deps.handlers);
 
-  // First contact: ensure the ~/.prometheus tree exists, and point the engine's model
-  // downloads at the resolved open_models dir (paths.json override > default) via the env
-  // the modelhub sidecar reads — so a `model pull` lands where the user chose.
+  // First contact: ensure the ~/.prometheus tree exists. Model downloads are NOT pointed at it:
+  // each model goes to the store of the software that serves it (`ai.modelStores`).
   const home = deps.home ?? prometheusHome();
   const tokenToggles = readTokenToggles(); // CLI-088: session-scoped token-economy toggles, read once
   ensureHomeTree(home);
-  process.env.PROMETHEUS_MODELS_DIR = resolveCategory("open_models", home);
 
   // Seed the PURE core REPL state from the profile (+ flags) and the cwd.
   const {
@@ -780,7 +780,10 @@ export async function launchSession(parsed: ParsedArgs, deps: SessionDeps = {}):
   // paid CLIs. When a local model is found, ADOPT it as the session endpoint + model so
   // chat works with zero config; otherwise keep the profile model and point at /setup.
   const backends: Backends =
-    deps.backends ?? (await detectBackends({ client }).catch(() => emptyBackends()));
+    deps.backends ??
+    (await detectBackends({ client, preferredRunner: loadDefaultServer(home) }).catch(() =>
+      emptyBackends(),
+    ));
   let endpoint: AiEndpoint | undefined = backends.localEndpoint;
   /**
    * The in-flight context-window/capability probe, if one was kicked off below — awaited
@@ -923,6 +926,7 @@ export async function launchSession(parsed: ParsedArgs, deps: SessionDeps = {}):
    * a stored key, so `/model` sees the new choice without a restart.
    */
   const modelsHost = createModelsHost({
+    migrateOnStart: true,
     home,
     client,
     backends,
@@ -1561,8 +1565,6 @@ export async function launchSession(parsed: ParsedArgs, deps: SessionDeps = {}):
   const runHostSetup = async (): Promise<void> => {
     const r = await runSetup({ client, write: writeLine, ask, askPath, home });
     if (r.endpoint) {
-      // a model dir change in /setup repointed paths.json — refresh the engine env.
-      process.env.PROMETHEUS_MODELS_DIR = resolveCategory("open_models", home);
       state = repl.reduce(state, {
         type: "tune",
         patch: { model: { provider: "ollama", modelId: r.endpoint.model ?? "" } },
@@ -1579,7 +1581,6 @@ export async function launchSession(parsed: ParsedArgs, deps: SessionDeps = {}):
   /** /paths: view + repoint the per-category heavy-download folders (models/videos/files). */
   const runHostPaths = async (): Promise<void> => {
     await runPathsWizard({ client, write: writeLine, ask, askPath, home });
-    process.env.PROMETHEUS_MODELS_DIR = resolveCategory("open_models", home);
   };
 
   /**
@@ -1902,7 +1903,11 @@ export async function launchSession(parsed: ParsedArgs, deps: SessionDeps = {}):
             "privileged command: run_command never runs one. Call propose_elevated with the program and its arguments (no sudo); the human approves that exact command.",
         } as ConfirmResult);
       }
-      const tool = agent.exposedTools(tuning.tools).find((t) => t.name === call.name);
+      // The SAME merged list the turn runs with (live state + connected MCP servers). This used
+      // the startup seed, so an MCP tool resolved to no annotations at all.
+      const tool = agent
+        .exposedTools(withMcpTools(state.tuning, mcp?.tools() ?? []).tools)
+        .find((t) => t.name === call.name);
       if (hostAutoApproves(call, tool?.annotations)) {
         return Promise.resolve(true as ConfirmResult);
       }
@@ -2817,6 +2822,9 @@ export async function launchSession(parsed: ParsedArgs, deps: SessionDeps = {}):
             ask: (prompt) => askCancellable(prompt),
             getAuthLevel: () => slashCtx.getAuthLevel(),
             signal: () => turnAbort?.signal,
+            // every pull from /updates is scanned before it counts (removed on a block)
+            gate: defaultOllamaGate,
+            discard: defaultOllamaDiscard,
           },
           /**
            * What "update everything" runs with — see updates/dispatch-cmd.ts for what it will and
@@ -2833,6 +2841,8 @@ export async function launchSession(parsed: ParsedArgs, deps: SessionDeps = {}):
               }),
             ),
             pull: pullModel,
+            gate: defaultOllamaGate,
+            discard: defaultOllamaDiscard,
             audit: (entry) => appendExecAudit(home, entry),
             freeDiskBytes: () => diskInfo(ollamaModelsDir())?.freeBytes,
             runtimeFormula: () => runtimeBrewFormula(),
@@ -3142,6 +3152,11 @@ export async function launchSession(parsed: ParsedArgs, deps: SessionDeps = {}):
         idleTimeoutMsSetting = ms;
         saveIdleTimeoutMs(home, ms);
       },
+    },
+    // `/server` — the persisted default local model server (Ollama unless the user picks another)
+    defaultServerSetting: {
+      get: () => loadDefaultServer(home),
+      set: (id) => saveDefaultServer(id, home),
     },
     // /cd — see `changeProjectDirectory`'s own header for the full rotation semantics.
     changeProjectDirectory: (dir, opts) => changeProjectDirectory(dir, opts),

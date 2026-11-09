@@ -337,7 +337,7 @@ export function MethodHierarchyView({ root }: { root: string }): ReactElement {
           style={{
             color: "var(--text-secondary)",
             fontFamily: "var(--font-mono, monospace)",
-            fontSize: "0.72rem",
+            fontSize: "0.75rem",
             marginBottom: 6,
           }}
         >
@@ -348,27 +348,27 @@ export function MethodHierarchyView({ root }: { root: string }): ReactElement {
       )}
 
       {status === "idle" && (
-        <p style={{ color: "var(--text-secondary)", fontSize: "0.72rem" }}>
+        <p style={{ color: "var(--text-secondary)", fontSize: "0.75rem" }}>
           Put the caret on a method, then press ⟳.
         </p>
       )}
       {status === "nocaret" && (
-        <p style={{ color: "var(--text-secondary)", fontSize: "0.72rem" }}>
+        <p style={{ color: "var(--text-secondary)", fontSize: "0.75rem" }}>
           No caret yet — click into an editor first.
         </p>
       )}
       {status === "nomethod" && (
-        <p style={{ color: "var(--text-secondary)", fontSize: "0.72rem" }}>
+        <p style={{ color: "var(--text-secondary)", fontSize: "0.75rem" }}>
           No method at the caret — put it on a method name, then press ⟳.
         </p>
       )}
       {status === "unsupported" && (
-        <p style={{ color: "var(--text-secondary)", fontSize: "0.72rem" }}>
+        <p style={{ color: "var(--text-secondary)", fontSize: "0.75rem" }}>
           No hierarchy server for this file type.
         </p>
       )}
       {status === "empty" && (
-        <p style={{ color: "var(--text-secondary)", fontSize: "0.72rem" }}>
+        <p style={{ color: "var(--text-secondary)", fontSize: "0.75rem" }}>
           No enclosing type at the caret (the server may still be indexing — press ⟳).
         </p>
       )}
@@ -400,7 +400,7 @@ function HierRows({
                 alignItems: "center",
                 gap: 4,
                 paddingLeft: depth * 12,
-                fontSize: "0.74rem",
+                fontSize: "0.75rem",
               }}
             >
               <button
@@ -433,7 +433,7 @@ function HierRows({
                   color: "var(--text-primary)",
                   cursor: "pointer",
                   fontFamily: "var(--font-mono, monospace)",
-                  fontSize: "0.74rem",
+                  fontSize: "0.75rem",
                   padding: "1px 0",
                   overflow: "hidden",
                   textOverflow: "ellipsis",
@@ -444,7 +444,7 @@ function HierRows({
                 {n.item.name}
                 <span style={{ color: "var(--text-secondary)" }}> {basename(n.item.uri)}</span>
               </button>
-              <span style={{ color: BADGE_COLOR[badge], fontSize: "0.64rem", fontWeight: 600 }}>
+              <span style={{ color: BADGE_COLOR[badge], fontSize: "0.75rem", fontWeight: 600 }}>
                 {badge}
               </span>
             </div>
@@ -456,7 +456,7 @@ function HierRows({
                 style={{
                   paddingLeft: (depth + 1) * 12 + 12,
                   color: "var(--text-secondary)",
-                  fontSize: "0.7rem",
+                  fontSize: "0.75rem",
                 }}
               >
                 (none)

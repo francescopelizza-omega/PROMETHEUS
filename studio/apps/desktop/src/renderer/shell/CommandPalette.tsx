@@ -106,6 +106,21 @@ export function CommandPalette({
   useEffect(() => {
     setActive((a) => Math.max(0, Math.min(a, ranked.length - 1)));
   }, [ranked.length]);
+  // A new query is a new list: the highlight goes back to the best match. Keeping the old
+  // index meant "type, Enter" could run whatever row slid under it as the list re-filtered.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: re-runs ON a query change by design
+  useEffect(() => {
+    setActive(0);
+  }, [query]);
+  // …and the highlighted row is always ON SCREEN: arrowing past ~8 rows highlighted (and Enter
+  // ran) a row the user could not see.
+  const listRef = useRef<HTMLDivElement | null>(null);
+  // biome-ignore lint/correctness/useExhaustiveDependencies: re-runs when the highlight moves
+  useEffect(() => {
+    listRef.current
+      ?.querySelector<HTMLElement>('[aria-selected="true"]')
+      ?.scrollIntoView({ block: "nearest" });
+  }, [active]);
 
   if (!open) return null;
 
@@ -175,6 +190,7 @@ export function CommandPalette({
           onChange={(e) => setQuery(e.target.value)}
           placeholder="Type a command or jump to a screen…"
           aria-label="Command palette query"
+          aria-activedescendant={ranked.length > 0 ? `palette-opt-${active}` : undefined}
           spellCheck={false}
           autoCapitalize="off"
           autoCorrect="off"
@@ -192,6 +208,7 @@ export function CommandPalette({
           }}
         />
         <div
+          ref={listRef}
           role="listbox"
           tabIndex={-1}
           aria-label="Palette results"
@@ -222,8 +239,13 @@ export function CommandPalette({
                 <button
                   type="button"
                   role="option"
+                  id={`palette-opt-${i}`}
                   aria-selected={isActive}
-                  onMouseEnter={() => setActive(i)}
+                  // MOVE, not enter: a resting pointer must not steal the highlight while the
+                  // list re-filters under it as the user types
+                  onMouseMove={() => {
+                    if (!isActive) setActive(i);
+                  }}
                   onClick={() => run(r.item)}
                   style={{
                     display: "flex",
@@ -254,7 +276,7 @@ export function CommandPalette({
                   {r.item.keybind && (
                     <kbd
                       style={{
-                        fontSize: "0.72rem",
+                        fontSize: "0.75rem",
                         color: "var(--text-secondary)",
                         fontFamily: "var(--font-mono)",
                         border: "1px solid var(--border-subtle)",

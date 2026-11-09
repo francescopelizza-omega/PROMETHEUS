@@ -294,6 +294,51 @@ def _git_clone_argv(git: str, url: str, dest: str, branch: Optional[str]) -> Lis
     return argv
 
 
+def _fetch_ref(git: str, stage: Path, refspec: str) -> subprocess.CompletedProcess:
+    """Shallow-fetch ONE ref into a staged clone, under the same safe flags.
+
+    Every clone here is `--depth 1` of a single branch, so a `pin` to any commit but the tip,
+    or a `branch` other than the cloned one, failed at checkout ("did not match any file(s)
+    known to git") — the object or the branch simply was not there. Fetch it first."""
+    return subprocess.run(
+        [git, *_GIT_SAFE_FLAGS, "-C", str(stage), "fetch", "--depth", "1",
+         "--no-recurse-submodules", "--no-tags", "origin", refspec],
+        capture_output=True, text=True, timeout=_GIT_TIMEOUT)
+
+
+def _checkout_branch(git: str, stage: Path, branch: str) -> subprocess.CompletedProcess:
+    """Switch a (shallow, single-branch) staged clone to `branch`: fetch it, then check it out."""
+    fetched = _fetch_ref(git, stage, f"+refs/heads/{branch}:refs/remotes/origin/{branch}")
+    if fetched.returncode == 0:
+        return subprocess.run(
+            [git, *_GIT_SAFE_FLAGS, "-C", str(stage), "checkout", "-B", branch,
+             f"origin/{branch}"],
+            capture_output=True, text=True, timeout=_GIT_TIMEOUT)
+    return subprocess.run([git, *_GIT_SAFE_FLAGS, "-C", str(stage), "checkout", branch],
+                          capture_output=True, text=True, timeout=_GIT_TIMEOUT)
+
+
+def _checkout_pin(git: str, stage: Path, sha: str) -> subprocess.CompletedProcess:
+    """Detach a staged clone at `sha`, fetching the commit first when it is not present."""
+    _fetch_ref(git, stage, sha)  # best effort: a server may refuse a want for a bare sha
+    return subprocess.run([git, *_GIT_SAFE_FLAGS, "-C", str(stage), "checkout", "--detach", sha],
+                          capture_output=True, text=True, timeout=_GIT_TIMEOUT)
+
+
+def _head_branch(git: Optional[str], stage: Path) -> Optional[str]:
+    """The branch a clone actually landed on (the remote's DEFAULT when none was asked for)."""
+    if not git or not (stage / ".git").exists():
+        return None
+    try:
+        cp = subprocess.run([git, *_GIT_SAFE_FLAGS, "-C", str(stage), "rev-parse",
+                             "--abbrev-ref", "HEAD"],
+                            capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    name = (cp.stdout or "").strip()
+    return name if cp.returncode == 0 and name and name != "HEAD" else None
+
+
 def _run_git(argv: List[str]) -> subprocess.CompletedProcess:
     log("git:", " ".join(argv))
     return subprocess.run(argv, capture_output=True, text=True, timeout=_GIT_TIMEOUT)
@@ -314,6 +359,32 @@ def _head_sha(tree: Path) -> Optional[str]:
 
 
 # --- the gate decision over a STAGED tree ------------------------------------ #
+
+def _own_stage(given: Path, stage: Path) -> Optional[Path]:
+    """The directory the gate may MOVE: `given` itself when it already lives under the stage
+    root, otherwise a COPY of it at `stage`.
+
+    The gate promotes by moving the staged dir into the live store and quarantines by moving it
+    aside. `--staged` comes from the caller (the desktop passes it through from the renderer),
+    so `--staged ~/Documents` moved the user's Documents folder into the repo store — or into
+    quarantine, if nemesis disliked something in it. A dir outside the stage root is copied in
+    (links as links, see `_restage_from_live`) and only the copy is ever moved.
+    """
+    try:
+        real = given.resolve(strict=True)
+    except (OSError, RuntimeError):
+        return None
+    if not real.is_dir():
+        return None
+    root = stage_root().resolve()
+    if real != root and root in real.parents:
+        return real
+    if stage.exists():
+        shutil.rmtree(stage, ignore_errors=True)
+    stage.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(real, stage, symlinks=True)
+    return stage
+
 
 def _quarantine(stage: Path) -> Path:
     """Move a refused staging dir aside (kept for inspection; never auto-deleted)."""
@@ -492,7 +563,9 @@ def v_clone(argv: List[str]) -> int:
     url = opt_value(argv, "--url")
     if not url:
         return fail("repo.clone", "need --url <git url>")
-    branch = opt_value(argv, "--branch") or "main"
+    # No `--branch` → clone the remote's DEFAULT branch. This used to default to "main", so
+    # every repo whose default is `master` (or anything else) failed to clone outright.
+    branch = opt_value(argv, "--branch")
     pin = opt_value(argv, "--pin")
     force = "--force" in argv
     staged = opt_value(argv, "--staged")  # an already-cloned dir to gate (offline/test)
@@ -508,9 +581,13 @@ def v_clone(argv: List[str]) -> int:
 
     if staged:
         # bytes already on disk → gate the staged tree directly (no fetch).
+        staged_path = _own_stage(Path(staged).expanduser(), stage)
+        if staged_path is None:
+            return fail("repo.clone", f"--staged is not a directory: {staged}", url=url, id=repo_id)
         result = _gate_staged(
             repo_id=repo_id, url=url, owner=meta["owner"], name=meta["name"],
-            branch=branch, stage=Path(staged).expanduser(), pin=pin, force=force,
+            branch=branch or _head_branch(_git(), staged_path) or "main",
+            stage=staged_path, pin=pin, force=force,
         )
         return _emit_gate("clone", result)
 
@@ -538,10 +615,9 @@ def v_clone(argv: List[str]) -> int:
                     url=url, id=repo_id)
 
     if pin:
-        # detached checkout of the requested SHA under safe flags before scanning.
-        cp = subprocess.run([git, *_GIT_SAFE_FLAGS, "-C", str(stage),
-                             "checkout", "--detach", pin],
-                           capture_output=True, text=True, timeout=_GIT_TIMEOUT)
+        # detached checkout of the requested SHA under safe flags before scanning (fetched
+        # first: a depth-1 clone holds only the tip).
+        cp = _checkout_pin(git, stage, pin)
         if cp.returncode != 0:
             shutil.rmtree(stage, ignore_errors=True)
             return fail("repo.clone", f"git checkout --detach {pin} failed: "
@@ -549,7 +625,7 @@ def v_clone(argv: List[str]) -> int:
 
     result = _gate_staged(
         repo_id=repo_id, url=url, owner=meta["owner"], name=meta["name"],
-        branch=branch, stage=stage, pin=pin, force=force,
+        branch=branch or _head_branch(git, stage) or "main", stage=stage, pin=pin, force=force,
     )
     return _emit_gate("clone", result)
 
@@ -587,7 +663,10 @@ def _restage_from_live(entry: Dict[str, Any], repo_id: str) -> Optional[Path]:
     if stage.exists():
         shutil.rmtree(stage, ignore_errors=True)
     stage.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copytree(live, stage)
+    # `symlinks=True`: copy a link AS a link. Following it copied the TARGET's bytes into the
+    # stage — a repo shipping `notes -> ~/.ssh` got the user's keys copied next to its code, then
+    # gated and promoted as if they were the repo's own files.
+    shutil.copytree(live, stage, symlinks=True)
     return stage
 
 
@@ -666,9 +745,7 @@ def v_pin(argv: List[str]) -> int:
         shutil.rmtree(stage, ignore_errors=True)
         return fail("repo.pin", "git not found on PATH — cannot pin (nothing was recorded)",
                     id=repo_id)
-    cp = subprocess.run([git, *_GIT_SAFE_FLAGS, "-C", str(stage),
-                         "checkout", "--detach", sha],
-                        capture_output=True, text=True, timeout=_GIT_TIMEOUT)
+    cp = _checkout_pin(git, stage, sha)
     if cp.returncode != 0:
         shutil.rmtree(stage, ignore_errors=True)
         return fail("repo.pin", f"git checkout --detach {sha} failed: "
@@ -708,9 +785,7 @@ def v_branch(argv: List[str]) -> int:
         shutil.rmtree(stage, ignore_errors=True)
         return fail("repo.branch", "git not found on PATH — cannot switch branch "
                               "(nothing was recorded)", id=repo_id)
-    cp = subprocess.run([git, *_GIT_SAFE_FLAGS, "-C", str(stage),
-                         "checkout", branch],
-                        capture_output=True, text=True, timeout=_GIT_TIMEOUT)
+    cp = _checkout_branch(git, stage, branch)
     if cp.returncode != 0:
         shutil.rmtree(stage, ignore_errors=True)
         return fail("repo.branch", f"git checkout {branch} failed: "

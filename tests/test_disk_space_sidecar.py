@@ -243,6 +243,71 @@ class Deleting(Sandbox):
         self.assertFalse(os.path.lexists(self.tmp / "target"))
         self.assertTrue((self.tmp / "victim" / "keep.bin").exists())
 
+    def test_a_symlinked_parent_cannot_launder_a_system_path(self):
+        # PLAN ONLY. `lnk -> /etc` used to make `lnk/hosts` a LOW-risk "cache" delete,
+        # because the protections compared the unresolved text path.
+        os.symlink("/etc", self.tmp / "lnk")
+        env = run("delete", str(self.tmp / "lnk" / "hosts"))
+        self.assertTrue(env["planned"], env)
+        item = env["items"][0]
+        # judged at its REAL location: a system path, so HIGH risk + a typed confirmation
+        self.assertTrue(item["path"].startswith(os.path.realpath("/etc")), item)
+        self.assertEqual(item["risk"], "HIGH", item)
+        self.assertTrue(env["requiresPhrase"], env)
+
+    def test_a_parent_swapped_for_a_symlink_after_the_plan_is_refused(self):
+        mod = load_sidecar()
+        tool = mod.load_tool()
+        write(self.tmp / "victim" / "data" / "keep.bin", 4096)
+        write(self.tmp / "work" / "data" / "junk.bin", 4096)
+        target = mod.as_path(str(self.tmp / "work" / "data"))
+        ctx = tool.Context(log_path=os.devnull)
+        plan = mod.plan_delete(tool, ctx, [target], "permanent")
+        self.assertFalse(plan["items"][0]["protected"], plan)
+        # the PARENT (not the target) is swapped for a link to the victim's tree
+        shutil.rmtree(self.tmp / "work")
+        os.symlink(self.tmp / "victim", self.tmp / "work")
+        out = mod.execute_delete(tool, ctx, [target], "permanent")
+        self.assertFalse(out[0]["ok"], out)
+        self.assertIn("symlink", out[0]["msg"])
+        self.assertTrue((self.tmp / "victim" / "data" / "keep.bin").exists())
+
+    def test_canonical_walk_refuses_a_parent_swapped_after_canonicalisation(self):
+        # the sidecar deletes canonical paths; a parent swapped for a link AFTER that must make
+        # the delete fail — never follow the link into someone else's folder (review repro)
+        mod = load_sidecar()
+        tool = mod.load_tool()
+        write(self.tmp / "a" / "victim", 16)
+        write(self.tmp / "precious" / "victim", 16)
+        target = mod.as_path(str(self.tmp / "a" / "victim"))
+        ctx = mod.context(tool)
+        os.rename(self.tmp / "a", self.tmp / "a.old")
+        os.symlink(self.tmp / "precious", self.tmp / "a")
+        ok, _msg = tool.delete_permanently(ctx, target)
+        self.assertFalse(ok)
+        self.assertTrue((self.tmp / "precious" / "victim").exists())
+        self.assertTrue((self.tmp / "a.old" / "victim").exists())
+
+    def test_execute_only_ancestor_still_allows_a_delete(self):
+        # walking needs search (x) permission only — /home 0711 must not break deletes
+        mod = load_sidecar()
+        tool = mod.load_tool()
+        write(self.tmp / "xonly" / "inner" / "junk.bin", 16)
+        os.chmod(self.tmp / "xonly", 0o311)
+        try:
+            ok, msg = tool.delete_permanently(mod.context(tool), mod.as_path(str(self.tmp / "xonly" / "inner" / "junk.bin")))
+        finally:
+            os.chmod(self.tmp / "xonly", 0o755)
+        self.assertTrue(ok, msg)
+        self.assertFalse((self.tmp / "xonly" / "inner" / "junk.bin").exists())
+
+    def test_canonical_confirm_refuses_a_path_whose_parent_is_now_a_link(self):
+        write(self.tmp / "real" / "f.bin", 16)
+        os.symlink(self.tmp / "real", self.tmp / "lnk")
+        env = run("delete", "--permanent", "--confirm", "--canonical", str(self.tmp / "lnk" / "f.bin"))
+        self.assertFalse(env["ok"], env)
+        self.assertTrue((self.tmp / "real" / "f.bin").exists())
+
     def test_a_dash_named_folder_needs_double_dash_and_is_never_an_option(self):
         write(self.tmp / "-rf" / "x.bin", 4096)
         env = run("delete", "--permanent", "--confirm", "--", "-rf", cwd=str(self.tmp))

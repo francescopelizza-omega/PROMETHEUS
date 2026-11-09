@@ -157,6 +157,14 @@ export interface ModelsStore {
 
   /** enqueue a download row in `queued` (idempotent on id). */
   enqueueDownload(spec: { id: string; modelId: string; quant: string; modality?: string }): void;
+  /**
+   * Put an EXISTING row back to `queued` (gate cleared) before a re-run — a confirmed warn or a
+   * forced override. Without it the re-run's `start`/verdict events were illegal from the row's
+   * old state and were dropped: a warned row was marked `admitted` BEFORE the engine re-ran and
+   * stayed admitted even when the re-run blocked; a forced row stayed `blocked` after it was
+   * admitted. The engine's NEW verdict is the only thing that may move the row.
+   */
+  requeueDownload(id: string): void;
   /** advance a download row by a CORE transition event (records the side-channel patch). */
   advanceDownload(id: string, event: DownloadEvent, patch?: Partial<DownloadRowData>): void;
   /** apply a REAL nemesis verdict to a SCANNING row (maps tier → the scan event; C5). */
@@ -220,6 +228,14 @@ export const useModelsStore = create<ModelsStore>((set) => ({
         ...(spec.modality !== undefined ? { modality: spec.modality } : {}),
       };
       return { downloads: { ...s.downloads, [spec.id]: row } };
+    }),
+
+  requeueDownload: (id) =>
+    set((s) => {
+      const row = s.downloads[id];
+      if (!row) return s;
+      const { gate: _gate, quarantineDir: _q, ...rest } = row;
+      return { downloads: { ...s.downloads, [id]: { ...rest, state: "queued" } } };
     }),
 
   advanceDownload: (id, event, patch = {}) =>

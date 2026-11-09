@@ -21,13 +21,13 @@
 import { createRequire } from "node:module";
 
 import {
+  type AiEndpoint,
   DEFAULT_CONTEXT_WINDOW,
   type LocalRunnerSpec,
   ai,
   localRunners,
   runnerById,
 } from "@prometheus/core";
-import type { AiEndpoint } from "@prometheus/core";
 import {
   type EngineClient,
   type LaunchGuardSample,
@@ -52,6 +52,7 @@ import {
   PATH_CATEGORIES,
   type PathCategory,
   diskInfo,
+  modelStoresHere,
   prometheusHome,
   resolveCategory,
   setCategory,
@@ -139,6 +140,8 @@ export function emptyBackends(): Backends {
 
 export interface DetectDeps {
   client: EngineClient;
+  /** the user's default local server (`/server`); Ollama when absent. */
+  preferredRunner?: string;
   /** injected for tests; defaults to global fetch. */
   fetchFn?: typeof fetch;
   /** per-runner probe timeout (ms). */
@@ -339,7 +342,10 @@ export async function detectBackends(deps: DetectDeps): Promise<Backends> {
   // says the daemon is. The Python sidecar has honoured that variable since it existed and
   // every TypeScript surface ignored it, so a relocated daemon was visible from one half of
   // the product and not the other.
-  const specs = localRunners();
+  // The user's default server (`/server`) goes first: it is the one started when none is
+  // running, and the one adopted when several serve models.
+  const preferred = deps.preferredRunner ?? ai.DEFAULT_SERVER;
+  const specs = ai.preferFirst(localRunners(), (r) => r.id, preferred);
   // LOOK before starting anything. This used to probe-and-start every runner in one
   // Promise.all, so a machine with Ollama AND LM Studio installed cold-started both on every
   // boot — two servers, two watchdogs, each free to load a model, for a session that uses one.
@@ -362,7 +368,7 @@ export async function detectBackends(deps: DetectDeps): Promise<Backends> {
     }
   }
   const liveRunners = probed.filter((r): r is LocalRunner => r !== null);
-  const localRunner = liveRunners.find((r) => r.models.length > 0);
+  const localRunner = ai.pickServingRunner(liveRunners, preferred);
 
   let paidClis: string[] = [];
   try {
@@ -647,12 +653,22 @@ async function setupLocal(
   const model = RECOMMENDED_LOCAL[pick - 1];
   const tag = model?.tag ?? "";
 
-  // ── install location: show the default open_models dir + disk, let the user repoint ──
-  const home = deps.home ?? prometheusHome();
-  let dir = resolveCategory("open_models", home);
+  // ── where it lands: Ollama's OWN store (this wizard pulls through Ollama) ──
+  /**
+   * The model goes where the software that serves it keeps models — never a Prometheus folder.
+   *
+   * This step used to show an `open_models` folder under ~/.prometheus and offer "Keep this
+   * folder? [Y/n]"; answering n ran `models config --set-root`, which made the engine export
+   * OLLAMA_MODELS at that folder — so pulls landed in a second, empty store beside the real
+   * `~/.ollama/models` (measured 2026-10-01: 29 GB there, 0 B in the chosen dir), and the
+   * user's own `ollama list` stopped agreeing with Prometheus. Ollama owns Ollama's bytes; a
+   * user who wants them elsewhere sets OLLAMA_MODELS on the Ollama app or daemon.
+   */
+  const store = modelStoresHere().find((x) => x.id === "ollama");
+  const dir = store?.dir ?? "";
   write("");
-  write(`${c.dim("install dir")}  ${c.bold(dir)}`);
-  const di = diskInfo(dir);
+  write(`${c.dim("stored in")}   ${c.bold(dir)} ${c.dim("(Ollama's own models folder)")}`);
+  const di = dir ? diskInfo(dir) : null;
   if (di) {
     write(
       `${c.dim("disk")}        ${c.green(humanBytes(di.freeBytes))} free of ${humanBytes(di.totalBytes)}  ${c.dim(`· model ≈ ${model?.gb ?? "?"} GB`)}`,
@@ -660,48 +676,13 @@ async function setupLocal(
   } else {
     write(`${c.dim("model size")}  ≈ ${model?.gb ?? "?"} GB`);
   }
-  if (deps.askPath) {
-    const keep = (await ask("Keep this folder? [Y/n]")).trim().toLowerCase();
-    if (keep === "n" || keep === "no") {
-      const chosen = await deps.askPath("New folder for open models:", dir);
-      dir = setCategory("open_models", chosen, home);
-      write(c.green(`✓ open models → ${dir}`));
-      // persist engine-side too (engine reads models_root from its config.json).
-      try {
-        await deps.client.runPrometheus(["models", "config", "--set-root", dir]);
-      } catch {
-        /* best-effort — the env var below is the load-bearing path for the sidecar. */
-      }
-    }
-  }
-  /**
-   * Prometheus's OWN download directory — and only that.
-   *
-   * This used to set `OLLAMA_MODELS = dir` as well, "to point BOTH download mechanisms at the
-   * chosen dir". That repointed ollama's entire model store at a Prometheus-chosen folder, and
-   * the consequences were measured on 2026-10-01:
-   *
-   *   ~/.ollama/models      29 GB, 2 models   the store ollama actually uses
-   *   <the chosen dir>       0 B              where this line sent every subsequent pull
-   *
-   * So a pull downloaded a duplicate into an empty folder while the models the user already had
-   * stayed invisible, and `ollama list` in their own terminal disagreed with Prometheus about
-   * what was installed. On this machine the chosen dir had itself drifted to a SOURCE DIRECTORY
-   * inside the repo, so a pull would have written tens of GB into the working tree.
-   *
-   * Ollama owns ollama's bytes. Prometheus indexes them (`model.list` reads the real store) and
-   * does not get to move them. A user who genuinely wants ollama's models elsewhere sets
-   * `OLLAMA_MODELS` themselves, and both the engine and the sidecar now honour that.
-   *
-   * `PROMETHEUS_MODELS_DIR` stays: it is Prometheus's own lane, for weights Prometheus itself
-   * downloads rather than ones another tool already manages.
-   */
-  process.env.PROMETHEUS_MODELS_DIR = dir;
 
   if (!ollamaUp) {
     write("");
     write(`${c.yellow("Ollama is not running.")} Install it first:`);
-    write(`  ${c.cyan("prometheus apps install ollama --yes")}   ${c.dim("(nemesis-gated)")}`);
+    write(
+      `  ${c.cyan("/models runtimes install ollama")}   ${c.dim("(official package channel)")}`,
+    );
     write(
       `then re-run ${c.cyan("/setup")} (or: ${c.cyan(`ollama pull ${tag}`)}), and restart prometheus.`,
     );
@@ -709,16 +690,22 @@ async function setupLocal(
       .trim()
       .toLowerCase();
     if (go === "y" || go === "yes") {
-      write(c.dim("Routing through the engine's gated installer…"));
+      // The NATIVE runner through its official channel (modelhub install-runner → Homebrew).
+      // `apps install ollama` is the Docker-container app: on a Mac it has no Metal, so every
+      // model would run on the CPU. Without Homebrew the sidecar returns the exact command for
+      // the human instead of running a vendor script.
+      write(c.dim("Installing Ollama through its official package channel…"));
       try {
-        const env = (await deps.client.runPrometheus(["apps", "install", "ollama"])) as unknown as {
-          ok?: boolean;
-        };
-        write(
-          env?.ok === false
-            ? c.red("installer reported a problem — see output above.")
-            : c.green(`✓ ollama install requested. Start it, then run \`ollama pull ${tag}\`.`),
-        );
+        const env = (await deps.client.runPrometheus(
+          ["sidecar", "modelhub", "install-runner", "--runner", "ollama"],
+          { timeoutMs: 30 * 60 * 1000 },
+        )) as unknown as { ok?: boolean; installed?: boolean; install?: string; error?: string };
+        if (env?.ok === false || env?.installed === false) {
+          write(c.red(`installer reported a problem: ${env?.error ?? "see output above"}`));
+          if (env?.install) write(`  run it yourself after reading it:  ${c.bold(env.install)}`);
+        } else {
+          write(c.green("✓ Ollama installed. Start it, then re-run /setup to pull the model."));
+        }
       } catch (err) {
         write(c.red(`installer failed: ${err instanceof Error ? err.message : String(err)}`));
       }
@@ -740,12 +727,52 @@ async function setupLocal(
     write(c.dim(`skipped. Run \`ollama pull ${tag}\` yourself, then restart prometheus.`));
     return {};
   }
-  const code = await runChild("ollama", ["pull", tag]);
+  const code = await runChild("ollama", ["pull", "--", tag]);
   if (code !== 0) {
     write(c.red(`ollama pull exited ${code}. Is the \`ollama\` binary on PATH?`));
     return {};
   }
-  write(c.green(`✓ ${tag} pulled. Adopting it for this session.`));
+  // Ollama's registry has no local stage: the stored blobs are scanned BEFORE the model is
+  // adopted (removed on a BLOCK). This branch used to adopt straight after `ollama pull` — the
+  // one local-model path in the product that skipped nemesis.
+  write(c.dim("scanning the downloaded model with nemesis…"));
+  const gate = async (force: boolean): Promise<Record<string, unknown>> =>
+    (await deps.client
+      .runPrometheus(
+        ["sidecar", "modelhub", "ollama-gate", `--tag=${tag}`, ...(force ? ["--accept-warn"] : [])],
+        { timeoutMs: 4 * 60 * 60 * 1000 },
+      )
+      .catch((e: unknown) => ({
+        ok: false,
+        error: e instanceof Error ? e.message : String(e),
+      }))) as unknown as Record<string, unknown>;
+  let g = await gate(false);
+  if (g.ok !== true && g.needs_confirm === true) {
+    write(c.yellow(`⚠ nemesis WARN: ${String(g.error ?? "review the findings")}`));
+    for (const sc of (Array.isArray(g.scans) ? g.scans : []) as { reasons?: unknown }[])
+      for (const r of Array.isArray(sc?.reasons) ? sc.reasons : [])
+        write(c.dim(`  · ${String(r)}`));
+    const typed = (await ask(`type ${tag} to use it anyway (Enter refuses): `)).trim();
+    if (typed === tag) g = await gate(true);
+    else {
+      // refused: remove it, or a later pick would see it installed and adopt it unscanned
+      const d = (await deps.client
+        .runPrometheus(["sidecar", "modelhub", "ollama-discard", `--tag=${tag}`])
+        .catch(() => ({ ok: false }))) as unknown as { ok?: boolean };
+      write(
+        d.ok === true
+          ? c.dim(`${tag} removed from Ollama.`)
+          : c.yellow(
+              `could not remove ${tag} from Ollama — run \`ollama rm ${tag}\` (it will not be adopted).`,
+            ),
+      );
+    }
+  }
+  if (g.ok !== true) {
+    write(c.red(`✗ ${String(g.error ?? "nemesis could not verify the model")} — not adopted.`));
+    return {};
+  }
+  write(c.green(`✓ ${tag} pulled and scanned by nemesis. Adopting it for this session.`));
   return {
     endpoint: buildLocalEndpoint({
       name: "ollama",
@@ -791,14 +818,25 @@ export interface PathsDeps {
 }
 
 /**
- * `/paths` — list each heavy-download category (open models, videos, audio, files) with
- * its current folder + free disk, and let the user repoint one (tab-completing picker).
- * Repointing `open_models` also persists the engine's models_root. Crash-free + fail-soft.
+ * `/paths` — list each heavy-download category (videos, audio, files) with its current folder +
+ * free disk, and let the user repoint one (tab-completing picker). Models are listed too, read
+ * only: they live in each serving runtime's own store, which Prometheus never moves.
+ * Crash-free + fail-soft.
  */
 export async function runPathsWizard(deps: PathsDeps): Promise<void> {
   const { write, ask } = deps;
   const home = deps.home ?? prometheusHome();
 
+  write(
+    `${c.bold("Models")} ${c.dim("— kept by the software that runs them; Prometheus keeps no copy")}`,
+  );
+  for (const st of modelStoresHere()) {
+    const di = diskInfo(st.dir);
+    const free = di ? c.dim(`  · ${humanBytes(di.freeBytes)} free`) : "";
+    write(`     ${c.bold(st.usedBy)}`);
+    write(`       ${c.dim(st.dir)}${free}  ${c.dim(`(move it with ${st.setBy})`)}`);
+  }
+  write("");
   write(`${c.bold("Download folders")} ${c.dim(`(root: ${home})`)}`);
   PATH_CATEGORIES.forEach((cat, i) => {
     const dir = resolveCategory(cat, home);
@@ -824,11 +862,4 @@ export async function runPathsWizard(deps: PathsDeps): Promise<void> {
   );
   const abs = setCategory(cat, chosen, home);
   write(c.green(`✓ ${CATEGORY_LABEL[cat]} → ${abs}`));
-  if (cat === "open_models") {
-    try {
-      await deps.client.runPrometheus(["models", "config", "--set-root", abs]);
-    } catch {
-      /* best-effort engine persist; the env var is the load-bearing path. */
-    }
-  }
 }

@@ -30,6 +30,8 @@ import { fileURLToPath } from "node:url";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const read = (...p: string[]): string => readFileSync(join(HERE, ...p), "utf8");
+/** studio/ — HERE is studio/apps/desktop/src */
+const STUDIO_ROOT = join(HERE, "..", "..", "..");
 
 /**
  * A file's CODE, comments stripped.
@@ -48,16 +50,17 @@ test("the pull note claims neither a scan nor that it will not auto-serve", () =
   const note = /export const PULL_SCAN_NOTE\s*=\s*\n?\s*"([^"]*)"/.exec(src);
   assert.ok(note, "PULL_SCAN_NOTE is no longer a single string literal");
   const text = note[1] ?? "";
-  // Forbid the POSITIVE claim, not the substring: the honest note says "NOT scanned by
-  // nemesis", and a guard that cannot tell an assertion from its negation would push the
-  // next author into vaguer wording to get past it.
-  assert.doesNotMatch(text, /(?<!not )scanned by nemesis/i, "the note claims a scan again");
-  assert.match(text, /not scanned by nemesis/i, "it must say plainly that no scan ran");
+  // The post-pull scan exists now (modelhub.py v_pull → gate_ollama_model): the note must say
+  // WHEN it runs — after the download, before use — and must not claim the scan that does NOT
+  // happen (a manifest check before any byte lands), nor a verdict it cannot know ("clean").
+  assert.match(text, /scanned by nemesis after the download/i, "say when the scan runs");
+  assert.match(text, /before it is used/i, "say what the scan protects");
+  assert.doesNotMatch(text, /manifest scanned|before the download|\bclean\b/i);
   assert.doesNotMatch(text, /will not auto-serve/i);
-  assert.match(text, /registry/i, "it must still say where the trust actually comes from");
-  // …and it must not name ONE registry: a pulled tag can point anywhere (the Pull island
-  // takes free text, and the HF fast path builds `hf.co/<source>`).
-  assert.doesNotMatch(text, /ollama's signed registry/i, "a tag does not have to be ollama's");
+  assert.doesNotMatch(text, /ollama's signed registry/i, "the trust is the scan, not a registry");
+  // and the claim is backed by code: the pull path really runs the gate
+  const py = readFileSync(join(STUDIO_ROOT, "python", "sidecar", "modelhub.py"), "utf8");
+  assert.match(py, /gate_ollama_model\(/, "v_pull no longer runs the post-pull gate");
 });
 
 test("the Home hero does not claim EVERY install is gated", () => {

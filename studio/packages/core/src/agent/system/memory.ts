@@ -71,7 +71,11 @@ export const MEMORY_WRITE_TOOL: ToolDef = {
     ),
     body: req("the durable fact itself, in full — this is what memory_read returns later"),
   },
-  annotations: {},
+  // `destructiveHint`: a write here is read back into the system prompt of EVERY future session
+  // in this project, and reusing a `name` replaces that note. With `{}` it classified as `config`
+  // and auto-ran at A3 — so one prompt-injected page could plant a standing instruction no human
+  // ever saw. It now always shows the human the note first below A6.
+  annotations: { destructiveHint: true, idempotentHint: true },
   toArgv: hostOnly("memory_write"),
 };
 

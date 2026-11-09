@@ -7,15 +7,22 @@
 export * from "./types.js";
 export { FREE_TIERS, FREE_TIER_CHECKED_AT, freeTierFor, describeDataUse } from "./free-tier.js";
 export { CLOUD_MODELS, cloudModelsFor, findCloudModel } from "./cloud.js";
-export { LOCAL_MODELS, findLocalModel } from "./local.js";
+export { LOCAL_MODELS, findLocalModel, toLocalEntry } from "./local.js";
+export type * from "./catalog-types.js";
+export { CATALOG_MODELS } from "./catalog.generated.js";
 export { OFFLOAD_RUNTIMES, offloadRuntime } from "./offload.js";
 export {
   type LocalRunPlan,
+  type StreamingOption,
   planLocalModel,
   planCatalog,
   diskFits,
+  fitsNatively,
+  hasLocalBuild,
+  modelBudgetGb,
   nativeAlternatives,
   machineFromHost,
+  streamingOptions,
 } from "./plan.js";
 export { type LiveModelMatch, matchLiveModel, modelsPathFor } from "./live-models.js";
 export * from "./wizard.js";

@@ -101,6 +101,10 @@ export function HomeRoute({
   const [draft, setDraft] = useState("");
   const [draftCaret, setDraftCaret] = useState(0);
   const askInputRef = useRef<HTMLInputElement>(null);
+  // Home's one job is the ask bar: be ready to type into it on arrival
+  useEffect(() => {
+    askInputRef.current?.focus({ preventScroll: true });
+  }, []);
 
   // "Tools ▸ Path Completion" — read fresh per workspace so a mid-session Settings toggle
   // (or switching projects) takes effect without a restart.
@@ -349,6 +353,8 @@ export function HomeRoute({
 
       {/* ── 2. ask bar ───────────────────────────────────────────────────── */}
       <form
+        // the input inside sets outline:0, so the FORM shows focus (global.css .prom-askbar)
+        className="prom-askbar"
         onSubmit={(e) => {
           e.preventDefault();
           askAI();
@@ -494,7 +500,7 @@ export function HomeRoute({
                   <span
                     style={{
                       fontFamily: "var(--font-mono)",
-                      fontSize: 11,
+                      fontSize: 12,
                       color: "var(--text-muted)",
                       whiteSpace: "nowrap",
                       overflow: "hidden",
@@ -616,7 +622,7 @@ export function HomeRoute({
                 <span style={{ flex: 1 }} />
                 <span
                   style={{
-                    fontSize: 11,
+                    fontSize: 12,
                     color: m.serving ? "var(--ok)" : "var(--text-muted)",
                   }}
                 >
@@ -663,7 +669,7 @@ export function HomeRoute({
                   <span
                     style={{
                       display: "block",
-                      fontSize: 11,
+                      fontSize: 12,
                       color: "var(--text-muted)",
                       fontFamily: "var(--font-mono)",
                       whiteSpace: "nowrap",
@@ -675,7 +681,7 @@ export function HomeRoute({
                     {r.path}
                   </span>
                 </span>
-                <span style={{ fontSize: 11, color: "var(--text-muted)" }}>
+                <span style={{ fontSize: 12, color: "var(--text-muted)" }}>
                   {r.openedAt > 0 ? ageLabel(r.openedAt) : "—"}
                 </span>
               </IslandRow>
@@ -818,7 +824,7 @@ function Island({
         >
           {title}
         </span>
-        <span style={{ fontSize: 11, color: "var(--text-muted)" }}>{right}</span>
+        <span style={{ fontSize: 12, color: "var(--text-muted)" }}>{right}</span>
       </header>
       <div style={{ display: "flex", flexDirection: "column" }}>{children}</div>
     </section>
@@ -1089,7 +1095,7 @@ function MeterBar({
   const width = measured ? Math.max(0, Math.min(100, pct)) : 0;
   return (
     <span style={{ display: "flex", alignItems: "center", gap: 7, flex: 1 }}>
-      <span style={{ fontSize: 11, color: "var(--text-muted)", width: 28 }}>{label}</span>
+      <span style={{ fontSize: 12, color: "var(--text-muted)", width: 28 }}>{label}</span>
       <span
         style={{
           flex: 1,
@@ -1110,7 +1116,7 @@ function MeterBar({
         />
       </span>
       <span
-        style={{ fontFamily: "var(--font-mono)", fontSize: 11, color: "var(--text-secondary)" }}
+        style={{ fontFamily: "var(--font-mono)", fontSize: 12, color: "var(--text-secondary)" }}
       >
         {measured ? `${Math.round(width)}%` : "—"}
       </span>

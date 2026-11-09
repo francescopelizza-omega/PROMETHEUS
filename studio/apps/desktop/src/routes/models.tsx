@@ -25,8 +25,15 @@
  * (timeout/exit) — EXPECTED; never faked-as-ready (C5/C8).
  */
 
-import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { type CSSProperties, type ReactElement, useCallback, useEffect, useState } from "react";
+import { keepPreviousData, useQuery, useQueryClient } from "@tanstack/react-query";
+import {
+  type CSSProperties,
+  type ReactElement,
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+} from "react";
 
 import {
   Button,
@@ -52,6 +59,7 @@ import { DecisionOverlay } from "../renderer/shell/DecisionOverlay.js";
 import { ForceGate, useForceGate } from "../renderer/shell/ForceGate.js";
 import { effectiveAuthLevel, useAuthorisationStore } from "../renderer/stores/authorisation.js";
 import { useModelsStore } from "../renderer/stores/models.js";
+import { errorText, notify } from "../renderer/stores/toasts.js";
 import type {
   AiDiscoveredRunner,
   ModelDownloadResult,
@@ -65,6 +73,7 @@ import type {
 } from "../shared/ipc-contract.js";
 import { ModelWizardPanel } from "./model-wizard.js";
 import {
+  DEFAULT_SERVER_OPTIONS,
   type InstalledRow,
   PULL_SCAN_NOTE,
   type PullProgress,
@@ -91,11 +100,23 @@ function useHardware() {
   });
 }
 
+/** `value`, once it has stopped changing for `ms` — so typing is not one request per key. */
+function useDebouncedValue<T>(value: T, ms: number): T {
+  const [settled, setSettled] = useState(value);
+  useEffect(() => {
+    const t = setTimeout(() => setSettled(value), ms);
+    return () => clearTimeout(t);
+  }, [value, ms]);
+  return settled;
+}
+
 function useSearch(q: string, modality: string, source: "hf" | "ollama", freeOnly: boolean) {
   return useQuery({
     queryKey: qk.modelSearch(q, modality, source, freeOnly),
     queryFn: (): Promise<ModelSearchResult> =>
       modelsApi().search({ q, modality, source, freeOnly }),
+    // keep showing the last results while the next ones load, instead of flashing "Searching…"
+    placeholderData: keepPreviousData,
   });
 }
 
@@ -234,7 +255,9 @@ export function ModelsRoute(): ReactElement {
   const setProgress = useModelsStore((s) => s.setProgress);
 
   const hwQ = useHardware();
-  const searchQ = useSearch(query, modality, source, freeOnly);
+  // every keystroke was a Hugging Face search (the default source) and a list flicker
+  const debouncedQuery = useDebouncedValue(query, 300);
+  const searchQ = useSearch(debouncedQuery, modality, source, freeOnly);
   // §3's four islands read three live sources: the supervisor's serve rows, the local
   // library (files + the indexed Ollama store) and the endpoint list. The A-level comes from
   // the one authorisation store every surface reads — the cloud rows gate on it (§3).
@@ -271,6 +294,8 @@ export function ModelsRoute(): ReactElement {
   // subscribe to the model-progress / serve-status feed (cosmetic + serve status).
   useEffect(() => {
     const off = modelsApi().onProgress((e: ModelProgressEvent) => {
+      // the guided picker's downloads report to the picker, not to this page
+      if (e.runId?.startsWith("wiz-")) return;
       setProgress(e.message);
       // a serve-status event ⇒ refetch the serving snapshot (the supervisor truth).
       if (e.phase === "serve") void qc.invalidateQueries({ queryKey: qk.modelServing() });
@@ -283,7 +308,29 @@ export function ModelsRoute(): ReactElement {
 
   const refetchServing = useCallback((): void => {
     void qc.invalidateQueries({ queryKey: qk.modelServing() });
+    // the library rows carry a `served` badge too — refresh them, or a just-served model kept
+    // its "Serve" button for the library query's whole 30 s staleTime
+    void qc.invalidateQueries({ queryKey: qk.modelLibraryAll() });
   }, [qc]);
+  /**
+   * Run a serve/stop/kill and SAY when it fails. These were `void …then(refetchServing)`: an
+   * `{ok:false}` was ignored and a rejection was unhandled, so a model that would not start
+   * looked like a button that did nothing.
+   */
+  const [serveMsg, setServeMsg] = useState<string | null>(null);
+  const serveAction = useCallback(
+    (label: string, op: Promise<ModelServeResult>): void => {
+      void op
+        .then((r) => {
+          setServeMsg(r.ok ? null : `${label} failed: ${r.error ?? "unknown error"}`);
+        })
+        .catch((e: unknown) =>
+          setServeMsg(`${label} failed: ${e instanceof Error ? e.message : String(e)}`),
+        )
+        .finally(refetchServing);
+    },
+    [refetchServing],
+  );
 
   /**
    * Run a download → route its §5 outcome. admitted ⇒ advance the row to admitted;
@@ -298,6 +345,9 @@ export function ModelsRoute(): ReactElement {
       // the same row. If the row is already actively in-flight, ignore the re-trigger.
       const inflight = useModelsStore.getState().downloads[rowId];
       if (inflight && (inflight.state === "staging" || inflight.state === "scanning")) return false;
+      // A re-run (confirmed warn, forced block, retry) starts the row over; only the engine's
+      // fresh verdict below decides where it lands.
+      if (inflight) useModelsStore.getState().requeueDownload(rowId);
       enqueueDownload({ id: rowId, modelId: id, quant, modality: modalityHint });
       advanceDownload(rowId, "start", { stagePath: `~/.prometheus/models/.stage/${id}` });
       advanceDownload(rowId, "staged");
@@ -312,21 +362,58 @@ export function ModelsRoute(): ReactElement {
           confirmForce: force,
         });
         const gate = res.gate;
+        const label = `${id} (${quant})`;
         if (res.admitted) {
           applyDownloadVerdict(rowId, { verdict: "allow", ...(gate ?? {}) });
           setPendingGate(null);
+          // a download can outlast the screen that started it — say how it ended wherever
+          // the user is now
+          notify({
+            key: `dl:${rowId}`,
+            tone: "ok",
+            title: `Model ready: ${label}`,
+            description: "Scanned by nemesis and admitted.",
+          });
           return true; // admitted — the ONLY outcome a caller may serve on (§5 gate)
         }
         if (gate) {
           applyDownloadVerdict(rowId, gate, res.quarantined);
           // a warn (or a block the user may force) opens the shared verdict sheet.
           setPendingGate({ gate, request: { id, quant, force: true }, target: rowId });
+          const warn = gate.verdict === "warn";
+          notify({
+            key: `dl:${rowId}`,
+            tone: warn ? "warn" : "danger",
+            title: warn ? `Review needed: ${label}` : `Blocked by nemesis: ${label}`,
+            description: warn
+              ? "nemesis raised a warning — open Models to review it."
+              : res.quarantined
+                ? "The files were quarantined, not installed."
+                : "Not installed.",
+          });
+        } else {
+          // neither admitted nor a verdict: the engine refused before scanning (no disk,
+          // bad id, the force consent declined, …). This row used to stay at "staged" — a
+          // spinner with nothing behind it — forever.
+          advanceDownload(rowId, "scanError");
+          notify({
+            key: `dl:${rowId}`,
+            tone: "danger",
+            title: `Download failed: ${label}`,
+            description: res.error ?? res.message ?? "The engine refused the download.",
+          });
         }
         return false; // warned/blocked/quarantined — NOT admitted
-      } catch {
+      } catch (err) {
         // IPC/engine failure — unstick the row into an error state (fail-closed),
         // never leave it spinning at "staged" or raise an unhandled rejection.
         advanceDownload(rowId, "scanError");
+        notify({
+          key: `dl:${rowId}`,
+          tone: "danger",
+          title: `Download failed: ${id} (${quant})`,
+          description: errorText(err),
+        });
         return false;
       }
     },
@@ -347,10 +434,11 @@ export function ModelsRoute(): ReactElement {
       void runDownload(selectedId, quant, modality, false).then((admitted) => {
         // only serve a model the §5 gate ADMITTED — never spin a profile for a warned/
         // blocked/quarantined download (the sheet is still open for the user to decide).
-        if (admitted) void modelsApi().serve({ id: selectedId, quant }).then(refetchServing);
+        if (admitted)
+          serveAction(`Serve ${selectedId}`, modelsApi().serve({ id: selectedId, quant }));
       });
     },
-    [selectedId, modality, runDownload, refetchServing],
+    [selectedId, modality, runDownload, serveAction],
   );
 
   // ── serve actions (drive the C8 supervisor via the MAIN process) ──────────
@@ -358,21 +446,21 @@ export function ModelsRoute(): ReactElement {
     (profileId: string): void => {
       const row = serveRows[profileId];
       if (!row) return;
-      void modelsApi().serve({ id: row.modelId, quant: row.quant }).then(refetchServing);
+      serveAction(`Start ${row.modelId}`, modelsApi().serve({ id: row.modelId, quant: row.quant }));
     },
-    [serveRows, refetchServing],
+    [serveRows, serveAction],
   );
   const onStop = useCallback(
     (profileId: string): void => {
-      void modelsApi().unserve(profileId).then(refetchServing);
+      serveAction("Stop", modelsApi().unserve(profileId));
     },
-    [refetchServing],
+    [serveAction],
   );
   const onKill = useCallback(
     (profileId: string): void => {
-      void modelsApi().kill(profileId).then(refetchServing);
+      serveAction("Kill", modelsApi().kill(profileId));
     },
-    [refetchServing],
+    [serveAction],
   );
   const onUseInIde = useCallback((profile: ServeProfileData): void => {
     // a serve row from the supervisor may lack an endpoint → don't deref undefined.
@@ -386,8 +474,8 @@ export function ModelsRoute(): ReactElement {
     (rowId: string): void => {
       const row = downloads[rowId];
       if (!row) return;
-      // user confirmed a warn → re-run admit (the engine still gates).
-      advanceDownload(rowId, "confirmAdmit");
+      // user confirmed a warn → re-run admit (the engine still gates). The row is NOT marked
+      // admitted here: `runDownload` requeues it and the engine's re-run verdict moves it.
       // NEVER reconstruct the id from rowId.split(':') — ollama ids contain colons
       // (qwen2.5:7b), so a split would re-download the WRONG model. row.modelId is the truth.
       // FORCE=true: a warned download re-run WITHOUT force returns the same warn → the sheet
@@ -395,7 +483,7 @@ export function ModelsRoute(): ReactElement {
       if (row.modelId) void runDownload(row.modelId, row.quant, row.modality ?? modality, true);
       setPendingGate(null);
     },
-    [downloads, advanceDownload, runDownload, modality, setPendingGate],
+    [downloads, runDownload, modality, setPendingGate],
   );
   // Inspect = show the row's gate verdict in the shared sheet (it used to be wired to
   // removeDownload, so clicking "Inspect" DELETED the row instead of showing detail).
@@ -447,38 +535,74 @@ export function ModelsRoute(): ReactElement {
   // true once a pull failed because the ollama runner is missing → show auto-install.
   const [needsRunner, setNeedsRunner] = useState(false);
   const [installingRunner, setInstallingRunner] = useState(false);
-  const handlePull = useCallback(async (): Promise<void> => {
-    // the island's own input first, then the selected search row — so the Pull island works
-    // on a fresh launch with nothing selected, which is its whole point.
-    const target = (pullTarget.trim() || selectedId || "").trim();
-    if (!target || pulling) return;
-    setPulling(true);
-    setPullBar({ pct: null, bytes: null });
-    setPullMsg(`ollama pull ${target} — downloading…`);
-    setPullInstall(null);
-    setNeedsRunner(false);
-    try {
-      const r = await modelsApi().pull({ id: target });
-      if (r.ok && r.installed) {
-        setPullMsg(`✓ installed ${target} — served at ${r.endpoint ?? "localhost:11434"}`);
-        void qc.invalidateQueries({ queryKey: qk.modelLibraryAll() });
-        refetchServing();
-      } else if (r.installable) {
-        // don't hand the user a command — offer to install the runner on their behalf.
-        setPullMsg("⚠ Ollama isn't installed yet — Prometheus can install it for you:");
-        setNeedsRunner(true);
-      } else if (r.blockedByResources) {
-        setPullMsg(`⛔ ${r.error ?? "system under heavy load"}`);
-      } else {
-        setPullMsg(`✗ ${r.error ?? "pull failed"}`);
-      }
-    } catch (e) {
-      setPullMsg(`✗ ${e instanceof Error ? e.message : String(e)}`);
-    } finally {
-      setPulling(false);
+  const handlePull = useCallback(
+    async (explicit?: string): Promise<void> => {
+      // the island's own input first, then the selected search row — so the Pull island works
+      // on a fresh launch with nothing selected, which is its whole point.
+      // An EXPLICIT target wins: "Install <selected> locally" passes the selection, which the
+      // island's leftover text (never cleared, even after a successful pull) used to override —
+      // so it re-pulled the last thing typed there instead of the model on screen.
+      const target = (explicit ?? (pullTarget.trim() || selectedId || "")).trim();
+      if (!target || pulling) return;
+      setPulling(true);
       setPullBar({ pct: null, bytes: null });
-    }
-  }, [pullTarget, selectedId, pulling, refetchServing, qc]);
+      setPullMsg(`ollama pull ${target} — downloading…`);
+      setPullInstall(null);
+      setNeedsRunner(false);
+      try {
+        const r = await modelsApi().pull({ id: target });
+        if (r.needsConfirm) {
+          // This island has no review step: a WARN is not adopted here, and the model is removed
+          // so nothing can pick it up later as "installed" without a scan. The guided picker
+          // (Models → wizard) shows the findings and lets the user accept them by name.
+          await modelsApi()
+            .discardOllama({ tag: r.tag ?? target })
+            .catch(() => undefined);
+          setPullMsg(
+            `⚠ nemesis WARN on ${target}: ${(r.gateReasons ?? []).slice(0, 3).join(" · ") || "review needed"} — not installed. Use the guided model picker to review and accept it.`,
+          );
+          notify({
+            key: `pull:${target}`,
+            tone: "warn",
+            title: `Not installed: ${target}`,
+            description: "nemesis raised a warning. Use the guided model picker to review it.",
+          });
+        } else if (r.ok && r.installed) {
+          setPullMsg(`✓ installed ${target} — served at ${r.endpoint ?? "localhost:11434"}`);
+          if (target === pullTarget.trim()) setPullTarget("");
+          notify({ key: `pull:${target}`, tone: "ok", title: `Installed ${target}` });
+          void qc.invalidateQueries({ queryKey: qk.modelLibraryAll() });
+          refetchServing();
+        } else if (r.installable) {
+          // don't hand the user a command — offer to install the runner on their behalf.
+          setPullMsg("⚠ Ollama isn't installed yet — Prometheus can install it for you:");
+          setNeedsRunner(true);
+        } else if (r.blockedByResources) {
+          setPullMsg(`⛔ ${r.error ?? "system under heavy load"}`);
+        } else {
+          setPullMsg(`✗ ${r.error ?? "pull failed"}`);
+          notify({
+            key: `pull:${target}`,
+            tone: "danger",
+            title: `Pull failed: ${target}`,
+            description: r.error ?? "pull failed",
+          });
+        }
+      } catch (e) {
+        setPullMsg(`✗ ${e instanceof Error ? e.message : String(e)}`);
+        notify({
+          key: `pull:${target}`,
+          tone: "danger",
+          title: `Pull failed: ${target}`,
+          description: errorText(e),
+        });
+      } finally {
+        setPulling(false);
+        setPullBar({ pct: null, bytes: null });
+      }
+    },
+    [pullTarget, selectedId, pulling, refetchServing, qc],
+  );
 
   /**
    * Start a local model DAEMON (`ollama serve` / `lms server start`) on request.
@@ -585,6 +709,16 @@ export function ModelsRoute(): ReactElement {
   const [hugBusy, setHugBusy] = useState(false);
   const [hugPhase, setHugPhase] = useState<string | null>(null);
   const [hugMessage, setHugMessage] = useState<string | null>(null);
+  /** a nemesis WARN on a hugged GGUF, waiting for the user to type its name (or refuse). */
+  const [hugWarn, setHugWarn] = useState<{
+    name: string;
+    /** `${source}|${quant}` the findings belong to */
+    key: string;
+    reasons: string[];
+  } | null>(null);
+  const [hugTyped, setHugTyped] = useState("");
+  /** set only by the accept button after the name was typed; read once by the next install. */
+  const hugAccept = useRef<string | null>(null);
 
   const onBrowseHugFolder = useCallback(async (): Promise<void> => {
     try {
@@ -597,6 +731,9 @@ export function ModelsRoute(): ReactElement {
 
   const onHugInstall = useCallback(async (): Promise<void> => {
     const source = hugSource.trim();
+    // read-and-clear FIRST: an acceptance is for one attempt, even one that returns early
+    const accepted = hugAccept.current;
+    hugAccept.current = null;
     if (!source || hugBusy) return;
     const target = hugTarget;
     const quant = hugQuant;
@@ -604,24 +741,40 @@ export function ModelsRoute(): ReactElement {
     const modelId = hugModelId(source);
     setHugBusy(true);
     setHugMessage(null);
+    setHugWarn(null);
     try {
-      // FAST PATH: Ollama + an HF repo → Ollama's OWN HF-hosted-GGUF passthrough.
-      // Zero local download, zero duplication — Ollama fetches + stores the bytes itself.
+      // FAST PATH: Ollama + an HF repo that ships GGUFs → the GATED hug: the GGUF for the
+      // chosen quant is staged pinned to a revision, checked against Hugging Face's sha256,
+      // admitted by nemesis and only then imported into Ollama. (This used to be
+      // `ollama pull hf.co/<repo>` — an arbitrary uploader's file, unscanned; the engine now
+      // refuses that tag, so the old path could only fail.)
       if (!isLocal && target === "ollama") {
-        setHugPhase("pulling");
-        setHugMessage(`ollama pull hf.co/${source}…`);
-        const r = await modelsApi().pull({ id: modelId, tag: `hf.co/${source}` });
-        if (r.ok && r.installed) {
-          setHugMessage(`✓ hugged ${modelId} → ollama${r.endpoint ? ` — ${r.endpoint}` : ""}`);
+        setHugPhase("downloading");
+        setHugMessage(`${source}: downloading the ${quant.toUpperCase()} GGUF, then nemesis…`);
+        const r = await modelsApi().hugOllama({
+          repo: source,
+          id: modelId,
+          quant,
+          // bound to the exact repo AND quant the findings were shown for
+          ...(accepted === `${source}|${quant}` ? { acceptWarn: true } : {}),
+        });
+        if (r.ok) {
+          setHugMessage(`✓ hugged ${modelId} → ollama as ${r.tag ?? modelId} (nemesis-admitted)`);
           void qc.invalidateQueries({ queryKey: qk.modelLibraryAll() });
-        } else if (r.installable) {
-          setHugMessage(
-            "⚠ Ollama isn't installed yet — use the Pull island's installer, then retry.",
-          );
-        } else {
-          setHugMessage(`✗ ${r.error ?? "pull failed"}`);
+          return;
         }
-        return;
+        if (r.needsConfirm) {
+          setHugWarn({ name: modelId, key: `${source}|${quant}`, reasons: r.gateReasons ?? [] });
+          setHugMessage(`⚠ nemesis WARN on ${modelId} — nothing is admitted until you accept`);
+          return;
+        }
+        // A repo that ships NO GGUF at all is converted below. Lacking only this quant is
+        // not that case: say which quants it does ship.
+        if (!r.noGguf) {
+          const have = (r.available ?? []).slice(0, 6).join(", ");
+          setHugMessage(`✗ ${r.error ?? "not admitted"}${have ? ` — it ships: ${have}` : ""}`);
+          return;
+        }
       }
 
       // Everything else needs the raw weights locally: fetch (if HF) → convert → install.
@@ -700,6 +853,19 @@ export function ModelsRoute(): ReactElement {
       setHugPhase(null);
     }
   }, [hugSource, hugTarget, hugQuant, hugBusy, qc]);
+  const onHugAcceptWarn = useCallback((): void => {
+    if (!hugWarn || hugTyped.trim() !== hugWarn.name) return;
+    // the source/quant may have been changed since the WARN: acceptance is for what was shown
+    if (hugWarn.key !== `${hugSource.trim()}|${hugQuant}`) {
+      setHugWarn(null);
+      setHugTyped("");
+      setHugMessage("the model or quantisation changed — install again to scan that one.");
+      return;
+    }
+    hugAccept.current = hugWarn.key;
+    setHugTyped("");
+    void onHugInstall();
+  }, [hugWarn, hugTyped, hugSource, hugQuant, onHugInstall]);
 
   const downloadRows: DownloadRowData[] = Object.values(downloads).sort((a, b) =>
     a.id < b.id ? -1 : 1,
@@ -708,9 +874,17 @@ export function ModelsRoute(): ReactElement {
   /* ── §3 derived state ──────────────────────────────────────────────────────*/
 
   /** the local library, projected to §3's cells (every one nullable — see the view model). */
+  // `served` comes from the SUPERVISOR, not the library: the sidecar marks every model in the
+  // ollama store `served: true` whether or not anything is loaded, so every ollama row showed a
+  // red Stop that found no profile and did nothing.
+  const liveIds = new Set(
+    Object.values(serveRows)
+      .filter((p) => p.status === "ready" || p.status === "starting")
+      .map((p) => p.modelId),
+  );
   const library: InstalledRow[] = installedRows(
     (asModels(libraryQ.data) as unknown as Parameters<typeof installedRows>[0]) ?? [],
-  );
+  ).map((r) => ({ ...r, served: liveIds.has(r.id) }));
   /**
    * Every endpoint: LOCAL rows measured on this machine, cloud rows from the engine catalog and
    * gated on the A-level (§3).
@@ -780,11 +954,18 @@ export function ModelsRoute(): ReactElement {
           onServe={(id) => {
             // serve the LIBRARY row directly — these bytes are already on disk and already
             // scanned, so there is no download to gate. The supervisor still owns the status.
-            void modelsApi().serve({ id }).then(refetchServing);
+            serveAction(`Serve ${id}`, modelsApi().serve({ id }));
           }}
           onStop={(id) => {
             const row = serveList.find((p) => p.modelId === id);
             if (row) onStop(row.id);
+            else
+              notify({
+                tone: "info",
+                title: `${id} is not being served by Prometheus`,
+                description:
+                  "Nothing to stop here — a model ollama loaded on its own unloads by itself.",
+              });
           }}
         />
         <PullIsland
@@ -820,6 +1001,15 @@ export function ModelsRoute(): ReactElement {
           busy={hugBusy}
           phase={hugPhase}
           message={hugMessage}
+          warn={hugWarn}
+          typed={hugTyped}
+          onTypedChange={setHugTyped}
+          onAcceptWarn={onHugAcceptWarn}
+          onRefuseWarn={() => {
+            setHugWarn(null);
+            setHugTyped("");
+            setHugMessage("refused — nothing is used.");
+          }}
         />
       </div>
 
@@ -828,6 +1018,19 @@ export function ModelsRoute(): ReactElement {
         models={models}
         tab={tab}
         onTabChange={setTab}
+        // "My Models" listed nothing — no caller ever passed the library, so it always said
+        // "No models installed yet" under an Installed island full of models
+        libraryList={
+          <InstalledIsland
+            rows={library}
+            loading={libraryQ.isPending}
+            onServe={(id) => serveAction(`Serve ${id}`, modelsApi().serve({ id }))}
+            onStop={(id) => {
+              const row = serveList.find((p) => p.modelId === id);
+              if (row) onStop(row.id);
+            }}
+          />
+        }
         modality={modality as ModalityFacet}
         onModalityChange={setModality}
         query={query}
@@ -845,14 +1048,22 @@ export function ModelsRoute(): ReactElement {
           void modelsApi()
             .hardware(true)
             .then(() => hwQ.refetch())
-            .catch(() => {})
+            .catch((err: unknown) =>
+              notify({
+                tone: "danger",
+                title: "Hardware rescan failed",
+                description: errorText(err),
+              }),
+            )
             .finally(() => setRescanning(false));
         }}
         loading={searchQ.isPending || rescanning}
         fitPanel={
           <FitScorePanel
             fit={fit}
-            loading={fitQ.isPending}
+            // `isPending` is true forever for a DISABLED query (no model selected), so the fit
+            // panel showed a spinner with nothing to fit. Fetching ⇔ there is a selection.
+            loading={fitQ.isFetching && !!selectedId}
             onDownload={onDownload}
             onDownloadServe={onDownloadServe}
           />
@@ -867,19 +1078,29 @@ export function ModelsRoute(): ReactElement {
           />
         }
         servingPanel={
-          <ServingPanel
-            profiles={serveList}
-            onStart={onStart}
-            onStop={onStop}
-            onKill={onKill}
-            onRetry={onStart}
-            onUseInIde={onUseInIde}
-            onEndpoint={(profile) => {
-              // "Endpoint" ≠ "Use in IDE": copy the served URL instead of repointing the IDE.
-              const baseUrl = profile.endpoint?.baseUrl;
-              if (baseUrl) void navigator.clipboard?.writeText(baseUrl);
-            }}
-          />
+          <>
+            {serveMsg && (
+              <div
+                role="alert"
+                style={{ color: "var(--danger)", fontSize: "var(--text-small-size)" }}
+              >
+                {serveMsg}
+              </div>
+            )}
+            <ServingPanel
+              profiles={serveList}
+              onStart={onStart}
+              onStop={onStop}
+              onKill={onKill}
+              onRetry={onStart}
+              onUseInIde={onUseInIde}
+              onEndpoint={(profile) => {
+                // "Endpoint" ≠ "Use in IDE": copy the served URL instead of repointing the IDE.
+                const baseUrl = profile.endpoint?.baseUrl;
+                if (baseUrl) void navigator.clipboard?.writeText(baseUrl);
+              }}
+            />
+          </>
         }
       />
 
@@ -905,32 +1126,16 @@ export function ModelsRoute(): ReactElement {
           </span>
           <Button
             variant="primary"
-            onClick={() => void handlePull()}
+            onClick={() => void handlePull(selectedId ?? undefined)}
             disabled={pulling || installingRunner}
           >
-            {pulling ? "⏳ Installing…" : "⚡ Install with Ollama"}
+            {pulling ? "Installing…" : "Install with Ollama"}
           </Button>
-          {needsRunner && (
-            <Button
-              variant="secondary"
-              onClick={() => void installRunner()}
-              disabled={installingRunner || pulling}
-            >
-              {installingRunner ? "⏳ Installing Ollama…" : "⬇ Install Ollama automatically"}
-            </Button>
-          )}
-          {pullMsg && <span style={{ color: "var(--text-primary)" }}>{pullMsg}</span>}
-          {pullInstall && (
-            <code
-              style={{
-                fontFamily: "var(--font-mono)",
-                background: "var(--bg-inset)",
-                padding: "2px 6px",
-                borderRadius: "var(--radius-sm, 4px)",
-              }}
-            >
-              {pullInstall}
-            </code>
+          {/* The runner install, the progress message and the manual command all live in the
+              Pull panel above — this bar repeated every one of them, so each message appeared
+              twice on the page. It keeps only the one-click action for the selected row. */}
+          {(pulling || pullMsg) && (
+            <span style={{ color: "var(--text-secondary)" }}>see “Pull a model” for progress</span>
           )}
         </div>
       )}
@@ -945,9 +1150,8 @@ export function ModelsRoute(): ReactElement {
             onProceed={() => {
               // proceed = confirm a warn (re-run admit; the engine still gates). Read the
               // id/quant from the carried request — NEVER split the colon-bearing target.
-              // Advance the row off `confirm` first (else applyDownloadVerdict's transition is
-              // illegal and the row parks forever), and force=true (the only lever to admit).
-              advanceDownload(pendingGate.target, "confirmAdmit");
+              // force=true (the only lever to admit a warn); `runDownload` requeues the row so
+              // the engine's re-run verdict — not this click — decides its state.
               const { id, quant } = pendingGate.request;
               if (id && quant) void runDownload(id, quant, modality, true);
               setPendingGate(null);
@@ -995,7 +1199,7 @@ function MetricPill({ label, value }: { label: string; value: string }): ReactEl
         background: "var(--bg-inset)",
         border: "1px solid var(--border-chip)",
         fontFamily: "var(--font-mono)",
-        fontSize: 11,
+        fontSize: 12,
         whiteSpace: "nowrap", // §7
       }}
     >
@@ -1048,7 +1252,7 @@ function ServingIsland(props: {
               alignItems: "center",
               gap: 5,
               fontFamily: "var(--font-mono)",
-              fontSize: 11,
+              fontSize: 12,
               color: "var(--text-secondary)",
               minWidth: 0,
             }}
@@ -1059,7 +1263,7 @@ function ServingIsland(props: {
             </span>
           </span>
         ) : (
-          <span style={{ fontSize: 11, color: "var(--text-muted)", whiteSpace: "nowrap" }}>
+          <span style={{ fontSize: 12, color: "var(--text-muted)", whiteSpace: "nowrap" }}>
             no endpoint
           </span>
         )
@@ -1127,7 +1331,7 @@ function ServingIsland(props: {
                   display: "flex",
                   justifyContent: "space-between",
                   gap: 8,
-                  fontSize: 11,
+                  fontSize: 12,
                   color: "var(--text-secondary)",
                   marginBottom: 3,
                   minWidth: 0,
@@ -1195,7 +1399,7 @@ function InstalledIsland(props: {
         <span
           style={{
             fontFamily: "var(--font-mono)",
-            fontSize: 11,
+            fontSize: 12,
             color: "var(--text-muted)",
             whiteSpace: "nowrap", // §7
           }}
@@ -1254,7 +1458,7 @@ function InstalledIsland(props: {
                   borderRadius: "var(--radius-md, 6px)",
                   color: r.served ? "var(--danger)" : "var(--text-title)",
                   cursor: "pointer",
-                  fontSize: "0.72rem",
+                  fontSize: "0.75rem",
                   fontWeight: 600,
                   padding: "2px 8px",
                   whiteSpace: "nowrap", // §7
@@ -1317,7 +1521,7 @@ function PullIsland(props: {
             background: "var(--gradient-brand)",
             border: "none",
             borderRadius: "var(--radius-md, 6px)",
-            color: "var(--bg-app)",
+            color: "var(--on-brand)",
             cursor: pulling ? "default" : "pointer",
             fontSize: "0.78rem",
             fontWeight: 700,
@@ -1338,7 +1542,7 @@ function PullIsland(props: {
               justifyContent: "space-between",
               gap: 8,
               fontFamily: "var(--font-mono)",
-              fontSize: 11,
+              fontSize: 12,
               color: "var(--text-secondary)",
               marginBottom: 3,
               minWidth: 0,
@@ -1363,7 +1567,7 @@ function PullIsland(props: {
             style={{
               margin: "5px 0 0",
               color: "var(--text-muted)",
-              fontSize: "0.7rem",
+              fontSize: "0.75rem",
               lineHeight: 1.4,
             }}
           >
@@ -1394,7 +1598,7 @@ function PullIsland(props: {
             display: "block",
             marginTop: 6,
             fontFamily: "var(--font-mono)",
-            fontSize: "0.72rem",
+            fontSize: "0.75rem",
             background: "var(--bg-inset)",
             padding: "3px 7px",
             borderRadius: "var(--radius-sm, 4px)",
@@ -1409,6 +1613,78 @@ function PullIsland(props: {
 }
 
 /** §3 "Endpoints": local rows live, cloud rows greyed below A5 with the reason attached. */
+const DEFAULT_SERVER_SETTING = "localModels.defaultServer";
+
+function DefaultServerSelect(): ReactElement | null {
+  const api = window.prometheus?.settings;
+  const [value, setValue] = useState<string>("ollama");
+  const [note, setNote] = useState<string | null>(null);
+  // a pick made before the initial read answers must not be overwritten by that late answer
+  const touched = useRef(false);
+  useEffect(() => {
+    let live = true;
+    void api
+      ?.get(DEFAULT_SERVER_SETTING)
+      .then((r) => {
+        if (live && !touched.current && r.ok && typeof r.value === "string") setValue(r.value);
+      })
+      .catch(() => undefined);
+    return () => {
+      live = false;
+    };
+  }, [api]);
+  if (!api) return null;
+  const hint = DEFAULT_SERVER_OPTIONS.find((o) => o.id === value)?.hint ?? "";
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 4, marginBottom: 8 }}>
+      <label
+        style={{ display: "flex", gap: 8, alignItems: "center", fontSize: "0.8rem", minWidth: 0 }}
+      >
+        <span style={{ color: "var(--text-secondary)", whiteSpace: "nowrap" }}>
+          Default local server
+        </span>
+        <select
+          aria-label="Default local server"
+          value={value}
+          style={hugSelectStyle}
+          onChange={(e) => {
+            const next = e.target.value;
+            const prev = value;
+            touched.current = true;
+            setValue(next);
+            setNote(null);
+            void api
+              .set(DEFAULT_SERVER_SETTING, next, "global")
+              .then((r) => {
+                // a refused save shows what IS saved, not the value that was not
+                if (!r.ok) setValue(prev);
+                setNote(
+                  r.ok
+                    ? "saved — the terminal's /server uses it too"
+                    : `✗ ${r.error ?? "not saved"}`,
+                );
+              })
+              .catch((err: unknown) => {
+                setValue(prev);
+                setNote(`✗ ${err instanceof Error ? err.message : String(err)}`);
+              });
+          }}
+        >
+          {DEFAULT_SERVER_OPTIONS.map((o) => (
+            <option key={o.id} value={o.id}>
+              {o.label}
+            </option>
+          ))}
+        </select>
+      </label>
+      <span style={{ color: "var(--text-muted)", fontSize: "0.75rem" }}>
+        {hint}
+        {note ? ` · ${note}` : ""}
+      </span>
+    </div>
+  );
+}
+
 function EndpointsIsland(props: {
   endpoints: readonly {
     name: string;
@@ -1478,7 +1754,7 @@ function EndpointsIsland(props: {
         <span
           style={{
             fontFamily: "var(--font-mono)",
-            fontSize: 11,
+            fontSize: 12,
             color: "var(--text-muted)",
             whiteSpace: "nowrap", // §7
           }}
@@ -1487,6 +1763,7 @@ function EndpointsIsland(props: {
         </span>
       }
     >
+      <DefaultServerSelect />
       {loading ? (
         <p style={{ color: "var(--text-secondary)", margin: 0 }}>discovering endpoints…</p>
       ) : endpoints.length === 0 ? (
@@ -1530,7 +1807,7 @@ function EndpointsIsland(props: {
                 style={{
                   flex: 1,
                   minWidth: 0,
-                  fontSize: "0.7rem",
+                  fontSize: "0.75rem",
                   color: "var(--text-muted)",
                   overflow: "hidden",
                   textOverflow: "ellipsis",
@@ -1542,7 +1819,7 @@ function EndpointsIsland(props: {
               <span
                 style={{
                   flex: "none",
-                  fontSize: "0.68rem",
+                  fontSize: "0.75rem",
                   // Keyed on USABLE, not on locality. It was `locality === "local" ? ok : …`,
                   // which painted "not installed" in the success colour the moment the local
                   // rows started telling the truth about themselves.
@@ -1595,6 +1872,11 @@ function HugIsland(props: {
   busy: boolean;
   phase: string | null;
   message: string | null;
+  warn: { name: string; reasons: string[] } | null;
+  typed: string;
+  onTypedChange: (v: string) => void;
+  onAcceptWarn: () => void;
+  onRefuseWarn: () => void;
 }): ReactElement {
   const {
     source,
@@ -1608,6 +1890,11 @@ function HugIsland(props: {
     busy,
     phase,
     message,
+    warn,
+    typed,
+    onTypedChange,
+    onAcceptWarn,
+    onRefuseWarn,
   } = props;
   return (
     <Panel elevation="e1" title="Hug a model">
@@ -1643,7 +1930,7 @@ function HugIsland(props: {
           value={target}
           onChange={(e) => onTargetChange(e.target.value as HugTarget)}
           aria-label="Target runtime"
-          disabled={busy}
+          disabled={busy || warn !== null}
           style={hugSelectStyle}
         >
           <option value="ollama">Ollama</option>
@@ -1655,7 +1942,7 @@ function HugIsland(props: {
           value={quant}
           onChange={(e) => onQuantChange(e.target.value)}
           aria-label="Quantization"
-          disabled={busy || target === "vllm"}
+          disabled={busy || target === "vllm" || warn !== null}
           title={
             target === "vllm"
               ? "vLLM reads the original weights directly — no quantization step"
@@ -1682,6 +1969,45 @@ function HugIsland(props: {
         <p style={{ margin: "8px 0 0", color: "var(--text-primary)", fontSize: "0.78rem" }}>
           {message}
         </p>
+      )}
+      {warn && !busy && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 4, marginTop: 6 }}>
+          {(warn.reasons.length ? warn.reasons : ["(no detail reported)"]).map((r) => (
+            <span
+              key={r}
+              style={{ fontSize: "0.75rem", fontFamily: "var(--font-mono)", color: "var(--warn)" }}
+            >
+              · {r}
+            </span>
+          ))}
+          <input
+            type="text"
+            autoComplete="off"
+            spellCheck={false}
+            aria-label="type the model name to use it anyway"
+            placeholder={`type ${warn.name} to use it anyway`}
+            value={typed}
+            onChange={(e) => onTypedChange(e.target.value)}
+            style={{
+              minWidth: 0,
+              background: "var(--bg-inset)",
+              border: "1px solid var(--border-chip)",
+              borderRadius: "var(--radius-md, 6px)",
+              color: "var(--text-primary)",
+              fontFamily: "var(--font-mono)",
+              fontSize: "0.8rem",
+              padding: "5px 9px",
+            }}
+          />
+          <div style={{ display: "flex", gap: 6 }}>
+            <Button variant="danger" onClick={onAcceptWarn} disabled={typed.trim() !== warn.name}>
+              Use it anyway
+            </Button>
+            <Button variant="ghost" onClick={onRefuseWarn}>
+              Refuse
+            </Button>
+          </div>
+        </div>
       )}
     </Panel>
   );

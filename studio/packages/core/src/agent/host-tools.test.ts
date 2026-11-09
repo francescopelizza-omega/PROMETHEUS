@@ -141,3 +141,20 @@ test("every External Tools settings node persists somewhere and offers its choic
     }
   }
 });
+
+test("externalToolDefaultsFrom: valid settings override defaults; out-of-range values are ignored", async () => {
+  const { externalToolDefaultsFrom, DEFAULT_EXTERNAL_TOOLS } = await import("./host-tools.js");
+  const d = externalToolDefaultsFrom({
+    "tools.externalTools.imageFormat": "webp",
+    "tools.externalTools.imageQuality": 70,
+    "tools.externalTools.pdfDpi": 99999,
+    "tools.externalTools.videoContainer": "avi",
+    "tools.externalTools.ocrLang": "ita",
+  });
+  assert.equal(d.imageFormat, "webp");
+  assert.equal(d.imageQuality, 70);
+  assert.equal(d.pdfDpi, DEFAULT_EXTERNAL_TOOLS.pdfDpi);
+  assert.equal(d.videoContainer, DEFAULT_EXTERNAL_TOOLS.videoContainer);
+  assert.equal(d.ocrLang, "ita");
+  assert.deepEqual(externalToolDefaultsFrom({}), { ...DEFAULT_EXTERNAL_TOOLS });
+});

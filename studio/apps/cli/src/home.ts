@@ -4,15 +4,19 @@
  * home.ts — the canonical `~/.prometheus/` HOME tree + the settings / per-category
  * download-path store + disk-usage helpers.
  *
- * EVERYTHING Prometheus persists for a user lives under ONE root (mandate): config,
- * open-model weights, third-party downloads (videos/audio/files), caches, logs,
- * records, and runtime state. The root is `~/.prometheus` (override: $PROMETHEUS_HOME).
+ * Everything Prometheus persists for a user lives under ONE root: config, third-party
+ * downloads (videos/audio/files), caches, logs, records, and runtime state. The root is
+ * `~/.prometheus` (override: $PROMETHEUS_HOME).
+ *
+ * MODEL WEIGHTS ARE NOT HERE. Each model lives in the store of the software that serves it
+ * (Ollama's, LM Studio's, the Hugging Face cache — `ai.modelStores`), so nothing is kept twice.
+ * An `open_models/` folder used to be created and exported as $PROMETHEUS_MODELS_DIR; it only
+ * ever collected duplicates, and it is gone.
  *
  *   ~/.prometheus/
  *     config/        settings.json · paths.json (per-category overrides)
- *     open_models/   default LLM weights (→ engine models_root + $PROMETHEUS_MODELS_DIR)
  *     downloads/     videos/ · audio/ · files/   (yt-dlp + third-party heavy files)
- *     cache/         hf/ · staging/
+ *     cache/         staging/
  *     logs/          engine/ · sessions/ · security/
  *     records/       installs/ · audits/ · quarantine/
  *     state/         sessions/   (+ first-run marker in settings.json)
@@ -22,13 +26,22 @@
  * Every fn takes an optional `home` so tests point it at a temp dir. Fail-soft: a read
  * error yields `{}`, a mkdir error is swallowed (never crash the session over a dir).
  */
-import { existsSync, mkdirSync, readFileSync, statfsSync, writeFileSync } from "node:fs";
+import {
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  renameSync,
+  statfsSync,
+  writeFileSync,
+} from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 
 // The resolver moved to core (Phase 6): the exec audit is written by the CLI *and* by
 // Studio's main process, so both must agree on where the home root is. Re-exported here
 // because every CLI call site already imports it from this module.
+import { ai } from "@prometheus/core";
 import { prometheusHome } from "@prometheus/core/agent-system-host";
 
 export { prometheusHome };
@@ -36,11 +49,9 @@ export { prometheusHome };
 /** The full subdir tree created under the home root (idempotent ensure). */
 export const HOME_TREE: readonly string[] = [
   "config",
-  "open_models",
   "downloads/videos",
   "downloads/audio",
   "downloads/files",
-  "cache/hf",
   "cache/staging",
   "logs/engine",
   "logs/sessions",
@@ -104,11 +115,10 @@ export function diskInfo(path: string): DiskInfo | null {
 /* --------------------- per-category download paths ------------------------ */
 
 /** Heavy-download categories the user can repoint to a different disk/folder. */
-export type PathCategory = "open_models" | "videos" | "audio" | "files";
+export type PathCategory = "videos" | "audio" | "files";
 
 /** Default location (relative to home) per category. */
 const CATEGORY_DEFAULT: Record<PathCategory, string> = {
-  open_models: "open_models",
   videos: "downloads/videos",
   audio: "downloads/audio",
   files: "downloads/files",
@@ -116,13 +126,47 @@ const CATEGORY_DEFAULT: Record<PathCategory, string> = {
 
 /** Human label per category (for the /paths UI). */
 export const CATEGORY_LABEL: Record<PathCategory, string> = {
-  open_models: "Open LLM models",
   videos: "Videos (yt-dlp)",
   audio: "Audio",
   files: "Files (third-party downloads)",
 };
 
-export const PATH_CATEGORIES: readonly PathCategory[] = ["open_models", "videos", "audio", "files"];
+export const PATH_CATEGORIES: readonly PathCategory[] = ["videos", "audio", "files"];
+
+/* --------------------- where models live (not here) ----------------------- */
+
+/** Each serving runtime's own model store on this machine (`ai.modelStores`, read live). */
+export function modelStoresHere(
+  env: Readonly<Record<string, string | undefined>> = process.env,
+  home: string = homedir(),
+): ai.ModelStore[] {
+  // one reader for every surface: pointer, legacy home AND LM Studio's own folder setting
+  return ai.modelStoresOnThisMachine(env, home, process.platform);
+}
+
+/** Free bytes per runtime store — a pick is checked against the store it writes to. */
+export function freeDiskByStore(
+  env: Readonly<Record<string, string | undefined>> = process.env,
+  home: string = homedir(),
+): Partial<Record<ai.ModelStoreId, number>> {
+  return ai.freeBytesByStore(modelStoresHere(env, home));
+}
+
+/**
+ * Free disk where a model download will land: the LEAST free among the runtimes' stores (they
+ * are usually one volume; when one sits on a smaller disk, that is the one a pick can fill).
+ */
+export function freeDiskForModels(
+  env: Readonly<Record<string, string | undefined>> = process.env,
+  home: string = homedir(),
+): DiskInfo | null {
+  let best: DiskInfo | null = null;
+  for (const s of modelStoresHere(env, home)) {
+    const d = diskInfo(s.dir);
+    if (d && (!best || d.freeBytes < best.freeBytes)) best = d;
+  }
+  return best;
+}
 
 function pathsFile(home: string): string {
   return join(home, "config", "paths.json");
@@ -191,13 +235,51 @@ export function loadSettings(home: string = prometheusHome()): Record<string, un
 }
 
 /** Merge-and-persist a settings patch (shallow). */
+/** Returns false when nothing was written (so a caller never reports a save that did not happen). */
 export function saveSettings(
   patch: Record<string, unknown>,
   home: string = prometheusHome(),
-): void {
+): boolean {
   ensureHomeTree(home);
+  const file = settingsFile(home);
+  // `loadSettings` answers {} for a file it cannot parse, so a hand-edit with a trailing comma
+  // made the NEXT save rewrite settings.json as defaults plus one key — the user's hooks, remote
+  // host allowlist and onboarding state, gone. The unreadable original is kept beside it first.
+  let raw = "";
+  try {
+    raw = readFileSync(file, "utf8");
+  } catch {
+    /* absent — nothing to preserve */
+  }
+  if (raw.trim()) {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      parsed = undefined;
+    }
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      const kept = `${file}.corrupt-${Date.now()}`;
+      try {
+        copyFileSync(file, kept);
+        process.stderr.write(
+          `warning: ${file} could not be read as JSON — kept as ${kept}; starting a fresh one\n`,
+        );
+      } catch {
+        return false; // could not preserve it: do not overwrite what we cannot restore
+      }
+    }
+  }
   const merged = { ...loadSettings(home), ...patch };
-  writeFileSync(settingsFile(home), `${JSON.stringify(merged, null, 2)}\n`);
+  // temp + rename: a crash mid-write must not leave a truncated settings file
+  const tmp = `${file}.${process.pid}.tmp`;
+  try {
+    writeFileSync(tmp, `${JSON.stringify(merged, null, 2)}\n`);
+    renameSync(tmp, file);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /** Has first-run onboarding been completed? (persisted in settings.json) */

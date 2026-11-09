@@ -28,6 +28,9 @@ regexes = ['''ghp_0123456789abcdef0123456789abcdef0123''']
 # ── synthetic provider keys: assert redactSecretEnv() masks them ─────────────
 # studio/packages/core/src/secrets/keychain.test.ts — "sk-live-1234567890", "sk-ant-xyz",
 # "sk-abc", "tok_secret". Obvious placeholders; none resolve to a real account.
+# studio/apps/desktop/src/main/settings-bundle.test.ts — "--api-key=sk-123456789012" (sequential
+# digits) asserts redactArgs() masks a connector's --api-key=… argument. Anchored with \b so a
+# longer real key that merely starts with these digits is still caught.
 [[allowlists]]
 description = "synthetic provider-key fixtures in the keychain/redaction tests"
 regexTarget = "match"
@@ -36,6 +39,7 @@ regexes = [
   '''sk-ant-xyz''',
   '''sk-abc[0-9a-z]*''',
   '''tok_secret''',
+  '''sk-123456789012\b''',
 ]
 
 # ── false positive: the tmux `send-keys` verb ────────────────────────────────

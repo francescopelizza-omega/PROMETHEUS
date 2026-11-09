@@ -33,7 +33,12 @@
  * electron), exactly as env-ipc.ts splits its logic into env-validate.ts.
  */
 
+import { createConnection } from "node:net";
+
 import { ipcMain } from "electron";
+
+import { ai } from "@prometheus/core";
+import { fetchOllamaTags } from "@prometheus/core/updates-live";
 
 import {
   type DownloadResult,
@@ -43,6 +48,9 @@ import {
   type ServeProfile,
   createModelHubClient,
   describeEngineFailure,
+  execCapture,
+  startModelServer,
+  vendorBin,
 } from "@prometheus/engine-bridge";
 
 import {
@@ -51,9 +59,11 @@ import {
   type ModelConvertResult,
   type ModelDownloadResult,
   type ModelEndpointsResult,
+  type ModelFetchGgufResult,
   type ModelFetchHfResult,
   type ModelFitResult,
   type ModelHardwareResult,
+  type ModelHugOllamaResult,
   type ModelInfoResult,
   type ModelInstallConverterResult,
   type ModelInstallHfCliResult,
@@ -67,12 +77,16 @@ import {
   type ModelServeResult,
   type ModelServeRow,
 } from "../shared/ipc-contract.js";
+import { consentToForce, consentToWarn } from "./force-consent.js";
 import {
   validateModelConvert,
+  validateModelDiscardOllama,
   validateModelDownload,
+  validateModelFetchGguf,
   validateModelFetchHf,
   validateModelFit,
   validateModelHardware,
+  validateModelHugOllama,
   validateModelInfo,
   validateModelInstallConverter,
   validateModelInstallHfCli,
@@ -83,11 +97,21 @@ import {
   validateModelPull,
   validateModelRemove,
   validateModelRepoint,
+  validateModelRuntime,
+  validateModelRuntimeStep,
   validateModelSearch,
   validateModelServe,
   validateModelUnserve,
 } from "./model-validate.js";
 import { registerModelWizardIpc } from "./model-wizard-ipc.js";
+import {
+  type RuntimeStepDeps,
+  hasBinOn,
+  linkIntoLmstudio,
+  runtimeInstalled,
+  serveAdmittedGguf,
+  startLmstudioFor,
+} from "./runtime-steps.js";
 import type { ServeRecipe, ServeRow, ServeSupervisor } from "./serve-supervisor.js";
 import { readTelemetry } from "./telemetry.js";
 
@@ -222,6 +246,22 @@ function toServeRow(row: ServeRow): ModelServeRow {
   if (row.pid !== undefined) out.pid = row.pid;
   if (row.lastError !== undefined) out.lastError = row.lastError;
   return out;
+}
+
+/** `lms ls --json` → key + folder path of every model LM Studio indexed ([] on any failure).
+ *  Spawned through engine-bridge (C5: the one module allowed to start processes). */
+async function lmsListJson(lms: string): Promise<{ modelKey: string; path: string }[]> {
+  const r = await execCapture(lms, ["ls", "--json"], { timeoutMs: 20_000 }).catch(() => undefined);
+  try {
+    const rows = JSON.parse(r?.stdout ?? "") as { modelKey?: unknown; path?: unknown }[];
+    return Array.isArray(rows)
+      ? rows
+          .filter((x) => typeof x?.modelKey === "string" && typeof x?.path === "string")
+          .map((x) => ({ modelKey: x.modelKey as string, path: x.path as string }))
+      : [];
+  } catch {
+    return [];
+  }
 }
 
 /** Construction-time wiring (the modelhub client + the C8 serve supervisor). */
@@ -369,7 +409,8 @@ export function registerModelIpcHandlers(wiring: ModelIpcWiring): () => void {
   // ── model:download — GATED (stage → REAL nemesis → admit | quarantine) ─────
   ipcMain.handle(
     IPC.modelDownload,
-    async (evt: unknown, arg: unknown): Promise<ModelDownloadResult> => {
+    async (evt: unknown, rawArg: unknown): Promise<ModelDownloadResult> => {
+      const arg = await consentToForce(evt, IPC.modelDownload, rawArg); // native consent for any force flag
       const v = validateModelDownload(arg);
       if (!v.ok) return { ok: false, error: v.error.message };
       const a = v.value;
@@ -414,6 +455,318 @@ export function registerModelIpcHandlers(wiring: ModelIpcWiring): () => void {
     },
   );
 
+  /**
+   * WARNs main itself reported, by `<channel>:<model>:<file>`. An `acceptWarn` is honoured only
+   * for one of these, once, within ten minutes: the renderer can accept a WARN the user was
+   * SHOWN, never send acceptance blind on a first call.
+   */
+  const pendingWarns = new Map<string, { at: number; reasons: string[] }>();
+  /** Tags whose WARN came from a pull of a model that was NOT installed before it. Only those
+   *  may be discarded: a re-pull of a model the user already had must never delete it. */
+  const freshPulls = new Set<string>();
+  const normTag = (t: string): string => (t.includes(":") ? t : `${t}:latest`).toLowerCase();
+  const WARN_TTL_MS = 10 * 60 * 1000;
+  const noteWarn = (key: string, reasons: readonly string[] = []): void => {
+    pendingWarns.set(key, { at: Date.now(), reasons: [...reasons] });
+  };
+  /** A pending WARN main reported, accepted by the HUMAN in a native dialog showing its
+   *  findings (the renderer's `acceptWarn` alone is only a request to ask). Consumed either way. */
+  const humanAcceptsWarn = async (evt: unknown, key: string, target: string): Promise<boolean> => {
+    const p = pendingWarns.get(key);
+    pendingWarns.delete(key);
+    if (!p || Date.now() - p.at >= WARN_TTL_MS) return false;
+    return consentToWarn(evt, target, p.reasons);
+  };
+
+  /**
+   * The ADMITTED library file of each model this process fetched, by catalogue id. Filled only
+   * by main's own `model:fetchGguf` when the gated download is admitted; read by the runtime
+   * steps, so a file path never crosses the IPC seam.
+   */
+  const admittedPaths = new Map<string, string>();
+  const runtimeDeps: RuntimeStepDeps = {
+    startServer: (argv) => startModelServer(argv),
+    listModels: async (base) => {
+      try {
+        const res = await fetch(`${base}/models`, { signal: AbortSignal.timeout(3000) });
+        if (!res.ok) return null;
+        const body = (await res.json()) as { data?: { id?: unknown }[] };
+        return Array.isArray(body?.data)
+          ? body.data.map((d) => String(d?.id ?? "")).filter(Boolean)
+          : [];
+      } catch {
+        return null;
+      }
+    },
+    linkLmstudio: async (id, path) => {
+      const r = await client.installTarget({
+        target: "lmstudio",
+        id: `prometheus/${id}`,
+        gguf: path,
+        link: true,
+      });
+      return r.ok ? { ok: true } : { ok: false, error: r.error ?? "link failed" };
+    },
+    hasBin: (bin) => hasBinOn(bin, process.env.PATH, (b) => vendorBin(b)),
+    portOpen: (port) =>
+      new Promise<boolean>((resolve) => {
+        const sock = createConnection({ host: "127.0.0.1", port });
+        const done = (v: boolean): void => {
+          sock.destroy();
+          resolve(v);
+        };
+        sock.setTimeout(1000, () => done(false));
+        sock.once("connect", () => done(true));
+        sock.once("error", () => done(false));
+      }),
+    verifyAdmitted: (path) => client.verifyAdmitted({ path }),
+    lmsList: () => lmsListJson(vendorBin("lms") ?? "lms"),
+  };
+
+  // ── model:fetchGguf — a catalogue model with no Ollama build: GATED download + import ─
+  // stage-hf pins the revision, verifies Hugging Face's sha256 and admits only on a nemesis
+  // allow; import-ollama refuses any file outside the admitted library. Two sidecar calls,
+  // both in main — the renderer only names the catalogue row.
+  ipcMain.handle(
+    IPC.modelFetchGguf,
+    async (evt: unknown, arg: unknown): Promise<ModelFetchGgufResult> => {
+      const v = validateModelFetchGguf(arg);
+      if (!v.ok) return { ok: false, error: v.error.message };
+      const a = v.value;
+      // The renderer NAMES a catalogue model; main decides which file that is. A shape-valid
+      // repo/file the catalogue does not list for this id (a compromised renderer, or a stale
+      // plan) is refused — the gate would scan it, but the user approved THIS model's download.
+      const row = ai.findLocalModel(a.id);
+      const listed = [row?.gguf, row?.ggufSmall].filter(
+        (g): g is NonNullable<typeof g> => g !== undefined,
+      );
+      if (!listed.some((g) => g.repo === a.repo && g.file === a.file)) {
+        return {
+          ok: false,
+          stage: "download",
+          error: `${a.repo}/${a.file} is not the catalogued GGUF for ${a.id}`,
+        };
+      }
+      const sender = senderOf(evt);
+      const blocked = await launchBlockReason();
+      if (blocked) return { ok: false, stage: "download", error: blocked };
+      try {
+        const warnKey = `gguf:${a.id}:${a.repo}/${a.file}`;
+        if (a.acceptWarn && !(await humanAcceptsWarn(evt, warnKey, `${a.repo}/${a.file}`))) {
+          return { ok: false, stage: "gate", error: "the nemesis warning was not accepted" };
+        }
+        return await queueMutation(a.id, async (): Promise<ModelFetchGgufResult> => {
+          const staged = await client.stageHf({
+            id: a.id,
+            repo: a.repo,
+            file: a.file,
+            // the runtime's own folder: LM Studio's for LM Studio, the Hugging Face cache for
+            // llama.cpp (served in place), a transit copy for Ollama (deleted after import)
+            place:
+              a.runtime === "lmstudio" ? "lmstudio" : a.runtime === "llamacpp" ? "hf" : "ollama",
+            ...(a.acceptWarn ? { acceptWarn: true } : {}),
+            onProgress: (p): void => {
+              if (!sender) return;
+              const event: ModelProgressEvent = {
+                phase: "download",
+                message: p.message ?? p.raw,
+                raw: p.raw,
+              };
+              if (a.runId !== undefined) event.runId = a.runId;
+              if (typeof p.pct === "number") event.pct = p.pct;
+              sender.send(IPC_EVENTS.modelProgress, event);
+            },
+          });
+          const weights = Array.isArray(staged.weights) ? (staged.weights as unknown[]) : [];
+          const path = typeof weights[0] === "string" ? (weights[0] as string) : undefined;
+          if (staged.ok === true && staged.admitted === true && path) admittedPaths.set(a.id, path);
+          if (staged.ok !== true || staged.admitted !== true || !path) {
+            const gate = (staged.gate ?? {}) as { reasons?: unknown };
+            const reasons = Array.isArray(gate.reasons) ? gate.reasons.map(String) : [];
+            if (staged.needs_confirm === true) noteWarn(warnKey, reasons);
+            return {
+              ok: false,
+              stage: staged.admitted === false || staged.blocked ? "gate" : "download",
+              error:
+                typeof staged.error === "string"
+                  ? staged.error
+                  : String(staged.message ?? "not admitted"),
+              ...(staged.needs_confirm === true ? { needsConfirm: true } : {}),
+              ...(reasons.length ? { gateReasons: reasons.slice(0, 8) } : {}),
+            };
+          }
+          // llama.cpp / LM Studio serve the placed file where it is; only Ollama imports it.
+          // The path stays in MAIN (admittedPaths); the renderer only learns that it worked.
+          if (a.runtime) return { ok: true };
+          const imp = await client.importOllama({ id: a.id, path });
+          if (imp.ok !== true || typeof imp.tag !== "string") {
+            return {
+              ok: false,
+              stage: "import",
+              path,
+              error: typeof imp.error === "string" ? imp.error : "ollama create failed",
+            };
+          }
+          return { ok: true, tag: imp.tag, path };
+        });
+      } catch (e) {
+        return { ok: false, error: errString(e) };
+      }
+    },
+  );
+
+  // ── model:hugOllama — a Hugging Face GGUF repo into Ollama, GATED end to end ─
+  // `ollama pull hf.co/<anyone>/<repo>` handed an uploader's file to Ollama unscanned; the
+  // sidecar's hug-ollama stages it pinned to a revision, verifies HF's sha256, admits it
+  // through nemesis and only then imports it.
+  ipcMain.handle(
+    IPC.modelHugOllama,
+    async (evt: unknown, arg: unknown): Promise<ModelHugOllamaResult> => {
+      const v = validateModelHugOllama(arg);
+      if (!v.ok) return { ok: false, error: v.error.message };
+      const a = v.value;
+      const sender = senderOf(evt);
+      const blocked = await launchBlockReason();
+      if (blocked) return { ok: false, error: blocked };
+      try {
+        // bound to the exact source AND quant: a WARN shown for Q4_K_M is not one for F16
+        const warnKey = `hug:${a.id ?? a.repo}:${a.repo}:${(a.quant ?? "").toLowerCase()}`;
+        if (a.acceptWarn && !(await humanAcceptsWarn(evt, warnKey, `${a.repo}:${a.quant ?? ""}`))) {
+          return { ok: false, error: "the nemesis warning was not accepted" };
+        }
+        return await queueMutation(a.id ?? a.repo, async (): Promise<ModelHugOllamaResult> => {
+          const r = await client.hugOllama({
+            repo: a.repo,
+            ...(a.id ? { id: a.id } : {}),
+            ...(a.quant ? { quant: a.quant } : {}),
+            ...(a.acceptWarn ? { acceptWarn: true } : {}),
+            onProgress: (p): void => {
+              if (!sender) return;
+              const event: ModelProgressEvent = {
+                phase: "download",
+                message: p.message ?? p.raw,
+                raw: p.raw,
+              };
+              if (a.runId !== undefined) event.runId = a.runId;
+              if (typeof p.pct === "number") event.pct = p.pct;
+              sender.send(IPC_EVENTS.modelProgress, event);
+            },
+          });
+          if (r.ok === true && typeof r.tag === "string") return { ok: true, tag: r.tag };
+          const gate = (r.gate ?? {}) as { reasons?: unknown };
+          const reasons = Array.isArray(gate.reasons) ? gate.reasons.map(String) : [];
+          if (r.needs_confirm === true) noteWarn(warnKey, reasons);
+          return {
+            ok: false,
+            error: typeof r.error === "string" ? r.error : String(r.message ?? "not admitted"),
+            ...(r.needs_confirm === true ? { needsConfirm: true } : {}),
+            ...(reasons.length ? { gateReasons: reasons.slice(0, 8) } : {}),
+            ...(r.no_gguf === true ? { noGguf: true } : {}),
+            ...(Array.isArray(r.available)
+              ? { available: r.available.map(String).slice(0, 30) }
+              : {}),
+          };
+        });
+      } catch (e) {
+        return { ok: false, error: errString(e) };
+      }
+    },
+  );
+
+  // ── the llama.cpp / LM Studio steps of a guided pick (see runtime-steps.ts) ─
+  ipcMain.handle(IPC.modelRuntimeStatus, () => runtimeInstalled(runtimeDeps.hasBin));
+  ipcMain.handle(IPC.modelInstallRuntime, async (_evt: unknown, arg: unknown) => {
+    const v = validateModelRuntime(arg);
+    if (!v.ok) return { ok: false, error: v.error.message };
+    const blocked = await launchBlockReason();
+    if (blocked) return { ok: false, error: blocked };
+    try {
+      const r = await queueMutation(`runtime:${v.value.runtime}`, () =>
+        client.installRuntime({ runtime: v.value.runtime }),
+      );
+      if (r.ok === true) return { ok: true };
+      return {
+        ok: false,
+        error: typeof r.error === "string" ? r.error : "the installer reported a problem",
+        ...(typeof r.install === "string" ? { manual: r.install } : {}),
+      };
+    } catch (e) {
+      return { ok: false, error: errString(e) };
+    }
+  });
+  ipcMain.handle(IPC.modelServeGguf, async (_evt: unknown, arg: unknown) => {
+    const v = validateModelRuntimeStep(arg);
+    if (!v.ok) return { ok: false, error: v.error.message };
+    const path = admittedPaths.get(v.value.id);
+    if (!path) return { ok: false, error: "no admitted download for this model in this session" };
+    const blocked = await launchBlockReason();
+    if (blocked) return { ok: false, error: blocked };
+    try {
+      // ONE llama-server start at a time: two concurrent (or a retry racing a still-loading
+      // first attempt) would load the weights twice — the memory-starvation pattern
+      const r = await queueMutation("serve:llamacpp", () =>
+        serveAdmittedGguf(runtimeDeps, v.value.id, path, v.value.ctx),
+      );
+      if (!r.ok && /no longer admitted|admission record/.test(r.error)) {
+        admittedPaths.delete(v.value.id);
+      }
+      return r;
+    } catch (e) {
+      return { ok: false, error: errString(e) };
+    }
+  });
+  ipcMain.handle(IPC.modelLinkLmstudio, async (_evt: unknown, arg: unknown) => {
+    const v = validateModelRuntimeStep(arg);
+    if (!v.ok) return { ok: false, error: v.error.message };
+    const path = admittedPaths.get(v.value.id);
+    if (!path) return { ok: false, error: "no admitted download for this model in this session" };
+    try {
+      return await linkIntoLmstudio(runtimeDeps, v.value.id, path);
+    } catch (e) {
+      return { ok: false, error: errString(e) };
+    }
+  });
+  ipcMain.handle(IPC.modelStartLmstudio, async (_evt: unknown, arg: unknown) => {
+    const v = validateModelRuntimeStep(arg);
+    if (!v.ok) return { ok: false, error: v.error.message };
+    try {
+      return await queueMutation("serve:lmstudio", () => startLmstudioFor(runtimeDeps, v.value.id));
+    } catch (e) {
+      return { ok: false, error: errString(e) };
+    }
+  });
+
+  // ── model:discardOllama — the user refused a WARN on a model that was just pulled ─
+  ipcMain.handle(
+    IPC.modelDiscardOllama,
+    async (_evt: unknown, arg: unknown): Promise<{ ok: boolean; error?: string }> => {
+      const v = validateModelDiscardOllama(arg);
+      if (!v.ok) return { ok: false, error: v.error.message };
+      // Only a tag main itself just reported a WARN for, and only one this pull brought in: the
+      // renderer used to be able to `ollama rm` ANY model, and a re-pull of an installed model
+      // after a ruleset change deleted the copy the user was using.
+      const pending = pendingWarns.has(`pull:${v.value.tag}`);
+      pendingWarns.delete(`pull:${v.value.tag}`); // a refused WARN can no longer be accepted
+      if (!pending) return { ok: false, error: "no nemesis WARN is pending for this model" };
+      if (!freshPulls.delete(normTag(v.value.tag)))
+        return {
+          ok: false,
+          error:
+            "it was installed before this pull, so it is kept — it will not be used until nemesis accepts it",
+        };
+      try {
+        const r = await queueMutation(v.value.tag, () =>
+          client.discardOllama({ tag: v.value.tag }),
+        );
+        return r.ok === true
+          ? { ok: true }
+          : { ok: false, error: typeof r.error === "string" ? r.error : "ollama rm failed" };
+      } catch (e) {
+        return { ok: false, error: errString(e) };
+      }
+    },
+  );
+
   // ── model:pull — REAL local install via ollama (fetch + serve the weights) ─
   ipcMain.handle(IPC.modelPull, async (evt: unknown, arg: unknown): Promise<ModelPullResult> => {
     const v = validateModelPull(arg);
@@ -426,6 +779,12 @@ export function registerModelIpcHandlers(wiring: ModelIpcWiring): () => void {
     try {
       const opts: Parameters<typeof client.pull>[0] = { id: a.id };
       if (a.tag !== undefined) opts.tag = a.tag;
+      const warnKey = `pull:${a.tag ?? a.id}`;
+      if (a.acceptWarn) {
+        if (!(await humanAcceptsWarn(evt, warnKey, a.tag ?? a.id)))
+          return { ok: false, error: "the nemesis warning was not accepted" };
+        opts.acceptWarn = true;
+      }
       // forward the ollama pull progress (JSON-lines on stderr) to the Download Queue.
       opts.onProgress = (p): void => {
         if (!sender) return;
@@ -438,7 +797,11 @@ export function registerModelIpcHandlers(wiring: ModelIpcWiring): () => void {
         if (typeof p.pct === "number") event.pct = p.pct;
         sender.send(IPC_EVENTS.modelProgress, event);
       };
+      const tagWanted = normTag(a.tag ?? a.id);
+      const before = await fetchOllamaTags().catch(() => undefined);
+      const wasInstalled = before?.some((t) => normTag(t.name) === tagWanted) ?? true;
       const r = await queueMutation(a.id, () => client.pull(opts));
+      if (!wasInstalled) freshPulls.add(normTag(r.tag ?? a.tag ?? a.id));
       const out: ModelPullResult = { ok: r.ok, command: r.command, id: r.id, runner: r.runner };
       if (r.tag !== undefined) out.tag = r.tag;
       if (r.installed) out.installed = true;
@@ -446,6 +809,11 @@ export function registerModelIpcHandlers(wiring: ModelIpcWiring): () => void {
       if (r.installable) out.installable = true;
       if (r.install !== undefined) out.install = r.install;
       if (r.error !== undefined) out.error = r.error;
+      if (r.needsConfirm) {
+        out.needsConfirm = true;
+        noteWarn(warnKey, r.gateReasons ?? []);
+      }
+      if (r.gateReasons?.length) out.gateReasons = r.gateReasons;
       // The HOW, not just the NO. `toPullResult` spreads the sidecar envelope, so a RAM-fit
       // refusal arrives carrying `hint` ("pick a smaller model … or re-run with --force") and
       // per-quant `reasons[]`. Rebuilding the DTO field-by-field dropped both, leaving a
@@ -526,6 +894,7 @@ export function registerModelIpcHandlers(wiring: ModelIpcWiring): () => void {
       const opts: { quant?: string; force?: boolean } = { force: v.value.force };
       if (v.value.quant !== undefined) opts.quant = v.value.quant;
       // serialize against any concurrent download/remove of the SAME model id.
+      admittedPaths.delete(v.value.id); // a removed library file is never served from memory
       return toMutation(await queueMutation(v.value.id, () => client.remove(v.value.id, opts)));
     } catch (e) {
       return { ok: false, error: errString(e) };
@@ -794,6 +1163,14 @@ export function registerModelIpcHandlers(wiring: ModelIpcWiring): () => void {
       IPC.modelFit,
       IPC.modelDownload,
       IPC.modelPull,
+      IPC.modelFetchGguf,
+      IPC.modelHugOllama,
+      IPC.modelDiscardOllama,
+      IPC.modelRuntimeStatus,
+      IPC.modelInstallRuntime,
+      IPC.modelServeGguf,
+      IPC.modelLinkLmstudio,
+      IPC.modelStartLmstudio,
       // was previously missing from this list (a pre-existing asymmetry — the handler
       // above registers it, so the disposer must remove it too, fixed in passing).
       IPC.modelInstallRunner,

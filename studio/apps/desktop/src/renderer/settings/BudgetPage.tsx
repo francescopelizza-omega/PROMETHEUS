@@ -72,23 +72,48 @@ export function BudgetPage(): ReactElement {
     key: "budget.sessionUsd" | "budget.dailyUsd" | "budget.warnAtPercent",
     raw: string,
   ): Promise<void> {
+    // An EMPTY field removes the cap. It used to become `Number("") === 0` and be refused as
+    // "not a positive number", so a cap, once set from this page, could never be taken off.
+    if (raw.trim() === "") {
+      setSaving(true);
+      try {
+        const res = await window.prometheus?.settings?.reset(key, "global");
+        setSaveError(res?.ok ? undefined : (res?.error ?? "failed to remove the cap"));
+        refresh();
+      } catch (e) {
+        setSaveError(e instanceof Error ? e.message : String(e));
+      } finally {
+        setSaving(false);
+      }
+      return;
+    }
     const n = Number(raw);
     if (!Number.isFinite(n) || n <= 0) {
       setSaveError(`"${raw}" is not a positive number`);
       return;
     }
     setSaving(true);
-    const res = await setBudgetField(key, n);
-    setSaving(false);
-    setSaveError(res.ok ? undefined : (res.error ?? "failed to save"));
+    try {
+      const res = await setBudgetField(key, n);
+      setSaveError(res.ok ? undefined : (res.error ?? "failed to save"));
+    } catch (e) {
+      setSaveError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setSaving(false); // a rejected save must not leave the fields disabled forever
+    }
   }
 
   async function saveUnpricedPolicy(value: "block" | "warn"): Promise<void> {
     setSaving(true);
-    const res = await setBudgetField("budget.unpricedPolicy", value);
-    setSaving(false);
-    setSaveError(res.ok ? undefined : (res.error ?? "failed to save"));
-    if (res.ok) setDraft((d) => ({ ...d, unpricedPolicy: value }));
+    try {
+      const res = await setBudgetField("budget.unpricedPolicy", value);
+      setSaveError(res.ok ? undefined : (res.error ?? "failed to save"));
+      if (res.ok) setDraft((d) => ({ ...d, unpricedPolicy: value }));
+    } catch (e) {
+      setSaveError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setSaving(false);
+    }
   }
 
   return (

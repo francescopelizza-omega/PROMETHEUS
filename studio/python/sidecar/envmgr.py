@@ -47,6 +47,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -186,15 +187,41 @@ def _discover_venvs() -> List[Dict[str, Any]]:
         if rp in seen or not _is_venv(p):
             continue
         seen.add(rp)
-        py = _python_exe(p)
+        # READ, never run: listing used to execute each venv's own `bin/python` (version and
+        # `pip list`), including `./.venv`, `./venv` and `./env` in the current directory — so
+        # a cloned repo shipping `pyvenv.cfg` + a fake `bin/python3` ran code on a read-only
+        # `env.list`. The version comes from pyvenv.cfg, the count from *.dist-info folders.
         found.append({
             "name": p.name,
             "path": rp,
             "kind": "venv",
-            "python_version": _python_version(py) if py else None,
-            "packages_count": _packages_count(py) if py else None,
+            "python_version": _venv_cfg_version(p),
+            "packages_count": _venv_dist_count(p),
         })
     return found
+
+
+def _venv_cfg_version(venv: Path) -> Optional[str]:
+    try:
+        for line in (venv / "pyvenv.cfg").read_text(encoding="utf-8", errors="replace").splitlines():
+            key, _, val = line.partition("=")
+            if key.strip().lower() in ("version", "version_info"):
+                v = val.strip()
+                return v if re.fullmatch(r"\d+(\.\d+){0,3}([a-z]+\d*)?", v) else None
+    except OSError:
+        return None
+    return None
+
+
+def _venv_dist_count(venv: Path) -> Optional[int]:
+    try:
+        sites = list(venv.glob("lib/python*/site-packages")) + list(venv.glob("Lib/site-packages"))
+        if not sites:
+            return None
+        return sum(1 for sp in sites for d in sp.iterdir()
+                   if d.name.endswith(".dist-info") and d.is_dir())
+    except OSError:
+        return None
 
 
 def _system_python() -> Dict[str, Any]:
@@ -271,6 +298,14 @@ def _error_verdict(reason: str) -> Dict[str, Any]:
     }
 
 
+# `name[extras] <version spec> ; <marker>` — a requirement, nothing else: no leading `-`
+# (pip options), no URLs/paths (`pkg @ https://…`, `./local`), no `-e`.
+_REQUIREMENT_RE = re.compile(
+    r"^[A-Za-z0-9][A-Za-z0-9._-]*(\[[A-Za-z0-9._,\s-]+\])?"
+    r"\s*((===|==|~=|!=|<=|>=|<|>)\s*[A-Za-z0-9.*+!_-]+\s*(,\s*(===|==|~=|!=|<=|>=|<|>)\s*[A-Za-z0-9.*+!_-]+\s*)*)?"
+    r"(\s*;\s*[^@]+)?$")
+
+
 def nemesis_gate(target: str) -> Dict[str, Any]:
     """Run the REAL nemesis as a pre-install gate on ``target`` (a staging dir).
 
@@ -303,9 +338,11 @@ def nemesis_gate(target: str) -> Dict[str, Any]:
     except (json.JSONDecodeError, ValueError):
         tail = (p.stderr or p.stdout or f"exit {p.returncode}").strip()[-200:]
         return _error_verdict(f"unparseable nemesis verdict ({tail})")
-    if not isinstance(verdict, dict) or "verdict" not in verdict:
-        return _error_verdict("nemesis returned a non-verdict object")
-    return verdict
+    # The same acceptance every other gate applies: only allow/warn/block/error, the stricter of
+    # the exit code and stdout wins, a signature that does not verify is tampering. Anything
+    # else ("ALLOW", null, "pending", an exit/verdict mismatch) used to fall through to INSTALL.
+    import nemesis_gate as _ng  # noqa: E402 — sibling sidecar module
+    return _ng.reconcile_verdict(verdict, p.returncode)
 
 
 def _verdict_summary(v: Dict[str, Any]) -> Dict[str, Any]:
@@ -360,6 +397,18 @@ def _gate_install(
     Without ``--confirm`` we return a non-destructive ``plan`` (the bridge previews it
     and collects the typed confirm) — staging + scanning + installing only run with it.
     """
+    flagged = [sp for sp in specs if sp.startswith("-")]
+    if flagged:
+        # a package spec is never a pip option (`--index-url=…`, `--find-links=…`, `--dest`)
+        return fail(command, f"refusing flag-shaped package specs: {flagged[:5]}", invalid=True)
+    # …and never a URL, a VCS ref or a local path. Only `env.import` checked this, so
+    # `pkg.install env "pkg @ https://x/y.whl"` / `git+https://…` / `./dir` reached pip: a direct
+    # reference is fetched AGAIN at install (`--no-index` does not stop it — no "scanned bytes
+    # only"), and a VCS/path requirement builds its metadata, running its code, before the scan.
+    bad = [sp for sp in specs if not _REQUIREMENT_RE.match(sp.strip())]
+    if bad:
+        return fail(command, f"refusing non-requirement specs (URLs, VCS refs, paths): {bad[:5]}",
+                    invalid=True)
     request: Dict[str, Any] = {
         "env": env["name"], "path": env["path"], "kind": env.get("kind"),
         "specs": list(specs), "scope": "conda" if env.get("kind") == "conda" else "venv",
@@ -372,7 +421,7 @@ def _gate_install(
     plan = {
         # the PREVIEW must describe what actually runs — see the staging step below for why
         # the dependency closure is fetched rather than the named specs alone
-        "download": pip + ["download", "--dest", "<staging>",
+        "download": pip + ["download", "--dest", "<staging>", "--only-binary=:all:",
                            *(extra_download or []), *specs],
         "gate": ["nemesis", "gate", "<staging>", *_NEMESIS_GATE_FLAGS],
         "install": pip + install_action + ["--no-index", "--find-links", "<staging>",
@@ -401,20 +450,28 @@ def _gate_install(
         # scan cover every byte that reaches the environment. Staging only the top-level artifact
         # would have gated one wheel and let its dependencies in unscanned, had the install
         # worked at all.
-        dl_cmd = pip + ["download", "--dest", staging,
+        # WHEELS ONLY: `pip download` of a source distribution runs its build backend (setup.py
+        # / PEP 517 hooks) to read its metadata — code from the package, BEFORE nemesis has seen
+        # a byte. A package with no wheel is refused with that reason instead.
+        dl_cmd = pip + ["download", "--dest", staging, "--only-binary=:all:",
                         "--disable-pip-version-check", *(extra_download or []), *specs]
         log("staging:", " ".join(dl_cmd))
         try:
             dl = subprocess.run(dl_cmd, capture_output=True, text=True,
                                 timeout=_PIP_DOWNLOAD_TIMEOUT)
         except subprocess.TimeoutExpired:
-            return fail(command, "pip download timed out", request=request, blocked=True)
+            # not a security refusal — nemesis never ran; `blocked` would show it as one
+            return fail(command, "pip download timed out", request=request)
         except (OSError, subprocess.SubprocessError) as exc:  # noqa: BLE001
-            return fail(command, f"pip download failed: {exc}", request=request, blocked=True)
+            return fail(command, f"pip download failed: {exc}", request=request)
         if dl.returncode != 0:
+            err = (dl.stderr or "").strip()
+            hint = ("no wheel is published for this package (or one of its dependencies) — "
+                    "Prometheus does not build source packages before scanning them"
+                    if "no matching distribution" in err.lower() else None)
             return fail(command, "pip download returned non-zero (nothing fetched, nothing gated)",
-                        request=request, blocked=True,
-                        stderr=(dl.stderr or "").strip()[-1000:])
+                        request=request, stderr=err[-1000:],
+                        **({"hint": hint} if hint else {}))
 
         # 2) scan — the real nemesis, fail-closed.
         v = nemesis_gate(staging)
@@ -436,7 +493,8 @@ def _gate_install(
 
         # 3c) install the EXACT vetted bytes (allow, or a forced override).
         inst_cmd = pip + install_action + [
-            "--no-index", "--find-links", staging, "--disable-pip-version-check",
+            "--no-index", "--find-links", staging, "--only-binary=:all:",
+            "--disable-pip-version-check",
             *(extra_install or []), *specs,
         ]
         log("gated install:", " ".join(inst_cmd))
@@ -770,6 +828,12 @@ def v_pkg_upgrade(argv: List[str]) -> int:
 
 
 def _pkg_gated(command: str, argv: List[str], *, upgrade: bool) -> int:
+    # Only the two documented flags. An unknown `-…` token is refused rather than dropped: a
+    # flag-shaped "package spec" is how a caller would try to switch --force/--confirm on.
+    unknown = sorted({a for a in argv if a.startswith("-")} - {"--confirm", "--force"})
+    if unknown:
+        return fail(command, f"unknown option(s): {', '.join(unknown)} — a package spec "
+                             "cannot start with '-'")
     pos = positional(argv)
     if len(pos) < 2:
         return fail(command, f"usage: {command} <env> <spec...> [--confirm] [--force]")
@@ -899,10 +963,17 @@ def v_env_import(argv: List[str]) -> int:
 
     # requirements.txt → create the venv, then GATED install of its lines.
     try:
-        specs = [ln.strip() for ln in fpath.read_text(encoding="utf-8").splitlines()
+        specs = [ln.split(" #", 1)[0].strip() for ln in fpath.read_text(encoding="utf-8").splitlines()
                  if ln.strip() and not ln.lstrip().startswith("#")]
     except OSError as exc:
         return fail("env.import", f"could not read {fpath}: {exc}")
+    # Each line becomes pip argv, so each must be a REQUIREMENT, never an option: a line like
+    # `--find-links=/x`, `--index-url=http://evil` or `--dest=/x` redirected the download (or
+    # the staging dir) so nemesis scanned an empty folder while pip installed from elsewhere.
+    bad = [ln for ln in specs if not _REQUIREMENT_RE.match(ln)]
+    if bad:
+        return fail("env.import", "requirements file has lines that are not plain requirements "
+                                  f"(options, URLs or editable installs are refused): {bad[:5]}")
     target = str(Path(name).expanduser()) if (os.sep in name or name.startswith("~")) \
         else str((Path.home() / ".prometheus" / "envs" / name))
     pyver = opt_value(argv, "--python")

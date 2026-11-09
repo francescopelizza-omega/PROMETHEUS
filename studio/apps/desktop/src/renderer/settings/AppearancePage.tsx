@@ -85,7 +85,12 @@ function SchemeTile({
       type="button"
       onClick={onSelect}
       aria-pressed={active}
-      aria-label={`${scheme.name} (${scheme.base})${active ? " — active" : ""}`}
+      aria-label={`${scheme.name} (${scheme.base}${scheme.filled ? "" : ", partial"})${active ? " — active" : ""}`}
+      title={
+        scheme.filled
+          ? undefined
+          : "Partial theme: only a few colours are its own, the rest come from its base palette."
+      }
       style={{
         width: 104,
         textAlign: "left",
@@ -113,7 +118,10 @@ function SchemeTile({
       >
         {scheme.name} {scheme.id === "prometheus-dark" ? "★" : ""}
         {active ? " ✓" : ""}
-        <div style={{ color: "var(--text-secondary)" }}>{scheme.base}</div>
+        <div style={{ color: "var(--text-secondary)" }}>
+          {scheme.base}
+          {scheme.filled ? "" : " · partial"}
+        </div>
       </div>
     </button>
   );

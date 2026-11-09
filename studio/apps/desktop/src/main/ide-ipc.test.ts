@@ -179,6 +179,8 @@ test("registerIdeIpcHandlers: register -> dispose -> register again never throws
   electronIpcMain = fakeIpcMain;
   mock.module("electron", {
     [MOCK_EXPORTS]: {
+      // native confirms (ext/privileged/settings/path seams) answer "Cancel" in tests
+      dialog: { showMessageBox: async () => ({ response: 0 }), showMessageBoxSync: () => 0 },
       ipcMain: fakeIpcMain,
       // browser-tool-host.ts (imported transitively) touches these two at load time
       // only as type/identity references — getWindow()/session.fromPartition() are

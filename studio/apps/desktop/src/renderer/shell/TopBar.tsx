@@ -17,6 +17,7 @@
 import type { CSSProperties, ReactElement } from "react";
 import { useState } from "react";
 
+import { modKey } from "../platform.js";
 import type { HealthPill } from "../stores/health-derive.js";
 import { AuthPill } from "./AuthPill.js";
 import { PrometheusMark } from "./PrometheusMark.js";
@@ -201,7 +202,7 @@ export function TopBar({
               color: "var(--text-muted)",
             }}
           >
-            ⌘K
+            {modKey()}K
           </span>
         </button>
       </span>

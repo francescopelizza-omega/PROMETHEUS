@@ -44,8 +44,17 @@ export function useCodebaseOverview(): UseCodebaseOverviewResult {
   const generate = useCallback(async () => {
     setLoading(true);
     setError(undefined);
-    const res = await window.prometheus?.codebaseOverview?.generate();
-    setLoading(false);
+    let res:
+      | Awaited<ReturnType<NonNullable<typeof window.prometheus.codebaseOverview>["generate"]>>
+      | undefined;
+    try {
+      res = await window.prometheus?.codebaseOverview?.generate();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+      return;
+    } finally {
+      setLoading(false); // never stuck on "loading" after a rejected invoke
+    }
     if (!res || !res.ok || !res.overview) {
       setError(res?.error ?? "codebase overview IPC unavailable");
       return;

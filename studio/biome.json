@@ -17,7 +17,11 @@
       "examples/**",
       "**/contract/golden/**",
       "**/__fixtures__/**",
-      "apps/cli/src/repl/**"
+      "apps/cli/src/repl/**",
+      "**/*.generated.ts",
+      "config/open-models.json",
+      "config/model-catalog.seed.json",
+      "config/model-arch.json"
     ]
   },
   "formatter": {

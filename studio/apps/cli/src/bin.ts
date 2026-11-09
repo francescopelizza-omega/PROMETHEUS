@@ -15,7 +15,7 @@ import { userInfo } from "node:os";
 import { createInterface } from "node:readline";
 
 import { cliProfiles } from "@prometheus/core";
-import { createEngineClient } from "@prometheus/engine-bridge";
+import { closeAllTunnels, createEngineClient } from "@prometheus/engine-bridge";
 
 import { installChildReaper } from "./child-reaper.js";
 import { prometheusHome } from "./home.js";
@@ -361,6 +361,12 @@ if (guard.sweep.killed.length > 0 && !process.argv.includes("--json")) {
 }
 // A clean exit means the children were already reaped; the sentinel has nothing left to do.
 process.on("exit", stopSentinel);
+// `/remote connect` tunnels (`ssh -N -L 127.0.0.1:port:…`) are non-detached children, and Node
+// does not kill those on exit — so each one kept listening on loopback after the CLI quit.
+// `on("exit")`, NOT engine-bridge's `hookTunnelCleanup`: that one registers `once("SIGINT")`,
+// which removes Node's default exit-on-signal, so a Ctrl-C would close the tunnels and leave the
+// process running.
+process.on("exit", closeAllTunnels);
 
 // Process-level crash guards (§6 crash-free): a stray rejection or a late async
 // throw renders an actionable one-liner + a nonzero exit, never a raw stack trace.

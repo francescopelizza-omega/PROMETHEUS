@@ -209,7 +209,7 @@ function DiffView({ before, after }: { before: string; after: string }): ReactEl
   const stats = useMemo(() => diffStats(lines), [lines]);
   return (
     <div style={{ marginTop: 2 }}>
-      <div style={{ fontSize: "0.66rem", color: "var(--text-secondary)", marginBottom: 2 }}>
+      <div style={{ fontSize: "0.75rem", color: "var(--text-secondary)", marginBottom: 2 }}>
         <span style={{ color: "var(--ok)" }}>+{stats.added}</span>{" "}
         <span style={{ color: "var(--danger)" }}>−{stats.removed}</span> proposed
       </div>
@@ -222,7 +222,7 @@ function DiffView({ before, after }: { before: string; after: string }): ReactEl
           background: "var(--bg-inset)",
           borderRadius: 4,
           fontFamily: "var(--font-mono, monospace)",
-          fontSize: "0.72rem",
+          fontSize: "0.75rem",
         }}
       >
         {lines.map((l, i) => (

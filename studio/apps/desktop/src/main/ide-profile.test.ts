@@ -44,6 +44,8 @@ const MOCK_EXPORTS = Number(process.versions.node.split(".")[0]) >= 26 ? "export
 
 mock.module("electron", {
   [MOCK_EXPORTS]: {
+    // native confirms (ext/privileged/settings/path seams) answer "Cancel" in tests
+    dialog: { showMessageBox: async () => ({ response: 0 }), showMessageBoxSync: () => 0 },
     ipcMain: fakeIpcMain,
     BrowserWindow: class FakeBrowserWindow {},
     session: { fromPartition: () => ({}) },

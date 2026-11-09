@@ -213,13 +213,13 @@ export function TodoView({ root }: { root: string }): ReactElement {
           {editorOpen ? "▾ patterns" : "▸ patterns"}
         </Button>
         <label style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 4 }}>
-          <span style={{ color: "var(--text-secondary)", fontSize: "0.7rem" }}>scope</span>
+          <span style={{ color: "var(--text-secondary)", fontSize: "0.75rem" }}>scope</span>
           <select
             aria-label="todo scope"
             value={scopeKind}
             onChange={(e) => setScopeKind(e.target.value as ScopeKind)}
             style={{
-              fontSize: "0.7rem",
+              fontSize: "0.75rem",
               background: "var(--bg-surface-2)",
               color: "inherit",
               border: "1px solid var(--border-subtle)",
@@ -257,7 +257,7 @@ export function TodoView({ root }: { root: string }): ReactElement {
                 onClick={() => toggleMarker(name)}
                 aria-pressed={on}
                 style={{
-                  fontSize: "0.66rem",
+                  fontSize: "0.75rem",
                   fontWeight: 600,
                   padding: "1px 7px",
                   borderRadius: 10,
@@ -276,7 +276,7 @@ export function TodoView({ root }: { root: string }): ReactElement {
       )}
 
       {scanned && !busy && visible.length === 0 && (
-        <p style={{ color: "var(--text-secondary)", fontSize: "0.72rem" }}>
+        <p style={{ color: "var(--text-secondary)", fontSize: "0.75rem" }}>
           No markers found in this scope.
         </p>
       )}
@@ -300,7 +300,7 @@ export function TodoView({ root }: { root: string }): ReactElement {
                         ? "var(--danger)"
                         : "var(--warn)",
                     fontWeight: 600,
-                    fontSize: "0.68rem",
+                    fontSize: "0.75rem",
                   }}
                 >
                   {it.marker}
@@ -317,7 +317,7 @@ export function TodoView({ root }: { root: string }): ReactElement {
                   style={{
                     flex: 1,
                     textAlign: "left",
-                    fontSize: "0.72rem",
+                    fontSize: "0.75rem",
                     cursor: "pointer",
                     background: "transparent",
                     border: "none",
@@ -362,7 +362,7 @@ function PatternEditor({
     onChange([...patterns, { name: `MARK${patterns.length + 1}`, regex: "\\bMARK\\b" }]);
 
   const fieldStyle = {
-    fontSize: "0.7rem",
+    fontSize: "0.75rem",
     background: "var(--bg-surface-2)",
     color: "inherit",
     border: "1px solid var(--border-subtle)",
@@ -381,7 +381,7 @@ function PatternEditor({
       }}
     >
       {!editable && (
-        <p style={{ color: "var(--warn)", fontSize: "0.68rem", margin: "0 0 6px" }}>
+        <p style={{ color: "var(--warn)", fontSize: "0.75rem", margin: "0 0 6px" }}>
           Settings unavailable — showing the builtin markers (read-only).
         </p>
       )}
@@ -408,7 +408,7 @@ function PatternEditor({
             }}
           />
           <label
-            style={{ display: "flex", alignItems: "center", gap: 2, fontSize: "0.64rem" }}
+            style={{ display: "flex", alignItems: "center", gap: 2, fontSize: "0.75rem" }}
             title="case sensitive"
           >
             <input
@@ -448,7 +448,7 @@ function PatternEditor({
             margin: "6px 0 0",
             padding: 0,
             color: "var(--danger)",
-            fontSize: "0.66rem",
+            fontSize: "0.75rem",
           }}
         >
           {skipped.map((s, i) => (

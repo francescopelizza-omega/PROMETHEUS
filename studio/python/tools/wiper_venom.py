@@ -966,7 +966,13 @@ class ForensicCleaner:
         try:
             tmp_dir = tempfile.mkdtemp(dir=self.temp_base)
             with tarfile.open(path, 'r:*') as t:
-                t.extractall(tmp_dir)
+                # `filter="data"` refuses `../` paths, absolute names, links pointing out of
+                # tmp_dir and device nodes. Without it (the default before Python 3.14, and the
+                # bundled runtime is 3.12) a hostile archive wrote anywhere the user can.
+                try:
+                    t.extractall(tmp_dir, filter="data")
+                except TypeError:  # Python < 3.12 has no filter argument: skip the archive
+                    return
             
             for root, dirs, files in os.walk(tmp_dir):
                 for file in files:

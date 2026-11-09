@@ -307,7 +307,11 @@ export async function runOneShot(
     name: string;
     args?: Record<string, unknown>;
   }): { approved: boolean; reason?: string } | true => {
-    const tool = agent.exposedTools(liveTuning.tools).find((t) => t.name === call.name);
+    // MCP tools included (merged into the turn's tuning further down): looking in `liveTuning`
+    // alone resolved every `mcp__*` call to no annotations.
+    const tool = agent
+      .exposedTools(withMcpTools(liveTuning, mcp?.tools() ?? []).tools)
+      .find((t) => t.name === call.name);
     /**
      * SCOPED, same as the TUI's confirmWrite and the desktop's permission-gate: a `write_file`
      * whose target lands outside the run's own working set (cwd — a headless run has no

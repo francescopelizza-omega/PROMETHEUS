@@ -84,6 +84,7 @@ import { AuthPicker } from "./shell/AuthPill.js";
 import { EngineGate } from "./shell/EngineGate.js";
 import { ErrorBoundary } from "./shell/ErrorBoundary.js";
 import { PrivilegedApprovalDialog } from "./shell/PrivilegedApprovalDialog.js";
+import { ToastHost } from "./shell/ToastHost.js";
 import { UpdateBanner } from "./shell/UpdateBanner.js";
 import { nextRegion, useFocusTrap } from "./shell/a11y.js";
 import {
@@ -121,6 +122,7 @@ import {
   updateOnDismiss,
   updateOnDownloadError,
   updateOnDownloadStart,
+  updateOnInstallError,
   updateOnProgress,
   updateOnReady,
 } from "./shell/update-view.js";
@@ -361,7 +363,9 @@ function SettingsOverlay({
         style={{
           width: "min(900px, 94vw)",
           maxHeight: "84vh",
-          overflow: "auto",
+          // the DIALOG does not scroll — its content pane does (SettingsPanel). Scrolling the
+          // whole section sent the header, the Close button and the nav away with a long page.
+          overflow: "hidden",
           background: "var(--bg-surface-2)",
           border: "1px solid var(--border-strong)",
           borderRadius: "var(--radius-xl, 14px)",
@@ -374,7 +378,14 @@ function SettingsOverlay({
           color: "var(--text-primary)",
         }}
       >
-        <header style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+        <header
+          style={{
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+            flex: "none",
+          }}
+        >
           <h2 style={{ margin: 0, fontSize: "var(--text-h2-size, 1rem)", fontWeight: 600 }}>
             Settings
           </h2>
@@ -383,7 +394,7 @@ function SettingsOverlay({
           </button>
         </header>
 
-        <label style={fieldLabel()}>
+        <label style={{ ...fieldLabel(), flex: "none" }}>
           Theme base
           <select
             value={preference}
@@ -704,7 +715,15 @@ function App(): ReactElement {
   }, []);
   // quitAndInstall — reachable only from the "ready" phase (the banner gates the button).
   const onUpdateInstall = useCallback((): void => {
-    void window.prometheus?.updates?.install().catch(() => {});
+    // a failed quit-and-install used to vanish; surface it on the same banner
+    void window.prometheus?.updates
+      ?.install()
+      .then((r: unknown) => {
+        const o = (r ?? {}) as { ok?: boolean; error?: string };
+        if (o.ok === false)
+          setUpdateState((s) => updateOnInstallError(s, o.error ?? "install failed"));
+      })
+      .catch((e) => setUpdateState((s) => updateOnInstallError(s, String(e))));
   }, []);
 
   // RightRail Inspector payload (file 08 §4.2): the current selection/route context as
@@ -852,6 +871,24 @@ function App(): ReactElement {
     // `forceOpenRail` is `useCallback([])`-stable, so this still subscribes exactly once —
     // listing it is what makes that a checked fact rather than a comment.
   }, [forceOpenRail]);
+
+  // Navigate bus: a route can send the user to another activity with an action for it to
+  // perform once mounted (editor palette → Security "gate workspace").
+  useEffect(() => {
+    const onNavigate = (ev: Event): void => {
+      const d = (ev as CustomEvent<{ activity?: string; action?: string; target?: string }>).detail;
+      if (d?.activity !== "security") return;
+      setActivity("security" as ActivityId);
+      // two frames: the route mounts after the activity switch
+      requestAnimationFrame(() =>
+        requestAnimationFrame(() =>
+          window.dispatchEvent(new CustomEvent("prometheus:security-action", { detail: d })),
+        ),
+      );
+    };
+    window.addEventListener("prometheus:navigate", onNavigate);
+    return () => window.removeEventListener("prometheus:navigate", onNavigate);
+  }, []);
 
   // Open-resource bus: any surface can dispatch prometheus:open-file / open-folder and
   // we route it to the editor (a tab for a file, the workspace root for a folder) — so a
@@ -1100,6 +1137,7 @@ function App(): ReactElement {
                 >
                   <EditorRoute
                     onNavigate={setActivity}
+                    active={activity === "editor"}
                     onOpenShellPanel={(tab) => {
                       setBottomTab(tab);
                       setBottomCollapsed(false);
@@ -1319,10 +1357,17 @@ function App(): ReactElement {
                 /* storage disabled — the wizard just won't persist this session */
               }
               setShowWizard(false);
+              // The Models choice was recorded and nothing acted on it. "Local" and "Cloud API"
+              // both continue on the Models screen (local runtimes, and the cloud endpoints
+              // panel); "later" stays where the user is.
+              if (!skipped && (result.modelChoice === "local" || result.modelChoice === "api")) {
+                setActivity("models");
+              }
             }}
           />
         </ErrorBoundary>
       )}
+      <ToastHost />
     </div>
   );
 }

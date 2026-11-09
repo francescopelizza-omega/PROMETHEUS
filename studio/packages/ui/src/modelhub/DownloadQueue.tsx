@@ -152,7 +152,7 @@ function Row({
               display: "flex",
               gap: "var(--space-3, 6px)",
               color: "var(--text-secondary)",
-              fontSize: "0.72rem",
+              fontSize: "0.75rem",
             }}
           >
             <span>{Math.round(row.pct)}%</span>
@@ -166,7 +166,7 @@ function Row({
         <div style={{ display: "flex", alignItems: "center", gap: "var(--space-4, 8px)" }}>
           <NemesisBadge tier={row.gate?.verdict} />
           {row.gate?.reasons && row.gate.reasons.length > 0 && (
-            <span style={{ color: "var(--text-secondary)", fontSize: "0.72rem" }}>
+            <span style={{ color: "var(--text-secondary)", fontSize: "0.75rem" }}>
               {inert(row.gate.reasons[0])}
             </span>
           )}
@@ -178,7 +178,7 @@ function Row({
           style={{
             color: "var(--text-secondary)",
             fontFamily: "var(--font-mono)",
-            fontSize: "0.7rem",
+            fontSize: "0.75rem",
             overflow: "hidden",
             textOverflow: "ellipsis",
             minWidth: 0, // flex/grid floor — without it the ellipsis is unreachable

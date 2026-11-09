@@ -88,7 +88,7 @@ function SymbolRows({
                 alignItems: "center",
                 gap: 4,
                 paddingLeft: depth * 12,
-                fontSize: "0.74rem",
+                fontSize: "0.75rem",
               }}
             >
               {hasKids ? (
@@ -124,7 +124,7 @@ function SymbolRows({
                   color: "var(--text-primary)",
                   cursor: "pointer",
                   fontFamily: "var(--font-mono, monospace)",
-                  fontSize: "0.74rem",
+                  fontSize: "0.75rem",
                   padding: "1px 0",
                   overflow: "hidden",
                   textOverflow: "ellipsis",
@@ -242,17 +242,17 @@ export function OutlineView({ root }: { root: string }): ReactElement {
       </div>
 
       {status === "none" && (
-        <p style={{ color: "var(--text-secondary)", fontSize: "0.72rem" }}>
+        <p style={{ color: "var(--text-secondary)", fontSize: "0.75rem" }}>
           Open a file to see its structure.
         </p>
       )}
       {status === "unsupported" && (
-        <p style={{ color: "var(--text-secondary)", fontSize: "0.72rem" }}>
+        <p style={{ color: "var(--text-secondary)", fontSize: "0.75rem" }}>
           No language server for this file type.
         </p>
       )}
       {status === "empty" && (
-        <p style={{ color: "var(--text-secondary)", fontSize: "0.72rem" }}>
+        <p style={{ color: "var(--text-secondary)", fontSize: "0.75rem" }}>
           No symbols (the server may still be indexing — press ⟳).
         </p>
       )}

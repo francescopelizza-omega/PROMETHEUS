@@ -110,6 +110,7 @@ import {
   saveRemoteHosts,
   upsertRemoteHost,
 } from "./remote-hosts-store.js";
+import { runServer } from "./server-cmd.js";
 import { type SteeringFile, renderSteeringList } from "./steering.js";
 import type { ResolveResult } from "./working-set.js";
 
@@ -594,6 +595,15 @@ export interface SlashCtx {
   idleTimeoutSetting?: {
     get: () => number;
     set: (ms: number) => void;
+  };
+  /**
+   * `/server` — the persisted DEFAULT LOCAL MODEL SERVER (Ollama unless the user picks another).
+   * `set` returns false for an unknown id or a failed save. Optional: `/server` says "not
+   * available on this surface" when unwired.
+   */
+  defaultServerSetting?: {
+    get: () => string;
+    set: (id: string) => boolean;
   };
   /**
    * `/cd` — move to a different project directory mid-session WITHOUT quitting and relaunching:
@@ -2956,6 +2966,14 @@ export const SLASH_REGISTRY: readonly SlashCmd[] = Object.freeze([
    * (`install`, `list`, `status` …) is still passed through by `runModelsCommand`, and
    * `/models tools` is the old bare listing.
    */
+  {
+    name: "server",
+    group: "models",
+    summary:
+      "Choose the default local model server — Ollama unless you pick LM Studio, llama.cpp, MLX-LM or vLLM.",
+    args: "[ollama|lmstudio|llamacpp|mlx|vllm]",
+    run: (rest, ctx) => runServer(rest, ctx),
+  },
   {
     name: "models",
     group: "models",

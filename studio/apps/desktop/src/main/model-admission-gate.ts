@@ -140,12 +140,20 @@ export async function admitDesktopModelLoad(
     let candidate = candidates.find((c) => c.id === model);
     // LM Studio has no KV geometry to price with: ask LM Studio itself (see the terminal gate,
     // model-admission-host.ts), floored at the weights + 1 GiB. Only on the real path.
-    if (candidate && runner === "lmstudio" && ai.isLocalUrl(baseUrl) && !candidate.measuredTotalBytes) {
+    if (
+      candidate &&
+      runner === "lmstudio" &&
+      ai.isLocalUrl(baseUrl) &&
+      !candidate.measuredTotalBytes
+    ) {
       const estimate =
         deps.lmsEstimateFn ?? (deps.inventoryFn ? async () => null : lmsEstimateBytes);
       const est = await estimate(candidate.id, candidate.contextTokens).catch(() => null);
       if (est) {
-        candidate = { ...candidate, measuredTotalBytes: Math.max(est, candidate.weightsBytes + 2 ** 30) };
+        candidate = {
+          ...candidate,
+          measuredTotalBytes: Math.max(est, candidate.weightsBytes + 2 ** 30),
+        };
       }
     }
     // Not installed here, or `/api/tags` did not answer: there is nothing to weigh, so there is

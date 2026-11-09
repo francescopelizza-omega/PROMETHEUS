@@ -835,7 +835,10 @@ test("model hug: PREVIEW by default — no sidecar calls, no execution", async (
   assert.equal(out.exitCode, 0);
   assert.deepEqual(calls, []);
   assert.match(out.text ?? "", /preview/);
-  assert.match(out.text ?? "", /hf\.co\/acme\/tiny/);
+  // the preview describes the GATED path, never Ollama's hf.co passthrough
+  assert.match(out.text ?? "", /acme\/tiny/);
+  assert.match(out.text ?? "", /nemesis/);
+  assert.doesNotMatch(out.text ?? "", /hf\.co\//);
 });
 
 test("model hug: preview for a local source + llamacpp describes fetch/convert/install", async () => {
@@ -915,17 +918,26 @@ test("model hug --json: --yes success returns the raw install-target envelope", 
   assert.equal((out.json as { ok: boolean; target: string }).target, "llamacpp");
 });
 
-test("model hug: ollama + HF source --yes → the zero-download hf.co passthrough", async () => {
+test("model hug: ollama + HF source --yes → the GATED import (never `ollama pull hf.co/…`)", async () => {
   const { deps, calls } = fake({
     ok: true,
-    command: "pull",
-    installed: true,
-    endpoint: "http://localhost:11434/v1",
+    command: "hug-ollama",
+    admitted: true,
+    tag: "prometheus/acme-tiny:latest",
   });
   const out = await runModelCommand(ctxFor(["model", "hug", "acme/tiny", "--yes"]), deps);
   assert.equal(out.exitCode, 0);
   assert.equal(calls.length, 1);
-  assert.deepEqual(calls[0]?.argv, ["pull", "--id", "acme/tiny", "--tag", "hf.co/acme/tiny"]);
+  assert.deepEqual(calls[0]?.argv, [
+    "hug-ollama",
+    "--id",
+    "acme/tiny",
+    "--repo",
+    "acme/tiny",
+    "--quant",
+    "Q4_K_M",
+  ]);
+  assert.ok(!calls.some((c) => c.argv.join(" ").includes("hf.co/")));
 });
 
 test("model hug: ollama + HF source, missing runner → install → verify → retry", async () => {
@@ -948,7 +960,7 @@ test("model hug: ollama + HF source, missing runner → install → verify → r
   const out = await runModelCommand(ctxFor(["model", "hug", "acme/tiny", "--yes"]), deps);
   assert.equal(out.exitCode, 0);
   assert.ok(calls.some((a) => a[0] === "install-runner"));
-  assert.ok(calls.some((a) => a[0] === "pull"));
+  assert.ok(calls.some((a) => a[0] === "hug-ollama"));
 });
 
 test("model hug: HF source + llamacpp --yes runs fetch-hf → convert → install-target in order", async () => {
@@ -1030,13 +1042,13 @@ test("model hug: local source + vllm --yes skips BOTH fetch-hf and convert, inst
   ]);
 });
 
-test("model hug: HF source + vllm --yes fetches but still skips convert entirely", async () => {
+test("model hug: HF source + vllm --yes takes the GATED snapshot path and skips convert entirely", async () => {
   const calls: string[][] = [];
+  const snap = "/hf/models--acme--tiny/snapshots/abc";
   const runSidecar = (async (_s: string, argv: string[]) => {
     calls.push(argv);
-    if (argv[0] === "fetch-hf") return { ok: true, path: "/tmp/hf-src/acme__tiny" };
-    if (argv[0] === "install-target")
-      return { ok: true, target: "vllm", path: "/tmp/hf-src/acme__tiny" };
+    if (argv[0] === "stage-hf") return { ok: true, admitted: true, local_path: snap };
+    if (argv[0] === "install-target") return { ok: true, target: "vllm", path: snap };
     return { ok: false, error: "unexpected call" };
   }) as unknown as SidecarDeps["runSidecar"];
   const deps: SidecarDeps = { runSidecar, launchGuard: async () => ({ cpuPct: 5, ramPct: 10 }) };
@@ -1047,8 +1059,11 @@ test("model hug: HF source + vllm --yes fetches but still skips convert entirely
   assert.equal(out.exitCode, 0);
   assert.deepEqual(
     calls.map((a) => a[0]),
-    ["fetch-hf", "install-target"],
+    ["stage-hf", "install-target"],
   );
+  // sha256-verified, nemesis-scanned and placed in the HF cache — never a scratch copy
+  assert.ok(calls[0]?.includes("--place=hf"));
+  assert.ok(calls[0]?.includes("--repo=acme/tiny"));
   assert.deepEqual(calls[1], [
     "install-target",
     "--target",
@@ -1056,7 +1071,7 @@ test("model hug: HF source + vllm --yes fetches but still skips convert entirely
     "--id",
     "acme/tiny",
     "--src",
-    "/tmp/hf-src/acme__tiny",
+    snap,
   ]);
 });
 

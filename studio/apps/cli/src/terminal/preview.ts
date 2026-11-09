@@ -43,6 +43,7 @@ export interface ChatPreviewInput {
   tmux?: string | boolean;
   cwd?: string;
   prompt?: string;
+  runner?: string;
 }
 
 /**
@@ -62,6 +63,8 @@ export function toChatPreviewOpts(input: ChatPreviewInput): ChatPreviewOpts {
   if (input.tmux !== undefined && input.tmux !== false) opts.tmux = input.tmux;
   if (input.cwd) opts.cwd = input.cwd;
   if (input.prompt) opts.prompt = input.prompt;
+  // dropped before, so `--cli aider --runner lmstudio` was wired to Ollama's port
+  if (input.runner) opts.runner = input.runner;
   return opts;
 }
 

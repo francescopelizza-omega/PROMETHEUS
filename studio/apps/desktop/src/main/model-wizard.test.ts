@@ -15,7 +15,13 @@ import type { FetchLike } from "@prometheus/core";
 
 import { createModelWizard, invalidateKeychainCache } from "./model-wizard.js";
 
-function make(opts: { fetch?: FetchLike; env?: Record<string, string> } = {}) {
+function make(
+  opts: {
+    fetch?: FetchLike;
+    env?: Record<string, string>;
+    verifyOllama?: (tag: string) => Promise<{ ok: boolean; error?: string }>;
+  } = {},
+) {
   invalidateKeychainCache();
   const stored = new Map<string, string>();
   const home = mkdtempSync(join(tmpdir(), "model-wizard-"));
@@ -35,6 +41,7 @@ function make(opts: { fetch?: FetchLike; env?: Record<string, string> } = {}) {
     machine: () => ({ ramGb: 36, vramGb: 0, unified: true }),
     ollamaTags: async () => [],
     served: async () => [],
+    ...(opts.verifyOllama ? { verifyOllama: opts.verifyOllama } : {}),
   });
   return { w, stored, home };
 }
@@ -151,4 +158,23 @@ test("rotationForMain: members come from env/keychain here, keys resolve by ref"
   assert.equal(r.members[0]?.providerId, "cerebras", "highest-priority keyed member first");
   assert.equal(await r.resolveKey("env:CEREBRAS_API_KEY"), "csk");
   assert.equal(await r.resolveKey("garbage"), "");
+});
+
+test("choose: a local Ollama pick is adopted only when nemesis vouches for it NOW", async () => {
+  const asked: string[] = [];
+  const refuse = make({
+    verifyOllama: async (tag) => {
+      asked.push(tag);
+      return { ok: false, error: "nemesis could not verify the model" };
+    },
+  });
+  const r = await refuse.w.choose({ ref: "local:qwen3-8b@ollama" });
+  assert.equal(r.ok, false);
+  assert.match(r.ok ? "" : r.error, /not adopted/);
+  assert.equal(asked.length, 1);
+  const allow = make({ verifyOllama: async () => ({ ok: true }) });
+  assert.equal((await allow.w.choose({ ref: "local:qwen3-8b@ollama" })).ok, true);
+  // a pick served by llama.cpp is not an Ollama tag: no Ollama gate is asked for it
+  const other = make({ verifyOllama: async () => ({ ok: false }) });
+  assert.equal((await other.w.choose({ ref: "local:qwen3-8b@llamacpp" })).ok, true);
 });

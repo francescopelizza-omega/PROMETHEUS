@@ -67,6 +67,8 @@ export interface CallToolOptions {
 
 export class McpHostManager {
   private readonly live = new Map<string, McpClientTransport>();
+  /** connects in flight, by id — see `connect` */
+  private readonly connecting = new Map<string, Promise<McpServerConfig>>();
   private readonly deps: McpHostDeps;
 
   constructor(deps: McpHostDeps) {
@@ -116,6 +118,20 @@ export class McpHostManager {
    * to vouch for its own new definition.
    */
   async connect(id: string): Promise<McpServerConfig> {
+    // ONE connect per id at a time, and none for a server that is already live. A double click
+    // on Enable (or two panels connecting at startup) spawned a second transport whose
+    // `live.set` overwrote the first — an orphaned server process per extra call.
+    const inflight = this.connecting.get(id);
+    if (inflight) return inflight;
+    if (this.live.has(id)) return this.requireServer(id);
+    const run = this.connectOnce(id).finally(() => {
+      this.connecting.delete(id);
+    });
+    this.connecting.set(id, run);
+    return run;
+  }
+
+  private async connectOnce(id: string): Promise<McpServerConfig> {
     const cfg = this.requireServer(id);
     if (cfg.health === "blocked") {
       throw new Error(

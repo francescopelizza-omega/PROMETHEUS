@@ -102,10 +102,35 @@ a:hover {
   outline-offset: 2px;
 }
 
+/* Button feedback. The shared <Button> paints its variant with INLINE styles, which no
+   :hover rule can beat, so every button in the app had no hover and no pressed state — a
+   click gave nothing back until the action finished. `filter` is not set inline, so it can
+   carry the state for the filled variants; the transparent ones need a real fill, and an
+   inline background only yields to !important. */
+button[data-variant]:not(:disabled):hover {
+  filter: brightness(1.08);
+}
+button[data-variant="ghost"]:not(:disabled):hover {
+  background: var(--bg-active) !important;
+}
+button[data-variant="secondary"]:not(:disabled):hover {
+  border-color: var(--border-hover) !important;
+}
+button[data-variant]:not(:disabled):active {
+  filter: brightness(0.94);
+  transform: translateY(0.5px);
+}
+@media (prefers-reduced-motion: reduce) {
+  button[data-variant]:not(:disabled):active {
+    transform: none;
+  }
+}
+
 /* The indeterminate ProgressRing/Spinner rotation (Reliability & Polish pack). */
 @keyframes prom-spin {
+  /* a full turn: stopping at 270deg made every asymmetric spinner snap back once a loop */
   to {
-    transform: rotate(270deg);
+    transform: rotate(360deg);
   }
 }
 .prom-spin {
@@ -325,4 +350,11 @@ a:hover {
 .prom-reader-doc {
   font-style: italic;
   color: var(--text-secondary) !important;
+}
+
+/* Home's ask bar: its input has outline:0 (it sits inside a styled pill), so keyboard focus is
+   shown on the pill itself — it was invisible. Inline styles win over a plain rule, hence !important. */
+.prom-askbar:focus-within {
+  border-color: var(--focus-ring) !important;
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--focus-ring) 35%, transparent), var(--elevation-e2) !important;
 }

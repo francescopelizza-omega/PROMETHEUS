@@ -420,13 +420,17 @@ back. Positionals after `--` are always paths, so a folder named `-rf` is never 
 | `levels` | `PATH [--depth N=10] [--top K=20]` | `{ok, command:"disk.levels", root, levels:[{depth, rows:[{path, rawPath?, size}]}], summary}` |
 | `largest-files` | `PATH [--top K=100]` | `{ok, command:"disk.files", root, files:[{path, rawPath?, size, mtime}]}` |
 | `delete` | `PATH… [--trash\|--permanent] [--confirm] [--ack-high-risk]` | plan: `{ok, command:"disk.delete", planned:true, mode, items:[{path, size, sizeAtLeast?, risk, reason, protected, mode, trashDir?}], worstRisk, total, requiresPhrase, note}` · run: `{ok, command:"disk.delete", executed:true, mode, results:[{path, ok, msg}], deleted}` |
-| `privileged-rescan` | `PATH [--depth-cap N=12] [--min-size S=1M]` | `{ok, command:"disk.privileged-rescan", argv:[python, disk_space.py, "--no-sudo", "--log", "/dev/null", "--map-json", PATH, …], script:{path, size, sha256}, cwd:"/", why}` |
+| `privileged-rescan` | `PATH [--depth-cap N=12] [--depth N=6] [--min-size S=1M]` | `{ok, command:"disk.privileged-rescan", argv:[python, "-I", disk_space.py, "--no-sudo", "--log", "/dev/null", "--map-json", PATH, "--depth-cap", N, "--depth", N, "--min-size", S], script:{path, size, sha256}, cwd:"/", why}` |
 | `privileged-explorer` | `[PATH]` | `{ok, command:"disk.privileged-explorer", argv:[python, "-I", disk_space.py, "--no-sudo", "--log", "/dev/null", ("--map", PATH)], script:{path, size, sha256}, cwd:"/", why}` — the interactive TUI as root, for the gate's terminal mode (Studio: Open as administrator) |
 | `cleanup-plan` | — | `{ok, command:"disk.cleanup-plan", findings:[{id, title, category, size, reclaimable, mountpoint, risk, summary, actions:[{id, title, risk, needsRoot, needsInput, preview, requiresReboot, recommended, command}]}], errors}` (Linux; elsewhere `findings:[]` + `note`) |
 
 - **Tree payload.** Breadth-first, biggest first, capped at `--max-nodes`: the cap drops the
   smallest detail, a cut folder carries `more:<n>`, and the envelope says `truncated:true`.
   The runner's 64 MiB stdout ceiling is never the thing that stops a map.
+- **Paths** are taken with every parent folder's symlinks resolved and the last component left
+  alone (`as_path`), so a protection is judged at the item's real location; `--confirm` refuses
+  an item whose parent has become a symlink since the plan, and the delete itself opens the
+  parent component by component with `O_NOFOLLOW` (`open_parent_nofollow`).
 - **Delete** keeps every protection of the tool's own TUI. `path_protected` refuses system
   folders, home folders, mount points and anything containing a mount. It runs at PLAN time and
   again, per item, at `--confirm` time — never trusted from the plan. Nested selections collapse

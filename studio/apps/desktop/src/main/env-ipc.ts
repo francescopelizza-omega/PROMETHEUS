@@ -61,6 +61,7 @@ import {
   validatePkgToggle,
   validatePkgUpgrade,
 } from "./env-validate.js";
+import { consentToForce } from "./force-consent.js";
 
 /** Coerce an unknown caught value to a short error string. */
 // `errString` was a LOCAL copy here, one of twenty across main/*.ts, and every copy returned
@@ -226,7 +227,8 @@ export function registerEnvIpcHandlers(wiring: EnvIpcWiring = {}): () => void {
   });
 
   // ── env:clone — freeze → GATED reinstall ──────────────────────────────────
-  ipcMain.handle(IPC.envEnvClone, async (_evt, arg: unknown): Promise<EnvGatedResult> => {
+  ipcMain.handle(IPC.envEnvClone, async (_evt, rawArg: unknown): Promise<EnvGatedResult> => {
+    const arg = await consentToForce(_evt, IPC.envEnvClone, rawArg); // native consent for any force flag
     const v = validateEnvClone(arg);
     if (!v.ok) return { ok: false, error: v.error.message };
     try {
@@ -280,7 +282,8 @@ export function registerEnvIpcHandlers(wiring: EnvIpcWiring = {}): () => void {
   });
 
   // ── env:import — GATED installs ───────────────────────────────────────────
-  ipcMain.handle(IPC.envEnvImport, async (_evt, arg: unknown): Promise<EnvGatedResult> => {
+  ipcMain.handle(IPC.envEnvImport, async (_evt, rawArg: unknown): Promise<EnvGatedResult> => {
+    const arg = await consentToForce(_evt, IPC.envEnvImport, rawArg); // native consent for any force flag
     const v = validateEnvImport(arg);
     if (!v.ok) return { ok: false, error: v.error.message };
     try {
@@ -321,75 +324,87 @@ export function registerEnvIpcHandlers(wiring: EnvIpcWiring = {}): () => void {
   });
 
   // ── pkg:install — GATED (the SPINE) ───────────────────────────────────────
-  ipcMain.handle(IPC.envPkgInstall, async (evt: unknown, arg: unknown): Promise<EnvGatedResult> => {
-    const v = validatePkgInstall(arg);
-    if (!v.ok) return { ok: false, error: v.error.message };
-    const a = v.value;
-    const sender = senderOf(evt);
-    trackRun(a.runId);
-    emitEnvProgress(sender, a.runId, `staging ${a.spec.join(" ")} for gate…`);
-    try {
-      const opts: Parameters<typeof client.pkgInstall>[0] = {
-        envId: await resolveEnvRef(a.envId),
-        spec: a.spec,
-        confirm: a.confirm,
-        force: a.force,
-      };
-      if (a.scope !== undefined) opts.scope = a.scope;
-      return toGated(await client.pkgInstall(opts));
-    } catch (e) {
-      return { ok: false, error: errString(e) };
-    } finally {
-      untrackRun(a.runId);
-    }
-  });
+  ipcMain.handle(
+    IPC.envPkgInstall,
+    async (evt: unknown, rawArg: unknown): Promise<EnvGatedResult> => {
+      const arg = await consentToForce(evt, IPC.envPkgInstall, rawArg); // native consent for any force flag
+      const v = validatePkgInstall(arg);
+      if (!v.ok) return { ok: false, error: v.error.message };
+      const a = v.value;
+      const sender = senderOf(evt);
+      trackRun(a.runId);
+      emitEnvProgress(sender, a.runId, `staging ${a.spec.join(" ")} for gate…`);
+      try {
+        const opts: Parameters<typeof client.pkgInstall>[0] = {
+          envId: await resolveEnvRef(a.envId),
+          spec: a.spec,
+          confirm: a.confirm,
+          force: a.force,
+        };
+        if (a.scope !== undefined) opts.scope = a.scope;
+        return toGated(await client.pkgInstall(opts));
+      } catch (e) {
+        return { ok: false, error: errString(e) };
+      } finally {
+        untrackRun(a.runId);
+      }
+    },
+  );
 
   // ── pkg:update — GATED ────────────────────────────────────────────────────
-  ipcMain.handle(IPC.envPkgUpdate, async (evt: unknown, arg: unknown): Promise<EnvGatedResult> => {
-    const v = validatePkgInstall(arg);
-    if (!v.ok) return { ok: false, error: v.error.message };
-    const a = v.value;
-    const sender = senderOf(evt);
-    trackRun(a.runId);
-    emitEnvProgress(sender, a.runId, `staging ${a.spec.join(" ")} for gate…`);
-    try {
-      const opts: Parameters<typeof client.pkgUpdate>[0] = {
-        envId: await resolveEnvRef(a.envId),
-        spec: a.spec,
-        confirm: a.confirm,
-        force: a.force,
-      };
-      if (a.scope !== undefined) opts.scope = a.scope;
-      return toGated(await client.pkgUpdate(opts));
-    } catch (e) {
-      return { ok: false, error: errString(e) };
-    } finally {
-      untrackRun(a.runId);
-    }
-  });
+  ipcMain.handle(
+    IPC.envPkgUpdate,
+    async (evt: unknown, rawArg: unknown): Promise<EnvGatedResult> => {
+      const arg = await consentToForce(evt, IPC.envPkgUpdate, rawArg); // native consent for any force flag
+      const v = validatePkgInstall(arg);
+      if (!v.ok) return { ok: false, error: v.error.message };
+      const a = v.value;
+      const sender = senderOf(evt);
+      trackRun(a.runId);
+      emitEnvProgress(sender, a.runId, `staging ${a.spec.join(" ")} for gate…`);
+      try {
+        const opts: Parameters<typeof client.pkgUpdate>[0] = {
+          envId: await resolveEnvRef(a.envId),
+          spec: a.spec,
+          confirm: a.confirm,
+          force: a.force,
+        };
+        if (a.scope !== undefined) opts.scope = a.scope;
+        return toGated(await client.pkgUpdate(opts));
+      } catch (e) {
+        return { ok: false, error: errString(e) };
+      } finally {
+        untrackRun(a.runId);
+      }
+    },
+  );
 
   // ── pkg:upgrade — GATED bulk ──────────────────────────────────────────────
-  ipcMain.handle(IPC.envPkgUpgrade, async (evt: unknown, arg: unknown): Promise<EnvGatedResult> => {
-    const v = validatePkgUpgrade(arg);
-    if (!v.ok) return { ok: false, error: v.error.message };
-    const a = v.value;
-    const sender = senderOf(evt);
-    trackRun(a.runId);
-    emitEnvProgress(sender, a.runId, "resolving outdated set + staging for gate…");
-    try {
-      const opts: Parameters<typeof client.pkgUpgrade>[0] = {
-        envId: await resolveEnvRef(a.envId),
-        confirm: a.confirm,
-        force: a.force,
-      };
-      if (a.spec !== undefined) opts.spec = a.spec;
-      return toGated(await client.pkgUpgrade(opts));
-    } catch (e) {
-      return { ok: false, error: errString(e) };
-    } finally {
-      untrackRun(a.runId);
-    }
-  });
+  ipcMain.handle(
+    IPC.envPkgUpgrade,
+    async (evt: unknown, rawArg: unknown): Promise<EnvGatedResult> => {
+      const arg = await consentToForce(evt, IPC.envPkgUpgrade, rawArg); // native consent for any force flag
+      const v = validatePkgUpgrade(arg);
+      if (!v.ok) return { ok: false, error: v.error.message };
+      const a = v.value;
+      const sender = senderOf(evt);
+      trackRun(a.runId);
+      emitEnvProgress(sender, a.runId, "resolving outdated set + staging for gate…");
+      try {
+        const opts: Parameters<typeof client.pkgUpgrade>[0] = {
+          envId: await resolveEnvRef(a.envId),
+          confirm: a.confirm,
+          force: a.force,
+        };
+        if (a.spec !== undefined) opts.spec = a.spec;
+        return toGated(await client.pkgUpgrade(opts));
+      } catch (e) {
+        return { ok: false, error: errString(e) };
+      } finally {
+        untrackRun(a.runId);
+      }
+    },
+  );
 
   // ── pkg:remove — no gate (drops pkg, keeps pin) ───────────────────────────
   ipcMain.handle(IPC.envPkgRemove, async (_evt, arg: unknown): Promise<EnvMutationResult> => {
@@ -462,30 +477,35 @@ export function registerEnvIpcHandlers(wiring: EnvIpcWiring = {}): () => void {
   });
 
   // ── cuda:torch — GATED ────────────────────────────────────────────────────
-  ipcMain.handle(IPC.envCudaTorch, async (evt: unknown, arg: unknown): Promise<EnvGatedResult> => {
-    const v = validateCudaTorch(arg);
-    if (!v.ok) return { ok: false, error: v.error.message };
-    const a = v.value;
-    const sender = senderOf(evt);
-    trackRun(a.runId);
-    emitEnvProgress(sender, a.runId, "staging the CUDA-matched torch wheel for gate…");
-    try {
-      const opts: Parameters<typeof client.cudaTorch>[0] = {
-        envId: await resolveEnvRef(a.envId),
-        confirm: a.confirm,
-        force: a.force,
-      };
-      if (a.index !== undefined) opts.index = a.index;
-      return toGated(await client.cudaTorch(opts));
-    } catch (e) {
-      return { ok: false, error: errString(e) };
-    } finally {
-      untrackRun(a.runId);
-    }
-  });
+  ipcMain.handle(
+    IPC.envCudaTorch,
+    async (evt: unknown, rawArg: unknown): Promise<EnvGatedResult> => {
+      const arg = await consentToForce(evt, IPC.envCudaTorch, rawArg); // native consent for any force flag
+      const v = validateCudaTorch(arg);
+      if (!v.ok) return { ok: false, error: v.error.message };
+      const a = v.value;
+      const sender = senderOf(evt);
+      trackRun(a.runId);
+      emitEnvProgress(sender, a.runId, "staging the CUDA-matched torch wheel for gate…");
+      try {
+        const opts: Parameters<typeof client.cudaTorch>[0] = {
+          envId: await resolveEnvRef(a.envId),
+          confirm: a.confirm,
+          force: a.force,
+        };
+        if (a.index !== undefined) opts.index = a.index;
+        return toGated(await client.cudaTorch(opts));
+      } catch (e) {
+        return { ok: false, error: errString(e) };
+      } finally {
+        untrackRun(a.runId);
+      }
+    },
+  );
 
   // ── cuda:install — prints the OS plan + gates any downloaded installer ─────
-  ipcMain.handle(IPC.envCudaInstall, async (_evt, arg: unknown): Promise<EnvMutationResult> => {
+  ipcMain.handle(IPC.envCudaInstall, async (_evt, rawArg: unknown): Promise<EnvMutationResult> => {
+    const arg = await consentToForce(_evt, IPC.envCudaInstall, rawArg); // native consent for any force flag
     const v = validateCudaInstall(arg);
     if (!v.ok) return { ok: false, error: v.error.message };
     try {

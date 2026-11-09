@@ -779,3 +779,21 @@ test("remoteUrl runs `remote get-url -- <name>` (option-injection-guarded)", asy
   assert.equal(url, "git@github.com:o/r.git");
   assert.deepEqual(calls[0], ["remote", "get-url", "--", "origin"]);
 });
+
+test("defaultGitRunner: a repository's core.fsmonitor never runs (opening a folder ≠ running its code)", async () => {
+  const { mkdtempSync, writeFileSync, existsSync, rmSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const r = mkdtempSync(join(tmpdir(), "prom-fsmon-"));
+  try {
+    await defaultGitRunner(r, ["init", "-q"]);
+    const marker = join(r, "pwned");
+    const hook = join(r, "hook.sh");
+    writeFileSync(hook, `#!/bin/sh\ntouch '${marker}'\n`, { mode: 0o755 });
+    await defaultGitRunner(r, ["config", "core.fsmonitor", hook]);
+    await defaultGitRunner(r, ["status", "--porcelain"]);
+    assert.equal(existsSync(marker), false, "git status executed the repo's fsmonitor command");
+  } finally {
+    rmSync(r, { recursive: true, force: true });
+  }
+});

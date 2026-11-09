@@ -79,6 +79,8 @@ export interface TerminalChatOpts {
   cwd?: string;
   /** one-shot prompt (omit → interactive). */
   prompt?: string;
+  /** the local server a local-model agent (hermes/aider/goose/opencode) is wired to. */
+  runner?: string;
   /** the ONLY engine gateway (C5) — shared with the rest of the CLI/session. */
   client: EngineClient;
   /** machine output mode (drives the preview JSON payload). */

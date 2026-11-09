@@ -161,6 +161,7 @@ export function EditorRoute({
   treeOverlay = false,
   subPanel,
   onSubPanel,
+  active = true,
 }: {
   /** jump to another shell activity (Model Hub / Chat) — threaded to the AgentPane CTAs. */
   onNavigate?: (id: ActivityId) => void;
@@ -181,6 +182,13 @@ export function EditorRoute({
    */
   subPanel?: string;
   onSubPanel?: (id: string) => void;
+  /**
+   * Whether the editor is the VISIBLE route. The shell keeps this route mounted (hidden) after
+   * the first visit, and its window-level shortcuts had no idea: on Models or Home, ⌘P/⌘⇧P
+   * opened a palette inside the invisible editor (whose focus trap then ate every Tab), ⌘O
+   * opened a file nobody could see. Every global listener here is armed only while active.
+   */
+  active?: boolean;
 } = {}): ReactElement {
   // Controlled-or-not, the standard pattern: the shell drives this in the app, and the route
   // keeps working with no props at all.
@@ -549,6 +557,7 @@ export function EditorRoute({
 
   // global keybinds: Cmd/Ctrl-Shift-P (commands), Cmd/Ctrl-P (quick-open), double-⇧ (all).
   useEffect(() => {
+    if (!active) return;
     // JetBrains "Search Everywhere" = a double-tap of Shift (two lone Shift keydowns within
     // ~350ms, nothing between) → open the fused popup on the All tab (APP-021).
     let lastShift = 0;
@@ -621,7 +630,7 @@ export function EditorRoute({
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [navigateTo, stepNav]);
+  }, [navigateTo, stepNav, active]);
 
   // Open a real project folder (workspaceRoot was hardcoded to "." → the explorer, git
   // panel, and run-gate all scoped the process CWD, not the user's project).
@@ -646,6 +655,7 @@ export function EditorRoute({
 
   // ⌘O / Ctrl-O → the native open-file picker (PyCharm/VS Code parity).
   useEffect(() => {
+    if (!active) return;
     const onKey = (e: KeyboardEvent): void => {
       if ((e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey && e.key.toLowerCase() === "o") {
         e.preventDefault();
@@ -654,7 +664,7 @@ export function EditorRoute({
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, []);
+  }, [active]);
 
   /** Dispatch a palette command id (maps the always-present surface to the shell). */
   const runCommand = useCallback(
@@ -726,7 +736,18 @@ export function EditorRoute({
         case "gate.showLog":
         case "prometheus.scan":
         case "prometheus.audit":
-          setActivity("debug");
+          // These used to open the DEBUG panel and run nothing, while the same ids from the
+          // shell palette went to Security. Both paths now land on Security, and a workspace
+          // scan is started there against the open folder.
+          window.dispatchEvent(
+            new CustomEvent("prometheus:navigate", {
+              detail: {
+                activity: "security",
+                action: id,
+                ...(id === "gate.runWorkspaceScan" && root ? { target: root } : {}),
+              },
+            }),
+          );
           break;
         case "editor.newScratchFile": {
           // a throwaway in-memory buffer (no project folder needed); EditorPane handles
@@ -808,6 +829,12 @@ export function EditorRoute({
           if (cfg && root) {
             setActivity("debug");
             void useRunSessionStore.getState().startByName(cfg.name, runConfigs, root);
+          } else {
+            // used to do nothing at all. There is no global toast bus (APP-019), so: with a
+            // folder open, offer "Run Anything" to pick or create a configuration; without
+            // one, say plainly what is missing.
+            if (root) setPalette("run");
+            else window.alert("Open a folder first: run configurations belong to a workspace.");
           }
           break;
         }

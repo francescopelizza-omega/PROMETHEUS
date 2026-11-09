@@ -765,7 +765,7 @@ export function CommandPalette(props: CommandPaletteProps): ReactElement {
                     </span>
                     <span
                       style={{
-                        fontSize: "0.72rem",
+                        fontSize: "0.75rem",
                         color: "var(--text-secondary)",
                         overflow: "hidden",
                         textOverflow: "ellipsis",
@@ -779,7 +779,7 @@ export function CommandPalette(props: CommandPaletteProps): ReactElement {
                   {tab === "all" && (
                     <span
                       style={{
-                        fontSize: "0.6rem",
+                        fontSize: "0.75rem",
                         textTransform: "uppercase",
                         color: "var(--text-secondary)",
                         border: "1px solid var(--border-subtle)",

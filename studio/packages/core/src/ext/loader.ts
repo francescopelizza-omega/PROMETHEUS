@@ -35,9 +35,32 @@ export function permissionSummary(perms: ExtPermissions | undefined): string[] {
   return lines;
 }
 
-/** The nemesis gate target for a manifest: its source repo, else the staging dir. */
-export function gateTargetFor(manifest: ExtensionManifest, stagingDir: string): string {
-  return manifest.repo ?? stagingDir;
+/**
+ * The nemesis gate target for a manifest: ALWAYS the directory whose code will run.
+ *
+ * It used to be `manifest.repo ?? stagingDir` — and `repo` is a string inside the untrusted
+ * archive, so a `.promext` naming any benign repository had THAT repo scanned while its own
+ * `main.js` was installed and run unscanned. The repo is still worth scanning; see
+ * `gateTargetsFor`.
+ */
+export function gateTargetFor(_manifest: ExtensionManifest, stagingDir: string): string {
+  return stagingDir;
+}
+
+/** Every target that must pass the gate: the code that runs, and the declared source repo. */
+export function gateTargetsFor(manifest: ExtensionManifest, stagingDir: string): string[] {
+  return manifest.repo ? [stagingDir, manifest.repo] : [stagingDir];
+}
+
+/** `main` must be a relative JS module INSIDE the extension: `../../x` loaded any file on disk. */
+export function mainEntryError(main: string | undefined): string | undefined {
+  const m = main ?? "main.js";
+  if (m.startsWith("/") || m.includes("\\") || m.includes("\0"))
+    return "main must be a relative path";
+  if (m.split("/").some((seg) => seg === ".." || seg === ""))
+    return "main must stay inside the extension";
+  if (!/\.(mjs|cjs|js)$/.test(m)) return "main must be a .js/.mjs/.cjs module";
+  return undefined;
 }
 
 export interface InstallPlan {

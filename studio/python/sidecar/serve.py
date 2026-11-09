@@ -67,6 +67,7 @@ def build_serve_profile(
     fit: Dict[str, Any],
     gguf_path: Optional[str] = None,
     hf_id: Optional[str] = None,
+    model_dir: Optional[str] = None,
     ctx_len: int = 8192,
     n_layers: int = 32,
     gpu_count: int = 1,
@@ -105,8 +106,13 @@ def build_serve_profile(
         args["max_model_len"] = ctx_len
         kv = "fp8" if caps.get("fp8") else "auto"
         args["kv_cache_dtype"] = kv
+        # The ADMITTED local directory, never a repo id: `vllm serve <org/name>` makes vLLM
+        # download the weights from Hugging Face itself, past the nemesis gate.
+        if not model_dir:
+            raise ValueError("vLLM serves only a model directory the gate admitted (--src)")
         argv = [
-            "vllm", "serve", hf_id or model_id,
+            "vllm", "serve", model_dir,
+            "--served-model-name", model_id,
             "--tensor-parallel-size", str(tp),
             "--max-model-len", str(ctx_len),
             "--host", host, "--port", str(port),

@@ -42,3 +42,39 @@ test("execTimeoutMs: a BACKGROUND job is budgeted as a lifetime, not as a turn s
   assert.equal(execTimeoutMs("background", 0), DEFAULT_BACKGROUND_TIMEOUT_MS);
   assert.equal(execTimeoutMs("background", -1), DEFAULT_BACKGROUND_TIMEOUT_MS);
 });
+
+test("a pipeline whose tail exits early ends like a shell's: no EPIPE crash, no runaway head", async () => {
+  /**
+   * `yes | head -1`: head exits after one line. The next chunk `yes` wrote into head's closed
+   * stdin raised EPIPE with no listener — an uncaughtException that ended the whole TUI session —
+   * and nothing told `yes` to stop, so it ran until the 30 s timeout and reported exit 124.
+   */
+  const { parseCommand } = await import("../../exec/index.js");
+  const { runParsedCommand } = await import("./exec-runner.js");
+  const p = parseCommand("yes | head -1", { vars: {} });
+  assert.ok(p.ok);
+  let uncaught: unknown;
+  const onUncaught = (e: unknown) => {
+    uncaught = e;
+  };
+  process.on("uncaughtException", onUncaught);
+  try {
+    const ac = new AbortController();
+    const r = await runParsedCommand(p.command, {
+      cwd: process.cwd(),
+      sandbox: { kind: "none", reason: "test" },
+      timeoutMs: 10_000,
+      signal: ac.signal,
+    });
+    assert.equal(r.stdout.trim(), "y");
+    assert.equal(r.timedOut, false, "the head was stopped, not timed out");
+    assert.equal(r.exitCode, 0);
+    assert.ok(r.durationMs < 5_000, `took ${r.durationMs} ms`);
+    // the turn's signal is no longer holding this pipeline's abort handler
+    ac.abort();
+    await new Promise((res) => setTimeout(res, 50));
+  } finally {
+    process.off("uncaughtException", onUncaught);
+  }
+  assert.equal(uncaught, undefined, `uncaught: ${String(uncaught)}`);
+});

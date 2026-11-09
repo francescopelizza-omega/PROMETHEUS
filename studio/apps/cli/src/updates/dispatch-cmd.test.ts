@@ -239,6 +239,8 @@ function harness(
       });
     },
     freeDiskBytes: o.free ?? (() => 100e9),
+    gate: async () => ({ ok: true }),
+    discard: async () => undefined,
     runtimeFormula: () => o.runtime,
     getPermMode: () => o.perm,
     ctrlCIsAbort: () => o.ctrlCIsAbort ?? true,

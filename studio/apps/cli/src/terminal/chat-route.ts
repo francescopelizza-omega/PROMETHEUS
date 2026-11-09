@@ -84,6 +84,7 @@ export async function routeTerminalChat(
     open: ctx.previewOnly ? false : parsed.flags.open === true,
     ...(tmuxFlag !== undefined ? { tmux: tmuxFlag === true ? true : String(tmuxFlag) } : {}),
     ...(flagStr(parsed.flags, "model") ? { model: flagStr(parsed.flags, "model") } : {}),
+    ...(flagStr(parsed.flags, "runner") ? { runner: flagStr(parsed.flags, "runner") } : {}),
     ...(flagStr(parsed.flags, "system-prompt")
       ? { systemPrompt: flagStr(parsed.flags, "system-prompt") }
       : {}),

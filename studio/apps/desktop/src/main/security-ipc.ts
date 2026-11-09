@@ -64,6 +64,7 @@ import {
   type SecurityUrlAuditResult,
 } from "../shared/ipc-contract.js";
 import type { IpcErrorShape } from "./arg-guards.js";
+import { consentToForce } from "./force-consent.js";
 import {
   type GateArgs,
   type RemediateArgs,
@@ -224,7 +225,8 @@ export function registerSecurityIpcHandlers(wiring: SecurityIpcWiring = {}): () 
   // ── security:install — the gated install (§5); engine runs nemesis itself ──
   ipcMain.handle(
     IPC.securityInstall,
-    async (evt: unknown, arg: unknown): Promise<EnvelopeResult> => {
+    async (evt: unknown, rawArg: unknown): Promise<EnvelopeResult> => {
+      const arg = await consentToForce(evt, IPC.securityInstall, rawArg); // native consent for any force flag
       const v = validateSecurityInstall(arg);
       if (!v.ok) return { ok: false, error: v.error.message };
       const a: SecurityInstallArgs = v.value;

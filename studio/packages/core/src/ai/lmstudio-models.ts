@@ -37,7 +37,10 @@ export function runnerIdForUrl(
 ): string {
   const port = portOf(baseUrl);
   if (port === undefined) return "ollama";
-  return localRunners(env).find((r) => r.port === port)?.id ?? "ollama";
+  return (
+    localRunners(env).find((r) => r.port === port || (r.altPorts ?? []).includes(port))?.id ??
+    "ollama"
+  );
 }
 
 /** `scheme://host` of a URL, brackets kept on an IPv6 literal. */

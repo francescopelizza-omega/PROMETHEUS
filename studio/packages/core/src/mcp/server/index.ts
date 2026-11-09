@@ -3,7 +3,7 @@
 /**
  * mcp/server/index.ts — the embedded MCP server surface barrel (file 09 §1/§3).
  *
- * Exposes the unified tool catalog (the 14 ported PROMETHEUS_TOOLS + the 5
+ * Exposes the unified tool catalog (the 20 PROMETHEUS_TOOLS + the 4
  * STUDIO_TOOLS = 19), the pure arg validator + engine-dispatch runner, and the
  * computeIsError policy. `@prometheus/core` re-exports these so the agent runtime
  * (§4) reads the SAME annotations the external SDK-facing server uses, and the
@@ -20,7 +20,7 @@ export { validateArgs, runMcpTool } from "./runner.js";
 import { PROMETHEUS_TOOLS, type ToolDef } from "./tools.js";
 import { STUDIO_TOOLS } from "./tools.studio.js";
 
-/** The full tool catalog the embedded server exposes (14 ported + 5 studio = 19). */
+/** The full tool catalog the embedded server exposes (20 ported + 4 studio = 24). */
 export const TOOLS: ToolDef[] = [...PROMETHEUS_TOOLS, ...STUDIO_TOOLS];
 
 const BY_NAME = new Map<string, ToolDef>(TOOLS.map((t) => [t.name, t]));

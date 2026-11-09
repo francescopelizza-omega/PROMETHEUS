@@ -16,7 +16,7 @@ import { join, resolve, sep } from "node:path";
 import { describeEngineFailure } from "@prometheus/engine-bridge";
 
 import { ext as coreExt } from "@prometheus/core";
-import { ipcMain } from "electron";
+import { BrowserWindow, dialog, ipcMain } from "electron";
 
 import {
   type ExtActivateResult,
@@ -190,9 +190,23 @@ export function registerExtIpcHandlers(opts: ExtIpcOptions): () => void {
     },
   });
 
+  /** activation failures at startup, by extension id — reported by extList, never dropped. */
+  const activationErrors = new Map<string, string>();
+  /** the last registry write failure (cleared on the next successful write). */
+  let persistError: string | undefined;
+
   async function persistRegistry(next: ExtRegistry): Promise<void> {
     registry = next;
-    await writeRegistry(opts.registryPath, next).catch(() => undefined);
+    // A failed write used to vanish into `.catch(() => undefined)`: the toggle worked until
+    // the next launch and then silently reverted. Keep the reason and show it in the list.
+    await writeRegistry(opts.registryPath, next).then(
+      () => {
+        persistError = undefined;
+      },
+      (e: unknown) => {
+        persistError = errString(e);
+      },
+    );
   }
 
   /** Scan the extensions dir + load the registry, then (once) ACTIVATE every ENABLED
@@ -207,8 +221,13 @@ export function registerExtIpcHandlers(opts: ExtIpcOptions): () => void {
     for (const id of enabledIds(registry)) {
       const entry = installed.get(id);
       if (!entry || manager.active().includes(id)) continue;
-      const mainPath = join(entry.installPath, entry.manifest.main ?? "main.js");
-      await manager.activate(entry.manifest, mainPath).catch(() => undefined);
+      const mainPath = safeMainPath(entry.installPath, entry.manifest.main);
+      await manager.activate(entry.manifest, mainPath).then(
+        () => activationErrors.delete(id),
+        (e: unknown) => {
+          activationErrors.set(id, errString(e));
+        },
+      );
     }
   }
 
@@ -225,8 +244,11 @@ export function registerExtIpcHandlers(opts: ExtIpcOptions): () => void {
         enabled: isEnabled(registry, e.manifest.id),
         permissions: coreExt.permissionSummary(e.manifest.permissions),
         ...(registry[e.manifest.id]?.verdict ? { verdict: registry[e.manifest.id]?.verdict } : {}),
+        ...(activationErrors.has(e.manifest.id)
+          ? { activationError: activationErrors.get(e.manifest.id) as string }
+          : {}),
       }));
-      return { ok: true, extensions };
+      return { ok: true, extensions, ...(persistError ? { persistError } : {}) };
     } catch (e) {
       return { ok: false, error: errString(e) };
     }
@@ -243,6 +265,22 @@ export function registerExtIpcHandlers(opts: ExtIpcOptions): () => void {
         stagingRoot: opts.stagingRoot,
         studioVersion: opts.studioVersion,
         gate: opts.gate,
+        // Native, main-owned consent: the renderer only supplied a path.
+        confirm: async (m, perms) => {
+          const win = BrowserWindow.getFocusedWindow();
+          const options = {
+            type: "question" as const,
+            buttons: ["Install", "Cancel"],
+            defaultId: 1,
+            cancelId: 1,
+            message: `Install extension "${m.label ?? m.id}"${m.version ? ` ${m.version}` : ""}?`,
+            detail: `It passed the nemesis scan. It will be allowed to:\n\n${perms.join("\n")}`,
+          };
+          const r = win
+            ? await dialog.showMessageBox(win, options)
+            : await dialog.showMessageBox(options);
+          return r.response === 0;
+        },
       });
       installed.set(res.id, { manifest: res.manifest, installPath: res.installPath });
       return { ok: true, id: res.id, installPath: res.installPath };
@@ -260,12 +298,17 @@ export function registerExtIpcHandlers(opts: ExtIpcOptions): () => void {
     if (!entry) return { ok: false, error: `not installed: ${id}` };
     try {
       await ensureScanned();
-      const mainPath = join(entry.installPath, entry.manifest.main ?? "main.js");
+      const mainPath = safeMainPath(entry.installPath, entry.manifest.main);
       await manager.activate(entry.manifest, mainPath);
+      // A startup failure that a later, successful activate fixed must stop being reported:
+      // extList kept showing "enabled but failed to start" for an extension that was running.
+      activationErrors.delete(id);
       // persist the DESIRED enabled state so it's restored at the next startup (APP-060).
       await persistRegistry(setEnabled(registry, id, true));
       return { ok: true };
     } catch (e) {
+      // and a failed manual activate IS one — the list said nothing about it before
+      activationErrors.set(id, errString(e));
       return { ok: false, error: errString(e) };
     }
   });
@@ -277,6 +320,7 @@ export function registerExtIpcHandlers(opts: ExtIpcOptions): () => void {
     try {
       await ensureScanned();
       await manager.deactivate(id);
+      activationErrors.delete(id); // disabled: "enabled but failed to start" no longer applies
       await persistRegistry(setEnabled(registry, id, false)); // disabled → won't auto-activate
       return { ok: true };
     } catch (e) {
@@ -330,4 +374,17 @@ export function registerExtIpcHandlers(opts: ExtIpcOptions): () => void {
       ipcMain.removeHandler(channel);
     }
   };
+}
+
+/**
+ * The extension's entry module, refused unless it is a relative JS module INSIDE its install
+ * dir (an older install could carry `main: "../../x.js"`, which loaded any file on disk).
+ */
+function safeMainPath(installPath: string, main: string | undefined): string {
+  const bad = coreExt.mainEntryError(main);
+  if (bad) throw new Error(`extension entry refused: ${bad}`);
+  const full = resolve(installPath, main ?? "main.js");
+  if (!full.startsWith(resolve(installPath) + sep))
+    throw new Error("extension entry escapes its folder");
+  return full;
 }

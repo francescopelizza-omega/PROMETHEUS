@@ -27,12 +27,12 @@
  * arg-validation lives in ide-validate.ts (zod-double-tested, no electron).
  */
 
-import { constants as fsConstants } from "node:fs";
+import { constants as fsConstants, readFileSync } from "node:fs";
 import { access } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join, resolve, sep } from "node:path";
 
-import { ipcMain } from "electron";
+import { dialog, ipcMain } from "electron";
 
 import {
   type EngineConfig,
@@ -52,6 +52,7 @@ import {
   settings as coreSettings,
 } from "@prometheus/core";
 import { DEFAULT_AUTH_LEVEL } from "@prometheus/core/agent-authorization";
+import { isMcpToolName } from "@prometheus/core/agent-protocol";
 import { isHostDispatchTool } from "@prometheus/core/agent-system";
 import { isPathAllowed, pathArgsOf, scopedAbsolute } from "@prometheus/core/agent-system-host";
 import {
@@ -65,6 +66,15 @@ import {
   saveGrants,
 } from "@prometheus/core/agent-system-host";
 
+import {
+  type ApprovalLedger,
+  type NativeApprover,
+  approvalPrompt,
+  askApproval,
+  electronNativeApprover,
+  mainNeedsApproval,
+  sharedApprovals,
+} from "./agent-approvals.js";
 import { browserToolHostDeps } from "./browser-tool-host.js";
 import { privilegedGrantRefusal } from "./privileged-approver.js";
 import { studioPrivilegedGate } from "./privileged-ipc.js";
@@ -147,6 +157,8 @@ import {
   type SystemTelemetry,
 } from "../shared/ipc-contract.js";
 import type {
+  AgentApproveToolCallRequest,
+  AgentApproveToolCallResult,
   AgentCanaryTripRequest,
   AgentCanaryTripResult,
   AgentEngineToolRequest,
@@ -360,6 +372,14 @@ export type RunWorkerTask = (
 
 /** The hosts + config the IDE IPC relays to (injected so the binaries stay decoupled). */
 export interface IdeIpcWiring {
+  /**
+   * The native "Allow the agent to …?" prompt main shows when its own ladder needs a human and
+   * the call carries no approval token (agent-approvals.ts). Injected so tests never open a
+   * dialog; production uses Electron's.
+   */
+  nativeApprover?: NativeApprover;
+  /** the approval ledger (tests); production shares one with mcp-ipc */
+  approvals?: ApprovalLedger;
   lsp: LspHost;
   dap: DapHost;
   pty: PtyHost;
@@ -599,6 +619,9 @@ export function clampAuthLevelForElevation(level: number): number {
 
 export function registerIdeIpcHandlers(wiring: IdeIpcWiring): () => void {
   const { lsp, dap, pty, git, fsWatch, prGateway } = wiring;
+  // single-use approval tokens for agent tool calls a human approved (agent-approvals.ts)
+  const approvals = wiring.approvals ?? sharedApprovals;
+  const nativeApprover: NativeApprover = wiring.nativeApprover ?? electronNativeApprover;
   const history = wiring.localHistory; // APP-063: Local History (optional; fail-soft)
   const config = wiring.engineConfig ?? {};
   const broadcast = wiring.broadcast ?? (() => {});
@@ -786,7 +809,7 @@ export function registerIdeIpcHandlers(wiring: IdeIpcWiring): () => void {
       return { ok: false, error: errString(e) };
     }
   });
-  ipcMain.handle(IPC.ideApproveOutside, (_e, arg: unknown): IdeOkResult => {
+  ipcMain.handle(IPC.ideApproveOutside, async (_e, arg: unknown): Promise<IdeOkResult> => {
     const o = arg as { path?: unknown; scope?: unknown } | null;
     try {
       if (o?.scope === "clear") {
@@ -796,7 +819,21 @@ export function registerIdeIpcHandlers(wiring: IdeIpcWiring): () => void {
       if (typeof o?.path !== "string" || !o.path) return { ok: false, error: "path required" };
       // a path already inside the set needs no approval — recording it would only grow
       // the exception list with entries that mean nothing.
-      if (!isInsideWorkingSet(o.path)) approveOutsideWorkingSet(o.path);
+      if (isInsideWorkingSet(o.path)) return { ok: true };
+      // This call WIDENS the main-process scope guard, so the renderer's own card is not
+      // enough: a compromised renderer could approve its own writes anywhere. Main shows the
+      // exact path natively; sensitive targets stay refused at write time regardless.
+      const path = assertNotSensitivePath(o.path);
+      const r = await dialog.showMessageBox({
+        type: "warning",
+        buttons: ["Cancel", "Allow"],
+        defaultId: 0,
+        cancelId: 0,
+        message: "Allow a write outside the project?",
+        detail: path,
+      });
+      if (r.response !== 1) return { ok: false, error: "declined" };
+      approveOutsideWorkingSet(path);
       return { ok: true };
     } catch (e) {
       return { ok: false, error: errString(e) };
@@ -1198,6 +1235,11 @@ export function registerIdeIpcHandlers(wiring: IdeIpcWiring): () => void {
   ipcMain.handle(IPC.idePtySpawn, async (_e, arg: unknown): Promise<IdePtySpawnResult> => {
     const v = validatePtySpawn(arg);
     if (!v.ok) return { ok: false, error: v.error.message };
+    // The shell must be a REGISTERED login shell (`/etc/shells`, or the user's `$SHELL`), never an
+    // arbitrary path the renderer names — otherwise "open a terminal" is "exec this file".
+    if (v.value.shell && !isRegisteredShell(v.value.shell)) {
+      return { ok: false, error: `not a registered shell: ${v.value.shell}` };
+    }
     try {
       const { ptyId } = pty.spawn({
         cwd: v.value.cwd,
@@ -1639,6 +1681,31 @@ export function registerIdeIpcHandlers(wiring: IdeIpcWiring): () => void {
    * only way the two stay identical, since every previous attempt at "keep them in sync by
    * being careful" is what produced the split.
    */
+  /**
+   * `agent:approveToolCall` — the pane reports that a human (its task card, or a remembered
+   * grant) approved ONE exact call; main mints a single-use token bound to that call's name and
+   * arguments, which `agent:systemTool` consumes. See main/agent-approvals.ts for what this does
+   * and does not protect against.
+   */
+  ipcMain.handle(
+    IPC.agentApproveToolCall,
+    async (_e, arg: unknown): Promise<AgentApproveToolCallResult> => {
+      const req = arg as AgentApproveToolCallRequest | null;
+      // host-dispatched tools (agent:systemTool) and MCP tools (mcp:agent-call, `mcp__srv__tool`)
+      if (
+        !req ||
+        typeof req.name !== "string" ||
+        !(isHostDispatchTool(req.name) || isMcpToolName(req.name))
+      ) {
+        return { ok: false, error: "agent:approveToolCall: unknown tool" };
+      }
+      if (!req.args || typeof req.args !== "object" || Array.isArray(req.args)) {
+        return { ok: false, error: "agent:approveToolCall: malformed args" };
+      }
+      return { ok: true, token: approvals.mint(req.name, req.args) };
+    },
+  );
+
   ipcMain.handle(IPC.agentSystemTool, async (_e, arg: unknown): Promise<AgentSystemToolResult> => {
     const req = arg as AgentSystemToolRequest | null;
     if (!req || typeof req.name !== "string" || typeof req.cwd !== "string") {
@@ -1654,6 +1721,42 @@ export function registerIdeIpcHandlers(wiring: IdeIpcWiring): () => void {
     }
     try {
       const cwd = assertNotSensitivePath(req.cwd);
+      const toolArgs = (req.args && typeof req.args === "object" ? req.args : {}) as Record<
+        string,
+        unknown
+      >;
+      // The level main ENFORCES: the renderer's claim, clamped to the saved file, the posture
+      // and sudo. The same number confines run_command's sandbox below and decides here whether
+      // a human must approve — main's own ladder, not the renderer's (agent-approvals.ts).
+      const clampedLevel = clampAuthLevelToSaved(
+        clampAuthLevelForPosture(
+          clampAuthLevelForElevation(
+            Math.max(
+              0,
+              Math.min(
+                Math.trunc(typeof req.authLevel === "number" ? req.authLevel : DEFAULT_AUTH_LEVEL),
+                7,
+              ),
+            ),
+          ),
+        ),
+      );
+      {
+        const scopeRoots = getWorkingSetRoots();
+        const roots = scopeRoots.length > 0 ? [...scopeRoots] : [cwd];
+        const insideWorkingSet = pathArgsOf(toolArgs).every((p) => {
+          const abs = scopedAbsolute(p, cwd);
+          return isInsideWorkingSet(abs) || isPathAllowed(abs, roots);
+        });
+        const approved = approvals.consume(req.approval, req.name, toolArgs);
+        if (
+          !approved &&
+          mainNeedsApproval(req.name, toolArgs, { level: clampedLevel, insideWorkingSet }) &&
+          !(await askApproval(nativeApprover, approvalPrompt(req.name, toolArgs)))
+        ) {
+          return { ok: false, summary: `denied: you did not approve ${req.name}` };
+        }
+      }
       // web_fetch / web_search — the only tools here that leave the machine, so the network
       // policy is applied before the request is built. `defaultNetwork` was declared, shown in
       // Settings and read by nothing but the model endpoint; this is its first real consumer
@@ -1736,15 +1839,7 @@ export function registerIdeIpcHandlers(wiring: IdeIpcWiring): () => void {
         // The operator's A0–A7 level, CLAMPED — see AgentSystemToolRequest.authLevel. It is
         // what `run_command`'s OS sandbox consults to decide whether this call may reach the
         // network, and it is what the exec audit records. Absent ⇒ core's safe default.
-        ...(typeof req.authLevel === "number"
-          ? {
-              authLevel: clampAuthLevelToSaved(
-                clampAuthLevelForPosture(
-                  clampAuthLevelForElevation(Math.max(0, Math.min(Math.trunc(req.authLevel), 7))),
-                ),
-              ),
-            }
-          : {}),
+        ...(typeof req.authLevel === "number" ? { authLevel: clampedLevel } : {}),
       });
       if (!out)
         return { ok: false, summary: `agent:systemTool: "${req.name}" is not a system tool` };
@@ -1890,14 +1985,24 @@ export function registerIdeIpcHandlers(wiring: IdeIpcWiring): () => void {
    * scan, no branch on content — a trip is already the signal, and this handler's only job is
    * to make sure it is not lost.
    */
+  let canaryWindowStart = 0;
+  let canaryWrites = 0;
   ipcMain.handle(IPC.agentCanaryTrip, async (_e, arg: unknown): Promise<AgentCanaryTripResult> => {
     const req = arg as AgentCanaryTripRequest | null;
     if (!req || typeof req.textSnippet !== "string") {
       return { ok: false };
     }
+    // Capped and rate-limited: the renderer writes this file through us, so an unbounded
+    // snippet (or a loop) would let it fill the disk under ~/.prometheus one call at a time.
+    const now = Date.now();
+    if (now - canaryWindowStart > 60_000) {
+      canaryWindowStart = now;
+      canaryWrites = 0;
+    }
+    if (++canaryWrites > 30) return { ok: false };
     appendCanaryAudit(prometheusHome(), {
       event: "canary-tripped",
-      textSnippet: req.textSnippet,
+      textSnippet: req.textSnippet.slice(0, 2048),
     });
     return { ok: true };
   });
@@ -2738,6 +2843,7 @@ export function registerIdeIpcHandlers(wiring: IdeIpcWiring): () => void {
       IPC.ideCommandFilesList,
       IPC.ideGate,
       IPC.agentSystemTool,
+      IPC.agentApproveToolCall,
       IPC.agentGrantsList,
       IPC.agentGrantsAdd,
       IPC.agentEngineTool,
@@ -2813,4 +2919,19 @@ export function registerIdeIpcHandlers(wiring: IdeIpcWiring): () => void {
     runHost?.off("exit", onRunExit as (...a: unknown[]) => void);
     fsWatch.off("change", onFsChange as (...a: unknown[]) => void);
   };
+}
+
+/** True when `shell` is listed in `/etc/shells` or is the user's own `$SHELL`. */
+export function isRegisteredShell(shell: string, shellsFile = "/etc/shells"): boolean {
+  if (process.platform === "win32") return true; // no /etc/shells; node-pty resolves cmd/pwsh itself
+  if (shell === process.env.SHELL) return true;
+  try {
+    return readFileSync(shellsFile, "utf8")
+      .split("\n")
+      .map((l) => l.trim())
+      .filter((l) => l && !l.startsWith("#"))
+      .includes(shell);
+  } catch {
+    return false;
+  }
 }

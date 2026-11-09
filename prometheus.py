@@ -437,8 +437,12 @@ import hmac
 import json
 import os
 import platform
+import re
+import secrets
 import shlex
 import shutil
+import signal
+import stat
 import subprocess
 import sys
 import tarfile
@@ -586,8 +590,12 @@ class Log:
     def warn(cls, msg: str) -> None:
         print(f"{cls._c('WARN', 'yellow')} {msg}", file=cls.STREAM)
 
+    LAST_ERR: Optional[str] = None   # the newest err() text — main() puts it in a --json
+                                     # fallback envelope when a handler emitted nothing
+
     @classmethod
     def err(cls, msg: str) -> None:
+        cls.LAST_ERR = msg
         print(f"{cls._c('FAIL', 'red')} {msg}", file=sys.stderr)
 
     @classmethod
@@ -643,6 +651,30 @@ def emit_json(obj: dict) -> int:
     return int(obj.get("_exit", 0 if obj.get("ok", True) else 2))
 
 
+class _StdoutTap:
+    """Under --json: records whether anything reached the machine channel.
+
+    The contract is ONE JSON object on stdout for every --json run. Most handlers honour it,
+    but their usage/lookup refusals (`Log.err(...); return 2` — `models install` with no id,
+    `apps logs nope`, `services stop` on an unknown service, `describe` of a missing tool, and
+    dozens more) wrote only to stderr, so the bridge reported "prometheus.py produced no JSON"
+    instead of the actual reason. main() wraps stdout in this tap and, when a handler returns
+    without writing, emits the envelope itself with the last `Log.err` text.
+    """
+
+    def __init__(self, inner):
+        self._inner = inner
+        self.wrote = False
+
+    def write(self, s):
+        if s:
+            self.wrote = True
+        return self._inner.write(s)
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
+
+
 def emit_table_json(command: str, render, **extra) -> int:
     """Bridge-safe emit for HUMAN-TABLE commands (models/apps/inventory list). Under --json
     the bridge contract requires ONE JSON object on stdout — but these render human tables via
@@ -696,6 +728,9 @@ def emit_console_json(command: str, render, **extra) -> int:
         "command": command,
         "ok": rc == 0,
         "exit_code": rc,
+        # the process exit must be the handler's own code — without `_exit`, emit_json mapped
+        # every failure to 2, so a handler returning 1 exited 2
+        "_exit": rc if isinstance(rc, int) else (0 if rc == 0 else 2),
         "lines": buf.getvalue().splitlines(),
         **extra,
     })
@@ -1008,6 +1043,24 @@ def _backup_file(path: Path) -> None:
 def edit_json(path: Path, mutator: Callable[[dict], bool], create: bool = True) -> bool:
     """Load a JSON config (tolerant of missing/empty), apply mutator(data)->changed,
     write pretty with a backup. Honors --dry-run. Returns True if it changed."""
+    # Another app's config. `_read_json` answers {} for a file it cannot parse — right for our own
+    # state files, wrong here: Zed's settings.json is JSONC (comments), so an MCP install rewrote
+    # it as ONLY the one key we added, dropping the user's theme, keymap and everything else. A
+    # present, non-empty file that is not a JSON object is left exactly as it is.
+    try:
+        raw = path.read_text(encoding="utf-8") if path.exists() else ""
+    except OSError as exc:
+        Log.warn(f"could not read {path}: {exc} — not edited")
+        return False
+    if raw.strip():
+        try:
+            parsed = json.loads(raw)
+        except ValueError:
+            parsed = None
+        if not isinstance(parsed, dict):
+            Log.warn(f"{path} is not plain JSON (comments or another format) — not edited, so "
+                     "nothing in it is lost. Add the entry by hand.")
+            return False
     data = _read_json(path)
     if not mutator(data):
         return False
@@ -1019,7 +1072,10 @@ def edit_json(path: Path, mutator: Callable[[dict], bool], create: bool = True) 
         return False
     _backup_file(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(data, indent=2))
+    # temp + rename: an interrupted write must not leave another app's config half-written
+    tmp = path.with_name(f".{path.name}.prom-tmp")
+    tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    os.replace(tmp, path)
     return True
 
 
@@ -1048,8 +1104,18 @@ def plugin_enabled(plugin_id: str) -> Optional[bool]:
 # ---- on-disk SKILL.md control (the reversible "comment-out a skill") ---------
 #  Disable = rename SKILL.md -> SKILL.md.disabled (Claude stops loading it).
 #  Mute    = set `disable-model-invocation: true` (no auto-fire; manual /name ok).
+# A path that never exists — returned for a name that is not a valid skill folder name, so every
+# caller (state, enable/disable/mute, the foreign-uninstall rmtree) sees "absent" and does nothing.
+_NO_SKILL_DIR = Path("/nonexistent/prometheus-invalid-skill-name")
+
+
 def _skill_paths(name: str) -> tuple[Path, Path, Path]:
-    d = CLAUDE_SKILLS_DIR / name
+    # `../../x` used to resolve outside the skills folder here too — reachable through
+    # `skills enable|disable|mute`, `enable`/`disable` (MCP) and the foreign uninstall's rmtree.
+    if _skill_name_error(name) is not None:
+        d = _NO_SKILL_DIR
+    else:
+        d = CLAUDE_SKILLS_DIR / name
     return d, d / "SKILL.md", d / "SKILL.md.disabled"
 
 
@@ -1616,9 +1682,64 @@ def _adapt_shell(p: Plugin, spec: InstallSpec, host: AIHost, osi: OSInfo) -> boo
         raise RuntimeError(f"{p.name}@{host.name}: no shell_steps for OS '{osi.family}'")
     _gate_shell_steps(p.name, host.name, steps)   # nemesis-gate the commands BEFORE running
     for cmd in steps:
+        pinned = _pinned_installer_step(cmd, spec.prefetch_scan_urls)
+        if pinned is not None:
+            try:
+                run(pinned[0])
+            finally:
+                _cleanup_pinned(pinned[1])   # the private copy of the script, even on failure
+            continue
         Log.step(" ".join(cmd))
         run(cmd)
     return True
+
+
+_CURL_PIPE_RX = re.compile(r"^curl\s+(?:-[A-Za-z]+\s+)*(\S+)\s*\|\s*(sudo\s+)?(sh|bash)\s*$")
+
+
+def _pinned_installer_step(cmd: list, urls: list) -> Optional[tuple]:
+    """For a `sh -lc "curl … <url> | sh"` step whose URL was prefetch-scanned: fetch the installer
+    ONCE, nemesis-gate THOSE bytes, and return (argv running them from a private temp file, dir).
+
+    The pipe used to run a SECOND, unpinned fetch after the scan of the first — what ran was
+    never what was scanned. A pipe into `sudo` is refused (root only through the privileged
+    gate). None = not such a step (run as given)."""
+    if not urls or len(cmd) != 3 or cmd[0] not in ("sh", "bash") or cmd[1] not in ("-lc", "-c"):
+        return None
+    m = _CURL_PIPE_RX.match(cmd[2].strip())
+    if not m or m.group(1) not in urls:
+        return None
+    url, sudo, interp = m.group(1), m.group(2), m.group(3)
+    if sudo:
+        raise RuntimeError(f"refusing `{cmd[2]}`: a remote script piped into sudo — run it "
+                           "yourself after reading it")
+    body = _fetch_text(url)
+    if body is None:
+        raise RuntimeError(f"could not fetch the installer {url} — nothing was run")
+    if GATE_MODE != "off":
+        nv = nemesis_gate("-", stdin_text=body)
+        _gate_audit("installer (run-time, pinned bytes)", url, nv)
+        if nv.get("verdict") in ("block", "error"):
+            raise RuntimeError(f"nemesis {nv.get('verdict')} on {url} — nothing was run: "
+                               + "; ".join((nv.get("blocking_reasons") or ["scan error"])[:3]))
+        # A WARN on a script about to run as the user used to pass silently here, while the same
+        # WARN on a plugin repo asks (enforce_gate). curl|sh is the riskiest thing we run, so it
+        # gets the same confirmation, not a weaker one.
+        if (nv.get("verdict") == "warn" and GATE_MODE != "warn"
+                and not _gate_confirm_warn(f"installer {url}", nv, _gate_ident("-", nv, body))):
+            raise RuntimeError(f"nemesis WARN on {url} was not approved — nothing was run")
+    d = Path(tempfile.mkdtemp(prefix="prom-installer-"))
+    os.chmod(d, 0o700)
+    script = d / "install.sh"
+    script.write_text(body, encoding="utf-8")
+    os.chmod(script, 0o600)
+    Log.step(f"{interp} {script}   # the scanned bytes of {url} (sha256 "
+             f"{hashlib.sha256(body.encode('utf-8', 'replace')).hexdigest()[:16]})")
+    return [interp, str(script)], d
+
+
+def _cleanup_pinned(d: Path) -> None:
+    shutil.rmtree(d, ignore_errors=True)
 
 
 def _adapt_git_clone_shell(p: Plugin, spec: InstallSpec, host: AIHost, osi: OSInfo) -> bool:
@@ -2076,7 +2197,11 @@ def _adapt_copilot_plugin(p: Plugin, spec: InstallSpec, host: AIHost, osi: OSInf
     Log.step(f"copilot plugin marketplace add {spec.marketplace_repo}")
     run([cli, "plugin", "marketplace", "add", spec.marketplace_repo], check=False)
     Log.step(f"copilot plugin install {spec.plugin_id}")
-    run([cli, "plugin", "install", spec.plugin_id], check=False)
+    cp = run([cli, "plugin", "install", spec.plugin_id], check=False)
+    # the install's own exit code decides: a failed install used to be reported as installed
+    if getattr(cp, "returncode", 1) != 0:
+        raise RuntimeError(f"copilot plugin install {spec.plugin_id} failed "
+                           f"(exit {getattr(cp, 'returncode', '?')})")
     return True
 
 
@@ -2687,7 +2812,7 @@ def _git_identity(path: Path) -> str:
                            capture_output=True, text=True, timeout=30)
         if p.returncode == 0:
             return p.stdout.strip()[:16]
-    return "dir:" + str(abs(hash(str(path))))[:12]
+    return "dir:" + hashlib.sha256(str(str(path)).encode("utf-8", "replace")).hexdigest()[:16]
 
 
 def _fetch_text(url: str, max_bytes: int = _MAX_FILE_BYTES) -> Optional[str]:
@@ -2996,7 +3121,12 @@ def _confirm_gate_disable(mode: str) -> bool:
     operator explicitly confirmed; otherwise the gate stays ENFORCED (fail-closed).
 
       • interactive TTY  → require typing 'disable-gate' (anything else keeps the gate on);
-      • non-interactive  → refuse UNLESS PROM_ALLOW_FORCE=1 (the CI escape, same as --force).
+      • non-interactive  → refuse UNLESS PROM_ALLOW_FORCE=1 (the CI escape).
+
+    Deliberately STRICTER than `--force` on one verdict: `--force` (alias --force-unsafe)
+    overrides a single BLOCK and works non-interactively by design (scripts and the plugin's
+    `/prometheus --force`), while this switches scanning off for a whole run, so a
+    non-interactive caller also needs the environment escape.
 
     On confirm it sets _GATE_DISABLED so the result envelope can never be reported clean.
     """
@@ -3019,24 +3149,68 @@ def _confirm_gate_disable(mode: str) -> bool:
     return True
 
 
+_TREE_IDENT_HASH_BUDGET = 256 * 1024 * 1024
+
+
 def _tree_ident(path: str) -> str:
-    """Content-bound identity for a directory: git HEAD when available, else a
-    hash over the (relpath, size) listing. Keeps a warn-approval pinned to WHAT
-    was approved, not just the label."""
+    """Content-bound identity for a directory. Keeps a warn-approval pinned to WHAT was
+    approved, not just the label.
+
+    Every entry counts, by relpath, size and CONTENT (content up to a 256 MiB budget; past it a
+    file contributes size + mtime_ns + ctime_ns + inode, so a large tree stays bounded but still
+    changes identity when anything in it is rewritten — ctime is the one a `touch -m` cannot put
+    back). Symlinks count by their target: swapping one for another changes what the tree does.
+
+    What it no longer does:
+      * return git HEAD for a checkout. HEAD says nothing about an edited working tree, an
+        untracked file or an ignored one, so an approval survived any of them; and asking git
+        whether the tree is dirty (`git status`) runs the repository's own fsmonitor and
+        clean-filter commands — code from the tree being judged. HEAD is still mixed in, and
+        `.git/objects` (content-addressed, pinned by HEAD) is the one part not re-read.
+      * return the constant "unreadable" on an error, which made one approval of ANY
+        unreadable tree under a label valid for every other unreadable tree under it. An
+        unreadable tree now gets a fresh identity each time, so it can never be remembered.
+    """
     p = Path(path)
-    if (p / ".git").exists():
-        ident = _git_identity(p)
-        if ident and ident != "unknown":
-            return ident
     h = hashlib.sha256()
+    if (p / ".git").exists():
+        head = _git_identity(p)
+        if re.fullmatch(r"[0-9a-f]{16}", head or ""):
+            h.update(b"git-head:" + head.encode() + b"\n")
+    budget = _TREE_IDENT_HASH_BUDGET
+    errors: list = []
+    entries: list = []
     try:
-        files = sorted(str(f.relative_to(p)) + ":" + str(f.stat().st_size)
-                       for f in p.rglob("*") if f.is_file())[:4000]
-        for line in files:
-            h.update(line.encode("utf-8", "replace"))
+        for root, dirs, files in os.walk(p, onerror=errors.append, followlinks=False):
+            rel_root = Path(root).relative_to(p)
+            if rel_root == Path(".git"):
+                dirs[:] = [d for d in dirs if d != "objects"]
+            for name in dirs + files:
+                entries.append(rel_root / name)
+        for rel in sorted(entries, key=str):
+            f = p / rel
+            st = f.lstat()
+            h.update(str(rel).encode("utf-8", "replace"))
+            if stat.S_ISLNK(st.st_mode):
+                h.update(b"\x00link:" + os.readlink(f).encode("utf-8", "replace"))
+            elif stat.S_ISDIR(st.st_mode):
+                h.update(b"\x00dir")
+            elif stat.S_ISREG(st.st_mode):
+                h.update(b"\x00" + str(st.st_size).encode() + b"\x00")
+                if st.st_size <= budget:
+                    budget -= st.st_size
+                    with f.open("rb") as fh:
+                        for chunk in iter(lambda: fh.read(1 << 20), b""):
+                            h.update(chunk)
+                else:
+                    h.update(f"stat:{st.st_mtime_ns}:{st.st_ctime_ns}:{st.st_ino}".encode())
+            else:
+                h.update(b"\x00special:" + str(stat.S_IFMT(st.st_mode)).encode())
             h.update(b"\n")
-    except OSError:
-        return "unreadable"
+    except (OSError, ValueError):
+        errors.append(True)
+    if errors:
+        return "unreadable:" + secrets.token_hex(8)
     return "tree:" + h.hexdigest()[:16]
 
 
@@ -3294,7 +3468,7 @@ def scan_spec(plugin_name: str, spec: InstallSpec) -> ScanReport:
                                              nv.get("recommendation", "review before install")),
                                         url, 0, url))
             return ScanReport(plugin_name, spec.method,
-                              spec.method + ":" + str(abs(hash(text)))[:12], findings, 1)
+                              spec.method + ":" + hashlib.sha256(str(text).encode("utf-8", "replace")).hexdigest()[:16], findings, 1)
 
         root: Optional[Path] = None
         source = ""
@@ -4802,13 +4976,19 @@ MODEL_TOOLS: list[ModelTool] = [
         id="coolify", name="Coolify", category="local-app",
         guided=True, isolated=False, install_kind="docker",
         blurb="Open-source self-hostable PaaS (Heroku/Vercel/Railway alternative): deploy apps, databases, and 280+ one-click services on your own servers over SSH.",
-        install_steps={"all": [["sh", "-lc", "curl -fsSL https://cdn.coollabs.io/coolify/install.sh | sudo bash"]]},
+        # MANUAL by policy: the official installer is a remote ROOT pipe (`curl … | sudo bash`).
+        # Prometheus never runs root outside its privileged gate, and a pipe fetches again after
+        # any scan — so the command is shown for the human to read and run on a dedicated host.
+        install_steps={},
         security="Apache-2.0, ~57k stars. Install is a REMOTE ROOT pipe-to-shell (curl ... | sudo bash) that installs Docker + the Coolify stack with broad privileges. Coolify is a privileged control plane: it holds SSH keys/credentials and orchestrates Docker (root-equivalent) on managed hosts; it builds/runs arbitrary git repos + container images.",
         warnings=("official install is `curl ... | sudo bash` (remote ROOT shell) — review/pin the script first",
                   "it installs Docker + stores SSH keys/server credentials = a high-impact, privileged service",
                   "firewall the dashboard (:8000) + realtime ports (:6001/:6002); only the proxy (:80/:443) should be public",
                   "deploy on an isolated host; it runs arbitrary user workloads (code-exec by design)"),
-        post_notes=("dashboard: http://localhost:8000 (first run creates the admin account)",
+        post_notes=("install it yourself on a DEDICATED host, after reading the script: "
+                    "curl -fsSL https://cdn.coollabs.io/coolify/install.sh -o coolify-install.sh && "
+                    "less coolify-install.sh && sudo bash coolify-install.sh",
+                    "dashboard: http://localhost:8000 (first run creates the admin account)",
                     "manage/UPDATE/UNINSTALL via Coolify's own tooling — this is a system install, not an isolated folder"),
         repo="https://github.com/coollabsio/coolify", docs="57-coollabsio-coolify.md",
     ),
@@ -4944,7 +5124,7 @@ MODEL_TOOLS: list[ModelTool] = [
                   "keep the local server bound to 127.0.0.1; only expose on a trusted LAN deliberately"),
         post_notes=("after install: open LM Studio, download a model, then 'Start Server' for an OpenAI-compatible endpoint at http://localhost:1234/v1",
                     "CLI: `lms ls` / `lms server start`; point any tool's OpenAI base-URL at it for $0 local inference",
-                    "Prometheus default model folder: `models config --show` (set it, then point LM Studio's models dir there)"),
+                    "models stay in LM Studio's own folder (~/.lmstudio/models): Prometheus downloads, scans and places them there — never a second copy elsewhere"),
         repo="https://lmstudio.ai", docs="96-lm-studio.md",
     ),
     # >>> APPEND MORE LOCAL-MODEL TOOLS HERE (ollama, vllm, llama.cpp, mlx, lm-studio, ...) <<<
@@ -5023,6 +5203,37 @@ def _human_size(p: Path) -> str:
             return f"{b:.0f}{u}"
         b /= 1024
     return f"{b:.1f}TB"
+
+
+def _uninstall_root_refusal(root: Path) -> Optional[str]:
+    """Why `root` must not be deleted as a tool's install folder, or None.
+
+    `--path X` resolves to X itself when X's NAME equals the tool id, and the folder was then
+    removed outright — any directory that happened to be called `airllm` or `odysseus` went.
+    Only a folder carrying Prometheus's own install manifest is a Prometheus install."""
+    try:
+        resolved = root.resolve()
+    except OSError:
+        return f"cannot resolve {root} — nothing deleted"
+    if resolved in (Path("/"), HOME.resolve()) or resolved in HOME.resolve().parents:
+        return f"refusing to delete {resolved}"
+    if root.is_symlink():
+        return f"{root} is a symlink — nothing deleted"
+    if not (root / ".prometheus_tool.json").is_file():
+        return (f"{root} has no Prometheus install manifest (.prometheus_tool.json) — it is not a "
+                "folder Prometheus created, so nothing was deleted")
+    return None
+
+
+def _rmtree_verified(root: Path, name: str) -> int:
+    """Delete, then CHECK: "folder deleted" used to print over an rmtree(ignore_errors=True)
+    that had silently left the folder in place."""
+    _rmtree(root)
+    if not DRY_RUN and root.exists():
+        Log.err(f"{name}: {root} could not be fully deleted — check permissions and retry")
+        return 1
+    Log.ok(f"{name} removed — folder deleted. Nothing left on the system.")
+    return 0
 
 
 def _rmtree(p: Path) -> None:
@@ -5317,6 +5528,13 @@ def _npm_build_install(t: "RepoTool", lay: "ToolLayout") -> str:
         # would defeat the fail-closed gate. The tool's OWN build runs explicitly below.
         Log.warn("npm lifecycle scripts DISABLED (--ignore-scripts) — ungated dep hooks are not run")
         _run_in([npm, "install", "--ignore-scripts"], d)
+        # `npm run build` EXECUTES dependency code (bundlers, compilers, their plugins) that was
+        # just fetched from the registry and never scanned — --ignore-scripts stops lifecycle
+        # hooks, not the build. The fetched tree is gated before anything in it runs.
+        nm = d / "node_modules"
+        if not DRY_RUN and nm.exists() and not enforce_gate(str(nm), f"{t.name} npm dependencies ({sub})"):
+            Log.err(f"{sub}: npm dependencies refused by the gate — not built, not installed")
+            continue
         _run_in([npm, "run", "build"], d)                  # the tool's OWN build (was gated in the clone)
         # install the built package into the isolated prefix (bin → prefix/bin)
         _run_in([npm, "install", "-g", "--ignore-scripts", "--prefix", str(prefix), str(d)], lay.live)
@@ -5344,7 +5562,60 @@ def _serve_tree_gate_ok(t: "ModelTool", lay: "ToolLayout") -> bool:
     tree_rep = ScanReport(t.id, "serve_tree", _git_identity(lay.live),
                           _walk_and_scan(lay.live),
                           sum(1 for _ in lay.live.rglob("*") if _.is_file()))
-    return security_gate(tree_rep, "local")
+    if not security_gate(tree_rep, "local"):
+        return False
+    # The regex pre-scan above is not the gate: with nemesis installed, `security_gate` waves any
+    # non-critical finding through on the promise that the deep scan "runs next" — and on this
+    # path nothing ran next, so a live/ tree changed after install launched on regexes alone.
+    # nemesis caches verdicts per tree, so an unchanged tree costs one cache hit per launch.
+    return enforce_gate(str(lay.live), f"{t.id} (installed tree, before serving)")
+
+
+_REQ_REFUSED_RX = re.compile(r"^\s*(-e\b|--editable\b|git\+|hg\+|svn\+|bzr\+|file:)|\s@\s*\S+://", re.I)
+
+
+def _requirements_refusal(req: Path) -> Optional[str]:
+    """Why a requirements file may not be installed through the gate, or None. Editable and
+    direct-URL / VCS requirements are fetched or BUILT outside `pip download --only-binary`, so
+    the bytes that would run are not the bytes nemesis scanned."""
+    try:
+        lines = req.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError as exc:
+        return f"cannot read {req.name}: {exc}"
+    for raw in lines:
+        line = raw.split("#", 1)[0].strip()
+        if line and _REQ_REFUSED_RX.search(line):
+            return f"{req.name} has a requirement the gate cannot vet: {line[:120]}"
+    return None
+
+
+def _gated_pip_install(pip: str, args: list, wheels: Path, label: str) -> bool:
+    """stage (wheels only, never executed) → nemesis gate → install EXACTLY the staged bytes.
+    False on any failure, with the reason logged — never a silent partial install."""
+    if "-r" in args:
+        why = _requirements_refusal(Path(args[args.index("-r") + 1]))
+        if why:
+            Log.err(why)
+            return False
+    if DRY_RUN:
+        Log.step(f"[dry-run] pip download --only-binary=:all: {' '.join(args)} → gate → offline install")
+        return True
+    wheels.mkdir(parents=True, exist_ok=True)
+    common = ["--only-binary=:all:", "--disable-pip-version-check"]
+    Log.step(f"staging {label} (wheels only, nothing is run) → {wheels.name}/")
+    cp = run([pip, "download", "--dest", str(wheels), *common, *args], check=False)
+    if getattr(cp, "returncode", 1) != 0:
+        Log.err(f"{label}: pip download failed (a package with no wheel is refused — "
+                "Prometheus does not build source packages before scanning them)")
+        return False
+    if not enforce_gate(str(wheels), label):
+        Log.warn(f"{label}: refused by the nemesis gate — nothing installed")
+        return False
+    cp = run([pip, "install", "--no-index", "--find-links", str(wheels), *common, *args], check=False)
+    if getattr(cp, "returncode", 1) != 0:
+        Log.err(f"{label}: pip install of the scanned wheels failed")
+        return False
+    return True
 
 
 def _install_into_layout(t: ModelTool, osi: OSInfo, base: Path) -> int:
@@ -5414,16 +5685,17 @@ def _install_into_layout(t: ModelTool, osi: OSInfo, base: Path) -> int:
         _make_venv(lay)
         pip = _venv_pip(lay)
         pkg = t.pip_pkg or t.id
-        if t.requirements:
-            run([pip, "install", "-r", str(lay.live / t.requirements)], check=False)
-        else:
-            wheels = lay.archives / f"wheels-v{n}"         # cache wheels → offline reinstall/rollback
-            if not DRY_RUN:
-                wheels.mkdir(parents=True, exist_ok=True)
-            run([pip, "download", "--no-deps", pkg, "-d", str(wheels)], check=False)
-            run([pip, "install", "--find-links", str(wheels), pkg], check=False)
-        for extra in t.pip_extras:                         # optional extras (e.g. bitsandbytes)
-            run([pip, "install", "-U", extra], check=False)
+        # Only the git tree used to be gated. The python dependencies — the whole transitive
+        # closure, from PyPI, sdists BUILT (i.e. their setup.py run) before anything was
+        # scanned — went straight in, and every failure was ignored. They now ride the same spine
+        # as `env install`: stage wheels only, nemesis-gate the staged bytes, install exactly
+        # those offline. The staged wheels are also the offline cache rollback reinstalls from.
+        wheels = lay.archives / f"wheels-v{n}"
+        args = (["-r", str(lay.live / t.requirements)] if t.requirements else [pkg]) + list(t.pip_extras)
+        if not _gated_pip_install(pip, args, wheels, f"{t.name} python dependencies"):
+            Log.err(f"{t.name}: its python dependencies were not installed — the install is "
+                    "incomplete (the gated source tree is kept)")
+            return 1
         pip_version = _venv_pkg_version(lay, pkg)
         if pip_version:
             Log.ok(f"{pkg} {pip_version} installed in venv_{t.id}/")
@@ -5431,7 +5703,7 @@ def _install_into_layout(t: ModelTool, osi: OSInfo, base: Path) -> int:
     steps = list(t.live_steps)
     if steps and not NO_SCAN:                              # scan the literal commands too
         text = "\n".join(" ".join(c) for c in steps)
-        rep = ScanReport(t.id, "live_steps", "steps:" + str(abs(hash(text)))[:8],
+        rep = ScanReport(t.id, "live_steps", "steps:" + hashlib.sha256(str(text).encode("utf-8", "replace")).hexdigest()[:16],
                          _scan_text("<model_tool>", text), 1)
         if not security_gate(rep, "local"):
             Log.warn(f"{t.name} run-steps blocked by security gate (install kept on disk)"); return 1
@@ -5441,7 +5713,7 @@ def _install_into_layout(t: ModelTool, osi: OSInfo, base: Path) -> int:
     serve = list(t.serve_steps)                           # long-running servers: scan, then LET THEM RUN (detached)
     if serve and not NO_SCAN:
         text = "\n".join(" ".join(c) for c in serve)
-        rep = ScanReport(t.id, "serve_steps", "serve:" + str(abs(hash(text)))[:8],
+        rep = ScanReport(t.id, "serve_steps", "serve:" + hashlib.sha256(str(text).encode("utf-8", "replace")).hexdigest()[:16],
                          _scan_text("<model_tool>", text), 1)
         if not security_gate(rep, "local"):
             Log.warn(f"{t.name} serve-steps blocked by security gate (install kept on disk)"); return 1
@@ -5568,14 +5840,22 @@ def _rollback_tool(t: ModelTool, base: Path, version: Optional[int]) -> int:
         pip = _venv_pip(lay)
         wheels = lay.archives / f"wheels-v{target}"
         if wheels.exists():                                # offline: use the cached wheel (network-down OK)
+            # the cache sat on disk since install — re-vet it before it runs again (tampered at
+            # rest is exactly the case a rollback must not trust)
+            if not DRY_RUN and not enforce_gate(str(wheels), f"{t.id} cached wheels v{target}"):
+                Log.err(f"rollback refused: cached wheels-v{target} did not pass the gate")
+                return 1
             Log.step(f"reinstall {pkg} from cached wheels-v{target}/ (offline)")
-            run([pip, "install", "--force-reinstall", "--no-deps", "--no-index",
-                 "--find-links", str(wheels), pkg], check=False)
-        else:                                              # no cache → fetch from PyPI
+            cp = run([pip, "install", "--force-reinstall", "--no-deps", "--no-index",
+                      "--find-links", str(wheels), pkg], check=False)
+            if getattr(cp, "returncode", 1) != 0:
+                Log.err(f"rollback: reinstalling {pkg} from the cache failed"); return 1
+        else:                                              # no cache → fetch, gate, install
             tgt = known[target].get("pip_version")
             spec = f"{pkg}=={tgt}" if tgt else pkg
-            Log.step(f"reinstall {spec} from PyPI (no local wheel cache for v{target})")
-            run([pip, "install", "--force-reinstall", "--no-deps", spec], check=False)
+            Log.step(f"reinstall {spec} (no local wheel cache for v{target})")
+            if not _gated_pip_install(pip, [spec], wheels, f"{t.id} v{target} python package"):
+                Log.err(f"rollback: {spec} was not reinstalled"); return 1
 
     for cmd in t.live_steps:                               # re-arm the service for the restored version
         _run_in(list(cmd), lay.live)
@@ -5629,7 +5909,10 @@ def _download(url: str, dest: Path) -> bool:
         Log.step(f"[dry-run] download {url} -> {dest}"); return True
     try:
         Log.step(f"download {url}")
-        urllib.request.urlretrieve(url, str(dest))
+        # `urlretrieve` has no timeout: a stalled server hung the whole run forever. 60 s per
+        # socket operation (not for the whole transfer — a large wheel may take minutes).
+        with urllib.request.urlopen(url, timeout=60) as resp, open(dest, "wb") as out:  # noqa: S310
+            shutil.copyfileobj(resp, out, 1024 * 1024)
         Log.ok(f"got {dest.name} ({_human_size(dest)})")
         # Gate the downloaded artifact (archive/binary) before it is used (fail-closed).
         if not enforce_gate(str(dest), f"download {dest.name}"):
@@ -6018,12 +6301,16 @@ REPO_TOOLS: list[RepoTool] = [
         id="ollama", name="Ollama", category="runner",
         repo="https://github.com/ollama/ollama",
         blurb="Run open LLMs locally (Llama, Qwen, Mistral, …) behind a simple API on :11434. The de-facto easy local-model server.",
-        kind="docker-run", docker_image="ollama/ollama", docker_name="ollama", docker_volumes=("ollama",), port="11434",
+        # The host's OWN ollama store is bind-mounted, not a named Docker volume: a volume is a
+        # second model store beside ~/.ollama/models (every model downloaded twice, invisible to
+        # the native `ollama list`). With the bind mount the container and a native install see
+        # the same models, and uninstall removes only the container — never the models.
+        kind="docker-run", docker_image="ollama/ollama", docker_name="ollama", docker_volumes=(), port="11434",
         # 127.0.0.1-bound: a bare `-p 11434:11434` publishes on 0.0.0.0 — the whole LAN could
         # drive (and load models on) this machine, while the line below promised loopback
-        docker_run=("run", "-d", "-v", "ollama:/root/.ollama", "-p", "127.0.0.1:11434:11434", "--name", "ollama", "ollama/ollama"),
+        docker_run=("run", "-d", "-v", f"{Path.home() / '.ollama'}:/root/.ollama", "-p", "127.0.0.1:11434:11434", "--name", "ollama", "ollama/ollama"),
         post_run=(("docker", "exec", "ollama", "ollama", "--version"),),
-        recommend="official Docker image — isolated + trivially removable (`docker rm -f ollama` + drop the volume). Safer than the curl|sh installer.",
+        recommend="official Docker image — isolated + trivially removable (`docker rm -f ollama`); it uses your existing ~/.ollama model store. On a Mac prefer the native app or `brew install ollama` (Docker has no Metal GPU).",
         security="Official `ollama/ollama` image. Binds 127.0.0.1:11434 by default via the published port; do not expose :11434 publicly.",
         safest_alt="macOS: `brew install ollama` (clean uninstall). Linux: `curl -fsSL https://ollama.com/install.sh | sh` (a piped installer — less isolated; we don't run it for you).",
         post_notes=("pull + chat a model: `docker exec -it ollama ollama run llama3.2`",
@@ -6120,7 +6407,9 @@ REPO_TOOLS: list[RepoTool] = [
         repo="https://github.com/n8n-io/n8n",
         blurb="Fair-code workflow automation (Zapier/Make alternative) with 400+ integrations + a visual editor on :5678.",
         kind="docker-run", docker_image="docker.n8n.io/n8nio/n8n", docker_name="n8n", docker_volumes=("n8n_data",), port="5678",
-        docker_run=("run", "-d", "--name", "n8n", "-p", "5678:5678", "-v", "n8n_data:/home/node/.n8n", "docker.n8n.io/n8nio/n8n"),
+        # loopback-only: n8n and uptime-kuma open with a "create the owner account" page, so a
+        # 0.0.0.0 publish let anyone on the LAN claim them first (as with the ollama row above).
+        docker_run=("run", "-d", "--name", "n8n", "-p", "127.0.0.1:5678:5678", "-v", "n8n_data:/home/node/.n8n", "docker.n8n.io/n8nio/n8n"),
         recommend="official Docker image + named volume — isolated + removable (`docker rm -f n8n` + drop the volume). Safer than a global `npm i -g n8n`.",
         security="Official `docker.n8n.io/n8nio/n8n`. Editor on :5678 — set auth + don't expose publicly without a proxy. Workflows can run code/HTTP, so treat it as trusted-internal.",
         safest_alt="`npx n8n` for a throwaway local try (no install). Avoid `npm install -g n8n` (pollutes the global Node env, messy to remove).",
@@ -6190,7 +6479,7 @@ REPO_TOOLS: list[RepoTool] = [
         blurb="Self-hosted uptime/status monitoring (Pingdom/UptimeRobot alternative): HTTP/TCP/ping/DNS checks, status pages, 90+ notification channels. UI on :3001.",
         kind="docker-run", docker_image="louislam/uptime-kuma:2", docker_name="uptime-kuma",
         docker_volumes=("uptime-kuma",), port="3001",
-        docker_run=("run", "-d", "--restart=always", "-p", "3001:3001", "-v", "uptime-kuma:/app/data", "--name", "uptime-kuma", "louislam/uptime-kuma:2"),
+        docker_run=("run", "-d", "--restart=always", "-p", "127.0.0.1:3001:3001", "-v", "uptime-kuma:/app/data", "--name", "uptime-kuma", "louislam/uptime-kuma:2"),
         recommend="official Docker image — isolated + trivially removable (`docker rm -f uptime-kuma` + drop the volume). Safer than the bare npm/pm2 path.",
         security="Official `louislam/uptime-kuma` image, very popular/mature. You create the admin account on first visit; do not expose :3001 publicly without auth + HTTPS.",
         safest_alt="docker compose (curl the official compose.yaml) · bare `git clone` + `npm run setup` + pm2 (less isolated).",
@@ -6437,7 +6726,7 @@ def _compose_install(t: RepoTool, path: Optional[str]) -> int:
                 if text is None:
                     return 2
                 if not NO_SCAN:                       # scan the compose text before writing/running it
-                    rep = ScanReport(t.id, t.compose_url, "compose:" + str(abs(hash(text)))[:8],
+                    rep = ScanReport(t.id, t.compose_url, "compose:" + hashlib.sha256(str(text).encode("utf-8", "replace")).hexdigest()[:16],
                                      _scan_text(cf, text), 0)
                     if not security_gate(rep, "local"):
                         Log.warn(f"{t.name} aborted by security gate"); return 1
@@ -6562,12 +6851,13 @@ def _uninstall_repo_tool(t: RepoTool, path: Optional[str]) -> int:
         root = _resolve_tool_root(base, t.id)
         if not root.exists():
             Log.warn(f"nothing to remove at {root}"); return 0
+        refusal = _uninstall_root_refusal(root)
+        if refusal:
+            Log.err(refusal); return 2
         Log.warn(f"this DELETES the whole isolated folder: {root}  ({_human_size_dir(root)})")
         if not _confirm(f"Delete {root} (venv + all versions + archives) ?"):
             Log.warn("declined"); return 0
-        _rmtree(root)
-        Log.ok(f"{t.name} removed — folder deleted. Clean, nothing left on the system.")
-        return 0
+        return _rmtree_verified(root, t.name)
     docker = _docker_bin()
     if t.kind == "docker-run":
         if not docker:
@@ -6695,7 +6985,7 @@ def _update_repo_tool(t: RepoTool, osi: OSInfo, path: Optional[str]) -> int:
         cf = t.compose_file or "docker-compose.yaml"
         text = _fetch_url_text(t.compose_url) if not DRY_RUN else None
         if text and not NO_SCAN:
-            rep = ScanReport(t.id, t.compose_url, "compose:" + str(abs(hash(text)))[:8], _scan_text(cf, text), 0)
+            rep = ScanReport(t.id, t.compose_url, "compose:" + hashlib.sha256(str(text).encode("utf-8", "replace")).hexdigest()[:16], _scan_text(cf, text), 0)
             if not security_gate(rep, "local"):
                 Log.warn("update aborted by security gate"); return 1
         if text and not enforce_gate_text(text, f"{t.id} compose ({t.compose_url})"):
@@ -8251,7 +8541,7 @@ def _pentest_install(t: PentestTool, osi: OSInfo) -> int:
     # is authored here and trusted, so it isn't re-flagged as a destructive command.
     recipe = "\n".join(list(t.build_steps) + ([f"git clone {t.git_clone}"] if t.git_clone else []))
     if recipe.strip() and not NO_SCAN:
-        rep = ScanReport(t.id, t.repo, "armory:" + str(abs(hash(recipe)))[:8],
+        rep = ScanReport(t.id, t.repo, "armory:" + hashlib.sha256(str(recipe).encode("utf-8", "replace")).hexdigest()[:16],
                          _scan_text(f"{t.id}-recipe", recipe), 1)
         if not security_gate(rep, "local"):
             Log.warn(f"{t.name} build recipe blocked by security gate"); return 1
@@ -8605,7 +8895,7 @@ def _orchestrator_install(t: PentestTool, osi: OSInfo) -> int:
         if compose is None:
             return 2
         if not NO_SCAN:
-            rep = ScanReport(t.id, t.compose_url, "pentagi:" + str(abs(hash(compose)))[:8],
+            rep = ScanReport(t.id, t.compose_url, "pentagi:" + hashlib.sha256(str(compose).encode("utf-8", "replace")).hexdigest()[:16],
                              _scan_text("docker-compose.yml", compose), 0)
             if not security_gate(rep, "local"):
                 Log.warn(f"{t.name} compose blocked by security gate"); return 1
@@ -10367,6 +10657,7 @@ def cmd_doctor(args, osi: OSInfo) -> int:
     detected = detect_hosts()
     ok = osi.family != "unsupported" and bool(detected)
     reqs = system_requirements()
+    strays = _stray_model_copies()
     if JSON_OUT:
         emit_json(
             {
@@ -10381,6 +10672,8 @@ def cmd_doctor(args, osi: OSInfo) -> int:
                 "config_dir_is_legacy": PROM_DIR == LEGACY_PROM_DIR,
                 # informational: never changes `ok` — every one has a working fallback
                 "system_requirements": reqs,
+                "model_stores": _model_stores(),
+                "stray_model_copies": strays,
             }
         )
         return 0 if ok else 2
@@ -10417,8 +10710,49 @@ def cmd_doctor(args, osi: OSInfo) -> int:
         print(f"    mkdir -p {target} && cp -a {LEGACY_PROM_DIR}/. {target}/")
         print(f"  then re-run `prometheus doctor`; when it stops warning, {LEGACY_PROM_DIR}")
         print("  can be deleted. It holds vault.json and pin.key, so nothing is moved for you.")
+    # Models live in each runtime's own store. Weights in a Prometheus folder are duplicates
+    # left by older versions (or an old `models_root`): say where, never delete them unasked.
+    for st in strays:
+        Log.warn(f"model weights in a Prometheus folder ({st['gb']} GB): {st['path']}")
+    if strays:
+        print("  they duplicate what Ollama / LM Studio / the Hugging Face cache keep — once you")
+        print("  have checked the model is in its runtime's store, delete the folder above.")
     (Log.ok if ok else Log.warn)("ready" if ok else "no usable OS or no AI agents found")
     return 0 if ok else 2
+
+
+def _stray_model_copies() -> list:
+    """Folders under Prometheus's own dirs that still hold model weights (.gguf / .safetensors):
+    the retired `models_root`, the old download cache, the gate library (a transit copy that
+    was never placed). Read-only: reported by `doctor`, never removed for the user."""
+    cands = [Path.home() / ".cache" / "prometheus" / "models",
+             PROM_HOME / "models", PROM_HOME / "open_models",
+             # AirLLM's per-layer split of a streamed model (a converted form, kept between runs)
+             Path.home() / ".cache" / "prometheus" / "tools" / "airllm-layers"]
+    if os.environ.get("PROMETHEUS_MODELS_HOME"):
+        cands.append(Path(os.environ["PROMETHEUS_MODELS_HOME"]).expanduser())
+    raw = load_config().get("models_root")
+    if raw:
+        cands.append(Path(os.path.expanduser(str(raw))))
+    out, seen = [], set()
+    for c in cands:
+        try:
+            c = c.resolve()
+        except OSError:
+            continue
+        if c in seen or not c.is_dir():
+            continue
+        seen.add(c)
+        size = 0
+        try:
+            for f in c.rglob("*"):
+                if f.suffix in (".gguf", ".safetensors") and f.is_file() and not f.is_symlink():
+                    size += f.stat().st_size
+        except OSError:
+            continue
+        if size:
+            out.append({"path": str(c), "gb": round(size / 1024 ** 3, 1)})
+    return out
 
 
 def _match_hosts(p: Plugin, detected: list[AIHost]) -> list[AIHost]:
@@ -12108,6 +12442,15 @@ def _maybe_startup_pin_audit(osi: "OSInfo", command: str) -> None:
     elif rp:
         Log.warn(f"URL-injection watch: {rp} installed source(s) changed and were "
                  f"re-gated + re-pinned. Review: prometheus skills audit")
+    # A source that drifted to a WARN stays live pending review — and was never mentioned: the
+    # notice above reported only quarantines and re-pins, so the review it waits for never came.
+    review = [r for r in (res.get("drift_review") or []) if isinstance(r, dict)]
+    if review:
+        Log.warn(f"⚠ URL-injection watch: {len(review)} installed source(s) CHANGED and now scan "
+                 "as WARN — still active, awaiting your review: "
+                 + ", ".join(str(r.get("path", "?")) for r in review[:3])
+                 + (" …" if len(review) > 3 else "")
+                 + ". Review: prometheus skills audit")
 
 
 def _quar_hmac_ok(man: dict) -> bool:
@@ -12656,10 +12999,59 @@ def cmd_inventory(args, osi: OSInfo) -> int:
     return emit_table_json("inventory", _render, action="scan")
 
 
+_SKILL_NAME_RX = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+
+
+def _skill_name_error(name: str) -> Optional[str]:
+    """Why `name` cannot be a skill folder name, or None.
+
+    A skill name becomes a path component under several agents' skill folders, and the MCP
+    `skill` argument is written by a language model. `../../x` used to resolve outside every
+    skills folder (sync copied INTO it, scaffold-skill wrote SKILL.md there).
+    """
+    if not isinstance(name, str) or not _SKILL_NAME_RX.match(name) or ".." in name:
+        return (f"invalid skill name {name!r}: use letters, digits, '.', '_' or '-', "
+                f"starting with a letter or digit (no path separators, no '..')")
+    return None
+
+
+def _inside(child: Path, parent: Path) -> bool:
+    try:
+        child.resolve().relative_to(parent.resolve())
+        return True
+    except (ValueError, OSError):
+        return False
+
+
+def _first_symlink(root: Path) -> Optional[Path]:
+    """The first symlink anywhere under `root` (root itself included), or None.
+
+    `cmd_sync` copies a skill folder into another agent's store. `_inside` proves where the
+    folder LANDS, but not what the copy writes through: a symlinked sub-directory already in
+    the destination sends `copytree(dirs_exist_ok=True)` out of the store, and a symlink in the
+    source used to be DEREFERENCED (copytree's default), so a skill linking `~/.ssh/id_ed25519`
+    replicated the key itself into every other agent's skill folder."""
+    if root.is_symlink():
+        return root
+    for base, dirs, files in os.walk(root, followlinks=False):
+        for n in dirs + files:
+            q = Path(base) / n
+            if q.is_symlink():
+                return q
+    return None
+
+
 def cmd_sync(args, osi: OSInfo) -> int:
     """P4.2 — replicate an installed SKILL.md folder into other detected agents'
     skill dirs (cross-CLI portability). Fixes 'the skill is only in Claude'."""
     name = args.skill
+    bad = _skill_name_error(name)
+    if bad:
+        if JSON_OUT:
+            return emit_json({"command": "sync", "ok": False, "skill": str(name),
+                              "error": bad, "_exit": 2})
+        Log.err(bad)
+        return 2
     src_dir = CLAUDE_SKILLS_DIR / name
     if not src_dir.exists():
         if JSON_OUT:
@@ -12672,6 +13064,19 @@ def cmd_sync(args, osi: OSInfo) -> int:
     # Re-vet the SOURCE skill before replicating it: a skill clean at install time could have
     # been tampered with on disk, and sync would otherwise fan that tree into every agent
     # unscanned. Gate once (the source is identical for all targets), fail-closed.
+    # The skill folder itself may be a symlink (a developer's working copy); a link INSIDE it
+    # that leaves it would be replicated as a pointer to that outside file in every agent.
+    real_src = src_dir.resolve()
+    for base, dirs, files in os.walk(real_src, followlinks=False):
+        for nm in dirs + files:
+            q = Path(base) / nm
+            if q.is_symlink() and not _inside(q, real_src):
+                msg = f"skill '{name}' links outside its folder ({q} -> {os.readlink(q)}) — not replicated"
+                if JSON_OUT:
+                    return emit_json({"command": "sync", "ok": False, "skill": name,
+                                      "error": msg, "_exit": 2})
+                Log.err(msg)
+                return 2
     if not DRY_RUN and not enforce_gate(str(src_dir), f"sync skill '{name}'"):
         if JSON_OUT:
             return emit_json({"command": "sync", "ok": False, "skill": name,
@@ -12689,15 +13094,24 @@ def cmd_sync(args, osi: OSInfo) -> int:
             placed.append((h.name, "no-skill-store"))
             continue
         dest = _expand(h.skills_dirs[0]) / name
+        if not _inside(dest, _expand(h.skills_dirs[0])):
+            Log.err(f"{h.name}: '{name}' would land outside {h.skills_dirs[0]} — refused")
+            placed.append((h.name, "refused-path"))
+            continue
         if dest.exists() and not FORCE:
             Log.ok(f"{h.name}: already has '{name}' — skip")
             placed.append((h.name, "already"))
+            continue
+        link = _first_symlink(dest) if (dest.exists() or dest.is_symlink()) else None
+        if link is not None:
+            Log.err(f"{h.name}: {link} is a symlink — refusing to copy through it")
+            placed.append((h.name, "refused-symlink"))
             continue
         if DRY_RUN:
             Log.step(f"[dry-run] copy {src_dir} -> {dest}")
         else:
             dest.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copytree(src_dir, dest, dirs_exist_ok=True)
+            shutil.copytree(src_dir, dest, symlinks=True, dirs_exist_ok=True)
         Log.ok(f"{h.name}: copied '{name}' -> {dest}")
         placed.append((h.name, "copied"))
     if JSON_OUT:
@@ -12795,14 +13209,37 @@ def _install_model_tool(t: ModelTool, osi: OSInfo, path: Optional[str] = None, m
                          f"for inspection: nemesis ui {dest}")
                 return 1
     steps = t.install_steps.get(osi.family) or t.install_steps.get("all") or []
-    if steps and not NO_SCAN:                          # scan the literal install commands too
+    if not steps:
+        # nothing Prometheus will run for this tool here — say so, and how, instead of
+        # printing "install complete" over an install that never happened
+        Log.warn(f"{t.name}: no automatic install on this system — follow the steps below")
+        for n in t.post_notes:
+            Log.step(n)
+        return 2
+    # Root only through the privileged gate: an install step that elevates by itself
+    # (`sudo …`, `| sudo bash`) is refused and shown, never run.
+    if any("sudo" in tok.split() or tok.strip().startswith("sudo") or "| sudo" in tok
+           for c in steps for tok in c):
+        Log.err(f"{t.name}: an install step elevates with sudo — Prometheus does not run root "
+                "outside its privileged gate. Run it yourself after reading it:")
+        for cmd in steps:
+            Log.step(" ".join(cmd))
+        return 2
+    if not NO_SCAN:                                    # scan the literal install commands too
         text = "\n".join(" ".join(c) for c in steps)
-        rep = ScanReport(t.id, "steps", "steps:" + str(abs(hash(text)))[:8], _scan_text("<model_tool>", text), 1)
+        # a STABLE identity (sha256): `abs(hash(text))` is randomised per process, so a trust
+        # decision recorded for these steps could never be found again
+        rep = ScanReport(t.id, "steps", "steps:" + hashlib.sha256(text.encode()).hexdigest()[:16],
+                         _scan_text("<model_tool>", text), 1)
         if not security_gate(rep, "local"):
             Log.warn(f"{t.name} aborted by security gate"); return 1
     for cmd in steps:
         Log.step(" ".join(cmd))
-        run(cmd, check=False)
+        r = run(cmd, check=False)
+        rc = getattr(r, "returncode", 0)
+        if rc != 0:
+            Log.err(f"{t.name}: `{' '.join(cmd)}` exited {rc} — install NOT complete")
+            return rc or 1
     Log.ok(f"{t.name} install complete")
     for n in t.post_notes:
         Log.step(n)
@@ -12843,12 +13280,13 @@ def _uninstall_model_tool(t: ModelTool, path: Optional[str]) -> int:
         Log.warn("bringing the docker stack down first (`docker compose down -v` — removes its volumes/data)")
         if _confirm(f"tear down {t.name}'s containers + volumes ?"):
             _run_in(["docker", "compose", "down", "-v"], lay.live)
+    refusal = _uninstall_root_refusal(root)
+    if refusal:
+        Log.err(refusal); return 2
     Log.warn(f"this DELETES the whole isolated folder: {root}  ({_human_size_dir(root)})")
     if not _confirm(f"Delete {root} (venv/engine snapshots/archives + all versions) ?"):
         Log.warn("declined"); return 0
-    _rmtree(root)
-    Log.ok(f"{t.name} removed — folder deleted. Nothing left on the system.")
-    return 0
+    return _rmtree_verified(root, t.name)
 
 
 def _service_model_tool(t: ModelTool, path: Optional[str], on: bool) -> int:
@@ -12929,22 +13367,27 @@ def _ollama_models_dir() -> Path:
 
     PRECEDENCE, and the reasoning for each rung:
 
-      1. An explicitly configured `models_root` — the user asked for it, in so many words, via
-         `models config --set-root`. Honour it.
-      2. `OLLAMA_MODELS` already in the environment — the user, or their daemon, already decided.
+      1. `OLLAMA_MODELS` already in the environment — the user, or their daemon, already decided.
          Prometheus is a guest here; it does not get to overrule that.
-      3. ollama's own documented default, `~/.ollama/models`. This is where the models are.
+      2. ollama's own documented default, `~/.ollama/models` (or a Linux service store).
 
-    `get_models_root()` still owns rung 1, and still defaults to ~/.prometheus/models for the
-    OTHER things that install under it (apps, worldsim engines, repos). Only the ollama lane
-    changes, because only ollama already has a store of its own.
+    A configured `models_root` used to be rung 1 and redirected ollama into
+    `<models_root>/ollama`. It is RETIRED (2026-11-04): every model lives in the store of the
+    software that serves it — ollama's, LM Studio's, the Hugging Face cache — and never in a
+    Prometheus folder that another tool would then copy, which is the duplication the user asked
+    to end. To move ollama's store, set OLLAMA_MODELS for the ollama app or daemon itself.
     """
-    cfg = load_config().get("models_root")
-    if cfg and _models_root_is_plausible(get_models_root()):
-        return get_models_root() / "ollama"
     env_dir = os.environ.get("OLLAMA_MODELS", "").strip()
     if env_dir:
         return Path(os.path.expanduser(os.path.expandvars(env_dir)))
+    # 3b. A Linux SERVICE install (the official script's `ollama` user, or a distro package)
+    #     keeps the store outside $HOME. The first candidate that holds a store wins; with
+    #     none, ollama's per-user default. (The post-pull gate reads the directory this
+    #     returns — pointing it at an empty ~/.ollama refused every pull on such a box.)
+    for cand in (Path.home() / ".ollama" / "models", Path("/usr/share/ollama/.ollama/models"),
+                 Path("/var/lib/ollama/.ollama/models"), Path("/var/lib/ollama/models")):
+        if (cand / "manifests").is_dir():
+            return cand
     return Path.home() / ".ollama" / "models"
 
 
@@ -12975,7 +13418,8 @@ def _models_root_is_plausible(root: Path) -> bool:
     engine_root = Path(__file__).resolve().parent
     if root == engine_root or engine_root in root.parents:
         Log.warn(f"ignoring models_root inside the Prometheus checkout: {root}")
-        Log.step("clear it with:  models config --set-root ~/.prometheus/models   (or edit the config)")
+        Log.step("models_root is retired — models live in each runtime's own store; "
+                 "remove it with:  prometheus models config --set-root \"\"")
         return False
     for parent in (root, *root.parents):
         if (parent / ".git").exists():
@@ -12986,17 +13430,14 @@ def _models_root_is_plausible(root: Path) -> bool:
 
 
 def _ollama_env() -> dict:
-    """os.environ, with OLLAMA_MODELS set ONLY when Prometheus is entitled to choose it.
+    """os.environ, UNCHANGED: Prometheus never chooses where ollama keeps its models.
 
-    When the user has not configured a `models_root` and has not exported `OLLAMA_MODELS`
-    themselves, this returns the environment UNCHANGED — so ollama uses its own default and
-    Prometheus sees the same models the user does. Setting the variable to ollama's own default
-    would be harmless but dishonest: it would claim a decision Prometheus did not make.
+    It used to export `OLLAMA_MODELS=<models_root>/ollama` whenever a `models_root` was
+    configured — including for an `ollama serve` Prometheus started itself — so pulls landed in
+    a Prometheus folder beside the real `~/.ollama/models`: a duplicate store the user's own
+    `ollama list` did not see. The store is ollama's decision (or the user's OLLAMA_MODELS).
     """
-    env = dict(os.environ)
-    if load_config().get("models_root"):
-        env["OLLAMA_MODELS"] = str(_ollama_models_dir())
-    return env
+    return dict(os.environ)
 
 
 def _resolve_ollama_tag(model: str) -> str:
@@ -13036,18 +13477,21 @@ def _models_pull_run(action: str, model: Optional[str]) -> int:
                               "error": f"usage: models {action} <model-id|ollama-tag>", "_exit": 2})
         Log.err(f"usage: models {action} <model-id|ollama-tag>   (see `models browse`)"); return 2
     tag = _resolve_ollama_tag(model)
+    # One validator, BEFORE the dry-run/JSON branches: a host-qualified tag used to be refused
+    # only on the real path, so `--dry-run`/`--json` reported `ok: true` with an argv that the
+    # real run then refused — a plan the engine would never carry out.
+    why = _ollama_tag_refusal(tag)
+    if why:
+        if JSON_OUT:
+            return emit_json({"command": "models", "ok": False, "action": action, "error": why, "_exit": 2})
+        Log.err(why); return 2
     mdir = _ollama_models_dir()
     if DRY_RUN:
         if JSON_OUT:
             return emit_json({"command": "models", "ok": True, "action": action, "dry_run": True,
                               "argv": ["ollama", action, tag], "ollama_models": str(mdir)})
-        # Say which of the two it is. Printing `OLLAMA_MODELS=<dir>` when Prometheus is in fact
-        # leaving the variable unset claims a decision it did not make — and the whole point of
-        # this change is that Prometheus stops pretending to own ollama's model store.
-        if load_config().get("models_root") and _models_root_is_plausible(get_models_root()):
-            Log.ok(f"[dry-run] OLLAMA_MODELS={mdir} ollama {action} {tag}")
-        else:
-            Log.ok(f"[dry-run] ollama {action} {tag}   (ollama's own store: {mdir})")
+        # Prometheus never sets OLLAMA_MODELS: the pull lands in ollama's own store.
+        Log.ok(f"[dry-run] ollama {action} {tag}   (ollama's own store: {mdir})")
         return 0
     if not shutil.which("ollama"):
         if JSON_OUT:
@@ -13057,14 +13501,9 @@ def _models_pull_run(action: str, model: Optional[str]) -> int:
         Log.err("ollama not found.")
         Log.step("install it first:  prometheus apps install ollama   (or: brew install ollama)")
         return 2
+    # No mkdir: the store is ollama's (it creates it), and creating an empty one here is how a
+    # second, unused store used to appear beside the real one.
     env = _ollama_env()
-    try:
-        mdir.mkdir(parents=True, exist_ok=True)
-    except OSError as e:
-        if JSON_OUT:
-            return emit_json({"command": "models", "ok": False, "action": action,
-                              "error": f"cannot create models folder {mdir}: {e}", "_exit": 2})
-        Log.err(f"cannot create models folder {mdir}: {e}"); return 2
     if JSON_OUT:
         # A JSON caller can't be handed an interactive/streaming terminal — return the command to run.
         return emit_json({"command": "models", "ok": True, "action": action,
@@ -13075,43 +13514,187 @@ def _models_pull_run(action: str, model: Optional[str]) -> int:
     # Prometheus is deferring to ollama's own default, and reading it directly would KeyError on
     # the common path. `mdir` always holds the directory the pull will really land in.
     Log.info(f"{action} '{tag}'  (models dir: {mdir})")
-    # "--" end-of-options: a tag starting with '-' must be a positional, never an ollama flag.
-    if action == "pull":
+    # `run` of a model already in the store does not pull again: a model Prometheus imported
+    # from a gated GGUF (`prometheus/<id>`) exists in NO registry, so the pull 404'd and `run`
+    # refused a model that was sitting on disk. It is still gated below — the digest ledger makes
+    # that a cache hit for a model scanned before, and a full scan for one that never was.
+    if action == "run" and _ollama_manifest_path(tag, mdir).is_file():
+        Log.step("already in the local store — not pulling it again")
+    else:
+        # "--" end-of-options: a tag starting with '-' must be a positional, never an ollama flag.
         try:
-            return _run_timed(["ollama", "pull", "--", tag], env=env, timeout=_RUN_TIMEOUT).returncode
+            rc = _run_timed(["ollama", "pull", "--", tag], env=env, timeout=_RUN_TIMEOUT).returncode
         except OSError as e:
             Log.err(f"ollama pull failed: {e}"); return 2
+        if rc != 0:
+            return rc
+    # Ollama's registry has no local stage: scan what it stored before it is ever loaded (and
+    # before `run` hands the terminal over). The sidecar removes the model on a BLOCK.
+    ok, why = _ollama_post_gate(tag, mdir)
+    if not ok:
+        Log.err(f"{tag}: {why}")
+        return 2
+    Log.ok(f"{tag}: scanned by nemesis — clean")
+    if action == "pull":
+        return 0
     os.execvpe("ollama", ["ollama", "run", "--", tag], env)   # hand the terminal to ollama
     return 0
 
 
-def _models_config(args) -> int:
-    """Show or set the default local-models install folder (models_root)."""
-    new = getattr(args, "set_root", None)
-    if new is not None:   # "" must reach validation (empty path) — not be treated as "show"
+# An Ollama-registry library tag: `name`, `ns/name`, either with `:version`. Same pattern as the
+# sidecar's `model_acquire._TAG_RE`, so the engine and the sidecar refuse the same tags.
+_OLLAMA_TAG_RE = re.compile(r"^[a-z0-9][a-z0-9._-]*(/[a-z0-9][a-z0-9._-]*)?(:[A-Za-z0-9._-]+)?$")
+
+
+def _ollama_tag_refusal(tag: str) -> Optional[str]:
+    """Why `tag` must not go through `ollama pull`, or None.
+
+    Only Ollama-registry library tags; `hf.co/<anyone>/<repo>` and other host-qualified tags
+    are an arbitrary uploader's file — those go through `model hug` (gated download + import)."""
+    if not tag or len(tag) > 200:
+        return "empty or oversized model tag"
+    first = tag.split("/", 1)[0]
+    if "/" in tag and ("." in first or ":" in first):
+        return (f"'{tag}' names a host ({first}) — use `prometheus model hug {tag.split('/', 1)[1]}` "
+                "(nemesis-gated) instead of pulling it through Ollama")
+    if not _OLLAMA_TAG_RE.match(tag):
+        return f"'{tag}' is not an Ollama library tag (see `prometheus models browse`)"
+    return None
+
+
+def _ollama_manifest_path(tag: str, root: Path) -> Path:
+    """Where ollama keeps `tag`'s manifest under the store `root` (mirrors model_acquire)."""
+    name, _, ver = tag.partition(":")
+    parts = name.split("/")
+    if len(parts) == 1:
+        parts = ["library", parts[0]]
+    return root / "manifests" / "registry.ollama.ai" / Path(*parts) / (ver or "latest")
+
+
+def _ollama_post_gate(tag: str, mdir: Optional[Path] = None) -> tuple:
+    """(ok, reason) from `modelhub ollama-gate --tag` — nemesis over the pulled blobs.
+
+    The sidecar gets the pull's own environment. It used to inherit os.environ only, while the
+    pull ran with `_ollama_env()`; with a configured `models_root` the two disagreed, the sidecar
+    found no manifest in ~/.ollama/models, and every pull into the configured store was refused
+    as "no readable manifest" — after the download had already finished. `mdir` is kept for
+    callers; the store itself is resolved by the sidecar."""
+    side = _SIDECAR_DIR / "modelhub.py"
+    if not side.is_file():
+        return False, "cannot verify: the modelhub sidecar is not shipped with this engine"
+    # The pull's own environment: OLLAMA_MODELS only when Prometheus chose the store (a
+    # configured models_root) or the user exported it. Forcing it to `mdir` otherwise pointed
+    # the scan at ~/.ollama on a Linux service install whose daemon writes /usr/share/ollama;
+    # left unset, the sidecar searches every store that holds the tag.
+    env = _ollama_env()
+    try:
+        p = subprocess.run([sys.executable, str(side), "ollama-gate", "--tag", tag],
+                           capture_output=True, text=True, timeout=4 * 3600, env=env)
+    except (OSError, subprocess.SubprocessError) as e:
+        return False, f"nemesis scan could not run ({e}) — the model is not used"
+    for line in reversed((p.stdout or "").strip().splitlines()):
         try:
-            root = set_models_root(new)
-        except RuntimeError as e:
-            if JSON_OUT:
-                return emit_json({"command": "models", "ok": False, "action": "config", "error": str(e), "_exit": 2})
-            Log.err(str(e)); return 2
+            obj = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(obj, dict):
+            return bool(obj.get("ok")), str(obj.get("error") or "")
+    return False, "nemesis scan produced no verdict — the model is not used"
+
+
+def _hf_hub_cache_dir() -> Path:
+    """huggingface_hub's own precedence (the sidecar's model_place resolves it the same way)."""
+    for var in ("HF_HUB_CACHE", "HUGGINGFACE_HUB_CACHE"):
+        if os.environ.get(var, "").strip():
+            return Path(os.environ[var].strip()).expanduser()
+    if os.environ.get("HF_HOME", "").strip():
+        return Path(os.environ["HF_HOME"].strip()).expanduser() / "hub"
+    xdg = os.environ.get("XDG_CACHE_HOME", "").strip()
+    return (Path(xdg).expanduser() if xdg else Path.home() / ".cache") / "huggingface" / "hub"
+
+
+def _lmstudio_models_dir() -> Path:
+    """LM Studio's models folder as LM Studio resolves it: LMSTUDIO_MODELS_DIR, the folder chosen
+    in its settings (`downloadsFolder`), else <home>/models, where home is the pointer it writes
+    when moved, the legacy ~/.cache/lm-studio, or ~/.lmstudio. Same order as model_place.py."""
+    if os.environ.get("LMSTUDIO_MODELS_DIR", "").strip():
+        return Path(os.environ["LMSTUDIO_MODELS_DIR"].strip()).expanduser()
+    home = Path.home() / ".lmstudio"
+    try:
+        ptr = (Path.home() / ".lmstudio-home-pointer").read_text(encoding="utf-8").strip()
+    except OSError:
+        ptr = ""
+    if ptr:
+        home = Path(ptr).expanduser()
+    elif (Path.home() / ".cache" / "lm-studio" / "models").is_dir():
+        home = Path.home() / ".cache" / "lm-studio"
+    for f in (home / "apps" / "bionic" / "settings.json", home / "settings.json"):
+        try:
+            v = json.loads(f.read_text(encoding="utf-8")).get("downloadsFolder")
+        except (OSError, ValueError, AttributeError):
+            continue
+        if isinstance(v, str) and v.strip():
+            return Path(v.strip()).expanduser()
+    return home / "models"
+
+
+def _llamacpp_cache_dir() -> Path:
+    if os.environ.get("LLAMA_CACHE", "").strip():
+        return Path(os.environ["LLAMA_CACHE"].strip()).expanduser()
+    if sys.platform == "darwin":
+        return Path.home() / "Library" / "Caches" / "llama.cpp"
+    xdg = os.environ.get("XDG_CACHE_HOME", "").strip()
+    return (Path(xdg).expanduser() if xdg else Path.home() / ".cache") / "llama.cpp"
+
+
+def _model_stores() -> list:
+    """Where each serving runtime keeps its models on this machine — the ONLY places
+    Prometheus downloads, converts or installs weights to (it has no model folder of its own)."""
+    return [
+        {"runtime": "ollama", "store": str(_ollama_models_dir()),
+         "set_by": "OLLAMA_MODELS (on the ollama app / daemon)"},
+        {"runtime": "lmstudio", "store": str(_lmstudio_models_dir()),
+         "set_by": "LM Studio → My Models (downloadsFolder) / LMSTUDIO_MODELS_DIR"},
+        {"runtime": "huggingface (MLX-LM, AirLLM, vLLM, llama.cpp -hf)",
+         "store": str(_hf_hub_cache_dir()), "set_by": "HF_HUB_CACHE / HF_HOME / XDG_CACHE_HOME"},
+        {"runtime": "llama.cpp (converted or repo-less GGUFs)",
+         "store": str(_llamacpp_cache_dir()), "set_by": "LLAMA_CACHE"},
+    ]
+
+
+def _models_config(args) -> int:
+    """Show where models live. `--set-root` is RETIRED: Prometheus keeps no model folder of its
+    own, so a configured `models_root` only ever created duplicates; it is removed if present."""
+    stale = load_config().get("models_root")
+    new = getattr(args, "set_root", None)
+    if new is not None:
+        removed = False
+        if stale and not DRY_RUN:
+            cfg = load_config()
+            cfg.pop("models_root", None)
+            removed = save_config(cfg)
+        msg = ("Prometheus no longer keeps models in a folder of its own: each model is "
+               "downloaded into the store of the software that serves it (see `prometheus models "
+               "config`). To move ollama's store, set OLLAMA_MODELS for the ollama app or daemon.")
         if JSON_OUT:
-            # `exists` is reported HONESTLY: under --dry-run the folder was not created, so
-            # claiming True would be the same lie the mutation itself was. `dry_run` tells a
-            # machine caller the setting was NOT persisted.
-            return emit_json({"command": "models", "ok": True, "action": "config",
-                              "models_root": str(root), "exists": root.exists(),
-                              **({"dry_run": True} if DRY_RUN else {})})
-        if DRY_RUN:
-            Log.ok(f"[dry-run] models_root would be set: {root} (nothing written)")
-            return 0
-        Log.ok(f"models_root set: {root}")
-        return 0
-    root = get_models_root()
+            return emit_json({"command": "models", "ok": False, "action": "config", "_exit": 2,
+                              "error": msg, "retired": "models_root",
+                              **({"removed_models_root": stale} if removed else {}),
+                              "stores": _model_stores()})
+        Log.err(msg)
+        if removed:
+            Log.ok(f"removed the old models_root ({stale}) from {PROM_CONFIG}")
+        return 2
+    stores = _model_stores()
     if JSON_OUT:
-        return emit_json({"command": "models", "ok": True, "action": "config", "models_root": str(root), "exists": root.exists()})
-    Log.info(f"models_root: {root}  ({'exists' if root.exists() else 'created on first install'})")
-    Log.step("change it:  prometheus models config --set-root /path/to/folder")
+        return emit_json({"command": "models", "ok": True, "action": "config", "stores": stores,
+                          **({"ignored_models_root": stale} if stale else {})})
+    Log.info("models live in each runtime's own store — Prometheus keeps no copy:")
+    for st in stores:
+        print(f"  {st['runtime']:<10} {st['store']}   ({st['set_by']})")
+    if stale:
+        Log.warn(f"models_root in {PROM_CONFIG} is ignored ({stale}) — "
+                 "remove it with:  prometheus models config --set-root \"\"")
     return 0
 
 
@@ -13237,34 +13820,12 @@ def get_models_root() -> Path:
 
 
 def set_models_root(path: str) -> Path:
-    """Validate + persist a new models_root; create it; return the resolved path.
-
-    Raises RuntimeError (caught by callers → friendly message / JSON error, never a
-    raw traceback) for: empty path, a path that exists but is a FILE (mkdir would
-    throw FileExistsError), an uncreatable folder, or a config write that failed."""
-    if not str(path).strip():
-        raise RuntimeError("models_root path is empty")
-    expanded = Path(os.path.expanduser(os.path.expandvars(str(path)))).resolve()
-    if expanded.exists() and not expanded.is_dir():
-        raise RuntimeError(f"{expanded} exists but is not a directory")
-    # --dry-run means NOTHING on disk changes. Validation above still runs (a dry run that
-    # reports success for a path it would have rejected is worthless), but the mkdir and the
-    # config write below are exactly the two mutations the flag exists to withhold: without
-    # this, `prometheus --dry-run models config --set-root DIR` CREATED DIR and PERSISTED the
-    # new models_root, then reported ok — a dry run that silently repointed the user's model
-    # library. Callers surface the dry-run state; see `_models_config`.
-    if DRY_RUN:
-        Log.step(f"[dry-run] would create {expanded} and set models_root")
-        return expanded
-    try:
-        expanded.mkdir(parents=True, exist_ok=True)
-    except OSError as e:
-        raise RuntimeError(f"cannot create models folder {expanded}: {e}") from e
-    cfg = load_config()
-    cfg["models_root"] = str(expanded)
-    if not save_config(cfg):
-        raise RuntimeError(f"could not persist config to {PROM_CONFIG} (check permissions)")
-    return expanded
+    """RETIRED. Prometheus keeps no model folder of its own: weights live in each runtime's
+    store (`_model_stores`), and a configured root only ever created duplicates. Always raises
+    RuntimeError (callers already turn that into a friendly refusal); nothing is created or
+    persisted. (It used to mkdir the folder and write `models_root` with no caller left.)"""
+    raise RuntimeError("models_root is retired: models live in each runtime's own folder "
+                       "(see `prometheus models config`)")
 
 # Agents that can receive a universal SKILL.md drop (have a skills dir).
 _SKILL_AGENTS = ("claude", "codex", "cursor", "gemini", "opencode")
@@ -13911,6 +14472,10 @@ def cmd_scaffold(args, osi: OSInfo) -> int:
     name = args.name.strip().replace(" ", "-").lower()
     if not name:
         Log.err("skill name required")
+        return 2
+    bad = _skill_name_error(name)
+    if bad:
+        Log.err(bad)
         return 2
     description = args.description or f"Use when <CLEAR trigger conditions for '{name}' — the sharper, the more reliably it auto-fires>."
     body = args.body or f"<the instructions Claude should follow whenever the '{name}' skill fires>"
@@ -14834,17 +15399,48 @@ def cmd_disk_space(args, osi: OSInfo) -> int:
     rest = list(getattr(args, "rest", None) or [])
     if rest[:1] == ["--"]:
         rest = rest[1:]
-    side = Path(__file__).resolve().parent / "studio" / "python" / "sidecar" / "disk_map.py"
+    return _relay_sidecar("disk_map", rest, "disk-space", timeout=60 * 60)
+
+
+_SIDECAR_DIR = Path(__file__).resolve().parent / "studio" / "python" / "sidecar"
+# The sidecars the `sidecar` verb may run. Each owns its own contract (CONTRACT.md) and its
+# own gating — a download in modelhub is nemesis-gated there, a delete in disk_map is a plan
+# unless confirmed. This list exists so the verb can never be pointed at an arbitrary file.
+# (`fit` is import-only — it has no command line — so it is not runnable here.)
+_SIDECAR_MODULES = ("envmgr", "modelhub", "disk_map", "probe", "repo", "repomap",
+                    "metadata", "linters", "coverage", "structsearch", "diagram", "profile",
+                    "locate_engine", "testmgr", "sqlrunner", "refactor", "kernel")
+# How long one sidecar call may run: gated model downloads / scans take hours, environment
+# installs a while; everything else is interactive.
+_SIDECAR_TIMEOUTS = {"modelhub": 12 * 3600, "envmgr": 2 * 3600, "disk_map": 3600}
+
+
+def _relay_sidecar(module: str, rest: list, label: str, timeout: int = 15 * 60) -> int:
+    """Run one sidecar and relay its single JSON envelope verbatim (stdout), its progress on
+    stderr, and its exit code as ours. Never re-interprets the result."""
+    side = _SIDECAR_DIR / f"{module}.py"
     if not side.is_file():
-        return emit_json({"command": "disk-space", "ok": False, "_exit": 2,
-                          "error": f"the disk tool is not shipped with this engine (no {side})"})
+        return emit_json({"command": label, "ok": False, "_exit": 2,
+                          "error": f"the {module} sidecar is not shipped with this engine "
+                                   f"(no {side})"})
+    # Its own process group: on a timeout the WHOLE tree goes (pip / hf / `ollama create`
+    # grandchildren included) — killing only the sidecar left them running as orphans.
+    proc = subprocess.Popen([sys.executable, str(side), *rest], stdout=subprocess.PIPE,
+                            stderr=None, text=True, start_new_session=True)
     try:
-        proc = subprocess.run([sys.executable, str(side), *rest], stdout=subprocess.PIPE,
-                              stderr=None, text=True, timeout=60 * 60, check=False)
+        out, _ = proc.communicate(timeout=timeout)
     except subprocess.TimeoutExpired:
-        return emit_json({"command": "disk-space", "ok": False, "_exit": 2,
-                          "error": "the disk scan did not finish within an hour"})
-    for line in reversed((proc.stdout or "").strip().splitlines()):
+        try:
+            os.killpg(proc.pid, signal.SIGTERM)
+            proc.wait(timeout=10)
+        except (OSError, subprocess.TimeoutExpired):
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except OSError:
+                pass
+        return emit_json({"command": label, "ok": False, "_exit": 2,
+                          "error": f"the {module} sidecar did not finish within {timeout}s"})
+    for line in reversed((out or "").strip().splitlines()):
         line = line.strip()
         if line.startswith("{"):
             try:
@@ -14854,8 +15450,38 @@ def cmd_disk_space(args, osi: OSInfo) -> int:
             if isinstance(obj, dict):
                 obj.setdefault("_exit", proc.returncode)
                 return emit_json(obj)
-    return emit_json({"command": "disk-space", "ok": False, "_exit": 2,
-                      "error": f"the disk sidecar produced no JSON (exit {proc.returncode})"})
+    return emit_json({"command": label, "ok": False, "_exit": 2,
+                      "error": f"the {module} sidecar produced no JSON (exit {proc.returncode})"})
+
+
+def cmd_sidecar(args, osi: OSInfo) -> int:
+    """`sidecar <module> <verb> [args…]` — run one allow-listed Python sidecar and relay its
+    JSON envelope. The core CommandSpecs `env-list` (envmgr env.list) and `model-hw`
+    (modelhub hw.scan) were written against this verb before it existed, and failed with
+    `invalid choice: 'sidecar'` on every call."""
+    rest = list(getattr(args, "rest", None) or [])
+    if rest[:1] == ["--"]:
+        rest = rest[1:]
+    if not rest:
+        return emit_json({"command": "sidecar", "ok": False, "_exit": 2,
+                          "error": "usage: sidecar <module> <verb> [args…]",
+                          "modules": list(_SIDECAR_MODULES)})
+    module, tail = rest[0], rest[1:]
+    if module not in _SIDECAR_MODULES:
+        return emit_json({"command": "sidecar", "ok": False, "_exit": 2,
+                          "error": f"unknown sidecar {module!r}",
+                          "modules": list(_SIDECAR_MODULES)})
+    if tail and tail[0].startswith("-"):
+        return emit_json({"command": "sidecar", "ok": False, "_exit": 2,
+                          "error": "the first argument after the module must be its verb"})
+    if DRY_RUN:
+        # the global --dry-run must not be silently ignored by a verb that can download, install
+        # or delete: say what WOULD run, run nothing
+        return emit_json({"command": f"sidecar.{module}", "ok": True, "dry_run": True,
+                          "argv": [sys.executable, str(_SIDECAR_DIR / f"{module}.py"), *tail],
+                          "note": "--dry-run: nothing was run"})
+    return _relay_sidecar(module, tail, f"sidecar.{module}",
+                          timeout=_SIDECAR_TIMEOUTS.get(module, 15 * 60))
 
 
 def _effort_read_rules(path: Path) -> tuple[list[dict], list[str]]:
@@ -15511,13 +16137,84 @@ CHAT_CLIS: dict[str, dict] = {
         "sys_note": "OpenCode: behavior via opencode.json (set permission: allow; no single bypass flag).",
         "bypass_note": "OpenCode has no single bypass flag — set permission:allow in opencode.json.",
     },
+    # LOCAL-MODEL agents: wired per run to a local OpenAI-compatible server (`--runner`, default
+    # ollama) through env/argv only — nothing is written to the agent's own config. The same
+    # wiring as `packages/core/src/ai/runtimes/plan.ts::agentWiring` (kept in step by tests).
+    "hermes": {
+        "label": "Hermes Agent", "bin": ("hermes",), "local_only": True,
+        "bypass": [], "bypass_note": "Hermes has no single bypass flag.",
+        "sys_note": "Hermes: behavior via its own config (no system-prompt flag).",
+    },
+    "aider": {
+        "label": "aider", "bin": ("aider",), "local_only": True,
+        "bypass": ["--yes-always"], "bypass_note": "--yes-always — aider applies every change without asking.",
+        "sys_note": "aider: conventions via --read CONVENTIONS.md (no system-prompt flag).",
+    },
+    "goose": {
+        "label": "Goose", "bin": ("goose",), "local_only": True,
+        "bypass": [], "bypass_note": "Goose: unattended runs are set with GOOSE_MODE=auto in its config.",
+        "sys_note": "Goose: behavior via .goosehints (no system-prompt flag).",
+    },
 }
+
+
+def _local_agent_cmd(service: str, binary: str, model: Optional[str], runner: Optional[str],
+                     prompt: Optional[str], bypass: bool) -> tuple[list[str], dict[str, str], list[str]]:
+    """argv/env for a LOCAL-MODEL agent (hermes/aider/goose) pointed at a local runner.
+
+    Every token is discrete; a value-flag prompt (`-z`, `--message`, `-t`) that starts with '-'
+    is refused, because as a flag VALUE it could be parsed as another option."""
+    if not model:
+        raise RuntimeError(f"{service} runs on a local model: give --model <served model name> "
+                           f"(and --runner {'|'.join(sorted(CHAT_LOCAL_ENDPOINTS))})")
+    if model.startswith("-"):
+        raise RuntimeError(f"refusing model id that starts with '-' (option-injection guard): {model}")
+    rn = runner or "ollama"
+    if rn not in CHAT_LOCAL_ENDPOINTS:
+        raise RuntimeError(f"unknown runner '{rn}'. Choose: {', '.join(sorted(CHAT_LOCAL_ENDPOINTS))}")
+    if prompt is not None and prompt.startswith("-"):
+        raise RuntimeError("refusing a prompt that starts with '-' for this CLI (option-injection "
+                           "guard); rephrase so it does not begin with a dash")
+    v1 = CHAT_LOCAL_ENDPOINTS[rn].rstrip("/")
+    root = v1[:-3] if v1.endswith("/v1") else v1
+    argv = [binary]
+    env: dict[str, str] = {}
+    notes = [f"{service} → local model '{model}' on {rn} ({v1}); nothing is written to its config"]
+    if service == "hermes":
+        # Hermes documents NO per-run endpoint flags (its quickstart: `hermes model` → Custom
+        # endpoint, stored in ~/.hermes/config.yaml). Invented `--base-url`/`--api-key` flags
+        # would stop it starting, and writing its config is not Prometheus's to do — so it is
+        # launched as is, with the one-time setup spelled out.
+        if prompt is not None:
+            raise RuntimeError("Hermes has no documented one-shot prompt flag — launch it "
+                               "interactively (omit the prompt)")
+        notes[0] = (f"hermes → configure it ONCE for '{model}': run `hermes model`, choose Custom "
+                    f"endpoint, base URL {v1}, API key blank (for Ollama, `ollama launch hermes` "
+                    "does it) — Prometheus never writes ~/.hermes/config.yaml")
+        notes.append("Hermes needs a context window of at least 64K tokens on the server")
+    elif service == "aider":
+        env.update(OPENAI_API_BASE=v1, OPENAI_API_KEY="local")
+        argv += ["--model", f"openai/{model}"]
+        if bypass:
+            argv += list(CHAT_CLIS["aider"]["bypass"])
+        if prompt is not None:
+            argv += ["--message", prompt]
+    elif service == "goose":
+        env.update(GOOSE_PROVIDER="openai", OPENAI_HOST=root, OPENAI_BASE_PATH="v1/chat/completions",
+                   OPENAI_API_KEY="local", GOOSE_MODEL=model)
+        argv += ["run", "-t", prompt] if prompt is not None else ["session"]
+    if bypass and not CHAT_CLIS[service].get("bypass"):
+        notes.append(CHAT_CLIS[service].get("bypass_note", "this CLI has no bypass flag"))
+    elif bypass:
+        notes.append("⚠ " + CHAT_CLIS[service].get("bypass_note", "permissions bypassed"))
+    return argv, env, notes
 
 
 def build_terminal_cmd(service: str, *, model: Optional[str] = None,
                        system_prompt_file: Optional[str] = None, replace_system: bool = False,
                        bypass: bool = False, prompt: Optional[str] = None,
-                       cwd: Optional[str] = None) -> tuple[list[str], dict[str, str], list[str]]:
+                       cwd: Optional[str] = None,
+                       runner: Optional[str] = None) -> tuple[list[str], dict[str, str], list[str]]:
     """Assemble a validated argv for a terminal-chat CLI. Returns (argv, env_overrides, notes).
 
     Pure + injection-safe: every token is appended discretely (no shell string),
@@ -15531,6 +16228,13 @@ def build_terminal_cmd(service: str, *, model: Optional[str] = None,
     if not binary:
         binary = spec["bin"][0]
         notes.append(f"'{binary}' not found on PATH — install it first (the command is still shown below)")
+    if spec.get("local_only"):
+        argv, env, more = _local_agent_cmd(service, binary, model, runner, prompt, bypass)
+        if system_prompt_file:
+            more.append(spec.get("sys_note", "system-prompt injection not supported by this CLI"))
+        if cwd:
+            more.append(f"{service} has no --add-dir; launch from {cwd} (cwd) instead")
+        return argv, env, notes + more
     argv: list[str] = [binary]
     env: dict[str, str] = {}
 
@@ -15538,10 +16242,16 @@ def build_terminal_cmd(service: str, *, model: Optional[str] = None,
     if bypass and spec.get("bypass_global"):
         argv += list(spec.get("bypass", []))
     # non-interactive subcommand (codex exec / opencode run) vs headless flag (claude/gemini/cursor -p)
+    # A VALUE-flag CLI (gemini `-p PROMPT`) gets its flag immediately before the prompt, at the
+    # end: emitted here it produced `gemini -p -m MODEL --yolo PROMPT`, where `-p` consumed `-m`
+    # as its value and the model/bypass flags were mis-parsed. Positional-prompt CLIs (claude's
+    # `-p` is `--print`, a boolean) keep it up front.
+    value_flag_prompt = bool(spec.get("headless_flag")) and not spec.get("prompt_positional") \
+        and not spec.get("headless_subcmd")
     if prompt is not None:
         if spec.get("headless_subcmd"):
             argv.append(spec["headless_subcmd"])
-        elif spec.get("headless_flag"):
+        elif spec.get("headless_flag") and not value_flag_prompt:
             argv += list(spec["headless_flag"])
     # model — reject a leading-dash value: model ids never start with '-', and as a
     # flag VALUE (e.g. `-m -x`) a dash-leading token can be mis-parsed as another flag.
@@ -15551,7 +16261,10 @@ def build_terminal_cmd(service: str, *, model: Optional[str] = None,
         # opencode takes `-m provider/model`; a bare id (`qwen3:8b`, an Ollama tag) failed its
         # provider lookup. A bare id is a LOCAL model: wire a one-run provider for it through
         # OPENCODE_CONFIG_CONTENT (merged over the user's own config, which is never written).
-        runner = "lmstudio" if "@" in model else "ollama"
+        # an explicit --runner wins; the old guess ('@' → LM Studio) is only the default
+        runner = runner or ("lmstudio" if "@" in model else "ollama")
+        if runner not in CHAT_LOCAL_ENDPOINTS:
+            raise RuntimeError(f"unknown runner '{runner}'. Choose: {', '.join(sorted(CHAT_LOCAL_ENDPOINTS))}")
         local_base = CHAT_LOCAL_ENDPOINTS[runner]
         env["OPENCODE_CONFIG_CONTENT"] = json.dumps({
             "$schema": "https://opencode.ai/config.json",
@@ -15601,6 +16314,8 @@ def build_terminal_cmd(service: str, *, model: Optional[str] = None,
             raise RuntimeError(
                 "refusing a prompt that starts with '-' for this CLI (option-injection "
                 "guard); rephrase so it does not begin with a dash")
+        if value_flag_prompt:
+            argv += list(spec["headless_flag"])
         argv.append(prompt)
     if bypass:
         notes.append("⚠ " + spec.get("bypass_note", "permissions bypassed"))
@@ -15654,7 +16369,9 @@ def _tmux_launch(session: str, argv: list[str], env: dict[str, str]) -> Optional
         Log.info(f"tmux session '{session}' already exists — attaching")
     Log.step(f"detach with Ctrl-b d · reattach later: tmux attach -t {session}")
     t0 = time.monotonic()
-    rc = subprocess.call(["tmux", "attach", "-t", session])
+    # An interactive attach lasts as long as the human stays in the session: the only
+    # subprocess in this file that is DELIBERATELY unbounded, so the bound is spelled out.
+    rc = subprocess.call(["tmux", "attach", "-t", session], timeout=None)
     if rc != 0 and time.monotonic() - t0 < _TMUX_ATTACH_FAILED_WITHIN_S:
         if created:
             _run_timed(["tmux", "kill-session", "-t", session], capture_output=True, timeout=10)
@@ -16135,11 +16852,17 @@ def cmd_chat(args, osi: OSInfo) -> int:
 
     # rule: a paid/credentialed CLI cannot run as a free in-app agentic chat
     if local and local in CHAT_CLIS:
+        # an agent CLI is not a model: paid CLIs carry their own login, local-model agents
+        # (hermes/aider/goose) need the model they should run on
+        agent = CHAT_CLIS[local].get("local_only")
+        hint = (f"prometheus chat --cli {local} --model <served model> [--runner …] [--open]" if agent
+                else f"prometheus chat --cli {local} [--bypass] [--tmux] [--open]")
+        what = "a local-model agent CLI" if agent else "a paid/credentialed CLI"
         if JSON_OUT:
             return emit_json({"command": "chat", "ok": False, "mode": "terminal",
-                              "error": f"'{local}' is a paid CLI — use terminal chat (--cli {local})", "_exit": 2})
-        Log.err(f"'{local}' is a paid/credentialed CLI, not a local model.")
-        Log.step(f"use a terminal chat instead:  prometheus chat --cli {local} [--bypass] [--tmux] [--open]")
+                              "error": f"'{local}' is {what}, not a model — use: {hint}", "_exit": 2})
+        Log.err(f"'{local}' is {what}, not a local model.")
+        Log.step(f"use a terminal chat instead:  {hint}")
         return 2
     if local:
         return chat_local(local, prompt, runner=getattr(args, "runner", None) or "ollama",
@@ -16153,6 +16876,7 @@ def cmd_chat(args, osi: OSInfo) -> int:
         Log.info("Prometheus chat — two modes:")
         Log.step("agentic (local, free):   prometheus chat --local <ollama-model> [--runner ollama|lmstudio] [\"prompt\"]")
         Log.step("terminal (paid CLI):     prometheus chat --cli <claude|codex|gemini|cursor|opencode> [--model M] [--system-prompt FILE] [--bypass] [--tmux [NAME]] [--open] [\"prompt\"]")
+        Log.step("terminal (local model):  prometheus chat --cli <hermes|aider|goose|opencode> --model <served name> [--runner ollama|lmstudio|llamacpp|vllm] [--open] [\"prompt\"]")
         Log.step("local models: `models list` / pull via `apps install ollama` then `ollama pull <m>` · default folder: `models config --show`")
         return 0
 
@@ -16176,7 +16900,8 @@ def cmd_chat(args, osi: OSInfo) -> int:
     argv, env, notes = build_terminal_cmd(
         cli, model=getattr(args, "model", None),
         system_prompt_file=sysf, replace_system=bool(getattr(args, "replace_system", False)),
-        bypass=bypass, prompt=prompt, cwd=getattr(args, "cwd", None))
+        bypass=bypass, prompt=prompt, cwd=getattr(args, "cwd", None),
+        runner=getattr(args, "runner", None))
     spec = CHAT_CLIS[cli]
     use_tmux = getattr(args, "tmux", None) is not None
     if getattr(args, "no_tmux", False):
@@ -16286,6 +17011,7 @@ class _JsonAwareParser(argparse.ArgumentParser):
 # Signals go only to the pid that was registered AND still has the start time recorded with it
 # (`ps -o lstart=`), so a recycled pid is never hit, and never to pid ≤ 1.
 SERVICES_DIR = PROM_DIR / "services"
+SERVICES_LOCK = SERVICES_DIR / ".registry.lock"
 SERVICES_REGISTRY = SERVICES_DIR / "registry.json"
 SERVICES_QUARANTINE = SERVICES_DIR / "quarantine.json"
 SERVICES_CAPS = SERVICES_DIR / "caps.json"
@@ -16389,18 +17115,22 @@ def service_register(name: str, pid: Optional[int] = None, *, cwd: Optional[Path
     }
     if DRY_RUN:
         return entry
-    reg = _svc_read(SERVICES_REGISTRY)
-    reg[name] = entry
-    _svc_write(SERVICES_REGISTRY, reg)
+    # The CLI and the detached watcher both read-modify-write this file; unlocked, a write from
+    # one dropped the other's update and a just-registered service was never RAM-watched.
+    with _file_lock(SERVICES_LOCK):
+        reg = _svc_read(SERVICES_REGISTRY)
+        reg[name] = entry
+        _svc_write(SERVICES_REGISTRY, reg)
     _ensure_service_watcher()
     return entry
 
 
 def service_unregister(name: str) -> None:
-    reg = _svc_read(SERVICES_REGISTRY)
-    if name in reg:
-        del reg[name]
-        _svc_write(SERVICES_REGISTRY, reg)
+    with _file_lock(SERVICES_LOCK):
+        reg = _svc_read(SERVICES_REGISTRY)
+        if name in reg:
+            del reg[name]
+            _svc_write(SERVICES_REGISTRY, reg)
 
 
 def service_quarantine(name: str) -> Optional[dict]:
@@ -16409,17 +17139,19 @@ def service_quarantine(name: str) -> Optional[dict]:
 
 
 def quarantine_service(name: str, reason: str, details: list) -> None:
-    q = _svc_read(SERVICES_QUARANTINE)
-    q[name] = {"reason": reason, "details": list(details)[:20],
-               "at": time.strftime("%Y-%m-%dT%H:%M:%S")}
-    _svc_write(SERVICES_QUARANTINE, q)
+    with _file_lock(SERVICES_LOCK):
+        q = _svc_read(SERVICES_QUARANTINE)
+        q[name] = {"reason": reason, "details": list(details)[:20],
+                   "at": time.strftime("%Y-%m-%dT%H:%M:%S")}
+        _svc_write(SERVICES_QUARANTINE, q)
 
 
 def clear_quarantine(name: str) -> None:
-    q = _svc_read(SERVICES_QUARANTINE)
-    if name in q:
-        del q[name]
-        _svc_write(SERVICES_QUARANTINE, q)
+    with _file_lock(SERVICES_LOCK):
+        q = _svc_read(SERVICES_QUARANTINE)
+        if name in q:
+            del q[name]
+            _svc_write(SERVICES_QUARANTINE, q)
 
 
 def _ps_table() -> dict:
@@ -16531,7 +17263,14 @@ def _svc_stop(entry: dict, reason: str) -> bool:
         names = entry.get("containers") or []
         if not (docker and names):
             return False
-        subprocess.run([docker, "stop", *names], capture_output=True, timeout=120, check=False)  # noqa: S603
+        try:
+            subprocess.run([docker, "stop", *names], capture_output=True, timeout=120,  # noqa: S603
+                           check=False)
+        except (subprocess.SubprocessError, OSError) as exc:
+            # an uncaught TimeoutExpired here used to end the whole watcher loop, silently —
+            # every other service then went un-watched
+            _svc_log(f"STOP {name} (docker {', '.join(names)}) FAILED: {exc}")
+            return False
         _svc_log(f"STOP {name} (docker {', '.join(names)}): {reason}")
         return True
     pid = entry.get("pid")
@@ -16615,10 +17354,11 @@ def _svc_advisory_scan(entry: dict) -> tuple:
 
 
 def _svc_mark_checked(name: str) -> None:
-    reg = _svc_read(SERVICES_REGISTRY)
-    if name in reg:
-        reg[name]["advisory_checked_at"] = time.time()
-        _svc_write(SERVICES_REGISTRY, reg)
+    with _file_lock(SERVICES_LOCK):
+        reg = _svc_read(SERVICES_REGISTRY)
+        if name in reg:
+            reg[name]["advisory_checked_at"] = time.time()
+            _svc_write(SERVICES_REGISTRY, reg)
 
 
 def watch_services(once: bool = False, poll_s: float = SERVICE_WATCH_POLL_S) -> int:
@@ -17581,7 +18321,7 @@ def build_parser() -> argparse.ArgumentParser:
                        default="list")
     p_mod.add_argument("tool", nargs="?", help="tool id (airllm|flashattention|...) OR model id/ollama-tag for pull/run")
     p_mod.add_argument("--path", metavar="DIR", help="isolated tools: folder to install into (else you browse). '<tool>' becomes the root.")
-    p_mod.add_argument("--set-root", metavar="DIR", dest="set_root", help="models config: set the default folder where local models/tools install (persisted)")
+    p_mod.add_argument("--set-root", metavar="DIR", dest="set_root", help="models config: RETIRED — models live in each runtime's own store; removes an old models_root")
     p_mod.add_argument("--show", action="store_true", help="models config: show the current default models folder")
     p_mod.add_argument("--version", metavar="N", help="rollback: target version (int for airllm/odysseus; release string e.g. 2.8.3 for flashattention)")
     # FlashAttention (kernel) — variegated install:
@@ -17652,7 +18392,8 @@ def build_parser() -> argparse.ArgumentParser:
                         help="AGENTIC mode: send the effort knob even where the capability "
                              "table says this model has none. Off by default — a forwarded "
                              "reasoning_effort is a hard 400 on some models.")
-    p_chat.add_argument("--cli", choices=["claude", "codex", "gemini", "cursor", "opencode"], help="TERMINAL mode: which paid CLI to launch")
+    p_chat.add_argument("--cli", choices=list(CHAT_CLIS),
+                        help="TERMINAL mode: which agent CLI to launch (hermes/aider/goose run on a local model: --model + --runner)")
     p_chat.add_argument("--model", metavar="M", help="terminal mode: model id for the CLI")
     p_chat.add_argument("--system-prompt", metavar="FILE", dest="system_prompt", help="terminal mode: a system-prompt file to load (appended by default)")
     p_chat.add_argument("--replace-system", action="store_true", dest="replace_system", help="terminal mode: REPLACE the system prompt instead of appending")
@@ -17678,6 +18419,8 @@ def build_parser() -> argparse.ArgumentParser:
     # Disk space — map / levels / largest files / mounts / delete plan, via the disk_map sidecar
     p_ds = sub.add_parser("disk-space", help="disk space: mounts | map PATH | levels PATH | largest-files PATH | delete PATH... (a plan unless --confirm) | cleanup-plan | privileged-rescan PATH — via the disk_map sidecar; never runs as root")
     p_ds.add_argument("rest", nargs=argparse.REMAINDER, help="the sidecar verb and its arguments")
+    p_sc = sub.add_parser("sidecar", help="run one allow-listed Python sidecar verb and relay its JSON (e.g. `sidecar envmgr env.list`, `sidecar modelhub hw.scan`)")
+    p_sc.add_argument("rest", nargs=argparse.REMAINDER, help="<module> <verb> [args…]")
 
     # 5th functionality — pentest armory (sandboxed offensive security, AUTHORIZED ONLY)
     p_pt = sub.add_parser("pentest", help="5th functionality: AUTHORIZED pentest tools + AIs, each run inside a strongly-armored sandbox (airgapped, ROE-gated)")
@@ -17950,13 +18693,32 @@ def main(argv: Optional[list[str]] = None) -> int:
         "methods": cmd_methods,
         "harden": cmd_harden,
         "disk-space": cmd_disk_space,
+        "sidecar": cmd_sidecar,
         "pentest": cmd_pentest,
         "vault": cmd_vault,
     }
+    tap = None
+    if JSON_OUT:
+        tap = _StdoutTap(sys.stdout)
+        sys.stdout = tap
+        Log.LAST_ERR = None
     try:
-        return dispatch[args.command](args, osi)
+        rc = dispatch[args.command](args, osi)
+        if tap is not None and not tap.wrote:
+            code = rc if isinstance(rc, int) else (0 if rc in (None, True) else 2)
+            env = {"command": args.command, "ok": code == 0, "exit_code": code, "_exit": code}
+            action = getattr(args, "action", None)
+            if isinstance(action, str):
+                env["action"] = action
+            if code != 0:
+                env["error"] = Log.LAST_ERR or f"{args.command} failed (exit {code})"
+            return emit_json(env)
+        return rc
     except KeyboardInterrupt:
         Log.err("interrupted")
+        if tap is not None and not tap.wrote:
+            return emit_json({"command": getattr(args, "command", "?"), "ok": False,
+                              "error": "interrupted", "_exit": 2})
         return 2
     except RuntimeError as e:
         # A RuntimeError is the engine's "refuse cleanly" channel (e.g. no interactive terminal
@@ -17987,6 +18749,9 @@ def main(argv: Optional[list[str]] = None) -> int:
             pass
         Log.step("Prometheus exited cleanly instead of crashing — please report this bug")
         return 1
+    finally:
+        if tap is not None and sys.stdout is tap:
+            sys.stdout = tap._inner   # in-process callers (tests) must not stack taps
 
 
 if __name__ == "__main__":

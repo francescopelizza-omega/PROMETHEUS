@@ -26,7 +26,7 @@ import {
 } from "react";
 import { createPortal } from "react-dom";
 
-import { Z, useAnchoredLayer } from "@prometheus/ui";
+import { Z, anchoredEdge, useAnchoredLayer } from "@prometheus/ui";
 import type { IdeEvent, IdeTerminalEnv, IdeTerminalMenuItem } from "../../shared/ipc-contract.js";
 import { ResizeHandle, useResizable } from "../shell/Resizable.js";
 import { useTheme } from "../shell/ThemeProvider.js";
@@ -666,7 +666,7 @@ function PaneStrip({
               alignItems: "center",
               gap: 4,
               padding: "3px 6px",
-              fontSize: "0.74rem",
+              fontSize: "0.75rem",
               whiteSpace: "nowrap",
               cursor: "pointer",
               color: isActive ? "var(--text-primary)" : "var(--text-secondary)",
@@ -799,7 +799,7 @@ function PaneStrip({
                   // clamps into the viewport, which also replaces the old right:0 hack.
                   position: "fixed",
                   left: menuBox.left,
-                  top: menuBox.top,
+                  ...anchoredEdge(menuBox),
                   width: menuBox.width,
                   minWidth: 230,
                   background: "var(--bg-surface-2)",
@@ -836,7 +836,7 @@ function PaneStrip({
                         style={{
                           padding: "2px 8px",
                           color: "var(--text-secondary)",
-                          fontSize: "0.7rem",
+                          fontSize: "0.75rem",
                         }}
                       >
                         {label}

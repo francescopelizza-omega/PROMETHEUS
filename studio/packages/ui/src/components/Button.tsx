@@ -22,6 +22,12 @@ export interface ButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
   size?: ButtonSize;
   /** Optional leading glyph/icon node (e.g. a verdict glyph or lucide icon). */
   icon?: ReactNode;
+  /**
+   * An action is in flight: the button is disabled, announces itself busy, and shows a
+   * spinner in place of its icon. Screens used to hand-roll this as `disabled={busy}` plus a
+   * "…ing" label — some did, most did not, so a slow action looked like a dead click.
+   */
+  loading?: boolean;
 }
 
 interface VariantStyle {
@@ -64,10 +70,22 @@ function variantStyle(variant: ButtonVariant): VariantStyle {
 }
 
 export const Button = forwardRef<HTMLButtonElement, ButtonProps>(function Button(
-  { variant = "secondary", size = "md", icon, children, style, disabled, onFocus, onBlur, ...rest },
+  {
+    variant = "secondary",
+    size = "md",
+    icon,
+    loading = false,
+    children,
+    style,
+    disabled: disabledProp,
+    onFocus,
+    onBlur,
+    ...rest
+  },
   ref,
 ) {
   const v = variantStyle(variant);
+  const disabled = disabledProp || loading;
   return (
     <button
       ref={ref}
@@ -75,6 +93,7 @@ export const Button = forwardRef<HTMLButtonElement, ButtonProps>(function Button
       disabled={disabled}
       data-variant={variant}
       data-size={size}
+      aria-busy={loading || undefined}
       style={{
         display: "inline-flex",
         alignItems: "center",
@@ -87,10 +106,11 @@ export const Button = forwardRef<HTMLButtonElement, ButtonProps>(function Button
         fontSize: "var(--text-body-size, 0.875rem)",
         fontWeight: 600,
         lineHeight: 1,
-        cursor: disabled ? "not-allowed" : "pointer",
-        opacity: disabled ? 0.5 : 1,
+        cursor: loading ? "progress" : disabled ? "not-allowed" : "pointer",
+        // a LOADING button stays legible — it is busy, not unavailable
+        opacity: disabled && !loading ? 0.5 : 1,
         transition:
-          "background var(--motion-hover, 120ms) ease-out, border-color var(--motion-hover, 120ms) ease-out",
+          "background var(--motion-hover, 120ms) ease-out, border-color var(--motion-hover, 120ms) ease-out, filter var(--motion-hover, 120ms) ease-out",
         outline: "none",
         ...v,
         ...style,
@@ -101,7 +121,16 @@ export const Button = forwardRef<HTMLButtonElement, ButtonProps>(function Button
       // destructured out of `rest` so the spread cannot reintroduce it.
       {...rest}
       onFocus={(e) => {
-        e.currentTarget.style.boxShadow = "0 0 0 2px var(--bg-app), 0 0 0 4px var(--focus-ring)";
+        // keyboard focus only — a CLICKED button kept a cyan halo until focus moved (08 §7)
+        let keyboard = true;
+        try {
+          keyboard = e.currentTarget.matches(":focus-visible");
+        } catch {
+          /* selector unsupported: show the ring */
+        }
+        if (keyboard) {
+          e.currentTarget.style.boxShadow = "0 0 0 2px var(--bg-app), 0 0 0 4px var(--focus-ring)";
+        }
         onFocus?.(e);
       }}
       onBlur={(e) => {
@@ -109,10 +138,26 @@ export const Button = forwardRef<HTMLButtonElement, ButtonProps>(function Button
         onBlur?.(e);
       }}
     >
-      {icon != null && (
-        <span aria-hidden="true" style={{ display: "inline-flex" }}>
-          {icon}
-        </span>
+      {loading ? (
+        <span
+          aria-hidden="true"
+          className="prom-spin"
+          style={{
+            width: "0.9em",
+            height: "0.9em",
+            borderRadius: "50%",
+            border: "2px solid currentColor",
+            borderRightColor: "transparent",
+            display: "inline-block",
+            flexShrink: 0,
+          }}
+        />
+      ) : (
+        icon != null && (
+          <span aria-hidden="true" style={{ display: "inline-flex" }}>
+            {icon}
+          </span>
+        )
       )}
       {children}
     </button>

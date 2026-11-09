@@ -47,8 +47,13 @@ DEFAULT_TIMEOUT_S = 120.0
 TOP_N = 2000
 
 
-class _TimeUp(Exception):
-    """Raised from the SIGALRM handler when the wall-clock cap fires (partial dump)."""
+class _TimeUp(BaseException):
+    """Raised from the SIGALRM handler when the wall-clock cap fires (partial dump).
+
+    BaseException, not Exception: a target with `except Exception:` around its main loop used to
+    swallow the timeout and run on until the host's SIGKILL — losing the very profile this
+    in-process design exists to keep. The timer also re-fires (see `setitimer` below) in case a
+    bare `except:` eats the first one."""
 
 
 # --------------------------------------------------------------------------- #
@@ -234,7 +239,7 @@ def _profile_target(
         sys.argv = [abs_path, *target_args]
         if has_alarm:
             signal.signal(signal.SIGALRM, _on_alarm)
-            signal.setitimer(signal.ITIMER_REAL, max(0.001, timeout))
+            signal.setitimer(signal.ITIMER_REAL, max(0.001, timeout), 0.5)
         prof.enable()
         # The target's own stdout/stderr must NOT pollute the one-JSON-object envelope —
         # redirect both to devnull while it runs (we only want the profile).
@@ -353,7 +358,7 @@ def _profile_memory_target(
         sys.argv = [abs_path, *target_args]
         if has_alarm:
             signal.signal(signal.SIGALRM, _on_alarm)
-            signal.setitimer(signal.ITIMER_REAL, max(0.001, timeout))
+            signal.setitimer(signal.ITIMER_REAL, max(0.001, timeout), 0.5)
         try:
             with open(os.devnull, "w", encoding="utf-8") as devnull:
                 with contextlib.redirect_stdout(devnull), contextlib.redirect_stderr(devnull):
@@ -470,7 +475,7 @@ def _profile_async_target(
         sys.argv = [abs_path, *target_args]
         if has_alarm:
             signal.signal(signal.SIGALRM, _on_alarm)
-            signal.setitimer(signal.ITIMER_REAL, max(0.001, timeout))
+            signal.setitimer(signal.ITIMER_REAL, max(0.001, timeout), 0.5)
         sampler.start()
         try:
             with open(os.devnull, "w", encoding="utf-8") as devnull:

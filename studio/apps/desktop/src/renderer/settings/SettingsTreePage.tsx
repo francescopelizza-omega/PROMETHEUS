@@ -19,7 +19,12 @@ import {
   rawAtScope,
   scopeToWriteScope,
 } from "./settings-scope.js";
-import { type SettingsNodeView, type SettingsUiScope, isEditableControl } from "./settings-view.js";
+import {
+  type SettingsNodeView,
+  type SettingsUiScope,
+  isEditableControl,
+  pruneDeadLeaves,
+} from "./settings-view.js";
 
 export interface SettingsTreePageProps {
   /** the active project root, if any — required to read/write the workspace layer;
@@ -39,7 +44,7 @@ function findById(nodes: readonly SettingsNodeView[], id: string): SettingsNodeV
 function coerceForControl(control: string | undefined, raw: string): unknown {
   if (control === "toggle") return raw === "true";
   if (control === "number") {
-    const n = Number(raw);
+    const n = raw.trim() === "" ? Number.NaN : Number(raw);
     return Number.isFinite(n) ? n : raw;
   }
   return raw;
@@ -47,7 +52,14 @@ function coerceForControl(control: string | undefined, raw: string): unknown {
 
 export function SettingsTreePage({ workspaceRoot }: SettingsTreePageProps): ReactElement {
   const [nodes, setNodes] = useState<SettingsNodeView[] | null>(null);
+  /** the TREE could not load — the only error that replaces the page. */
   const [error, setError] = useState<string | undefined>(undefined);
+  /**
+   * A refused/failed WRITE. It used to share `error`, so one bad value (or a declined native
+   * confirm on a security key) replaced the whole page with a red line and no way back but a
+   * restart. It is shown inline, beside the setting, and cleared by the next good write.
+   */
+  const [actionError, setActionError] = useState<string | undefined>(undefined);
   const [selectedId, setSelectedId] = useState<string | undefined>(undefined);
   const [pending, setPending] = useState(false);
   // APP-058: the selected editable scope tab (default read-only ← user ← project).
@@ -60,7 +72,7 @@ export function SettingsTreePage({ workspaceRoot }: SettingsTreePageProps): Reac
       return;
     }
     setError(undefined);
-    setNodes(res.nodes ?? []);
+    setNodes(pruneDeadLeaves(res.nodes ?? []));
   }, [workspaceRoot]);
 
   useEffect(() => {
@@ -68,6 +80,9 @@ export function SettingsTreePage({ workspaceRoot }: SettingsTreePageProps): Reac
   }, [reload]);
 
   const selected = nodes && selectedId ? findById(nodes, selectedId) : undefined;
+  // a write error belongs to the setting it came from — not to the next one opened
+  // biome-ignore lint/correctness/useExhaustiveDependencies: selection change IS the trigger
+  useEffect(() => setActionError(undefined), [selectedId, scope]);
 
   const onSet = useCallback(
     async (value: unknown, scope: "global" | "workspace") => {
@@ -80,8 +95,13 @@ export function SettingsTreePage({ workspaceRoot }: SettingsTreePageProps): Reac
           scope,
           workspaceRoot,
         );
-        if (res && !res.ok) setError(res.error ?? "set failed");
-        else await reload();
+        if (res && !res.ok) setActionError(res.error ?? "set failed");
+        else {
+          setActionError(undefined);
+          await reload();
+        }
+      } catch (e) {
+        setActionError(e instanceof Error ? e.message : String(e));
       } finally {
         setPending(false);
       }
@@ -99,8 +119,13 @@ export function SettingsTreePage({ workspaceRoot }: SettingsTreePageProps): Reac
           scope,
           workspaceRoot,
         );
-        if (res && !res.ok) setError(res.error ?? "reset failed");
-        else await reload();
+        if (res && !res.ok) setActionError(res.error ?? "reset failed");
+        else {
+          setActionError(undefined);
+          await reload();
+        }
+      } catch (e) {
+        setActionError(e instanceof Error ? e.message : String(e));
       } finally {
         setPending(false);
       }
@@ -178,7 +203,7 @@ export function SettingsTreePage({ workspaceRoot }: SettingsTreePageProps): Reac
                             marginLeft: "var(--space-2, 4px)",
                             color: raw.set ? "var(--accent)" : "var(--text-secondary)",
                             fontFamily: "var(--font-mono)",
-                            fontSize: "0.7rem",
+                            fontSize: "0.75rem",
                           }}
                         >
                           {raw.set ? displayValue(raw.value) : "not set"}
@@ -236,6 +261,14 @@ export function SettingsTreePage({ workspaceRoot }: SettingsTreePageProps): Reac
                     onReset={onReset}
                   />
                 ))}
+              {actionError && (
+                <div
+                  role="alert"
+                  style={{ color: "var(--danger)", fontSize: "var(--text-small-size)" }}
+                >
+                  {actionError}
+                </div>
+              )}
             </div>
           )}
         </Panel>
@@ -327,7 +360,18 @@ function EditableValue({
           value={draft}
           disabled={locked}
           onChange={(e) => setDraft(e.currentTarget.value)}
-          onBlur={() => onSet(coerceForControl(control, draft), writeScope)}
+          onBlur={() => {
+            // Only a CHANGED value is written — tabbing through a field used to rewrite it,
+            // and an emptied number field became `Number("") === 0`. Empty means "remove my
+            // override", which is a reset, not a value.
+            if (draft === String(value ?? "")) return;
+            if (draft.trim() === "" && control === "number") {
+              if (canRemove) onReset(writeScope);
+              else setDraft(String(value ?? ""));
+              return;
+            }
+            onSet(coerceForControl(control, draft), writeScope);
+          }}
           type={control === "number" ? "number" : control === "color" ? "color" : "text"}
           style={{
             background: "var(--bg-inset)",

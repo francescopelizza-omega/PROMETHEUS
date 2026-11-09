@@ -417,3 +417,24 @@ test("a FAILED handshake closes the transport — a started child is never left 
   await assert.rejects(() => mgr2.connect("fs"), /original failure/);
   assert.equal(closeAttempts, 1);
 });
+
+test("manager: concurrent connects of one id spawn ONE transport; a live server is not respawned", async () => {
+  const store = new InMemoryConfigStore();
+  const allowGate = async (target: string): Promise<HostGateVerdict> => ({
+    verdict: "allow",
+    target,
+  });
+  let spawned = 0;
+  const factory: TransportFactory = () => {
+    spawned += 1;
+    return new FakeTransport({ tools: [RO_TOOL] });
+  };
+  const mgr = new McpHostManager({ store, gate: allowGate, transport: factory });
+  await mgr.addServer(cfg());
+  const [a, b] = await Promise.all([mgr.connect("fs"), mgr.connect("fs")]);
+  assert.equal(a.health, "ready");
+  assert.equal(b.health, "ready");
+  assert.equal(spawned, 1, "a double click must not leak a second server process");
+  await mgr.connect("fs");
+  assert.equal(spawned, 1, "already live ⇒ no respawn");
+});

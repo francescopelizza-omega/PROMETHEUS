@@ -198,24 +198,30 @@ test("the filter matches name, summary, quantisation and tags", () => {
 
 test("a HuggingFace repo installs through ollama's OFFICIAL hf.co form — no conversion", () => {
   /**
-   * `ollama pull hf.co/<repo>:<quant>` is supported by ollama itself. That is what makes a
-   * HuggingFace-backed browser work without scraping anything and, for almost every model,
-   * without a conversion step: someone has already published a GGUF.
+   * Every command the browser shows is a GATED one: a HuggingFace GGUF goes through the hug
+   * (revision-pinned, sha256-checked, nemesis-admitted) — never `ollama pull hf.co/…`, which
+   * handed an uploader's file to Ollama unscanned — and a registry tag through Prometheus's
+   * pull, which scans what Ollama stored before the model is used.
    */
   assert.equal(
     installCommand(
       entry({ route: { kind: "ollama-hf", repo: "bartowski/X-GGUF", quant: "Q4_K_M" } }),
     ),
-    "ollama pull hf.co/bartowski/X-GGUF:Q4_K_M",
+    "prometheus model hug bartowski/X-GGUF --target ollama --quant q4_k_m",
   );
   assert.equal(
     installCommand(entry({ route: { kind: "ollama-hf", repo: "a/b" } })),
-    "ollama pull hf.co/a/b",
+    "prometheus model hug a/b --target ollama",
   );
   assert.equal(
     installCommand(entry({ route: { kind: "ollama-tag", tag: "qwen3.6:latest" } })),
-    "ollama pull qwen3.6:latest",
+    "prometheus models pull qwen3.6:latest",
   );
+  for (const e of [
+    entry({ route: { kind: "ollama-hf", repo: "a/b", quant: "Q8_0" } }),
+    entry({ route: { kind: "ollama-tag", tag: "x:1" } }),
+  ])
+    assert.ok(!/hf\.co\/|^ollama pull/.test(installCommand(e) ?? ""));
 });
 
 test("a repo with no published GGUF offers NO command, rather than one that will fail", () => {

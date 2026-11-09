@@ -58,7 +58,19 @@ export function useBudgetStatus(): UseBudgetStatusResult {
   const alive = useRef(true);
 
   const load = useCallback(async () => {
-    const res = await window.prometheus?.budget?.status();
+    let res:
+      | Awaited<ReturnType<NonNullable<typeof window.prometheus.budget>["status"]>>
+      | undefined;
+    try {
+      res = await window.prometheus?.budget?.status();
+    } catch (e) {
+      // a rejected invoke used to escape the poll (unhandled every 4 s) and leave
+      // `loading` true for ever
+      if (!alive.current) return;
+      setError(e instanceof Error ? e.message : String(e));
+      setLoading(false);
+      return;
+    }
     if (!alive.current) return;
     if (!res || !res.ok) {
       setError(res?.error ?? "budget IPC unavailable");

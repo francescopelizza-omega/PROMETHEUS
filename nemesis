@@ -194,6 +194,21 @@ class Finding:
 # --------------------------------------------------------------------------- #
 # Signature rules
 # --------------------------------------------------------------------------- #
+# EXFIL-003's two halves (see the rule). The SOURCE is the whole environment, a secret-named
+# variable, a dump method, or a computed key — never one literal, non-secret name such as
+# `process.env.PREMIUM_SITE_URL ?? 'https://…'` (a setting with a URL default, not a leak).
+_ENV_SRC = (
+    r"(?:(?:process\.env|os\.environ)\b(?!\s*(?:\.|\?\.|\[))"
+    r"|(?:process\.env|os\.environ)\s*(?:\.get\(\s*['\"]|\[\s*['\"]|\??\.)\s*"
+    r"\w*(?:token|key|secret|passw|pwd|cred|auth|session|cookie)\w*"
+    r"|(?:process\.env|os\.environ)\s*\??\.\s*"
+    r"(?:copy|items|keys|values|entries|toObject|toJSON|__dict__)\b"
+    r"|(?:process\.env|os\.environ)\s*(?:\[\s*(?!['\"\s])|\.get\(\s*(?!['\"\s]))"
+    r"|printenv\b|/proc/self/environ\b)"
+)
+_NET_SINK = r"(?:fetch|axios|requests\.(?:post|get)|urllib|curl|http)"
+
+
 def _build_rules() -> list[Rule]:
     I = re.IGNORECASE | re.MULTILINE
     M = re.MULTILINE
@@ -208,6 +223,64 @@ def _build_rules() -> list[Rule]:
              r"\b(ba|z|da)?sh\b\s+-c\s+[\"']?\$\(\s*(curl|wget|fetch)",
              "Executes the output of a remote download inside a shell command substitution.",
              "Remove the command substitution; vet the remote content first.",
+             flags=I),
+        # Variants that DROP-001/002 never saw (audit 2026-11-02: each one returned ALLOW).
+        Rule("DROP-003", "download piped to a script interpreter", "dropper", "HIGH",
+             r"\b(curl|wget)\b[^\n|]{0,400}?\|\s*(sudo\s+(-\S+\s+)*)?(env\s+)?"
+             r"(python[\d.]*|perl|ruby|node|php|pwsh|powershell|osascript|lua)"
+             r"([ \t]+-[su]?)?[ \t]*($|[;&|)#])",
+             "Pipes a network download into an interpreter that executes stdin.",
+             "Download to a file, read it, then run it deliberately.",
+             flags=I),
+        Rule("DROP-004", "shell sourcing a download via process substitution", "dropper", "HIGH",
+             r"\b((ba|z|da|k)?sh|source|\.)\s+<\(\s*(curl|wget)\b",
+             "`bash <(curl …)` / `source <(curl …)` executes remote content without a pipe.",
+             "Download to a file, inspect it, then run it.",
+             flags=I),
+        Rule("DROP-005", "download piped through a chain into a shell", "dropper", "HIGH",
+             # the middle span excludes '|': same matches (the lazy first span absorbs any
+             # earlier pipes), but linear per candidate pipe — `[^\n]{0,200}?` there tried
+             # 400×200 splits per `curl`, ~1.6 s per 20 KB of `curl|curl|…`.
+             r"\b(curl|wget)\b[^\n]{0,400}?\|[^\n|]{0,200}\|\s*(sudo\s+)?(ba|z|da|k)?sh\b",
+             "Network output reaches a shell after intermediate commands (tee, sed, cat …).",
+             "Remove the pipe into the shell; vet the content first.",
+             flags=I),
+        Rule("DROP-006", "download piped to a dynamic command", "dropper", "HIGH",
+             r"\b(curl|wget)\b[^\n|]{0,400}?\|\s*(sudo\s+)?(\$\(|`|"
+             r"\$\{?[A-Za-z_]\w*\}?[ \t]*($|[;&|)])|eval\b|source\b|\.\s+/dev/stdin)",
+             "Pipes a download into a command chosen at run time ($(echo sh), $SHELL, eval).",
+             "Remove the dynamic pipe target; vet the content first.",
+             flags=I),
+        Rule("DROP-007", "remote content fetched and executed in-process", "dropper", "HIGH",
+             r"\b(exec|eval|os\.system|os\.popen|subprocess\.\w+)\s*\(\s*[\w.]*urlopen\s*\(|"
+             r"\b(exec|eval)\s*\(\s*(requests|httpx)\.(get|post)\s*\(|"
+             r"\bon\s*\(\s*[\"']end[\"']\s*,[^\n]{0,80}?\beval\s*\(|"
+             r"\b(eval|new\s+Function)\s*\(\s*(await\s+)?\(?\s*(await\s+)?fetch\s*\(|"
+             r"\.then\(\s*(eval|Function)\s*\)",
+             "Downloads code and evaluates it inside the running interpreter.",
+             "Remove the eval/exec of network data.",
+             flags=M),
+        Rule("DROP-008", "download, chmod +x and run", "dropper", "HIGH",
+             # An exec bit (`+x`, `u+rx`, 7xx/5xx/3xx/1xx), then the next command RUNS the file
+             # chmod targeted. It used to accept any third command after any chmod containing
+             # an "x" — so the official kubectl install line (`… && mv ./kubectl …`) and
+             # `chmod 644 index.html && ls` ("x" ending "index") both blocked.
+             r"\b(curl|wget)\b[^\n]{0,300}?(&&|;)\s*chmod\s+(?:-[a-z]+\s+)*"
+             r"(?:[ugoa]*\+[rwst]*x[rwst]*|0?[1357][0-7]{2})\s+(?:\./)?(?P<f>[\w.~/-]+)"
+             r"[^\n&;]{0,200}?(&&|;)\s*(sudo\s+)?(?:exec\s+|(?:ba|z|da)?sh\s+)?(?:\./)?(?P=f)\b",
+             "Fetches a binary, marks it executable and runs it in one breath.",
+             "Download, verify the checksum/signature, then run deliberately.",
+             flags=I),
+        Rule("DROP-009", "shell eval of decoded data", "dropper", "HIGH",
+             r"\beval\b[^\n]{0,20}?\$\([^\n]{0,400}?\bbase64\s+(-d|--decode|-D)\b|"
+             r"\bbase64\s+(-d|--decode|-D)\b[^\n|]{0,200}?\|\s*(sudo\s+)?(ba|z|da|k)?sh\b",
+             "Decodes a base64 blob and executes it — the payload is hidden from review.",
+             "Decode the blob offline; never eval decoded data in an install step.",
+             flags=I),
+        Rule("DROP-010", "URL content piped into a shell", "dropper", "HIGH",
+             r"https?://[^\s|'\"<>]+[^\n|]{0,200}?\|\s*(sudo\s+)?(ba|z|da|k)?sh\b",
+             "Content addressed by a URL is piped into a shell (fetcher name hidden or aliased).",
+             "Download to a file, inspect it, then run it.",
              flags=I),
         # --- Reverse shells ----------------------------------------------- #
         Rule("RSHELL-001", "/dev/tcp or /dev/udp reverse shell", "reverse_shell", "CRITICAL",
@@ -273,7 +346,9 @@ def _build_rules() -> list[Rule]:
              "Review the compiled source; remove if it decodes an opaque blob.",
              flags=M),
         Rule("OBF-005", "PowerShell encoded/IEX (cross-platform pwsh)", "obfuscation", "HIGH",
-             r"(Invoke-Expression|\bIEX\b)\b|-Enc(odedCommand)?\b\s+[A-Za-z0-9+/=]{40,}",
+             r"(Invoke-Expression|\bIEX\b)\b|-Enc(odedCommand)?\b\s+[A-Za-z0-9+/=]{40,}|"
+             r"\b(powershell|pwsh)(\.exe)?\b[^\n]{0,80}?\s-(e|ec|en|enc|enco|encod|encode|"
+             r"encoded|encodedc\w*)\s+[A-Za-z0-9+/=]{8,}",
              "PowerShell Invoke-Expression / -EncodedCommand — obfuscated execution.",
              "Decode the base64 command; remove IEX of remote/encoded data.",
              flags=I),
@@ -318,6 +393,13 @@ def _build_rules() -> list[Rule]:
              "Installs a launchd plist for auto-start persistence on macOS.",
              "Remove and audit ~/Library/LaunchAgents and /Library/LaunchDaemons.",
              flags=I),
+        Rule("PERSIST-006", "system crontab / cron.d write", "persistence", "HIGH",
+             r">>?\s*/etc/(crontab|cron\.(d|hourly|daily|weekly|monthly)/\S*)|"
+             r">>?\s*/var/spool/cron\S*|\btee\s+(-a\s+)?/etc/(crontab|cron\.d/)|"
+             r"\bcrontab\s+(/tmp|/dev/shm|/var/tmp)/",
+             "Writes a job into the system crontab or cron.d — survives reboots.",
+             "Remove the write; audit /etc/crontab and /etc/cron.d.",
+             flags=I),
         Rule("PERSIST-003", "launchd plist RunAtLoad", "persistence", "MEDIUM",
              r"<key>\s*RunAtLoad\s*</key>\s*<true\s*/>",
              "launchd plist set to run at load — verify the ProgramArguments are benign.",
@@ -350,12 +432,14 @@ def _build_rules() -> list[Rule]:
         # fires on what the rule names: the WHOLE environment (`JSON.stringify(process.env)`,
         # `dict(os.environ)`), a secret-named variable (`process.env.GITHUB_TOKEN`,
         # `os.environ.get("AWS_SECRET_ACCESS_KEY")`), or printenv / /proc/self/environ.
+        # The narrowing above must not open a gap for the dumps that do not look like a bare
+        # mention: a dump METHOD (`os.environ.copy()`, `.items()`, `process.env.toObject()`) and a
+        # COMPUTED key (`process.env[k]`, `os.environ.get(name)`) — a loop over the keys reads
+        # every secret without ever naming one. Only a single LITERAL non-secret name is exempt.
         Rule("EXFIL-003", "env dump POSTed to network", "exfiltration", "HIGH",
-             r"(?:(?:process\.env|os\.environ)\b(?!\s*(?:\.|\?\.|\[))"
-             r"|(?:process\.env|os\.environ)\s*(?:\.get\(\s*['\"]|\[\s*['\"]|\??\.)\s*"
-             r"\w*(?:token|key|secret|passw|pwd|cred|auth|session|cookie)\w*"
-             r"|printenv\b|/proc/self/environ\b)"
-             r"[^\n]{0,200}?(fetch|axios|requests\.(post|get)|urllib|curl|http)",
+             # source … sink, OR sink … source: `requests.post(url, json=os.environ.copy())`
+             # names the sink first, and that order used to pass unseen.
+             rf"(?:{_ENV_SRC}[^\n]{{0,200}}?{_NET_SINK}|{_NET_SINK}[^\n]{{0,200}}?{_ENV_SRC})",
              "Serialises environment variables (tokens, secrets) and sends them out.",
              "Remove the network send; rotate any exposed secrets.",
              flags=I),
@@ -395,7 +479,7 @@ def _build_rules() -> list[Rule]:
              "Confirm the registry is trusted/internal; pin and verify packages.",
              flags=I),
         Rule("PKG-004", "pyproject in-tree build backend (PEP 517 backend-path)", "supply_chain", "HIGH",
-             r"^\s*backend-path\s*=",
+             r"^[ \t]*backend-path\s*=",
              "pyproject.toml declares an in-tree build backend (backend-path) — pip loads and runs "
              "build-backend code straight from the repo at `pip install`/build time, before the "
              "package is ever imported. Arbitrary local code execution on install.",
@@ -493,14 +577,14 @@ def _build_rules() -> list[Rule]:
              "${{ github.event.* }} into a run: shell.",
              flags=M, globs=("*/.github/workflows/*", "*.yml", "*.yaml")),
         Rule("GHA-003", "third-party action pinned to a movable ref", "ci_supply_chain", "MEDIUM",
-             r"(?m)^\s*-?\s*uses:\s*[\"']?(?!actions/|github/|docker://)"
+             r"(?m)^[ \t]*(?:-[ \t]*)?uses:[ \t]*[\"']?(?!actions/|github/|docker://)"
              r"[\w.-]+/[\w.-]+@(?![0-9a-fA-F]{40}\b)[\w./-]+",
              "A third-party Action is referenced by tag/branch, not a full commit SHA. A "
              "compromised tag silently runs new code in your pipeline.",
              "Pin third-party actions to a 40-char commit SHA (uses: owner/repo@<sha>).",
              flags=M, globs=("*/.github/workflows/*", "*.yml", "*.yaml")),
         Rule("GHA-004", "CI runs remote script (curl|wget into shell)", "ci_supply_chain", "HIGH",
-             r"(?m)^\s*run:\s*[^\n]*\b(curl|wget)\b[^\n|]{0,200}?\|\s*(sudo\s+)?(ba|z)?sh\b",
+             r"(?m)^[ \t]*run:\s*[^\n]*\b(curl|wget)\b[^\n|]{0,200}?\|\s*(sudo\s+)?(ba|z)?sh\b",
              "A workflow step downloads and pipes a remote script straight into a shell.",
              "Vendor/verify the script; do not pipe network output to a shell in CI.",
              flags=I, globs=("*/.github/workflows/*", "*.yml", "*.yaml")),
@@ -512,33 +596,33 @@ def _build_rules() -> list[Rule]:
              "Remove; inspect the command it points at. These keys are a known RCE vector.",
              flags=I),
         Rule("GIT-002", "git config carries executable directive", "git_weaponize", "CRITICAL",
-             r"(?im)^\s*(fsmonitor|sshCommand|pager)\s*=\s*\S",
+             r"(?im)^[ \t]*(fsmonitor|sshCommand|pager)\s*=\s*\S",
              "A committed git config sets fsmonitor/sshCommand/pager — git will run this "
              "command automatically (Trojan dotfiles / repo-local config RCE).",
              "Delete the directive; never trust an executable git-config value from a repo.",
              flags=re.IGNORECASE | re.MULTILINE,
              globs=(".gitconfig", "gitconfig", "*/.git/config")),
         Rule("GIT-003", "git alias runs a shell command", "git_weaponize", "HIGH",
-             r"(?im)^\s*[\w.-]+\s*=\s*!",
+             r"(?im)^[ \t]*[\w.-]+\s*=\s*!",
              "A git alias whose value starts with `!` runs an arbitrary shell command.",
              "Verify the alias; remove if it executes anything unexpected.",
              flags=re.IGNORECASE | re.MULTILINE,
              globs=(".gitconfig", "gitconfig")),
         Rule("GIT-004", "git hooksPath redirection", "git_weaponize", "HIGH",
-             r"(?im)^\s*hooksPath\s*=\s*\S",
+             r"(?im)^[ \t]*hooksPath\s*=\s*\S",
              "Redirects git hooks into a repo-controlled directory — committed hooks then "
              "run on commit/checkout/merge.",
              "Inspect the hooks directory; remove the redirection if untrusted.",
              flags=re.IGNORECASE | re.MULTILINE,
              globs=(".gitconfig", "gitconfig", "*/.git/config")),
         Rule("GIT-005", "submodule uses ext:: transport", "git_weaponize", "HIGH",
-             r"(?im)^\s*url\s*=\s*ext::",
+             r"(?im)^[ \t]*url\s*=\s*ext::",
              "A submodule URL uses the git `ext::` transport, which executes a shell "
              "command on clone/update — remote code execution.",
              "Remove the submodule; never clone with --recurse-submodules from this repo.",
              flags=re.IGNORECASE | re.MULTILINE, globs=(".gitmodules",)),
         Rule("GIT-006", "submodule from raw IP / local transport", "git_weaponize", "MEDIUM",
-             r"(?im)^\s*url\s*=\s*(file://|git://|https?://\d{1,3}(\.\d{1,3}){3})",
+             r"(?im)^[ \t]*url\s*=\s*(file://|git://|https?://\d{1,3}(\.\d{1,3}){3})",
              "A submodule points at a raw IP, file:// or unauthenticated git:// transport.",
              "Confirm the source is trusted; prefer pinned https submodules.",
              flags=re.IGNORECASE | re.MULTILINE, globs=(".gitmodules",)),
@@ -565,7 +649,10 @@ def _build_rules() -> list[Rule]:
              action="report", klass="vuln", flags=re.MULTILINE),
         Rule("SAST-TLSOFF", "TLS verification disabled", "sast", "HIGH",
              r"(?i)(verify\s*=\s*False|rejectUnauthorized\s*:\s*false|InsecureSkipVerify\s*:\s*true"
-             r"|_create_unverified_context|ssl\._https_verify|curl\b[^\n]*\s-k\b)",
+             r"|_create_unverified_context|ssl\._https_verify"
+             # Linear: anchored at line start with a lookahead. The old `curl\b[^\n]*\s-k\b`
+             # was quadratic (6.2 s on a 100 KB line of `curl curl …`).
+             r"|^(?=[^\n]*\bcurl\b)[^\n]*\s-k\b)",
              "Certificate/host verification is disabled — enables man-in-the-middle.",
              "Keep TLS verification on; pin or trust a proper CA instead.",
              action="report", klass="vuln", flags=re.MULTILINE),
@@ -673,7 +760,7 @@ def _build_rules() -> list[Rule]:
              "Use secrets.token_*/crypto.randomBytes for anything security-relevant.",
              action="report", klass="vuln", flags=re.MULTILINE),
         Rule("SAST-ASSERT-AUTH", "authorization via assert", "sast", "LOW",
-             r"(?i)^\s*assert\s+[^\n]*(is_admin|is_authenticated|has_perm|role\s*==)",
+             r"(?i)^[ \t]*assert\s+[^\n]*(is_admin|is_authenticated|has_perm|role\s*==)",
              "Authorization enforced with `assert` vanishes under `python -O`.",
              "Raise an explicit exception / return 403 instead of asserting.",
              action="report", klass="vuln", flags=re.MULTILINE),
@@ -986,7 +1073,7 @@ _ARC_BOMB_RULE = Rule(
     action="report", klass="container", flags=0,
 )
 _ARC_NESTED_RULE = Rule(
-    "ARC-NESTED", "Archive nested beyond depth limit", "archive", "MEDIUM", "",
+    "ARC-NESTED", "Archive nested beyond depth limit", "archive", "HIGH", "",
     "An archive contains further archives deeper than the scan depth limit — a common "
     "way to hide payloads from shallow scanners (and a nesting-bomb vector).",
     "Increase --max-depth deliberately, or treat the nested blob as unscannable.",
@@ -1516,8 +1603,14 @@ def _engine_findings(root: str, cfg: dict) -> list[Finding]:
                     path, _, sig = line.rpartition(":")
                     out.append(Finding(path.strip() or root, 1, 1, _CLAMAV_RULE,
                                        sig.replace("FOUND", "").strip()))
-        except (OSError, subprocess.SubprocessError):
-            pass
+            # clamscan: 0 clean, 1 found, 2+ error — an error is a missing engine, say so.
+            if p.returncode not in (0, 1):
+                out.append(Finding(root, 1, 1, _EXT_ENGINE_FAIL_RULE,
+                                   f"clamscan exit {p.returncode}: "
+                                   f"{(p.stderr or '').strip()[:120]}"))
+        except (OSError, subprocess.SubprocessError) as e:
+            out.append(Finding(root, 1, 1, _EXT_ENGINE_FAIL_RULE,
+                               f"clamscan: {type(e).__name__}"))
     yrules = cfg.get("yara_rules") or _default_yara_rules()
     if yrules and os.path.exists(yrules) and shutil.which("yara"):
         try:
@@ -1527,8 +1620,13 @@ def _engine_findings(root: str, cfg: dict) -> list[Finding]:
                 rule_name, _, path = line.partition(" ")
                 if rule_name and path:
                     out.append(Finding(path.strip(), 1, 1, _YARA_RULE, rule_name.strip()))
-        except (OSError, subprocess.SubprocessError):
-            pass
+            if p.returncode != 0:
+                out.append(Finding(root, 1, 1, _EXT_ENGINE_FAIL_RULE,
+                                   f"yara exit {p.returncode}: "
+                                   f"{(p.stderr or '').strip()[:120]}"))
+        except (OSError, subprocess.SubprocessError) as e:
+            out.append(Finding(root, 1, 1, _EXT_ENGINE_FAIL_RULE,
+                               f"yara: {type(e).__name__}"))
     return out
 
 
@@ -1684,7 +1782,7 @@ def _parse_deps(fname: str, text: str) -> list:
         if f.startswith("requirements") and f.endswith(".txt"):
             # tolerate extras (`pkg[security]==1.0`) and trailing env markers (`; ...`)
             return re.findall(
-                r"(?m)^\s*([A-Za-z0-9][A-Za-z0-9._-]*)(?:\[[^\]]*\])?\s*==\s*([0-9][^\s;#]*)",
+                r"(?m)^[ \t]*([A-Za-z0-9][A-Za-z0-9._-]*)(?:\[[^\]]*\])?\s*==\s*([0-9][^\s;#]*)",
                 text)
         if f == "pnpm-lock.yaml":
             # v6: "  /name@1.2.3:" or "  /@scope/name@1.2.3(peer):"
@@ -2427,10 +2525,1144 @@ def _ndb_scan(name: str, raw: bytes) -> list:
     return out
 
 
+
+
+# --------------------------------------------------------------------------- #
+# Model-weight formats: pickle / PyTorch / NumPy / Keras / safetensors / GGUF
+# --------------------------------------------------------------------------- #
+# Model files are DATA formats that some loaders turn into CODE:
+#   * pickle (and everything built on it: torch .pt/.pth/.bin/.ckpt, joblib, object
+#     .npy) runs arbitrary callables on load via GLOBAL/STACK_GLOBAL + REDUCE;
+#   * a Keras `Lambda` layer stores marshalled Python bytecode;
+#   * a torch.package archive ships `.py` sources that are imported on load;
+#   * a GGUF carries a Jinja chat template that inference servers render — a template
+#     that reaches `__globals__`/`__subclasses__` is a server-side template injection.
+# safetensors and GGUF are the SAFE formats only when they are well formed, so both are
+# validated structurally (bounded header, sane counts, offsets inside the file). Nothing
+# here ever unpickles, imports or renders anything: pickles are walked with
+# `pickletools.genops`, which only decodes opcodes.
+_PICKLE_RCE_RULE = Rule(
+    "PICKLE-RCE", "Pickle imports a code-execution callable", "model", "CRITICAL", "",
+    "A pickle stream (model weights, joblib, object .npy) imports a callable that can run "
+    "commands, open files or sockets, or load further code (os.system, subprocess, "
+    "builtins.eval/exec/__import__, runpy, socket …). Loading it executes that call.",
+    "Do not load this file. Use a safetensors/GGUF build of the model from its publisher.",
+    action="report", flags=0,
+)
+_PICKLE_DYN_RULE = Rule(
+    "PICKLE-DYNAMIC", "Pickle builds an import from non-constant data", "model", "CRITICAL", "",
+    "A STACK_GLOBAL takes its module/name from values that are not plain string constants. "
+    "Legitimate serializers always push literal names; computing them is obfuscation.",
+    "Do not load this file; treat the artifact as hostile.",
+    action="report", flags=0,
+)
+_PICKLE_GLOBAL_RULE = Rule(
+    "PICKLE-GLOBAL", "Pickle imports a non-allowlisted callable", "model", "MEDIUM", "",
+    "The pickle imports callables outside the tensor/array/container allowlist. They are "
+    "not known-dangerous, but loading the file will import and call them.",
+    "Prefer a safetensors/GGUF build; if you must load it, use torch.load(weights_only=True).",
+    action="report", flags=0,
+)
+_MODEL_CODE_RULE = Rule(
+    "MODEL-CODE", "Model file embeds executable code", "model", "CRITICAL", "",
+    "The model artifact carries code its loader executes: a Keras Lambda layer (marshalled "
+    "bytecode) or a torch.package archive (Python sources imported on load).",
+    "Do not load this model; obtain a weights-only (safetensors/GGUF) build.",
+    action="report", flags=0,
+)
+_TORCHSCRIPT_RULE = Rule(
+    "MODEL-TORCHSCRIPT", "TorchScript program in model archive", "model", "MEDIUM", "",
+    "A torch.jit archive: `code/__torch__/…` holds a TorchScript program that runs on "
+    "torch.jit.load. TorchScript is a restricted language (no imports, no os), so this is not "
+    "the arbitrary-Python MODEL-CODE case — but it is a program, not weights. Its pickles "
+    "(data.pkl, constants.pkl) are still walked for imports.",
+    "Prefer a weights-only (safetensors/GGUF) build; load TorchScript only from a trusted source.",
+    action="report", flags=0,
+)
+_GGUF_TEMPLATE_RULE = Rule(
+    "GGUF-TEMPLATE", "Chat template attempts template injection", "model", "CRITICAL", "",
+    "The GGUF's Jinja chat template reaches Python internals (dunder attributes, the |attr "
+    "filter, lipsum/cycler/joiner globals, popen/subprocess). Inference servers render this "
+    "template on every request — a sandbox escape here runs code on the serving host.",
+    "Do not serve this file; download the model from its original publisher.",
+    action="report", flags=0,
+)
+_TEMPLATE_INCLUDE_RULE = Rule(
+    "GGUF-TEMPLATE-INCLUDE", "Chat template loads other templates", "model", "HIGH", "",
+    "The chat template uses include/import/extends — it pulls template code from somewhere "
+    "else at render time. No published chat template needs to.",
+    "Do not serve this file; use the publisher's original template.",
+    action="report", flags=0,
+)
+_TEMPLATE_INJECT_RULE = Rule(
+    "TMPL-INJECT", "Chat template carries injected instructions", "model", "MEDIUM", "",
+    "The chat template contains prose that reads like hidden instructions (ignore previous "
+    "instructions, do not reveal, URLs, send the key). Templates are applied to every prompt, "
+    "which makes them a quiet place to backdoor a model's behaviour.",
+    "Read the template; replace it with the publisher's original if unsure.",
+    action="report", flags=0,
+)
+_MODEL_MALFORMED_RULE = Rule(
+    "MODEL-MALFORMED", "Model file is malformed or unverifiable", "archive", "HIGH", "",
+    "A weights file that claims a known format (GGUF, safetensors, pickle, npy) does not "
+    "parse within safe bounds — truncated, oversized header, impossible counts or offsets. "
+    "Its contents are a blind spot, and malformed headers are a classic parser-exploit vector.",
+    "Re-download from the publisher and compare the checksum; do not load it as is.",
+    # Same contract as FILE-UNSCANNABLE: klass=container, blocked through build_verdict's
+    # 'unscannable blind spot' reason so --allow-unscannable still works deliberately.
+    action="report", klass="container", flags=0,
+)
+
+_PICKLE_EXTS = (".pkl", ".pickle", ".pck", ".joblib", ".dill", ".pt", ".pth", ".ckpt",
+                ".bin", ".pytorch", ".mar", ".npy", ".npz", ".sav")
+_ZIP_MODEL_EXTS = (".pt", ".pth", ".bin", ".ckpt", ".pytorch", ".mar", ".npz", ".keras")
+_MODEL_SCAN_CAP = 256 * 1024 * 1024          # max decompressed pickle bytes analysed
+_PICKLE_MAX_OPS = 20_000_000
+# Legacy torch.load reads five pickles back to back; 64 leaves room for any honest layout. Past
+# it, more pickle-parsable data is itself a finding — the cap used to end the walk silently, so a
+# 17th stream carrying os.system gated ALLOW.
+_PICKLE_MAX_STREAMS = 64
+# Extensions whose loaders unpickle whatever is there: always walked, any protocol, any first
+# byte (protocol 0/1 pickles have no \x80 header — they used to skip the walk entirely).
+_STRICT_PICKLE_EXTS = (".pkl", ".pickle", ".joblib", ".dill", ".pt", ".pth", ".ckpt",
+                       ".pytorch", ".mar")
+# torch's legacy TAR checkpoint: these members are unpickled by torch.load.
+_TORCH_TAR_MEMBERS = ("pickle", "sys_info", "storages", "tensors")
+_PICKLE_STR_KEEP = 1024                      # longer strings are never a module/attr name
+
+
+def _pickle_opcode_bytes() -> frozenset:
+    import pickletools
+    return frozenset(op.code.encode("latin-1") for op in pickletools.opcodes)
+
+
+_PICKLE_OPCODES = _pickle_opcode_bytes()
+_PY_IDENT = re.compile(r"^[A-Za-z_][\w.]*$")
+# Callables a weights pickle legitimately imports (torch, numpy, containers). Anything
+# else is reported; anything in _PICKLE_DANGER is CRITICAL.
+_PICKLE_SAFE_GLOBALS = {
+    ("collections", "OrderedDict"), ("collections", "defaultdict"), ("collections", "deque"),
+    ("builtins", "set"), ("builtins", "frozenset"), ("builtins", "slice"),
+    ("builtins", "complex"), ("builtins", "bytearray"), ("builtins", "range"),
+    ("builtins", "object"), ("builtins", "dict"), ("builtins", "list"),
+    ("builtins", "tuple"), ("builtins", "int"), ("builtins", "float"), ("builtins", "bool"),
+    ("builtins", "str"), ("builtins", "bytes"),
+    ("__builtin__", "set"), ("__builtin__", "frozenset"), ("__builtin__", "slice"),
+    ("__builtin__", "object"),
+    ("copy_reg", "_reconstructor"), ("copyreg", "_reconstructor"),
+    ("_codecs", "encode"),
+    ("torch._utils", "_rebuild_tensor"), ("torch._utils", "_rebuild_tensor_v2"),
+    ("torch._utils", "_rebuild_tensor_v3"), ("torch._utils", "_rebuild_parameter"),
+    ("torch._utils", "_rebuild_parameter_with_state"), ("torch._utils", "_rebuild_qtensor"),
+    ("torch._utils", "_rebuild_sparse_tensor"), ("torch._utils", "_rebuild_nested_tensor"),
+    ("torch._utils", "_rebuild_meta_tensor_no_storage"),
+    ("torch._utils", "_rebuild_wrapper_subclass"),
+    ("torch._utils", "_rebuild_device_tensor_from_numpy"),
+    ("torch._utils", "_rebuild_xla_tensor"), ("torch._utils", "_rebuild_mlc_tensor"),
+    ("torch._tensor", "_rebuild_from_type_v2"), ("torch._tensor", "_rebuild_from_type"),
+    ("torch.nn.parameter", "Parameter"), ("torch", "Size"), ("torch", "device"),
+    ("torch", "dtype"), ("torch", "layout"), ("torch", "memory_format"),
+    ("torch.serialization", "_get_layout"),
+    # NOT ("torch.storage", "_load_from_bytes"): it runs torch.load on embedded bytes — a
+    # nested pickle this walk cannot see. It stays 'unknown'.
+    ("numpy.core.multiarray", "_reconstruct"), ("numpy._core.multiarray", "_reconstruct"),
+    ("numpy.core.multiarray", "scalar"), ("numpy._core.multiarray", "scalar"),
+    ("numpy", "ndarray"), ("numpy", "dtype"), ("numpy", "core"),
+    ("numpy.dtypes", "Float32DType"), ("numpy.dtypes", "Float64DType"),
+    ("numpy.dtypes", "Int64DType"), ("numpy.dtypes", "Int32DType"),
+    ("numpy.dtypes", "Float16DType"), ("numpy.dtypes", "UInt8DType"),
+    ("numpy.dtypes", "BoolDType"),
+    ("datetime", "datetime"), ("datetime", "date"), ("datetime", "time"),
+    ("datetime", "timedelta"), ("datetime", "timezone"), ("decimal", "Decimal"),
+    ("fractions", "Fraction"), ("uuid", "UUID"), ("pathlib", "PosixPath"),
+    ("pathlib", "WindowsPath"), ("pathlib", "PurePosixPath"), ("pathlib", "PureWindowsPath"),
+}
+_PICKLE_SAFE_TORCH_STORAGE = re.compile(r"^(torch|torch\.cuda)$")
+_PICKLE_SAFE_TORCH_NAMES = re.compile(
+    r"^(\w*Storage|float\d*|bfloat16|half|double|int\d*|uint\d*|long|short|bool|"
+    r"complex\d*|cfloat|cdouble|qint\d+|quint\d+(x\d+)?|float8_\w+|chalf)$")
+# Modules (or module prefixes) whose callables execute code, touch the OS, the network or
+# the import system — any import from these is a code-execution primitive on load.
+_PICKLE_DANGER_MODULES = (
+    "os", "posix", "nt", "subprocess", "sys", "socket", "shutil", "runpy", "importlib",
+    "pty", "commands", "popen2", "platform", "webbrowser", "requests", "urllib", "urllib2",
+    "urllib3", "http", "httplib", "ftplib", "telnetlib", "smtplib", "poplib", "imaplib",
+    "pickle", "cPickle", "_pickle", "dill", "cloudpickle", "joblib", "marshal", "types",
+    "ctypes", "cffi", "code", "codeop", "pdb", "bdb", "timeit", "trace", "profile",
+    "cProfile", "multiprocessing", "threading", "_thread", "signal", "asyncio", "distutils",
+    "setuptools", "pip", "pkg_resources", "sh", "plumbum", "paramiko", "operator",
+    "functools", "io", "_io", "tempfile", "glob", "zipimport", "pkgutil", "imp",
+    "linecache", "inspect", "gc", "ensurepip", "venv", "site", "sysconfig", "builtins_",
+    "torch.hub", "torch.load", "torch.jit", "torch.package", "torch._dynamo",
+    "torch.utils.cpp_extension", "numpy.testing", "numpy.f2py", "numpy.distutils",
+    "numpy.lib.npyio", "numpy.load", "keras", "tensorflow", "IPython", "jinja2", "yaml",
+    "_posixsubprocess", "_osx_support", "_aix_support", "nturl2path", "aiohttp", "httpx",
+    "selenium", "smtpd", "xmlrpc", "socketserver", "_winapi", "winreg", "msvcrt",
+    # found in review 2026-11-02 — each runs a program or executes code:
+    "pydoc", "_pyrepl", "doctest", "torch._inductor", "torch.storage", "numpy.lib.format",
+    "numpy.lib", "code", "rlcompleter", "pstats", "lib2to3", "idlelib", "turtledemo",
+)
+_PICKLE_DANGER_BUILTINS = {
+    "eval", "exec", "execfile", "compile", "open", "getattr", "setattr", "delattr",
+    "__import__", "globals", "locals", "vars", "input", "breakpoint", "help", "exit", "quit",
+    "memoryview", "apply", "reload", "file", "__build_class__", "classmethod", "staticmethod",
+    "property", "super", "type",
+}
+
+
+def _pickle_global_class(module: str, name: str) -> str:
+    """'safe' | 'danger' | 'unknown' for one imported callable."""
+    if (module, name) in _PICKLE_SAFE_GLOBALS:
+        return "safe"
+    if _PICKLE_SAFE_TORCH_STORAGE.match(module) and _PICKLE_SAFE_TORCH_NAMES.match(name):
+        return "safe"
+    if module in ("builtins", "__builtin__", "__builtins__"):
+        return ("danger" if name in _PICKLE_DANGER_BUILTINS or name.startswith("_") or "." in name
+                else "unknown")
+    root = module.split(".", 1)[0]
+    for d in _PICKLE_DANGER_MODULES:
+        if module == d or module.startswith(d + ".") or root == d:
+            return "danger"
+    # A private callable (`uuid._get_command_stdout` runs any binary) or a dotted attribute path
+    # (`object.__getattribute__` reached through the name) is never what a weights pickle
+    # rebuilds — the allowlist above names every legitimate one. ("uuid._" used to sit in the
+    # module list, where it was compared against MODULE names and so never matched anything.)
+    if name.startswith("_") or "." in name:
+        return "danger"
+    if name in ("system", "popen", "spawn", "exec", "eval", "load", "loads", "call", "run",
+                "check_output", "Popen", "pipepager", "tempfilepager", "debug_script",
+                "compile_file", "read_array", "getoutput", "getstatusoutput"):
+        return "danger"
+    return "unknown"
+
+
+def _pickle_analyse(data: bytes, lenient: bool = False
+                    ) -> tuple[list[tuple[str, str]], int, Optional[str], int]:
+    """Statically walk every pickle stream in `data` (legacy torch files concatenate several).
+    Returns (imports, dynamic_global_count, error, bytes_consumed). Never unpickles.
+
+    Every stream after the first, and the first too when `lenient` (a `.bin`/extensionless file
+    that may or may not be a pickle), is TENTATIVE: bytes that stop parsing are trailing raw
+    storage, not an error — but a dangerous import seen before the bad byte is still reported
+    (the payload-then-corruption "nullifAI" pattern runs in pickle.load before the corruption).
+    Only identifier-shaped module/attr names count in a tentative stream, so random bytes that
+    happen to look like a GLOBAL opcode do not become findings."""
+    import pickletools
+    imports: list[tuple[str, str]] = []
+    seen: set = set()
+    dynamic = 0
+    pos = 0
+    streams = 0
+    mark = object()
+    STR_OPS = {"STRING", "BINSTRING", "SHORT_BINSTRING", "UNICODE", "BINUNICODE",
+               "SHORT_BINUNICODE", "BINUNICODE8", "BINBYTES", "SHORT_BINBYTES", "BINBYTES8"}
+    GET_OPS = {"GET", "BINGET", "LONG_BINGET"}
+    PUT_OPS = {"PUT", "BINPUT", "LONG_BINPUT"}
+    ops = 0
+
+    def add(mod: str, attr: str) -> None:
+        if (mod, attr) not in seen:          # a set, not one tuple per opcode (memory bound)
+            seen.add((mod, attr))
+            imports.append((mod, attr))
+
+    def ident(t: tuple) -> bool:
+        return bool(_PY_IDENT.match(t[0]) and _PY_IDENT.match(t[1]))
+
+    def rollback(start: int, keep_danger_only: bool) -> list:
+        new = imports[start:]
+        del imports[start:]
+        seen.clear()
+        seen.update(imports)
+        kept = [t for t in new if ident(t)
+                and (not keep_danger_only or _pickle_global_class(*t) == "danger")]
+        for t in kept:
+            add(*t)
+        return kept
+
+    while pos < len(data):
+        if data[pos:pos + 1] not in _PICKLE_OPCODES:
+            if streams == 0 and not lenient:
+                return imports, dynamic, f"not a pickle (first byte {data[:1]!r})", 0
+            break                       # trailing raw storage bytes (legacy torch layout)
+        if streams >= _PICKLE_MAX_STREAMS:
+            return imports, dynamic, f"more than {_PICKLE_MAX_STREAMS} pickle streams", pos
+        tentative = lenient or streams > 0
+        streams += 1
+        start_imp, start_dyn = len(imports), dynamic
+        stack: list = []
+        memo: dict = {}
+        try:
+            stream = io.BytesIO(data)
+            stream.seek(pos)
+            end = pos
+            stopped = False
+            for op, arg, at in pickletools.genops(stream):
+                ops += 1
+                if ops > _PICKLE_MAX_OPS:
+                    return imports, dynamic, "opcode budget exceeded", end
+                nm = op.name
+                end = stream.tell()
+                if nm in ("GLOBAL", "INST"):
+                    mod, _, attr = str(arg).partition(" ")
+                    add(mod, attr)
+                elif nm in ("EXT1", "EXT2", "EXT4"):
+                    # copyreg extension registry: the callable never appears in the stream
+                    dynamic += 1
+                elif nm == "STACK_GLOBAL":
+                    a = stack.pop() if stack else None
+                    m = stack.pop() if stack else None
+                    if isinstance(m, str) and isinstance(a, str):
+                        add(m, a)
+                    else:
+                        dynamic += 1
+                    stack.append(None)
+                    continue
+                if nm in STR_OPS:
+                    sv = (arg.decode("latin-1") if isinstance(arg, (bytes, bytearray))
+                          else str(arg))
+                    stack.append(sv if len(sv) <= _PICKLE_STR_KEEP else None)
+                    continue
+                if nm in GET_OPS:
+                    stack.append(memo.get(arg))
+                    continue
+                if nm in PUT_OPS:
+                    if stack:
+                        memo[arg] = stack[-1]
+                    continue
+                if nm == "MEMOIZE":
+                    if stack:
+                        memo[len(memo)] = stack[-1]
+                    continue
+                if nm == "MARK":
+                    stack.append(mark)
+                    continue
+                before = op.stack_before
+                after = op.stack_after
+                if pickletools.markobject in before:
+                    while stack and stack[-1] is not mark:
+                        stack.pop()
+                    if stack:
+                        stack.pop()
+                    extra = before.index(pickletools.markobject)
+                    for _ in range(extra):
+                        if stack:
+                            stack.pop()
+                else:
+                    for _ in range(len(before)):
+                        if stack:
+                            stack.pop()
+                for _ in after:
+                    stack.append(None)
+                if nm == "STOP":
+                    stopped = True
+                    break
+            if not stopped:
+                raise ValueError("stream ended without STOP")
+            if tentative:
+                rollback(start_imp, keep_danger_only=False)   # drop garbage-shaped names
+            pos = end
+        except Exception as e:          # malformed opcode stream
+            if tentative:
+                kept = rollback(start_imp, keep_danger_only=True)
+                dynamic = start_dyn
+                if kept:
+                    return imports, dynamic, f"{type(e).__name__}: {e}"[:160], pos
+                break
+            return imports, dynamic, f"{type(e).__name__}: {e}"[:160], pos
+    return imports, dynamic, None, pos
+
+
+def _model_decompress(raw: bytes) -> bytes:
+    """joblib/legacy dumps are often compressed; decompress (bounded at the pickle cap)
+    before analysis. NOT `_maybe_decompress`: that name is the scanner's bomb-safe 4 MiB
+    decoder for blobs found in text, and rebinding it raised every decoded text blob's
+    ceiling to 256 MiB (caught in review, 2026-11-02)."""
+    try:
+        if raw[:2] == b"\x1f\x8b":
+            return gzip.GzipFile(fileobj=io.BytesIO(raw)).read(_MODEL_SCAN_CAP)
+        if raw[:3] == b"BZh":
+            return bz2.BZ2Decompressor().decompress(raw, _MODEL_SCAN_CAP)
+        if raw[:6] == b"\xfd7zXZ\x00":
+            return lzma.LZMADecompressor().decompress(raw, _MODEL_SCAN_CAP)
+        if raw[:1] == b"x" and raw[1:2] in (b"\x01", b"\x5e", b"\x9c", b"\xda"):
+            return zlib.decompressobj().decompress(raw, _MODEL_SCAN_CAP)
+    except Exception:
+        return raw
+    return raw
+
+
+def _pickle_findings(name: str, data: bytes, lenient: bool = False) -> list[Finding]:
+    out: list[Finding] = []
+    data = _model_decompress(data)
+    imports, dynamic, err, _ = _pickle_analyse(data, lenient=lenient)
+    danger = sorted({f"{m}.{a}" for m, a in imports if _pickle_global_class(m, a) == "danger"})
+    unknown = sorted({f"{m}.{a}" for m, a in imports if _pickle_global_class(m, a) == "unknown"})
+    if danger:
+        out.append(Finding(name, 1, 1, _PICKLE_RCE_RULE, ", ".join(danger)[:200]))
+    if dynamic:
+        out.append(Finding(name, 1, 1, _PICKLE_DYN_RULE,
+                           f"{dynamic} STACK_GLOBAL(s) with non-constant module/name"))
+    if unknown:
+        out.append(Finding(name, 1, 1, _PICKLE_GLOBAL_RULE, ", ".join(unknown)[:200]))
+    if err:
+        # ALWAYS on a parse error: a payload placed before deliberate corruption (the
+        # 2025 "nullifAI" pattern) loads fine in pickle and used to pass scanners that bail.
+        out.append(Finding(name, 1, 1, _MODEL_MALFORMED_RULE, f"pickle: {err}"))
+    return out
+
+
+class _ModelReader:
+    """Bounded reader over either the in-memory scan window or the file on disk, so a
+    header that lies beyond the 64 MiB window is still read from the real file."""
+
+    def __init__(self, name: str, raw: bytes, total: int) -> None:
+        self.raw = raw
+        self.total = total
+        self.fh = None
+        if len(raw) < total and "!" not in name and os.path.isfile(name):
+            try:
+                self.fh = open(name, "rb")
+            except OSError:
+                self.fh = None
+        self.pos = 0
+
+    def read(self, n: int) -> bytes:
+        if n < 0:
+            raise ValueError("negative read")
+        if self.pos + n <= len(self.raw):
+            b = self.raw[self.pos:self.pos + n]
+        elif self.fh is not None:
+            self.fh.seek(self.pos)
+            b = self.fh.read(n)
+        else:
+            b = self.raw[self.pos:self.pos + n]
+        if len(b) != n:
+            raise EOFError(f"truncated at byte {self.pos} (wanted {n})")
+        self.pos += n
+        return b
+
+    def skip(self, n: int) -> None:
+        if n < 0 or self.pos + n > self.total:
+            raise EOFError(f"skip past end at byte {self.pos}")
+        self.pos += n
+
+    def close(self) -> None:
+        if self.fh is not None:
+            try:
+                self.fh.close()
+            except OSError:
+                pass
+
+
+# dtype -> bits per element
+_SAFETENSORS_DTYPES = {
+    "BOOL": 8, "U8": 8, "I8": 8, "F8_E5M2": 8, "F8_E4M3": 8, "F8_E8M0": 8, "F4": 4,
+    "F6_E2M3": 6, "F6_E3M2": 6, "I16": 16, "U16": 16, "F16": 16, "BF16": 16, "I32": 32,
+    "U32": 32, "F32": 32, "F64": 64, "I64": 64, "U64": 64, "C64": 64,
+}
+_SAFETENSORS_HDR_MAX = 100 * 1024 * 1024
+
+
+def _safetensors_findings(name: str, raw: bytes, total: int) -> list[Finding]:
+    def bad(msg: str) -> list[Finding]:
+        return [Finding(name, 1, 1, _MODEL_MALFORMED_RULE, f"safetensors: {msg}")]
+    rd = _ModelReader(name, raw, total)
+    try:
+        if total < 8:
+            return bad("file shorter than its 8-byte header length")
+        n = int.from_bytes(rd.read(8), "little")
+        if n <= 1 or n > _SAFETENSORS_HDR_MAX or n > total - 8:
+            return bad(f"header length {n} out of bounds")
+        hdr = rd.read(n)
+        # A real header has ~3 containers per tensor (entry, shape, offsets). Counted before
+        # parsing: 100 MiB of `[[],[],…]` would cost gigabytes inside json.loads.
+        if hdr.count(b"{") + hdr.count(b"[") > 4_000_000:
+            return bad("header holds more JSON containers than any tensor index needs")
+        try:
+            meta = json.loads(hdr.decode("utf-8"))
+        except Exception as e:
+            return bad(f"header is not JSON ({type(e).__name__})")
+        if not isinstance(meta, dict):
+            return bad("header is not a JSON object")
+        if not hdr.startswith(b"{") or hdr.rstrip(b" ") != hdr.rstrip(b" ").rstrip() or \
+                not hdr.rstrip(b" ").endswith(b"}"):
+            return bad("header must be a JSON object padded with spaces only")
+        if len(meta) > 1_000_001:
+            return bad("more than a million tensors")
+        body = total - 8 - n
+        ranges: list = []
+        for k, v in meta.items():
+            if k == "__metadata__":
+                if not isinstance(v, dict) or not all(
+                        isinstance(a, str) and isinstance(b, str) for a, b in v.items()):
+                    return bad("__metadata__ must map strings to strings")
+                continue
+            if not isinstance(v, dict):
+                return bad(f"tensor {k[:40]!r} entry is not an object")
+            if v.get("dtype") not in _SAFETENSORS_DTYPES:
+                return bad(f"tensor {k[:40]!r} has unknown dtype {str(v.get('dtype'))[:16]!r}")
+            shape = v.get("shape")
+            if not isinstance(shape, list) or not all(isinstance(d, int) and d >= 0 for d in shape):
+                return bad(f"tensor {k[:40]!r} has an invalid shape")
+            offs = v.get("data_offsets")
+            if (not isinstance(offs, list) or len(offs) != 2
+                    or not all(isinstance(o, int) for o in offs)
+                    or not 0 <= offs[0] <= offs[1] <= body):
+                return bad(f"tensor {k[:40]!r} data_offsets outside the file body")
+            if any(ord(c) < 32 for c in k):
+                return bad("tensor name contains control characters")
+            numel = 1
+            for d in shape:
+                numel *= d
+            want = (numel * _SAFETENSORS_DTYPES[v["dtype"]] + 7) // 8
+            if offs[1] - offs[0] != want:
+                return bad(f"tensor {k[:40]!r} spans {offs[1] - offs[0]} bytes, "
+                           f"its shape × dtype needs {want}")
+            ranges.append((offs[0], offs[1]))
+        ranges.sort()
+        cursor = 0
+        for b, e in ranges:
+            if b != cursor:
+                return bad("tensor data overlaps or leaves a gap" if b < cursor
+                           else f"{b - cursor} unaccounted bytes between tensors")
+            cursor = e
+        if cursor != body:
+            # bytes after the last tensor are a payload no loader reads — a polyglot
+            return bad(f"{body - cursor} trailing bytes after the last tensor")
+        return []
+    except EOFError as e:
+        return bad(str(e))
+    finally:
+        rd.close()
+
+
+_GGUF_TYPE_SIZE = {0: 1, 1: 1, 2: 2, 3: 2, 4: 4, 5: 4, 6: 4, 7: 1, 10: 8, 11: 8, 12: 8}
+_GGUF_STR_MAX = 32 * 1024 * 1024
+_GGUF_KEY_MAX = 65535
+_GGUF_ARR_MAX = 16 * 1024 * 1024
+# ggml_type -> (block elements, block bytes) for the types whose layout is long-stable.
+# Types not listed (newer IQ/MX formats) are not size-checked rather than guessed at — a
+# wrong table would refuse a legitimate download.
+_GGML_BLOCK = {
+    0: (1, 4), 1: (1, 2), 2: (32, 18), 3: (32, 20), 6: (32, 22), 7: (32, 24), 8: (32, 34),
+    9: (32, 36), 10: (256, 84), 11: (256, 110), 12: (256, 144), 13: (256, 176),
+    14: (256, 210), 15: (256, 292), 24: (1, 1), 25: (1, 2), 26: (1, 4), 27: (1, 8),
+    28: (1, 8), 30: (1, 2),
+}
+# Two halves, because a template's CODE carries string literals. Granite's tool prompt sits in
+# `{%- set x = '…fulfill the request.' %}` — prose inside a string — and `\brequest\s*\.`
+# blocked every Granite build. Identifier patterns run on code with the strings BLANKED; the
+# string tricks (spelling "__" without writing it) run on code with the strings kept.
+_GGUF_TEMPLATE_RX = re.compile(
+    r"__\w+__|\\x5f|\\u005f|\\137|'_'\s*\*\s*2|\"_\"\s*\*\s*2|"
+    r"['\"]_+['\"]\s*~|~\s*['\"]_+['\"]|__\w*['\"]\s*[~+]|[~+]\s*['\"]\w*__|"
+    r"\|\s*format\b[^}]{0,40}%c",
+    re.I)
+_TMPL_IDENT_RX = re.compile(
+    r"\|\s*attr\b|\battr\s*\(|"
+    r"\b(lipsum|cycler|joiner)\b|\bnamespace\s*\.|"
+    r"\bself\s*\.\s*_|\.\s*mro\s*\(|\b(popen|subprocess|import_module|__import__|getattr|"
+    r"globals|eval|exec|compile)\b|\bos\s*\.\s*\w|\brequest\s*\.|\bconfig\s*\.\s*\w",
+    re.I)
+_TMPL_STRING_RX = re.compile(r"'(?:[^'\\]|\\.)*'|\"(?:[^\"\\]|\\.)*\"", re.S)
+_GGUF_TEMPLATE_INCLUDE_RX = re.compile(r"\{%-?\s*(include|import|from|extends)\b")
+# Strong signals only. Checked against 16 real GGUFs on the build machine (2026-11-02):
+# "do not tell the user about …" appears in legitimate tool-calling templates (Qwen/Nemotron
+# families) and fired on 12 of them, so phrasing like that is NOT a signal here — a warn on a
+# download is a stalled download. What remains has no legitimate place in a chat template.
+_TEMPLATE_INJECT_RX = re.compile(
+    r"ignore\s+(all\s+)?(previous|prior|above)\s+instructions|exfiltrat|"
+    r"send\s+(the\s+|your\s+)?(api[\s_-]*key|password|credentials?|secret)|"
+    r"\b(curl|wget)\s+-|\bbase64\s+-d", re.I)
+
+
+_TMPL_CODE_RX = re.compile(r"\{\{.*?\}\}|\{%.*?%\}", re.S)
+# ways to spell "__" without writing it, inside template CODE
+_TMPL_UNDERSCORE_RX = re.compile(
+    r"\\N\{LOW LINE\}|\\U0000005f|\[\s*['\"]_['\"]\s*,\s*['\"]_['\"]|"
+    r"replace\s*\(\s*['\"][^'\"]{0,8}['\"]\s*,\s*['\"]_", re.I)
+
+
+def _chat_template_findings(name: str, key: str, tmpl: str) -> list[Finding]:
+    """Shared by GGUF metadata, tokenizer_config.json, chat_template.json/.jinja and Ollama
+    template layers.
+
+    The injection regex runs on the template's CODE only — `{{ … }}` and `{% … %}`. Literal
+    text is output, never evaluated; matching it made prose like "Answer the request." or "You
+    can compile …" CRITICAL (Granite's tool prompt ends "…fulfill the request."). The prompt
+    injection check (TMPL-INJECT) still reads the whole template, since its target IS prose."""
+    out: list[Finding] = []
+    code = "\n".join(c.group(0) for c in _TMPL_CODE_RX.finditer(tmpl))
+    bare = _TMPL_STRING_RX.sub("''", code)
+    hit = None
+    for rx, src in ((_GGUF_TEMPLATE_RX, code), (_TMPL_UNDERSCORE_RX, code), (_TMPL_IDENT_RX, bare)):
+        m = rx.search(src)
+        if m:
+            hit = src[max(0, m.start() - 40):m.end() + 40]
+            break
+    if hit is not None:
+        out.append(Finding(name, 1, 1, _GGUF_TEMPLATE_RULE, f"{key}: …{hit}…"[:200]))
+    m = _GGUF_TEMPLATE_INCLUDE_RX.search(tmpl)
+    if m:
+        out.append(Finding(name, 1, 1, _TEMPLATE_INCLUDE_RULE,
+                           f"{key}: {tmpl[m.start():m.end() + 60]}"[:200]))
+    m = _TEMPLATE_INJECT_RX.search(tmpl)
+    if m:
+        out.append(Finding(name, 1, 1, _TEMPLATE_INJECT_RULE,
+                           f"{key}: …{tmpl[max(0, m.start() - 40):m.end() + 40]}…"[:200]))
+    return out
+
+
+def _gguf_findings(name: str, raw: bytes, total: int) -> list[Finding]:
+    out: list[Finding] = []
+
+    def bad(msg: str) -> list[Finding]:
+        return out + [Finding(name, 1, 1, _MODEL_MALFORMED_RULE, f"gguf: {msg}")]
+    rd = _ModelReader(name, raw, total)
+    try:
+        if rd.read(4) != b"GGUF":
+            return bad("bad magic")
+        ver = int.from_bytes(rd.read(4), "little")
+        if ver not in (2, 3):
+            # v1 (32-bit counts) is refused by current llama.cpp; anything else is unknown
+            return bad(f"unsupported version {ver}")
+        cnt = 8
+        n_tensors = int.from_bytes(rd.read(cnt), "little")
+        n_kv = int.from_bytes(rd.read(cnt), "little")
+        if n_tensors > 1_000_000 or n_kv > 65_536:
+            return bad(f"impossible counts (tensors={n_tensors}, kv={n_kv})")
+
+        def rstr(limit: int = _GGUF_STR_MAX) -> bytes:
+            ln = int.from_bytes(rd.read(cnt), "little")
+            if ln > limit or rd.pos + ln > total:
+                raise ValueError(f"string length {ln} exceeds bound")
+            return rd.read(ln)
+
+        def rval(t: int, depth: int = 0):
+            if t in _GGUF_TYPE_SIZE:
+                rd.skip(_GGUF_TYPE_SIZE[t])
+                return None
+            if t == 8:
+                return rstr()
+            if t == 9:
+                if depth > 1:
+                    raise ValueError("arrays nested too deep")
+                et = int.from_bytes(rd.read(4), "little")
+                n = int.from_bytes(rd.read(cnt), "little")
+                if n > _GGUF_ARR_MAX:
+                    raise ValueError(f"array length {n} exceeds bound")
+                if et in _GGUF_TYPE_SIZE:
+                    rd.skip(_GGUF_TYPE_SIZE[et] * n)
+                    return None
+                for _ in range(n):
+                    rval(et, depth + 1)
+                return None
+            raise ValueError(f"unknown value type {t}")
+
+        alignment = 32
+        seen_keys: set = set()
+        for _ in range(n_kv):
+            key = rstr(_GGUF_KEY_MAX).decode("utf-8", "replace")
+            if key in seen_keys:
+                return bad(f"duplicate metadata key {key[:60]!r}")
+            seen_keys.add(key)
+            vt = int.from_bytes(rd.read(4), "little")
+            if vt > 12:
+                return bad(f"unknown value type {vt} for {key[:60]!r}")
+            val = rval(vt)
+            if key == "general.alignment" and vt in (4, 5):
+                # value already skipped; re-read the 4 bytes just consumed
+                rd.pos -= 4
+                alignment = int.from_bytes(rd.read(4), "little") or 32
+            if isinstance(val, (bytes, bytearray)) and key.startswith("tokenizer.chat_template"):
+                out += _chat_template_findings(name, key, val.decode("utf-8", "replace"))
+        if alignment <= 0 or alignment > 1 << 20 or alignment & (alignment - 1):
+            return bad(f"invalid alignment {alignment}")
+        spans: list = []
+        names: set = set()
+        for _ in range(n_tensors):
+            tname = rstr(_GGUF_KEY_MAX)
+            if tname in names:
+                return bad(f"duplicate tensor name {tname[:60]!r}")
+            names.add(tname)
+            nd = int.from_bytes(rd.read(4), "little")
+            if nd < 1 or nd > 4:                     # GGML_MAX_DIMS
+                return bad(f"tensor with {nd} dimensions")
+            numel = 1
+            for _d in range(nd):
+                dim = int.from_bytes(rd.read(8), "little")
+                if dim < 1 or dim > 1 << 40:
+                    return bad(f"tensor dimension {dim}")
+                numel *= dim
+                if numel > 1 << 50:
+                    return bad("tensor element count overflows")
+            ttype = int.from_bytes(rd.read(4), "little")
+            if ttype > 63:
+                return bad(f"tensor type {ttype}")
+            off = int.from_bytes(rd.read(8), "little")
+            if off % alignment:
+                return bad(f"tensor offset {off} is not {alignment}-aligned")
+            blk = _GGML_BLOCK.get(ttype)
+            nbytes = None
+            if blk is not None:
+                if numel % blk[0]:
+                    return bad(f"tensor of {numel} elements is not a whole number of blocks")
+                nbytes = numel // blk[0] * blk[1]
+            spans.append((off, nbytes))
+        data_start = rd.pos + (-rd.pos % alignment)
+        data_size = total - data_start
+        spans.sort()
+        prev_end = 0
+        for off, nbytes in spans:
+            if off >= data_size and n_tensors:
+                return bad("tensor offset points past end of file")
+            if off < prev_end:
+                return bad("tensor data ranges overlap")
+            if nbytes is not None:
+                if off + nbytes > data_size:
+                    return bad("tensor data runs past end of file")
+                prev_end = off + nbytes
+            else:
+                prev_end = off
+        return out
+    except (EOFError, ValueError) as e:
+        return bad(str(e)[:160])
+    finally:
+        rd.close()
+
+
+def _npy_descr_has_object(descr: object, depth: int = 0) -> bool:
+    """Any object field anywhere in a dtype descr: 'O', '|O', or a structured dtype
+    [('a', '|O'), ...] (numpy unpickles those too)."""
+    if depth > 32:
+        return True
+    if isinstance(descr, str):
+        return descr.lstrip("|<>=").startswith("O")
+    if isinstance(descr, (list, tuple)):
+        for item in descr:
+            if isinstance(item, (list, tuple)):
+                if any(_npy_descr_has_object(x, depth + 1) for x in item[1:]):
+                    return True
+            elif _npy_descr_has_object(item, depth + 1):
+                return True
+    return False
+
+
+def _npy_findings(name: str, raw: bytes) -> list[Finding]:
+    """NumPy .npy: an object dtype means the payload after the header is a pickle.
+
+    The header is parsed the way numpy parses it (a Python literal), not by a regex: a header
+    written with double quotes, or a structured dtype with an object field, used to pass while
+    numpy itself took the pickle path. A payload that starts like a pickle is walked whatever
+    the header says."""
+    if not raw.startswith(b"\x93NUMPY") or len(raw) < 10:
+        return []
+    major = raw[6]
+    if major == 1:
+        hl, off = int.from_bytes(raw[8:10], "little"), 10
+    else:
+        hl, off = int.from_bytes(raw[8:12], "little"), 12
+    if hl > 1 << 20:
+        return [Finding(name, 1, 1, _MODEL_MALFORMED_RULE, f"npy header of {hl} bytes")]
+    header = raw[off:off + hl].decode("latin-1", "replace")
+    payload = raw[off + hl:]
+    try:
+        meta = ast.literal_eval(header.strip())
+        descr = meta.get("descr") if isinstance(meta, dict) else None
+        if descr is None:
+            raise ValueError("no descr")
+    except (ValueError, SyntaxError, MemoryError, RecursionError) as e:
+        return [Finding(name, 1, 1, _MODEL_MALFORMED_RULE, f"npy header: {e}"[:160])]
+    if _npy_descr_has_object(descr) or payload[:1] == b"\x80":
+        return _pickle_findings(name, payload)
+    return []
+
+
+def _template_file_findings(name: str, raw: bytes, base: str) -> list[Finding]:
+    """chat templates shipped beside safetensors weights (tokenizer_config.json's
+    `chat_template`, string or list of {name, template}; chat_template.jinja)."""
+    try:
+        text = raw.decode("utf-8", "replace")
+    except Exception:
+        return []
+    if base.endswith(".jinja"):
+        return _chat_template_findings(name, base, text)
+    try:
+        cfg = json.loads(text)
+    except (ValueError, RecursionError):
+        return [Finding(name, 1, 1, _MODEL_MALFORMED_RULE, f"{base} does not parse as JSON")]
+    out: list[Finding] = []
+    ct = cfg.get("chat_template") if isinstance(cfg, dict) else None
+    if isinstance(ct, str):
+        out += _chat_template_findings(name, "chat_template", ct)
+    elif isinstance(ct, list):
+        for item in ct[:64]:
+            if isinstance(item, dict) and isinstance(item.get("template"), str):
+                out += _chat_template_findings(
+                    name, f"chat_template.{str(item.get('name'))[:40]}", item["template"])
+    return out
+
+
+# HF tokenizer data files are routinely larger than the 8 MiB text-scan cap (a 260k-entry
+# vocabulary is ~30 MB). They are DATA read by a Rust parser, never executed — validated as
+# JSON (or present as text) instead of being reported as an unscannable blind spot.
+_TOKENIZER_DATA_FILES = {"tokenizer.json", "vocab.json", "merges.txt", "added_tokens.json",
+                         "special_tokens_map.json"}
+_TOKENIZER_DATA_MAX = 256 * 1024 * 1024
+# A 262k-vocabulary tokenizer.json has ~0.5M merge pairs; four times that is still honest.
+_TOKENIZER_MAX_CONTAINERS = 2_000_000
+
+
+def fname_lower_is_tokenizer(name: str) -> bool:
+    return os.path.basename(name.split("!")[-1]).lower() in _TOKENIZER_DATA_FILES
+
+
+def _zip_model_findings(scanner: "Scanner", name: str, raw: bytes, total: int,
+                        ext: str) -> list[Finding]:
+    """torch zip checkpoints, .npz, .keras: analyse the members that loaders execute."""
+    out: list[Finding] = []
+    src = None
+    try:
+        if len(raw) >= total:
+            src = io.BytesIO(raw)
+        elif "!" not in name and os.path.isfile(name):
+            src = name
+        else:
+            return [Finding(name, 1, 1, _MODEL_MALFORMED_RULE,
+                            "zip model larger than the in-archive scan window")]
+        with zipfile.ZipFile(src) as zf:
+            infos = zf.infolist()
+            if len(infos) > 100_000:
+                return [Finding(name, 1, 1, _MODEL_MALFORMED_RULE, "zip has >100k members")]
+            fnames = [i.filename for i in infos]
+            has_pkl = any(f.lower().endswith((".pkl", ".pickle")) for f in fnames)
+            if ext == "" and not has_pkl:
+                return []                 # an ordinary zip — the archive scanner owns it
+            # loader/scanner disagreement tricks (picklescan CVE-2025-1944/1945 class)
+            if len(set(fnames)) != len(fnames):
+                out.append(Finding(name, 1, 1, _MODEL_MALFORMED_RULE,
+                                   "zip has duplicate member names"))
+            if sum(1 for f in fnames if f.endswith("/data.pkl") or f == "data.pkl") > 1:
+                out.append(Finding(name, 1, 1, _MODEL_MALFORMED_RULE,
+                                   "zip has more than one data.pkl"))
+            py = [f for f in fnames if f.endswith((".py", ".pyc", ".so"))]
+            # TorchScript (torch.jit.save): every .py sits under <root>/code/ and is TorchScript
+            # IR source. Anything else — a .pyc, a .so, a .py outside code/ — is real code.
+            ts = [f for f in py if f.endswith(".py") and "/code/__torch__" in f"/{f}"
+                  and f"/{f}".split("/code/", 1)[0].count("/") <= 1]
+            real = [f for f in py if f not in ts]
+            if real and (ext != ".npz" or has_pkl):
+                out.append(Finding(name, 1, 1, _MODEL_CODE_RULE,
+                                   f"code members: {', '.join(real[:4])}"))
+            elif ts:
+                out.append(Finding(name, 1, 1, _TORCHSCRIPT_RULE,
+                                   f"TorchScript sources: {', '.join(ts[:3])}"))
+            for i in infos:
+                fn = i.filename
+                low = fn.lower()
+                if low.endswith((".pkl", ".pickle")) or low.endswith("/data.pkl"):
+                    if i.file_size > _MODEL_SCAN_CAP:
+                        out.append(Finding(f"{name}!{fn}", 1, 1, _MODEL_MALFORMED_RULE,
+                                           f"pickle member of {i.file_size} bytes exceeds cap"))
+                        continue
+                    out += _pickle_findings(f"{name}!{fn}", zf.read(i))
+                elif low.endswith(".npy"):
+                    if i.file_size > _MODEL_SCAN_CAP:
+                        # skipped silently, a 300 MiB object array carrying os.system gated ALLOW
+                        out.append(Finding(f"{name}!{fn}", 1, 1, _MODEL_MALFORMED_RULE,
+                                           f"npy member of {i.file_size} bytes exceeds cap"))
+                        continue
+                    out += _npy_findings(f"{name}!{fn}", zf.read(i))
+                elif ext == ".keras" and low == "config.json" and i.file_size > 64 << 20:
+                    out.append(Finding(name, 1, 1, _MODEL_MALFORMED_RULE,
+                                       f"keras config.json of {i.file_size} bytes exceeds cap"))
+                elif ext == ".keras" and low == "config.json" and i.file_size <= 64 << 20:
+                    cfg = zf.read(i)
+                    if re.search(rb'"class_name"\s*:\s*"(Lambda|TFOpLambda)"', cfg):
+                        out.append(Finding(name, 1, 1, _MODEL_CODE_RULE,
+                                           "Keras Lambda layer (marshalled Python bytecode)"))
+    except zipfile.BadZipFile as e:
+        out.append(Finding(name, 1, 1, _MODEL_MALFORMED_RULE, f"zip: {e}"[:160]))
+    except Exception as e:
+        out.append(Finding(name, 1, 1, _MODEL_MALFORMED_RULE,
+                           f"zip: {type(e).__name__}: {e}"[:160]))
+    return out
+
+
+def _torch_tar_findings(name: str, raw: bytes, total: int) -> list[Finding]:
+    """torch's legacy TAR checkpoint: `pickle`, `sys_info`, `storages` and `tensors` are
+    unpickled by torch.load. The archive scanner treated it as an ordinary tar of data."""
+    out: list[Finding] = []
+    try:
+        if len(raw) >= total:
+            tf = tarfile.open(fileobj=io.BytesIO(raw), mode="r:")
+        elif "!" not in name and os.path.isfile(name):
+            tf = tarfile.open(name, mode="r:")
+        else:
+            return [Finding(name, 1, 1, _MODEL_MALFORMED_RULE,
+                            "tar model larger than the in-archive scan window")]
+        with tf:
+            for m in tf:
+                base = m.name.rsplit("/", 1)[-1]
+                if base not in _TORCH_TAR_MEMBERS or not m.isfile():
+                    continue
+                if m.size > _MODEL_SCAN_CAP:
+                    out.append(Finding(f"{name}!{m.name}", 1, 1, _MODEL_MALFORMED_RULE,
+                                       f"pickle member of {m.size} bytes exceeds cap"))
+                    continue
+                fh = tf.extractfile(m)
+                if fh is not None:
+                    out += _pickle_findings(f"{name}!{m.name}", fh.read())
+    except (tarfile.TarError, OSError, EOFError) as e:
+        out.append(Finding(name, 1, 1, _MODEL_MALFORMED_RULE, f"tar: {e}"[:160]))
+    return out
+
+
+def _is_chat_template_file(name: str, base: str) -> bool:
+    """A file a model loader renders as a CHAT template — not every *.jinja (a Flask app's
+    `{% extends %}` / `{{ request.path }}` templates were blocked as CRITICAL)."""
+    if base in ("tokenizer_config.json", "chat_template.json", "chat_template.jinja",
+                "template.jinja"):
+        return True
+    p = name.replace(os.sep, "/").split("!")[-1]
+    return base.endswith(".jinja") and "/additional_chat_templates/" in f"/{p}"
+
+
+def _model_format_findings(scanner: "Scanner", name: str, raw: bytes, total: int,
+                           ext: str) -> list[Finding]:
+    """Dispatch on magic first, extension second. Returns [] for non-model files."""
+    head = raw[:16]
+    base = os.path.basename(name.split("!")[-1]).lower()
+    try:
+        if head.startswith(b"GGUF"):
+            return _gguf_findings(name, raw, total)
+        if _is_chat_template_file(name, base):
+            return _template_file_findings(name, raw, base)
+        if ext == ".gguf":
+            return [Finding(name, 1, 1, _MODEL_MALFORMED_RULE, "gguf: bad magic")]
+        if ext == ".safetensors":
+            return _safetensors_findings(name, raw, total)
+        if head.startswith(b"\x93NUMPY"):
+            return _npy_findings(name, raw)
+        if head.startswith(b"PK\x03\x04") and (ext in _ZIP_MODEL_EXTS or ext == ""):
+            return _zip_model_findings(scanner, name, raw, total, ext)
+        if ext in (".h5", ".hdf5") and head.startswith(b"\x89HDF\r\n\x1a\n"):
+            if re.search(rb'class_name\\?"\s*:\s*\\?"(Lambda|TFOpLambda)', raw):
+                return [Finding(name, 1, 1, _MODEL_CODE_RULE,
+                                "Keras Lambda layer in HDF5 model_config")]
+            return []
+        is_tar = len(raw) > 262 and raw[257:262] == b"ustar"
+        if is_tar and ext in (".pt", ".pth", ".ckpt", ".pytorch", ".bin", ".tar", ""):
+            found = _torch_tar_findings(name, raw, total)
+            if found or ext != ".tar":
+                return found
+            return []
+        proto_magic = head[:1] == b"\x80" and len(head) > 1 and 2 <= head[1] <= 5
+        if ext in _STRICT_PICKLE_EXTS:
+            return _pickle_findings(name, raw[:_MODEL_SCAN_CAP])
+        if ext in (".pck", ".sav"):
+            # `.sav` is also SPSS ("$FL2…") — only a payload that starts like a pickle is one
+            if _model_decompress(raw[:_MODEL_SCAN_CAP])[:1] in _PICKLE_OPCODES:
+                return _pickle_findings(name, raw[:_MODEL_SCAN_CAP], lenient=not proto_magic)
+            return []
+        if ext in (".bin", ".npy", "") and head[:1] in _PICKLE_OPCODES:
+            # .bin and extensionless files are often NOT pickles — but protocol 0/1 pickles
+            # (pure ASCII for protocol 0) are, and they have no \x80 header. Walked
+            # tentatively: a stream that stops parsing is "not a pickle" unless a dangerous,
+            # identifier-shaped import came before the bad byte; a clean parse to STOP reports
+            # its imports. Text that merely starts with an opcode letter produces nothing.
+            return _pickle_findings(name, raw[:_MODEL_SCAN_CAP], lenient=not proto_magic)
+    except Exception as e:              # never let a parser bug pass a file silently
+        return [Finding(name, 1, 1, _MODEL_MALFORMED_RULE,
+                        f"model check crashed: {type(e).__name__}: {e}"[:160])]
+    return []
+
+
+_UNTRUSTED_ARTIFACT_RULE = Rule(
+    "NEM-UNTRUSTED-ARTIFACT", "File impersonates a nemesis artifact", "archive", "MEDIUM", "",
+    "The path is named like a nemesis quarantine vault or .nemesis.bak backup, but this "
+    "machine's nemesis did not write it (no signed record). Earlier versions skipped such "
+    "names unscanned — a free hiding place. Its contents are scanned like any other file.",
+    "Delete it unless you know why it is there.",
+    action="report", klass="container", flags=0,
+)
+_LINK_ESCAPE_RULE = Rule(
+    "FILE-LINK-ESCAPE", "Symlink points outside the scanned tree", "archive", "MEDIUM", "",
+    "A symlink inside the scanned tree resolves outside it (or to a sensitive path). Its "
+    "target is not part of the scan, and an installer that follows it reads or writes "
+    "somewhere else.",
+    "Replace the link with the real file, or verify the target deliberately.",
+    action="report", klass="container", flags=0,
+)
+_EXT_ENGINE_FAIL_RULE = Rule(
+    "EXT-ENGINE-FAILED", "External engine did not complete", "archive", "LOW", "",
+    "clamscan/yara is installed but failed or timed out, so its signatures were not applied "
+    "to this target. Built-in detectors still ran.",
+    "Check the engine (freshclam, rule file) or pass --no-ext-engines deliberately.",
+    action="report", klass="container", flags=0,
+)
+_OWN_ARTIFACT_NAMES = ("__nemesis_quarantine__",)
+_OWN_ARTIFACTS_LOG = "own-artifacts.jsonl"
+_OWN_ARTIFACTS_CACHE: Optional[dict] = None
+
+
+def _own_artifact_mac(key: bytes, path: str, digest: str) -> str:
+    return hmac.new(key, f"own-artifact\x00{path}\x00{digest}".encode(),
+                    hashlib.sha256).hexdigest()
+
+
+def _own_artifacts() -> dict:
+    """realpath -> sha256 of every artifact THIS machine's nemesis wrote (vault files,
+    .nemesis.bak backups), from an HMAC-signed log under ~/.nemesis. A record whose MAC
+    does not verify is ignored, so a planted log grants nothing."""
+    global _OWN_ARTIFACTS_CACHE
+    if _OWN_ARTIFACTS_CACHE is not None:
+        return _OWN_ARTIFACTS_CACHE
+    out: dict = {}
+    key = _gate_key(create=False)
+    p = os.path.join(_NEMESIS_HOME, _OWN_ARTIFACTS_LOG)
+    if key and os.path.isfile(p):
+        try:
+            with open(p, encoding="utf-8") as fh:
+                lines = fh.readlines()[-50_000:]
+            for ln in lines:
+                try:
+                    r = json.loads(ln)
+                    if hmac.compare_digest(
+                            str(r.get("mac", "")),
+                            _own_artifact_mac(key, str(r["path"]), str(r["sha256"]))):
+                        out[r["path"]] = r["sha256"]
+                except (ValueError, KeyError, TypeError):
+                    continue
+        except OSError:
+            pass
+    _OWN_ARTIFACTS_CACHE = out
+    return out
+
+
+def _record_own_artifact(path: str) -> None:
+    """Sign and log one artifact nemesis just wrote. Best effort: an unrecorded artifact is
+    simply scanned again later (fail-closed), never trusted."""
+    global _OWN_ARTIFACTS_CACHE
+    key = _gate_key(create=True)
+    if not key:
+        return
+    try:
+        rp = os.path.realpath(path)
+        digest = _sha256_file(rp)
+        rec = {"path": rp, "sha256": digest, "mac": _own_artifact_mac(key, rp, digest)}
+        os.makedirs(_NEMESIS_HOME, mode=0o700, exist_ok=True)
+        logp = os.path.join(_NEMESIS_HOME, _OWN_ARTIFACTS_LOG)
+        try:
+            if os.path.getsize(logp) > 4 * 1024 * 1024:
+                # compact: keep only records whose artifact still exists
+                keep = {p: d for p, d in _own_artifacts().items() if os.path.exists(p)}
+                tmp = logp + ".tmp"
+                tfd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+                with os.fdopen(tfd, "w", encoding="utf-8") as th:
+                    for p, d in keep.items():
+                        th.write(json.dumps({"path": p, "sha256": d,
+                                             "mac": _own_artifact_mac(key, p, d)}) + "\n")
+                os.replace(tmp, logp)
+        except OSError:
+            pass
+        fd = os.open(logp, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+        with os.fdopen(fd, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(rec) + "\n")
+        if _OWN_ARTIFACTS_CACHE is not None:
+            _OWN_ARTIFACTS_CACHE[rp] = digest
+    except OSError:
+        pass
+
+
+def _is_trusted_own_artifact(path: str) -> bool:
+    try:
+        rp = os.path.realpath(path)
+        want = _own_artifacts().get(rp)
+        return bool(want) and hmac.compare_digest(want, _sha256_file(rp))
+    except OSError:
+        return False
+
+
+# --- shell view: undo the cheap obfuscations droppers use ------------------------- #
+_SHELL_VIEW_CATEGORIES = {"dropper", "obfuscation", "reverse_shell", "persistence",
+                          "exfiltration", "destructive", "miner"}
+_SV_PRINTF_RX = re.compile(r"\$\(\s*printf\s+(['\"])((?:\\x[0-9a-fA-F]{2}|\\[0-7]{3}|[\w./:-])+)\1\s*\)")
+_SV_ANSI_RX = re.compile(r"\$'((?:\\x[0-9a-fA-F]{2}|\\[0-7]{3}|[\w./:-])+)'")
+_SV_CONCAT_RX = re.compile(r"([\"'])\s*\+\s*\1")
+# Maximal runs of empty quote pairs, matched ONCE (no lookarounds): the old lookahead form
+# backtracked through the whole run from every start position — quadratic, 10.7 s at 40 KB of
+# `''`. Whether a run sits against a word character is decided in _sv_emptyq_sub, in O(1).
+_SV_EMPTYQ_RX = re.compile(r"(?:\"\"|'')+")
+_SV_WORDISH = re.compile(r"[\w/.]")
+
+
+def _sv_emptyq_sub(s: str) -> str:
+    def drop(m: "re.Match") -> str:
+        before = s[m.start() - 1] if m.start() > 0 else ""
+        after = s[m.end()] if m.end() < len(s) else ""
+        touching = bool((before and _SV_WORDISH.match(before))
+                        or (after and _SV_WORDISH.match(after)))
+        return "" if touching else m.group(0)
+    return _SV_EMPTYQ_RX.sub(drop, s)
+_SV_ECHO_RX = re.compile(r"\$\(\s*echo\s+(?:-n\s+)?['\"]?([\w./-]+)['\"]?\s*\)")
+_SV_BSLASH_RX = re.compile(r"\\(?=[a-z])")
+
+
+def _sv_decode_escapes(s: str) -> str:
+    def one(m: "re.Match") -> str:
+        t = m.group(0)
+        return chr(int(t[2:], 16)) if t[1] == "x" else chr(int(t[1:], 8))
+    return re.sub(r"\\x[0-9a-fA-F]{2}|\\[0-7]{3}", one, s)
+
+
+def _normalize_shell_line(s: str) -> str:
+    s = _SV_PRINTF_RX.sub(lambda m: _sv_decode_escapes(m.group(2)), s)
+    s = _SV_ANSI_RX.sub(lambda m: _sv_decode_escapes(m.group(1)), s)
+    s = _SV_CONCAT_RX.sub("", s)
+    s = _sv_emptyq_sub(s)
+    s = _SV_ECHO_RX.sub(lambda m: m.group(1), s)
+    s = _SV_BSLASH_RX.sub("", s)
+    return s
+
+
+_SV_JOIN_MAX = 1 << 20
+
+
+def _shell_view(text: str) -> list[tuple[int, str]]:
+    """Logical lines (backslash-continuations joined, cheap obfuscation undone) that differ
+    from their physical source, as (first physical line, normalized text)."""
+    lines = text.split("\n")
+    out: list[tuple[int, str]] = []
+    i = 0
+    while i < len(lines):
+        start = i
+        # Bounded by BYTES, not by 64 lines: bash joins any number of continuations, so
+        # `curl URL \` + 70 lines of ` \` + `| sh` hid the pipe from every dropper rule.
+        parts = [lines[i].rstrip("\r")]
+        size = len(parts[0])
+        while parts[-1].endswith("\\") and i + 1 < len(lines) and size < _SV_JOIN_MAX:
+            parts[-1] = parts[-1][:-1]
+            nxt = lines[i + 1].rstrip("\r").lstrip()
+            parts.append(nxt)
+            size += len(nxt) + 1
+            i += 1
+        buf = " ".join(parts)
+        norm = _normalize_shell_line(buf)
+        if i != start or norm != lines[start].rstrip("\r"):
+            out.append((start + 1, norm))
+        i += 1
+    return out
+
+
 # --------------------------------------------------------------------------- #
 # Scanner
 # --------------------------------------------------------------------------- #
-_DEFAULT_SKIP_DIRS = {".git", ".hg", ".svn", "__nemesis_quarantine__"}
+# VCS metadata stays skipped as a tree (its weaponizable control files are scanned
+# explicitly in Scanner.scan). nemesis's OWN artifacts (quarantine vault, .nemesis.bak)
+# are no longer skipped by NAME — a name is attacker-controlled — only when a signed
+# record proves this machine wrote them (_is_trusted_own_artifact).
+_DEFAULT_SKIP_DIRS = {".git", ".hg", ".svn"}
 _TEXT_MAX = 8 * 1024 * 1024      # regex-scan text files up to 8 MiB
 _HASH_MAX = 64 * 1024 * 1024     # hash files up to 64 MiB
 
@@ -2457,23 +3689,72 @@ class Scanner:
         self.last_archive_disinfection: Optional[dict] = None
         self.sca_unscanned: set[str] = set()   # lockfile ecosystems with no local OSV index
         self.url_seen = 0                       # URL-injection L0: dereferenceable URLs observed
+        # findings raised by the WALK itself (unreadable dirs, link escapes, impersonated
+        # artifacts) — merged by scan(); never silently dropped.
+        self.walk_findings: list[Finding] = []
 
     # -- walk ----------------------------------------------------------- #
     def _iter_files(self, root: str) -> Iterator[str]:
         if os.path.isfile(root):
             yield root
             return
-        for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
-            dirnames[:] = [d for d in dirnames if d not in self.skip_dirs]
+        root_real = os.path.realpath(root)
+
+        def _walk_error(e: OSError) -> None:
+            where = getattr(e, "filename", None) or root
+            self.errors.append(f"{where}: {e}")
+            self.walk_findings.append(Finding(
+                where, 1, 1, _FILE_UNSCAN_RULE,
+                f"directory not readable: {e.strerror or e}"))
+
+        for dirpath, dirnames, filenames in os.walk(root, onerror=_walk_error,
+                                                    followlinks=False):
+            # VCS metadata is skipped only at the scan ROOT (its control files are scanned
+            # explicitly in scan()). A `.hg`/`.git`/`.svn` deeper in the tree is just a
+            # directory with an attacker-chosen name — `vendor/.hg/x.sh` called from a
+            # package.json script used to be invisible.
+            if os.path.realpath(dirpath) == root_real:
+                dirnames[:] = [d for d in dirnames if d not in self.skip_dirs]
+            else:
+                dirnames[:] = [d for d in dirnames
+                               if d not in (self.skip_dirs - _DEFAULT_SKIP_DIRS)]
+            for d in list(dirnames):
+                if d in _OWN_ARTIFACT_NAMES:
+                    # scanned (not skipped); the name alone earns a warning unless every
+                    # file in it is a signed own artifact — checked per file below.
+                    pass
+                dp = os.path.join(dirpath, d)
+                if os.path.islink(dp):
+                    self._note_link(dp, root_real)
             for fn in filenames:
-                if fn.endswith(".nemesis.bak"):
-                    continue  # our own backups hold the original (pre-fix) threat
                 full = os.path.join(dirpath, fn)
                 if any(rx.search(full) for rx in self.excludes):
                     continue
                 if os.path.islink(full):
+                    self._note_link(full, root_real)
                     continue
+                own_name = (fn.endswith(".nemesis.bak")
+                            or any(part in _OWN_ARTIFACT_NAMES
+                                   for part in os.path.relpath(dirpath, root).split(os.sep)))
+                if own_name:
+                    if _is_trusted_own_artifact(full):
+                        continue  # signed: this machine's nemesis wrote it
+                    if not fn.endswith(".jsonl"):
+                        self.walk_findings.append(Finding(
+                            full, 1, 1, _UNTRUSTED_ARTIFACT_RULE,
+                            "named like a nemesis artifact, no signed record"))
                 yield full
+
+    def _note_link(self, path: str, root_real: str) -> None:
+        try:
+            target = os.path.realpath(path)
+        except OSError:
+            return
+        inside = target == root_real or target.startswith(root_real.rstrip(os.sep) + os.sep)
+        if not inside:
+            self.walk_findings.append(Finding(
+                path, 1, 1, _LINK_ESCAPE_RULE,
+                f"-> {os.readlink(path) if os.path.islink(path) else target}"[:200]))
 
     # -- per-file ------------------------------------------------------- #
     @staticmethod
@@ -2491,7 +3772,11 @@ class Scanner:
         try:
             size = os.path.getsize(path)
         except OSError as e:
+            # FAIL-CLOSED: an unreadable file used to be appended to `errors`, which nothing
+            # read — a `chmod 000` dropper scanned as 0 files and gated ALLOW.
             self.errors.append(f"{path}: {e}")
+            findings.append(Finding(path, 1, 1, _FILE_UNSCAN_RULE,
+                                    f"cannot stat: {e.strerror or e}"))
             return findings
         if size == 0:
             self.files_scanned += 1
@@ -2502,6 +3787,8 @@ class Scanner:
                 rest = fh.read(_HASH_MAX - len(head)) if size > len(head) else b""
         except OSError as e:
             self.errors.append(f"{path}: {e}")
+            findings.append(Finding(path, 1, 1, _FILE_UNSCAN_RULE,
+                                    f"cannot read: {e.strerror or e}"))
             return findings
         raw = head + rest
         self.files_scanned += 1
@@ -2559,6 +3846,12 @@ class Scanner:
         if _NDB_AC is not None:
             findings += _ndb_scan(name, raw)
 
+        # 2c) model-weight formats: pickle opcode walk (torch/joblib/npy), safetensors and
+        #     GGUF structural validation, GGUF chat-template injection, Keras Lambda and
+        #     torch.package code. Before the binary early-return: weights ARE binary.
+        if depth == 0:
+            findings += _model_format_findings(self, name, raw, total_size, ext)
+
         if is_binary:
             # P9b: triage compiled binaries via their printable strings (C2 URLs,
             # /bin/sh, embedded commands) — beyond magic + hash.
@@ -2582,6 +3875,45 @@ class Scanner:
                         name, 1, 1, _FILE_UNSCAN_RULE,
                         "NUL byte in first 4096 bytes; text detectors not run",
                     ))
+            return findings
+        if total_size > self.text_max and fname_lower_is_tokenizer(name) \
+                and total_size <= _TOKENIZER_DATA_MAX:
+            # A large tokenizer vocabulary is DATA. JSON that parses is inert (no JSON document
+            # is a working shell or Python program), so it is exempt from the text rules once
+            # proven — with its container count bounded first, because `[{},{},…]` costs ~30x
+            # its size in memory. A plain-text vocabulary (merges.txt) is NOT proven inert by
+            # its name: `curl … | sh` is a valid two-token line. It is scanned in windows.
+            try:
+                blob = raw
+                if len(raw) < total_size and "!" not in name and os.path.isfile(name):
+                    with open(name, "rb") as fh:
+                        blob = fh.read(_TOKENIZER_DATA_MAX + 1)
+                if len(blob) < total_size:
+                    raise ValueError("truncated")
+                if name.lower().endswith(".json"):
+                    if blob.count(b"{") + blob.count(b"[") > _TOKENIZER_MAX_CONTAINERS:
+                        raise ValueError("more JSON containers than any tokenizer has")
+                    json.loads(blob.decode("utf-8"))
+                    return findings
+                blob.decode("utf-8")
+            except (ValueError, OSError, UnicodeDecodeError, RecursionError, MemoryError) as e:
+                findings.append(Finding(name, 1, 1, _MODEL_MALFORMED_RULE,
+                                        f"tokenizer data file does not parse: "
+                                        f"{type(e).__name__}: {e}"[:160]))
+                return findings
+            start = 0
+            while start < len(blob):
+                end = min(len(blob), start + self.text_max)
+                if end < len(blob):
+                    nl = blob.rfind(b"\n", start, end)
+                    if nl > start:
+                        end = nl + 1
+                line0 = blob.count(b"\n", 0, start)
+                for f in self.scan_bytes(name, blob[start:end], end - start, depth=1):
+                    if f.path == name and line0:
+                        f.line += line0
+                    findings.append(f)
+                start = end
             return findings
         if total_size > self.text_max:
             # FAIL-CLOSED: an oversized text file was skipped silently, so padding a dropper
@@ -2611,6 +3943,12 @@ class Scanner:
                     _fnmatch(fname, g) or _fnmatch(ppath, g) for g in rule.globs):
                 continue
             for m in rule.compiled().finditer(text):
+                # DROP-010 (URL piped to a shell) exists for droppers whose fetcher name is
+                # hidden; when another dropper rule already owns the line it is a duplicate.
+                if rule.rid == "DROP-010":
+                    ln0 = text.count("\n", 0, m.start()) + 1
+                    if any(f.line == ln0 and f.rule.category == "dropper" for f in findings):
+                        continue
                 # entropy backstop: a SECRET-GENERIC hit whose value reads like a
                 # word ("placeholder-password") is noise; only random-looking
                 # values (entropy ≥ 3.5 bits/char) are worth a finding.
@@ -2620,6 +3958,28 @@ class Scanner:
                         continue
                 ln, col, snip = self._line_at(text, m.start())
                 findings.append(Finding(name, ln, col, rule, snip))
+
+        # 3a) shell view: re-run the execution-family rules over logical lines with
+        #     backslash-continuations joined and cheap obfuscation undone ("cu"+"rl",
+        #     s""h, $(printf '\x63…'), $(echo sh), c\url). Report-only (a fix must never
+        #     rewrite a line chosen through a normalization), and one per line.
+        if "\\\n" in text or any(t in text for t in ('""', "''", "+", "printf", "$(echo", "$'")):
+            hit_lines = {(f.line, f.rule.category) for f in findings}
+            for phys, norm in _shell_view(text):
+                for rule in self.rules:
+                    if rule.category not in _SHELL_VIEW_CATEGORIES:
+                        continue
+                    if (phys, rule.category) in hit_lines:
+                        continue
+                    if rule.globs and not any(
+                            _fnmatch(fname, g) or _fnmatch(ppath, g) for g in rule.globs):
+                        continue
+                    m = rule.compiled().search(norm)
+                    if m:
+                        hit_lines.add((phys, rule.category))
+                        findings.append(Finding(
+                            name, phys, 1, replace(rule, action="report"),
+                            f"(normalized) {norm[max(0, m.start() - 20):m.end() + 40].strip()}"[:200]))
 
         # 3b) threat-feed IOC matching (URL / domain / IP literal-set membership).
         if URL_BLOCKLIST or DOMAIN_BLOCKLIST or IP_BLOCKLIST:
@@ -2814,8 +4174,18 @@ class Scanner:
 
     def scan(self, root: str) -> list[Finding]:
         all_findings: list[Finding] = []
+        self.walk_findings = []
         for path in self._iter_files(root):
-            all_findings.extend(self.scan_file(path))
+            try:
+                all_findings.extend(self.scan_file(path))
+            except (RecursionError, MemoryError, ValueError, OSError, UnicodeError) as e:
+                # One pathological file (a deeply nested vocab.json raised RecursionError)
+                # used to turn the WHOLE scan into an internal error, discarding every other
+                # finding. It is a blind spot for THIS file — reported, and it still blocks.
+                self.errors.append(f"{path}: {type(e).__name__}: {e}"[:300])
+                all_findings.append(Finding(path, 1, 1, _FILE_UNSCAN_RULE,
+                                            f"scanner failed on this file: {type(e).__name__}"))
+        all_findings.extend(self.walk_findings)
         # .git is skipped as a tree, but its weaponizable control files must be
         # seen even in default scans (GIT-002/GIT-004: fsmonitor, !-aliases,
         # hook payloads) — scan exactly those, not the object store.
@@ -2828,8 +4198,10 @@ class Scanner:
                            if not h.endswith(".sample")]
             except OSError:
                 pass
+            # Mercurial runs [hooks] from .hg/hgrc on ordinary commands, like git's fsmonitor
+            extras.append(os.path.join(root, ".hg", "hgrc"))
             for p in extras:
-                if os.path.isfile(p):
+                if os.path.isfile(p) and not os.path.islink(p):
                     all_findings.extend(self.scan_file(p))
         all_findings.sort(key=lambda f: (_SEV_RANK[f.rule.severity], f.path, f.line))
         return all_findings
@@ -2874,7 +4246,9 @@ class ArchiveOpts:
     max_member: int = 256 * 1024 * 1024
     max_total: int = 2 * 1024 * 1024 * 1024
     max_files: int = 100_000
-    max_depth: int = 2
+    # 4, not 2: release.zip → Spring Boot fat jar → library jar → .gz resource is an ordinary
+    # Java release, and ARC-NESTED blocks. The byte/ratio/file budgets bound the work either way.
+    max_depth: int = 4
     allow_unscannable: bool = False
     disinfect: bool = False
     out: Optional[str] = None
@@ -4023,6 +5397,7 @@ class Remediator:
         except OSError as e:
             self.errors.append(f"{path}: quarantine failed: {e}")
             return
+        _record_own_artifact(dest)
         rec = {
             "id": qid,
             "original_path": os.path.abspath(path),
@@ -4211,6 +5586,7 @@ def _backup(path: str) -> str:
     bak = path + ".nemesis.bak"
     if not os.path.exists(bak):
         shutil.copy2(path, bak)
+        _record_own_artifact(bak)   # signed: later scans may skip THIS file, not the name
     return bak
 
 
@@ -4879,8 +6255,12 @@ def _is_nonexec_doc(path: str) -> bool:
     including `security.py`, `readme.sh` — is NOT a doc and its findings still block.
     An AGENT-INSTRUCTION doc (SKILL.md, AGENTS.md, .claude/commands/*.md …) is never a doc
     here: an agent executes it."""
-    base = (path or "").replace("\\", "/").lower().rsplit("/", 1)[-1]
+    base = (path or "").replace("\\", "/").lower().rsplit("/", 1)[-1].split("!")[-1]
     if _is_agent_instruction_doc(path):
+        return False
+    if base in _TOKENIZER_DATA_FILES:
+        # merges.txt is tokenizer DATA, not prose: no honest one holds `curl … | sh`, and its
+        # name is the attacker's choice — the doc downgrade made a dropper in it a mere WARN
         return False
     ext = os.path.splitext(base)[1]
     if ext in _DOC_EXTS:
@@ -4903,7 +6283,8 @@ def build_verdict(findings: list[Finding], scanner: Scanner, target: str,
     # hard blind spot (whole archive unreadable) blocks; a member-level encrypted
     # blind spot warns — the rest of the archive WAS scanned (plan §8).
     unscannable_hard = any(
-        f.rule.rid in ("ARC-UNSCANNABLE", "FILE-UNSCANNABLE") for f in findings
+        f.rule.rid in ("ARC-UNSCANNABLE", "FILE-UNSCANNABLE", "MODEL-MALFORMED", "ARC-NESTED")
+        for f in findings
     )
     unscannable_soft = any(f.rule.rid == "ARC-ENCRYPTED" for f in findings)
     unscannable = unscannable_hard or unscannable_soft
@@ -5027,6 +6408,10 @@ def build_verdict(findings: list[Finding], scanner: Scanner, target: str,
         "safe_to": safe_to, "recommendation": rec,
         "blocking_reasons": reasons,
         "top_findings": [f.to_dict() for f in findings[:15]],
+        # EVERY rule that fired, uncapped (bounded by the ruleset, not by the finding count):
+        # a consumer that escalates on a rule family (the model gate on PICKLE-/MODEL-/GGUF-)
+        # must not be blinded because sixteen unrelated findings filled top_findings first.
+        "rule_ids": sorted({f.rule.rid for f in findings}),
         "unscannable": unscannable,
         "disinfection": disinf,
         "provenance": {
@@ -5143,19 +6528,38 @@ def _cache_key(target: str, policy: dict, opts_sig: str) -> Optional[str]:
     except OSError:
         return None
     h = hashlib.sha256()
-    for part in (tsha, _db_fingerprint(), json.dumps(policy, sort_keys=True),
-                 opts_sig, __version__):
+    # The verdict depends on the NAME as well as the bytes (extension dispatch, the doc
+    # downgrade, agent-instruction paths) and on the rules: keyed on content alone, `notes.txt`
+    # cached ALLOW and the same bytes as `model.pkl` were then served that ALLOW.
+    for part in (tsha, os.path.abspath(target), _db_fingerprint(),
+                 json.dumps(policy, sort_keys=True), opts_sig, __version__, _ruleset_sha()):
         h.update(part.encode())
         h.update(b"\x00")
     return h.hexdigest()
 
 
+def _cache_mac(gk: bytes, key: str, verdict: dict) -> str:
+    body = json.dumps(verdict, sort_keys=True, separators=(",", ":")).encode()
+    return hmac.new(gk, b"cache\x00" + key.encode() + b"\x00" + body,
+                    hashlib.sha256).hexdigest()
+
+
 def _cache_get(key: Optional[str]) -> Optional[dict]:
+    """A cached verdict is honoured only when its HMAC verifies under the gate key — a
+    planted or edited cache file is a miss (re-scan), never a free ALLOW."""
     if not key:
+        return None
+    gk = _gate_key(create=False)
+    if not gk:
         return None
     try:
         with open(os.path.join(_cache_dir(), key + ".json"), encoding="utf-8") as fh:
-            v = json.load(fh)
+            rec = json.load(fh)
+        if not (isinstance(rec, dict) and isinstance(rec.get("verdict"), dict)
+                and hmac.compare_digest(str(rec.get("mac", "")),
+                                        _cache_mac(gk, key, rec["verdict"]))):
+            return None
+        v = rec["verdict"]
         v["cached"] = True
         return v
     except (OSError, json.JSONDecodeError):
@@ -5165,17 +6569,17 @@ def _cache_get(key: Optional[str]) -> Optional[dict]:
 def _cache_put(key: Optional[str], verdict: dict) -> None:
     if not key:
         return
+    gk = _gate_key(create=True)
+    if not gk:
+        return                                # no key: an unverifiable cache is no cache
     try:
-        os.makedirs(_cache_dir(), exist_ok=True)
+        os.makedirs(_cache_dir(), mode=0o700, exist_ok=True)
         p = os.path.join(_cache_dir(), key + ".json")
         tmp = p + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as fh:
-            json.dump(verdict, fh)
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump({"verdict": verdict, "mac": _cache_mac(gk, key, verdict)}, fh)
         os.replace(tmp, p)
-        try:
-            os.chmod(p, 0o600)
-        except OSError:
-            pass
     except OSError:
         pass
 
@@ -5214,10 +6618,14 @@ def _gate_key(create: bool = False) -> Optional[bytes]:
         return None
     k = secrets.token_hex(32).encode()
     try:
-        os.makedirs(_NEMESIS_HOME, exist_ok=True)
-        with open(_gate_key_path(), "wb") as fh:
+        os.makedirs(_NEMESIS_HOME, mode=0o700, exist_ok=True)
+        # Created 0600 atomically (O_EXCL): the old write-then-chmod left the key
+        # world-readable under the default umask for a moment.
+        fd = os.open(_gate_key_path(), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "wb") as fh:
             fh.write(k)
-        os.chmod(_gate_key_path(), 0o600)
+    except FileExistsError:
+        return _gate_key(create=False)       # a concurrent creator won the race
     except OSError:
         return None
     return k
@@ -5231,6 +6639,9 @@ def _verdict_canonical(v: dict) -> bytes:
 def sign_verdict(v: dict) -> dict:
     key = _gate_key(create=True)
     if not key:
+        # say so: a consumer that asked for --sign must not mistake "no signature" for
+        # an oversight; `alg: none` reads as unsigned everywhere.
+        v["signature"] = {"alg": "none", "value": "", "error": "gate key unavailable"}
         return v
     sig = hmac.new(key, _verdict_canonical(v), hashlib.sha256).hexdigest()
     v["signature"] = {"alg": "HMAC-SHA256", "value": sig,
@@ -6047,6 +7458,14 @@ _FORGE_SHORT_RX = re.compile(
 def _looks_like_repo(spec: str) -> bool:
     if os.path.exists(spec):
         return False
+    if _OWNER_REPO_RX.match(spec) and not (_REPO_URL_RX.match(spec) or spec.endswith(".git")):
+        # `src/app` where ./src exists is a mistyped LOCAL path, not github.com/src/app —
+        # fetching a stranger's repo and returning ITS verdict for the user's path is
+        # exactly the wrong answer for a gate. Explicit forms (URL, .git, github:x/y)
+        # are still remote.
+        head = spec.split("/", 1)[0]
+        if os.path.exists(head):
+            return False
     return bool(_REPO_URL_RX.match(spec) or spec.endswith(".git")
                 or _OWNER_REPO_RX.match(spec) or _FORGE_SHORT_RX.match(spec))
 
@@ -7516,8 +8935,11 @@ def run_scan(args) -> int:
         elif sast_mode == "lite":
             scanner.rules = [r for r in scanner.rules
                              if r.klass != "vuln" or r.severity in ("CRITICAL", "HIGH")]
-        is_archive = (os.path.isfile(root) and detect_archive(root) is not None
-                      and sandbox != "off")
+        archive_kind = detect_archive(root) if os.path.isfile(root) else None
+        is_archive = archive_kind is not None and sandbox != "off"
+        # `--sandbox off` used to drop the archive flag, so the zip was scanned as one
+        # opaque binary and a dropper inside it gated ALLOW. Unopened = blind spot.
+        sandbox_off_blind = archive_kind is not None and sandbox == "off"
         passwords = list(getattr(args, "password", []) or [])
         pf = getattr(args, "password_file", None)
         if pf and os.path.exists(pf):
@@ -7531,7 +8953,7 @@ def run_scan(args) -> int:
             disinfect=disinfect or (is_archive and getattr(args, "fix", False)),
             out=out, allow_unscannable=allow_unscan,
             keep_extract=getattr(args, "keep_extract", False),
-            max_depth=getattr(args, "max_depth", 2),
+            max_depth=getattr(args, "max_depth", 4),
             max_ratio=getattr(args, "max_ratio", 100.0),
             passwords=tuple(passwords),
             jail=getattr(args, "jail", "auto"),
@@ -7586,6 +9008,9 @@ def run_scan(args) -> int:
         else:
             no_tree = getattr(args, "no_tree_archives", False)
             findings = scanner.scan(root)
+            if sandbox_off_blind:
+                findings.append(Finding(root, 1, 1, _ARC_UNSCAN_RULE,
+                                        "--sandbox off: archive members were not inspected"))
             if os.path.isdir(root) and not no_tree:
                 findings += scan_tree_archives(scanner, root, aopts)
             if disinfect and findings:
@@ -7994,7 +9419,7 @@ def main(argv: Optional[list[str]] = None) -> int:
                     help="downgrade unscannable archives (rar/7z w/o backend, encrypted) block→warn")
     sp.add_argument("--keep-extract", action="store_true",
                     help="keep the temp extraction (default: always erased after scan)")
-    sp.add_argument("--max-depth", type=int, default=2, help="nested-archive recursion depth")
+    sp.add_argument("--max-depth", type=int, default=4, help="nested-archive recursion depth")
     sp.add_argument("--max-ratio", type=float, default=100.0,
                     help="decompression-bomb ratio threshold")
     sp.add_argument("--no-ext-engines", action="store_true",
@@ -8045,13 +9470,14 @@ def main(argv: Optional[list[str]] = None) -> int:
                     help="bypass the verdict cache (always re-scan)")
     gp.add_argument("--sign", action="store_true",
                     help="HMAC-sign the verdict so a consumer can verify it")
-    gp.add_argument("--timeout", type=int, default=0, metavar="SECS",
-                    help="abort after SECS seconds with a fail-closed error verdict (0 = no limit)")
+    gp.add_argument("--timeout", type=int, default=900, metavar="SECS",
+                    help="abort after SECS seconds with a fail-closed error verdict "
+                         "(default 900 for the gate; 0 = no limit)")
     gp.add_argument("--no-tree-archives", action="store_true",
                     help="do not open archives found inside a scanned directory")
     gp.add_argument("--hashes", metavar="FILE",
                     help="extra SHA256/SHA1/MD5 blocklist, one per line")
-    gp.add_argument("--max-depth", type=int, default=2, help="nested-archive recursion depth")
+    gp.add_argument("--max-depth", type=int, default=4, help="nested-archive recursion depth")
     gp.add_argument("--max-ratio", type=float, default=100.0,
                     help="decompression-bomb ratio threshold")
     gp.add_argument("--max-text-mb", type=float, default=_TEXT_MAX / 1e6,

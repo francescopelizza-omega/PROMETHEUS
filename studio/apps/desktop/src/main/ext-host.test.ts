@@ -114,6 +114,7 @@ test("installExtension: valid .promext installs (gated) into the extensions dir,
       stagingRoot: dir,
       studioVersion: "1.0.0",
       gate: allowGate,
+      confirm: async () => true,
     });
     assert.equal(res.id, "pub.sample");
     assert.equal(res.installPath, join(extensionsDir, "pub.sample"));
@@ -136,6 +137,7 @@ test("installExtension: a malformed zip is rejected (bad-zip) with no staging re
           extensionsDir: join(dir, "ext"),
           stagingRoot: dir,
           gate: allowGate,
+          confirm: async () => true,
         }),
       (e: unknown) => e instanceof ExtInstallError && e.code === "bad-zip",
     );
@@ -153,6 +155,7 @@ test("installExtension: a missing/invalid manifest is rejected (bad-manifest)", 
           extensionsDir: join(dir, "ext"),
           stagingRoot: dir,
           gate: allowGate,
+          confirm: async () => true,
         }),
       (e: unknown) => e instanceof ExtInstallError && e.code === "bad-manifest",
     );
@@ -172,6 +175,7 @@ test("installExtension: an incompatible engines.studio is rejected (incompatible
           stagingRoot: dir,
           studioVersion: "1.0.0",
           gate: allowGate,
+          confirm: async () => true,
         }),
       (e: unknown) => e instanceof ExtInstallError && e.code === "incompatible",
     );
@@ -366,3 +370,58 @@ async function readdirSafe(dir: string): Promise<string[]> {
     return [];
   }
 }
+
+test("installExtension: nothing is installed without the human's confirmation", async () => {
+  await withTmp(async (dir) => {
+    const archive = await writePromext(dir, VALID_MANIFEST);
+    for (const confirm of [undefined, async () => false]) {
+      await assert.rejects(
+        () =>
+          installExtension(archive, {
+            extensionsDir: join(dir, "extensions"),
+            stagingRoot: dir,
+            gate: allowGate,
+            ...(confirm ? { confirm } : {}),
+          }),
+        (e: unknown) => e instanceof ExtInstallError && e.code === "declined",
+      );
+    }
+  });
+});
+
+test("installExtension: the staged code is gated even when the manifest names a repo", async () => {
+  await withTmp(async (dir) => {
+    const archive = await writePromext(dir, { ...VALID_MANIFEST, repo: "someone/benign-repo" });
+    const gated: string[] = [];
+    await installExtension(archive, {
+      extensionsDir: join(dir, "extensions"),
+      stagingRoot: dir,
+      gate: async (t: string) => {
+        gated.push(t);
+        return { verdict: "allow" } as never;
+      },
+      confirm: async () => true,
+    });
+    assert.ok(
+      gated.some((t) => t.includes(".promext-staging-")),
+      "the code that runs was scanned",
+    );
+    assert.ok(gated.includes("someone/benign-repo"), "and the declared repo too");
+  });
+});
+
+test("installExtension: a main entry outside the extension is refused", async () => {
+  await withTmp(async (dir) => {
+    const archive = await writePromext(dir, { ...VALID_MANIFEST, main: "../../evil.js" });
+    await assert.rejects(
+      () =>
+        installExtension(archive, {
+          extensionsDir: join(dir, "extensions"),
+          stagingRoot: dir,
+          gate: allowGate,
+          confirm: async () => true,
+        }),
+      (e: unknown) => e instanceof ExtInstallError && e.code === "bad-manifest",
+    );
+  });
+});

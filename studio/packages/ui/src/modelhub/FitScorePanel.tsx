@@ -44,17 +44,28 @@ export interface FitScorePanelProps {
 }
 
 /** A monospace table cell. */
+/**
+ * ONE column template for the header and every row. They were sized independently (fixed
+ * spans in the header, shrinkable cells in the rows), so below ~600 px — easy with the rail
+ * open — the columns stopped lining up under their titles.
+ */
+const FIT_COLUMNS = "92px 64px 72px minmax(120px, 1fr) 92px 84px";
+
 function Cell({
   children,
   width,
   color,
+  title,
 }: {
   children: React.ReactNode;
   width?: string;
   color?: string;
+  /** full text for a cell that may be clipped (the verdict) */
+  title?: string;
 }): ReactElement {
   return (
     <span
+      title={title}
       style={{
         display: "inline-block",
         width,
@@ -83,43 +94,41 @@ function QuantRow({
   const verdict = q.verdict as FitVerdict;
   const role = q.runnable ? fitRole(verdict) : "danger";
   const runner = (q.runnerHint ?? []).map((r) => inert(r)).join("/") || "—";
+  const chip = fitChipText({
+    verdict,
+    ratio: q.ratio,
+    runnable: q.runnable,
+    blockedReason: q.blockedReason,
+  });
   return (
     <li
       data-verdict={verdict}
       data-runnable={q.runnable}
       style={{
-        display: "flex",
+        display: "grid",
+        gridTemplateColumns: FIT_COLUMNS,
         alignItems: "center",
-        gap: "var(--space-4, 8px)",
+        columnGap: "var(--space-4, 8px)",
         padding: "4px 6px",
         borderRadius: "var(--radius-sm, 4px)",
         opacity: q.runnable ? 1 : 0.6,
         background: recommended ? "var(--bg-surface-2)" : "transparent",
       }}
     >
-      <Cell width="92px">
+      <Cell>
         {recommended && <span aria-hidden="true">▸ </span>}
         {inert(q.label)}
       </Cell>
-      <Cell width="64px" color="var(--text-secondary)">
-        {formatGb(q.weightsGb)}
+      <Cell color="var(--text-secondary)">{formatGb(q.weightsGb)}</Cell>
+      <Cell color="var(--text-secondary)">{q.runnable ? formatGb(q.estVramGb) : "—"}</Cell>
+      <Cell color={roleVar(role)} title={chip}>
+        {chip}
       </Cell>
-      <Cell width="72px" color="var(--text-secondary)">
-        {q.runnable ? formatGb(q.estVramGb) : "—"}
-      </Cell>
-      <Cell width="150px" color={roleVar(role)}>
-        {fitChipText({
-          verdict,
-          ratio: q.ratio,
-          runnable: q.runnable,
-          blockedReason: q.blockedReason,
-        })}
-      </Cell>
-      <Cell width="92px" color="var(--text-secondary)">
+      <Cell color="var(--text-secondary)">
         <span style={{ letterSpacing: "-1px" }}>{qualityBar(q.qualityRank)}</span>{" "}
         {q.qualityRank.toFixed(2)}
       </Cell>
-      <Cell width="84px" color="var(--text-secondary)">
+      <Cell color="var(--text-secondary)">
         {runner}
         {recommended ? " ★" : ""}
       </Cell>
@@ -153,33 +162,46 @@ export function FitScorePanel({
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: "var(--space-4, 8px)" }}>
-      {/* header row */}
-      <div
-        style={{
-          display: "flex",
-          alignItems: "center",
-          gap: "var(--space-4, 8px)",
-          color: "var(--text-secondary)",
-          fontFamily: "var(--font-mono)",
-          fontSize: "0.72rem",
-          textTransform: "uppercase",
-          letterSpacing: "0.04em",
-          padding: "0 6px",
-        }}
-      >
-        <span style={{ display: "inline-block", width: "92px" }}>Quant</span>
-        <span style={{ display: "inline-block", width: "64px" }}>Size</span>
-        <span style={{ display: "inline-block", width: "72px" }}>Est VRAM</span>
-        <span style={{ display: "inline-block", width: "150px" }}>Verdict</span>
-        <span style={{ display: "inline-block", width: "92px" }}>Quality</span>
-        <span style={{ display: "inline-block", width: "84px" }}>Runner</span>
-      </div>
+      {/* the table scrolls sideways on a narrow pane instead of crushing its columns */}
+      <div style={{ overflowX: "auto", minWidth: 0 }}>
+        <div
+          style={{
+            minWidth: 560,
+            display: "flex",
+            flexDirection: "column",
+            gap: "var(--space-4, 8px)",
+          }}
+        >
+          {/* header row */}
+          <div
+            style={{
+              display: "grid",
+              gridTemplateColumns: FIT_COLUMNS,
+              alignItems: "center",
+              columnGap: "var(--space-4, 8px)",
+              color: "var(--text-secondary)",
+              fontFamily: "var(--font-mono)",
+              fontSize: "0.75rem",
+              textTransform: "uppercase",
+              letterSpacing: "0.04em",
+              padding: "0 6px",
+            }}
+          >
+            <span>Quant</span>
+            <span>Size</span>
+            <span>Est VRAM</span>
+            <span>Verdict</span>
+            <span>Quality</span>
+            <span>Runner</span>
+          </div>
 
-      <ul style={{ listStyle: "none", margin: 0, padding: 0, display: "grid", gap: "2px" }}>
-        {(fit.ranked ?? []).map((q) => (
-          <QuantRow key={`${q.label}:${q.fmt}`} q={q} recommended={q.label === recLabel} />
-        ))}
-      </ul>
+          <ul style={{ listStyle: "none", margin: 0, padding: 0, display: "grid", gap: "2px" }}>
+            {(fit.ranked ?? []).map((q) => (
+              <QuantRow key={`${q.label}:${q.fmt}`} q={q} recommended={q.label === recLabel} />
+            ))}
+          </ul>
+        </div>
+      </div>
 
       {/* §4.4 recommended explainer */}
       <p

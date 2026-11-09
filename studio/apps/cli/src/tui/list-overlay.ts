@@ -45,6 +45,13 @@ export interface ListOverlayItem {
    * only after a 20 GB download, is the outcome this exists to prevent.
    */
   disabled?: string;
+  /**
+   * Two description lines for the TWO-COLUMN layout (the model picker): the label sits alone in
+   * the left column on the first line, with the second line left empty, and these two lines
+   * fill the right column beside it. When any item carries `columns`, the whole overlay renders
+   * two rows per item; items without them show their `detail` as the first right-hand line.
+   */
+  columns?: readonly [string, string];
 }
 
 export type ListOverlayAction =
@@ -81,6 +88,8 @@ function rank(query: string, items: readonly ListOverlayItem[]): ListOverlayItem
     if (label.startsWith(q)) return 1;
     if (label.includes(q)) return 2;
     if ((it.detail ?? "").toLowerCase().includes(q)) return 3;
+    // the two-column descriptions are searchable too ("coding", "vision", "128K" …)
+    if ((it.columns ?? []).some((l) => l.toLowerCase().includes(q))) return 4;
     return -1;
   };
   return items
@@ -182,6 +191,90 @@ export function renderListOverlay(
   const reserved = 3 + (state.status ? 1 : 0); // title + filter + hint (+ status)
   const detailRows = Math.min(detail.length, Math.max(0, rows - reserved - 3), 6);
   const bodyRows = Math.max(1, rows - reserved - detailRows);
+  // Two rows per item need room: at least one item plus the "k/n" position line, and a right
+  // column wide enough to read. Below that (a short split pane, a tiny terminal) the two-row
+  // layout overflowed the rows it was given; it falls back to one line per item instead.
+  if (state.all.some((i) => i.columns) && bodyRows >= 3 && w >= 24) {
+    renderTwoColumn(state, lines, w, bodyRows, caps);
+  } else {
+    renderOneLine(state, lines, w, bodyRows, caps);
+  }
+  for (const line of detail.slice(0, detailRows)) {
+    // A blocked row's reason is painted as a warning, not as ordinary detail — it is the reason
+    // Enter will do nothing, and it has to look different from the description above it.
+    const paint = selected?.disabled ? p.warn : p.muted;
+    lines.push(paint(clipToWidth(`  ${line}`, w)));
+  }
+  lines.push(p.muted(clipToWidth("  ↑↓ move · Enter select · Esc cancel", w)));
+  return lines;
+}
+
+/** Scroll window: `count` visible slots, centred on the highlighted item. */
+function windowTop(index: number, n: number, count: number): number {
+  if (n <= count) return 0;
+  return Math.min(Math.max(0, index - (count >> 1)), n - count);
+}
+
+/**
+ * The two-column picker: every item is TWO terminal rows.
+ *
+ *     ▌ Qwen3 8B                  Hybrid think/no-think chat, coding and tools.
+ *     ▌                           Fits 16 GB; 32K native context, Apache-2.0.
+ *       Gemma 3 4B                Small multimodal model (reads images).
+ *                                 No native tool calling — chat only.
+ *
+ * The left column holds only the title (its second line deliberately empty) so the right
+ * column has room for the description. Narrow terminals shrink the left column first and
+ * clip, never wrap — the row count stays exactly two per item.
+ */
+function renderTwoColumn(
+  state: ListOverlayState,
+  lines: string[],
+  w: number,
+  bodyRows: number,
+  caps: ColorCaps,
+): void {
+  const p = painter(caps);
+  const n = state.filtered.length;
+  // two rows per item; when the list scrolls, one row is kept for the "k/n" position line
+  const fitsAll = n <= Math.floor(bodyRows / 2);
+  const slots = Math.max(1, Math.floor((fitsAll ? bodyRows : bodyRows - 1) / 2));
+  const top = windowTop(state.index, n, slots);
+  const view = state.filtered.slice(top, top + slots);
+  const widest = Math.max(1, ...state.filtered.map((i) => stringWidth(i.label)));
+  const leftW = Math.max(8, Math.min(34, widest, Math.floor((w - 6) * 0.4)));
+  // 8 = the 2-cell gutter + 3-cell column gap + the selection bar's own marker cells
+  const rightW = Math.max(0, w - leftW - 8);
+  view.forEach((item, idx) => {
+    const real = top + idx;
+    const on = real === state.index;
+    const mark = item.current ? " ←" : "";
+    const label = clipToWidth(`${item.label}${mark}`, leftW);
+    const pad = " ".repeat(Math.max(0, leftW - stringWidth(label)));
+    const [d1, d2] = item.columns ?? [item.detail ?? "", ""];
+    const r1 = clipToWidth(d1, rightW);
+    const r2 = clipToWidth(d2, rightW);
+    if (on) {
+      lines.push(`${p.accent("▌")}${selectionBar(` ${label}${pad}   ${r1}`, w - 1, caps)}`);
+      lines.push(`${p.accent("▌")}${selectionBar(` ${" ".repeat(leftW)}   ${r2}`, w - 1, caps)}`);
+    } else {
+      const dim = item.disabled ? p.muted : p.accent;
+      lines.push(`  ${dim(label)}${pad}   ${p.muted(r1)}`);
+      lines.push(`  ${" ".repeat(leftW)}   ${p.muted(r2)}`);
+    }
+  });
+  if (n === 0) lines.push(p.muted(clipToWidth("  (no matches)", w)));
+  else if (n > slots) lines.push(p.muted(clipToWidth(`  ${state.index + 1}/${n}`, w)));
+}
+
+function renderOneLine(
+  state: ListOverlayState,
+  lines: string[],
+  w: number,
+  bodyRows: number,
+  caps: ColorCaps,
+): void {
+  const p = painter(caps);
   const n = state.filtered.length;
   let top = 0;
   if (n > bodyRows) top = Math.min(Math.max(0, state.index - (bodyRows >> 1)), n - bodyRows);
@@ -191,25 +284,15 @@ export function renderListOverlay(
     const real = top + idx;
     const mark = item.current ? "  ← current" : "";
     if (real === state.index) {
-      const label = clipToWidth(
-        `${item.label}${item.detail ? `  ${item.detail}` : ""}${mark}`,
-        w - 4,
-      );
+      const det = item.detail ?? item.columns?.[0];
+      const label = clipToWidth(`${item.label}${det ? `  ${det}` : ""}${mark}`, w - 4);
       lines.push(`${p.accent("▌")}${selectionBar(` ${label}`, w - 1, caps)}`);
     } else {
       const labelCut = clipToWidth(item.label, labelW);
       const restBudget = Math.max(0, w - 5 - stringWidth(labelCut));
-      const rest = clipToWidth(`${item.detail ?? ""}${mark}`, restBudget);
+      const rest = clipToWidth(`${item.detail ?? item.columns?.[0] ?? ""}${mark}`, restBudget);
       lines.push(`  ${p.accent(labelCut)} ${p.muted(rest)}`);
     }
   });
   if (n === 0) lines.push(p.muted(clipToWidth("  (no matches)", w)));
-  for (const line of detail.slice(0, detailRows)) {
-    // A blocked row's reason is painted as a warning, not as ordinary detail — it is the reason
-    // Enter will do nothing, and it has to look different from the description above it.
-    const paint = selected?.disabled ? p.warn : p.muted;
-    lines.push(paint(clipToWidth(`  ${line}`, w)));
-  }
-  lines.push(p.muted(clipToWidth("  ↑↓ move · Enter select · Esc cancel", w)));
-  return lines;
 }

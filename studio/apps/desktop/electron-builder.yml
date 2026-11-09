@@ -61,6 +61,33 @@ asarUnpack:
   # trade. Electron's shim transparently redirects main's own in-asar imports here, so
   # index.js/worker.js/extRunner.js are unaffected.
   - "out/main/**"
+# Electron Fuses — flipped in the binary at pack time, so they cannot be undone by an
+# environment variable or a command-line flag on the user's machine (security review S10).
+#
+#   runAsNode            STAYS ON, deliberately. The detached ollama watchdog
+#                        (engine-bridge/src/ollama-watchdog.ts) re-executes this binary with
+#                        ELECTRON_RUN_AS_NODE=1, and it must OUTLIVE the app — a utilityProcess
+#                        dies with its parent, which is exactly the case the watchdog exists for.
+#                        Turn this off only together with moving the watchdog to another runtime.
+#   nodeOptions / CLI inspect   OFF: NODE_OPTIONS=--require=… and --inspect were a way to run
+#                        code inside the signed app's main process from outside it.
+#   asar integrity + only-load-from-asar   ON: the app code that runs is the code that was
+#                        packed (main's out/** is asarUnpack'ed for the watchdog — see above —
+#                        so this protects the renderer and preload bundles, not that directory).
+#   cookieEncryption     ON: the agent browser's cookie store is encrypted with the OS keychain.
+#   grantFileProtocolExtraPrivileges   left at Electron's default: the renderer is loaded from
+#                        file:// (loadFile) and Monaco's workers resolve relative to it. Revisit
+#                        together with moving the renderer to a custom app:// protocol.
+#   resetAdHocDarwinSignature   ON: flipping a fuse breaks an ad-hoc signature on arm64; local
+#                        unsigned builds would otherwise refuse to launch.
+electronFuses:
+  runAsNode: true
+  enableCookieEncryption: true
+  enableNodeOptionsEnvironmentVariable: false
+  enableNodeCliInspectArguments: false
+  enableEmbeddedAsarIntegrityValidation: true
+  onlyLoadAppFromAsar: true
+  resetAdHocDarwinSignature: true
 # after every per-OS pack: restore the node-pty spawn-helper's 0755 exec bit inside
 # app.asar.unpacked (asar packing drops it → "No terminal backend" in the packaged app).
 afterPack: build/after-pack.cjs

@@ -41,7 +41,13 @@ export const MANIFEST_FILE = "prometheus.extension.json";
 /* ── install pipeline ─────────────────────────────────────────────────────── */
 
 /** A typed install failure — the `code` lets the UI phrase the rejection precisely. */
-export type ExtInstallErrorCode = "bad-zip" | "bad-manifest" | "incompatible" | "blocked" | "io";
+export type ExtInstallErrorCode =
+  | "bad-zip"
+  | "bad-manifest"
+  | "incompatible"
+  | "blocked"
+  | "declined"
+  | "io";
 export class ExtInstallError extends Error {
   readonly code: ExtInstallErrorCode;
   constructor(code: ExtInstallErrorCode, message: string) {
@@ -68,6 +74,15 @@ export interface InstallExtensionOptions {
   studioVersion?: string;
   /** the nemesis gate (engine-bridge). A block/error verdict aborts install (no force). */
   gate: ExtGateFn;
+  /**
+   * The HUMAN's go-ahead, after the gate and before anything is moved into place: shown the
+   * extension's id, version and the permissions it declares. Absent → refused: an install
+   * request from the renderer alone (a path it chose) is not consent.
+   */
+  confirm?: (
+    manifest: { id: string; version?: string; label?: string },
+    permissions: string[],
+  ) => Promise<boolean>;
 }
 
 export interface InstalledExtension {
@@ -120,13 +135,23 @@ export async function installExtension(
       ...(opts.studioVersion ? { studioVersion: opts.studioVersion } : {}),
     });
     if (coreExt.isPlanError(plan)) throw new ExtInstallError("incompatible", plan.error);
-    // 4) nemesis-gate the target (repo wins over staging via gateTargetFor). RED ⇒ refuse.
-    const verdict = await opts.gate(plan.gateTarget);
-    if (isBlocked(verdict)) {
-      throw new ExtInstallError(
-        "blocked",
-        `nemesis gate blocked "${manifest.id}" (${verdict.verdict})${verdict.reason ? `: ${verdict.reason}` : ""}`,
-      );
+    const badMain = coreExt.mainEntryError(manifest.main);
+    if (badMain) throw new ExtInstallError("bad-manifest", badMain);
+    // 4) nemesis-gate the code that will RUN (the staged tree), and the declared source repo
+    //    too when there is one. Both must pass; the repo can no longer stand in for the code.
+    for (const target of coreExt.gateTargetsFor(manifest, stagingDir)) {
+      const verdict = await opts.gate(target);
+      if (isBlocked(verdict)) {
+        throw new ExtInstallError(
+          "blocked",
+          `nemesis gate blocked "${manifest.id}" (${verdict.verdict})${verdict.reason ? `: ${verdict.reason}` : ""}`,
+        );
+      }
+    }
+    // 4b) the human sees what it may do, and says yes.
+    const perms = coreExt.permissionSummary(manifest.permissions);
+    if (!opts.confirm || !(await opts.confirm(manifest, perms))) {
+      throw new ExtInstallError("declined", `installation of "${manifest.id}" was not confirmed`);
     }
     // 5) move into place (replace any prior install of this id atomically-ish).
     try {

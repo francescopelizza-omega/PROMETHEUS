@@ -49,11 +49,26 @@ export function toPromptView(v: ApprovalView): PrivilegedPromptView {
   };
 }
 
-export function createStudioApprover(send: PrivilegedSend): {
+/**
+ * The HUMAN's final word, owned by main: a native dialog that names the exact command, its
+ * working directory and the script digest. The renderer's card is informational — the renderer
+ * is not trusted to approve root for itself (a compromised one could start a request through
+ * `agent:systemTool` and answer `privilegedDecide` on its own, and sudo's password prompt never
+ * names the command it is about to run).
+ */
+export type NativeConfirm = (view: ApprovalView) => Promise<boolean>;
+
+export function createStudioApprover(
+  send: PrivilegedSend,
+  nativeConfirm?: NativeConfirm,
+): {
   approver: Approver;
-  decide: (arg: unknown, senderId: number) => PrivilegedDecideResult;
+  decide: (arg: unknown, senderId: number) => Promise<PrivilegedDecideResult>;
 } {
-  const pending = new Map<string, { resolve: (a: ApprovalAnswer) => void; senderId: number }>();
+  const pending = new Map<
+    string,
+    { resolve: (a: ApprovalAnswer) => void; senderId: number; view: ApprovalView; aborted: boolean }
+  >();
 
   const approver: Approver = (view, signal) =>
     new Promise<ApprovalAnswer>((resolve) => {
@@ -62,10 +77,12 @@ export function createStudioApprover(send: PrivilegedSend): {
         resolve({ decision: "deny" });
         return;
       }
-      pending.set(view.id, { resolve, senderId });
+      const entry = { resolve, senderId, view, aborted: false };
+      pending.set(view.id, entry);
       signal.addEventListener(
         "abort",
         () => {
+          entry.aborted = true;
           if (!pending.delete(view.id)) return;
           send(IPC.privilegedClose, { id: view.id });
           resolve({ decision: "deny" });
@@ -74,7 +91,7 @@ export function createStudioApprover(send: PrivilegedSend): {
       );
     });
 
-  const decide = (arg: unknown, senderId: number): PrivilegedDecideResult => {
+  const decide = async (arg: unknown, senderId: number): Promise<PrivilegedDecideResult> => {
     const a = arg as { id?: unknown; decision?: unknown; phrase?: unknown } | null;
     if (!a || typeof a.id !== "string") return { ok: false, error: "malformed decision" };
     const entry = pending.get(a.id);
@@ -85,15 +102,21 @@ export function createStudioApprover(send: PrivilegedSend): {
     }
     const { resolve } = entry;
     pending.delete(a.id);
-    if (a.decision === "approve") {
-      resolve(
-        typeof a.phrase === "string" && a.phrase
-          ? { decision: "approve", phrase: a.phrase }
-          : { decision: "approve" },
-      );
-    } else {
+    if (a.decision !== "approve") {
       resolve({ decision: "deny" });
+      return { ok: true };
     }
+    // The renderer said yes; the human says it in a dialog main owns, or it is a no.
+    const human = nativeConfirm ? await nativeConfirm(entry.view).catch(() => false) : true;
+    if (!human || entry.aborted) {
+      resolve({ decision: "deny" });
+      return { ok: true };
+    }
+    resolve(
+      typeof a.phrase === "string" && a.phrase
+        ? { decision: "approve", phrase: a.phrase }
+        : { decision: "approve" },
+    );
     return { ok: true };
   };
 

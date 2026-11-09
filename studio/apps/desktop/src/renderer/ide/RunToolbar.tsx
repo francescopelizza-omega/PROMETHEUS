@@ -97,7 +97,7 @@ export function RunToolbar({
           border: "1px solid var(--border-subtle)",
           borderRadius: 4,
           padding: "2px 4px",
-          fontSize: "0.74rem",
+          fontSize: "0.75rem",
           maxWidth: 200,
           // the config picker gives up width before the buttons do.
           minWidth: 0,
@@ -139,7 +139,7 @@ export function RunToolbar({
       </Button>
       <span
         style={{
-          fontSize: "0.7rem",
+          fontSize: "0.75rem",
           color: "var(--text-secondary)",
           overflow: "hidden",
           textOverflow: "ellipsis",

@@ -355,7 +355,7 @@ function SearchView({ root }: { root: string }): ReactElement {
           style={{
             display: "flex",
             gap: 8,
-            fontSize: "0.72rem",
+            fontSize: "0.75rem",
             color: "var(--text-secondary)",
           }}
         >
@@ -375,19 +375,19 @@ function SearchView({ root }: { root: string }): ReactElement {
           style={{
             display: "block",
             color: "var(--text-secondary)",
-            fontSize: "0.72rem",
+            fontSize: "0.75rem",
           }}
         >
           {notice}
         </output>
       )}
       {results.length > 0 && (
-        <p style={{ color: "var(--text-secondary)", fontSize: "0.72rem" }}>
+        <p style={{ color: "var(--text-secondary)", fontSize: "0.75rem" }}>
           {matches} result{matches === 1 ? "" : "s"} in {files} file{files === 1 ? "" : "s"}
         </p>
       )}
       {searched && !busy && results.length === 0 && (
-        <p style={{ color: "var(--text-secondary)", fontSize: "0.72rem" }}>No results.</p>
+        <p style={{ color: "var(--text-secondary)", fontSize: "0.75rem" }}>No results.</p>
       )}
 
       {results.map((fm) => (
@@ -418,7 +418,7 @@ function SearchView({ root }: { root: string }): ReactElement {
                       })
                     }
                     style={{
-                      fontSize: "0.72rem",
+                      fontSize: "0.75rem",
                       cursor: "pointer",
                       background: "transparent",
                       border: "none",
@@ -491,7 +491,7 @@ function SearchView({ root }: { root: string }): ReactElement {
 
 const rowApplyBtn: CSSProperties = {
   flexShrink: 0,
-  fontSize: "0.62rem",
+  fontSize: "0.75rem",
   cursor: "pointer",
   background: "transparent",
   border: "1px solid var(--border-subtle)",
@@ -572,7 +572,7 @@ function UsagesView({ root }: { root: string }): ReactElement {
         <span style={{ flex: 1, minWidth: 0, color: "var(--text-primary)" }}>
           Usages of <code style={{ fontFamily: "var(--font-mono, monospace)" }}>{symbol}</code>
           {!loading && (
-            <span style={{ color: "var(--text-secondary)", fontSize: "0.72rem" }}>
+            <span style={{ color: "var(--text-secondary)", fontSize: "0.75rem" }}>
               {" "}
               — {usages} in {files} file{files === 1 ? "" : "s"}
             </span>
@@ -595,9 +595,9 @@ function UsagesView({ root }: { root: string }): ReactElement {
         </button>
       </div>
 
-      {loading && <p style={{ color: "var(--text-secondary)", fontSize: "0.72rem" }}>Searching…</p>}
+      {loading && <p style={{ color: "var(--text-secondary)", fontSize: "0.75rem" }}>Searching…</p>}
       {!loading && groups.length === 0 && (
-        <p style={{ color: "var(--text-secondary)", fontSize: "0.72rem" }}>No usages found.</p>
+        <p style={{ color: "var(--text-secondary)", fontSize: "0.75rem" }}>No usages found.</p>
       )}
 
       {groups.map((g) => {
@@ -654,7 +654,7 @@ const fileToggle: CSSProperties = {
   border: "none",
   color: "var(--text-secondary)",
   cursor: "pointer",
-  fontSize: "0.68rem",
+  fontSize: "0.75rem",
   padding: "0 0 2px",
   textAlign: "left",
   fontFamily: "var(--font-ui)",
@@ -663,7 +663,7 @@ const fileToggle: CSSProperties = {
 const rowBtn: CSSProperties = {
   flex: 1,
   minWidth: 0,
-  fontSize: "0.72rem",
+  fontSize: "0.75rem",
   cursor: "pointer",
   background: "transparent",
   border: "none",
@@ -678,7 +678,7 @@ const rowBtn: CSSProperties = {
 
 function badge(source: Usage["source"]): CSSProperties {
   return {
-    fontSize: "0.58rem",
+    fontSize: "0.75rem",
     textTransform: "uppercase",
     fontFamily: "var(--font-mono, monospace)",
     padding: "0 3px",

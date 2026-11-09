@@ -283,6 +283,13 @@ export type { RemoteGpu, RemoteHardware, SshTarget } from "@prometheus/engine-br
 
 // The `/models` guided picker: catalogue (local / free / paid), fit planning, wizard steps.
 export * from "./model-catalog/index.js";
+// The user's default local model server (`/server`; settings `localModels.defaultServer`).
+export * from "./default-server.js";
+// where each serving runtime keeps its models — Prometheus keeps none of its own
+export * from "./model-stores.js";
+// Local runtimes + local-model agents (registry, runtime choice, gated acquisition, agent
+// wiring) — a sub-namespace (`ai.runtimes.*`) so its `Platform`/`Tier`/`AGENTS` never collide.
+export * as runtimes from "./runtimes/index.js";
 // The endless free rotation: one endpoint, every free provider behind it.
 export {
   type RotationMember,

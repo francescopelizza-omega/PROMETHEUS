@@ -43,6 +43,11 @@ const {
   validateModelConvert,
   validateModelInstallConverter,
   validateModelInstallTarget,
+  validateModelPull,
+  validateModelFetchGguf,
+  validateModelHugOllama,
+  validateModelRuntime,
+  validateModelRuntimeStep,
 } = await import("./model-validate.js");
 
 /** The shared discriminated outcome the validators return. */
@@ -336,4 +341,56 @@ test("validateModelInstallTarget REJECTS an unknown target (fail-closed)", () =>
       gguf: "/tmp/x.gguf",
     }) as GuardResult<unknown>,
   );
+});
+
+test("accepting a nemesis WARN is only ever the literal `true` (review 2026-11-02)", () => {
+  for (const v of ["true", 1, "yes", {}, []]) {
+    const p = validateModelPull({ id: "qwen3:8b", acceptWarn: v });
+    assert.ok(p.ok && p.value.acceptWarn === undefined, `pull acceptWarn=${JSON.stringify(v)}`);
+    const g = validateModelFetchGguf({ id: "m", repo: "org/r", file: "m.gguf", acceptWarn: v });
+    assert.ok(
+      g.ok && g.value.acceptWarn === undefined,
+      `fetchGguf acceptWarn=${JSON.stringify(v)}`,
+    );
+  }
+  const p = validateModelPull({ id: "qwen3:8b", acceptWarn: true });
+  assert.ok(p.ok && p.value.acceptWarn === true);
+});
+
+test("hugOllama: every field becomes sidecar argv, so each is shape-checked", () => {
+  assert.ok(validateModelHugOllama({ repo: "org/model-GGUF", quant: "Q4_K_M", id: "org/m" }).ok);
+  for (const bad of [
+    { repo: "-x/y" },
+    { repo: "org" },
+    { repo: "org/m; rm -rf ~" },
+    { repo: "org/m", quant: "--force" },
+    { repo: "org/m", quant: "Q4 K" },
+    { repo: "org/m", id: "--id" },
+    { repo: "org/m", id: "" },
+  ]) {
+    assert.equal(validateModelHugOllama(bad).ok, false, JSON.stringify(bad));
+  }
+  const f = validateModelHugOllama({ repo: "org/m", acceptWarn: "true" });
+  assert.ok(f.ok && f.value.acceptWarn === undefined);
+});
+
+test("model:pull refuses a flag-shaped id or tag (it would double as --no-gate / --accept-warn)", () => {
+  for (const bad of [{ id: "--no-gate" }, { id: "x", tag: "--accept-warn" }, { id: "x", tag: 5 }]) {
+    assert.equal(validateModelPull(bad).ok, false, JSON.stringify(bad));
+  }
+  assert.ok(validateModelPull({ id: "qwen3:8b", tag: "qwen3:8b" }).ok);
+});
+
+test("runtime steps: only the two serving runtimes, only catalogue-shaped ids", () => {
+  assert.ok(validateModelRuntime({ runtime: "llamacpp" }).ok);
+  assert.ok(validateModelRuntime({ runtime: "lmstudio" }).ok);
+  for (const rt of ["ollama", "vllm", "sh", "", 1]) {
+    assert.equal(validateModelRuntime({ runtime: rt }).ok, false, String(rt));
+  }
+  assert.ok(validateModelRuntimeStep({ id: "qwen3-8b", ctx: 32768 }).ok);
+  for (const id of ["-m", "--offline", "a b", "", "x;rm"]) {
+    assert.equal(validateModelRuntimeStep({ id, ctx: 1 }).ok, false, id);
+  }
+  const g = validateModelFetchGguf({ id: "m", repo: "org/r", file: "m.gguf", runtime: "sh" });
+  assert.ok(g.ok && g.value.runtime === undefined, "an unknown runtime is dropped, not passed on");
 });

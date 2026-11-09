@@ -108,7 +108,7 @@ function ModelHealthRow({
     <tr style={rowStyle}>
       <td style={tdStyle}>
         <div style={{ fontWeight: 600 }}>{record.model}</div>
-        <div style={{ color: "var(--text-secondary)", fontSize: "0.68rem" }}>
+        <div style={{ color: "var(--text-secondary)", fontSize: "0.75rem" }}>
           {record.endpointId} · {record.locality}
         </div>
       </td>
@@ -168,7 +168,7 @@ const thStyle: CSSProperties = {
   padding: "var(--space-2, 4px) var(--space-3, 6px)",
   color: "var(--text-secondary)",
   fontWeight: 500,
-  fontSize: "0.72rem",
+  fontSize: "0.75rem",
   textTransform: "uppercase",
   letterSpacing: "0.02em",
   borderBottom: "1px solid var(--border-strong)",
